@@ -155,7 +155,9 @@ def _export_to_ext4(container_tag, image_path):
             f"tar -C {tmpdir} -xf - --exclude=dev/* "
             f"&& mkdir -p {tmpdir}/dev/pts {tmpdir}/dev/shm "
             f"{tmpdir}/dev/mqueue "
-            f"&& mke2fs -t ext4 -d {tmpdir} -b 4096 "
+            f"&& find {tmpdir} ! -readable -exec "
+            f"chmod u+r {{}} + 2>/dev/null; "
+            f"mke2fs -t ext4 -d {tmpdir} -b 4096 "
             f"-L rootfs {tmpfile} {_IMAGE_SIZE_MB}M'"
         ], capture_output=False)
 
