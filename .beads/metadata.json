@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "lustre_test_vms_v2",
+  "project_id": "3686a6c6-dc01-484a-a51a-3d47c621181e"
+}
