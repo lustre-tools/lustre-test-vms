@@ -121,8 +121,43 @@ else
 	cat /input/staging/config.fragment >> .config
 fi
 
+# Force-apply config fragment values using sed.
+# merge_config.sh handles most cases but olddefconfig
+# can revert =y back to =m due to dependency resolution.
+# Applying via sed after merge ensures they stick.
+echo "--- Force-applying config fragment overrides..."
+while IFS= read -r line; do
+	[[ "$line" =~ ^# ]] && continue
+	[[ -z "$line" ]] && continue
+	key="${line%%=*}"
+	if grep -q "^${key}=" .config; then
+		sed -i "s|^${key}=.*|${line}|" .config
+	elif grep -q "^# ${key} is not set" .config; then
+		sed -i "s|^# ${key} is not set|${line}|" .config
+	else
+		echo "${line}" >> .config
+	fi
+done < /input/staging/config.fragment
+echo "    Applied overrides from config fragment"
+
 echo "--- Running olddefconfig..."
 make olddefconfig 2>&1 | tail -3
+
+# Verify critical overrides survived olddefconfig
+echo "--- Verifying config overrides..."
+while IFS= read -r line; do
+	[[ "$line" =~ ^# ]] && continue
+	[[ -z "$line" ]] && continue
+	key="${line%%=*}"
+	actual=$(grep "^${key}=" .config || echo "NOT SET")
+	if [[ "$actual" != "$line" ]]; then
+		echo "    WARNING: $key override not preserved"
+		echo "      wanted: $line"
+		echo "      got:    $actual"
+		# Force it again
+		sed -i "s|^${key}=.*|${line}|" .config
+	fi
+done < /input/staging/config.fragment
 
 # Set EXTRAVERSION from LNXREL so kernel version matches the SRPM
 # e.g., 5.14.0 becomes 5.14.0-611.13.1.el9_7_lustre
