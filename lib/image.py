@@ -135,55 +135,34 @@ def _export_to_ext4(container_tag, image_path):
         result = _run(["podman", "create", container_tag])
         container_id = result.stdout.strip()
 
-        log.info("Extracting container %s into %s ...",
-                 container_id[:12], tmpdir)
-        # Use shell pipeline for reliable podman export | tar
-        # (Python Popen pipelines can have buffering issues)
+        log.info("Extracting container %s and building "
+                 "ext4 under fakeroot ...",
+                 container_id[:12])
+
+        # Create ext4 image file path
+        tmpfile = tempfile.mktemp(
+            suffix=".ext4", prefix="ltvm-image-")
+
+        # Use fakeroot to preserve root ownership.
+        # Without it, extracted files would be owned by
+        # our uid, and mke2fs -d bakes that into the ext4.
+        # fakeroot wraps the entire pipeline: tar extract
+        # (preserves uid 0) + mke2fs (sees uid 0).
         _run([
-            "bash", "-c",
-            f"podman export {container_id} | "
-            f"tar -C {tmpdir} -xf - "
-            f"--no-same-owner --exclude='dev/*'"
+            "fakeroot", "bash", "-c",
+            f"podman export {container_id} "
+            f"| tar -C {tmpdir} -xf - --exclude='dev/*' "
+            f"&& mkdir -p {tmpdir}/dev/pts {tmpdir}/dev/shm "
+            f"{tmpdir}/dev/mqueue "
+            f"&& mke2fs -t ext4 -d {tmpdir} -b 4096 "
+            f"-L rootfs {tmpfile} {_IMAGE_SIZE_MB}M"
         ], capture_output=False)
 
-        # Create minimal /dev structure (VM kernel
-        # populates the rest via devtmpfs at boot)
-        dev_dir = Path(tmpdir) / "dev"
-        dev_dir.mkdir(exist_ok=True)
-        for d in ["pts", "shm", "mqueue"]:
-            (dev_dir / d).mkdir(exist_ok=True)
-
-        # Remove the podman container now that we have the files
+        # Remove the podman container
         subprocess.run(
             ["podman", "rm", "-f", container_id],
             capture_output=True)
         container_id = None
-
-        # Create ext4 image populated from the directory.
-        # mke2fs -d is rootless -- no mount/loop needed.
-        tmpfile = tempfile.mktemp(
-            suffix=".ext4", prefix="ltvm-image-")
-
-        # Make all files user-readable so mke2fs -d can
-        # access them. Use find to avoid changing directory
-        # permissions (which would break setuid binaries etc.)
-        log.info("Fixing file permissions for rootless "
-                 "mke2fs ...")
-        subprocess.run(
-            ["find", tmpdir, "-not", "-readable",
-             "-exec", "chmod", "u+r", "{}", "+"],
-            capture_output=True)
-
-        log.info("Creating ext4 image with mke2fs -d ...")
-        _run([
-            "mke2fs",
-            "-t", "ext4",
-            "-d", tmpdir,
-            "-b", "4096",
-            "-L", "rootfs",
-            tmpfile,
-            f"{_IMAGE_SIZE_MB}M",
-        ])
 
         # Shrink to minimum size
         _run(["resize2fs", "-M", tmpfile])
