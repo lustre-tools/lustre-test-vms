@@ -1,0 +1,9 @@
+# Kernel config fragment applied to ALL targets
+# These are microvm-specific requirements
+
+# QEMU microvm direct kernel boot
+CONFIG_XEN_PVH=y
+
+# kdump support
+CONFIG_KEXEC=y
+CONFIG_CRASH_DUMP=y
