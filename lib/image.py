@@ -146,16 +146,17 @@ def _export_to_ext4(container_tag, image_path):
         # Use fakeroot to preserve root ownership.
         # Without it, extracted files would be owned by
         # our uid, and mke2fs -d bakes that into the ext4.
-        # fakeroot wraps the entire pipeline: tar extract
-        # (preserves uid 0) + mke2fs (sees uid 0).
+        # podman runs OUTSIDE fakeroot (it checks real uid),
+        # tar + mke2fs run INSIDE fakeroot.
         _run([
-            "fakeroot", "bash", "-c",
+            "bash", "-c",
             f"podman export {container_id} "
-            f"| tar -C {tmpdir} -xf - --exclude='dev/*' "
+            f"| fakeroot bash -c '"
+            f"tar -C {tmpdir} -xf - --exclude=dev/* "
             f"&& mkdir -p {tmpdir}/dev/pts {tmpdir}/dev/shm "
             f"{tmpdir}/dev/mqueue "
             f"&& mke2fs -t ext4 -d {tmpdir} -b 4096 "
-            f"-L rootfs {tmpfile} {_IMAGE_SIZE_MB}M"
+            f"-L rootfs {tmpfile} {_IMAGE_SIZE_MB}M'"
         ], capture_output=False)
 
         # Remove the podman container
