@@ -282,6 +282,7 @@ def build_kernel(target_config, lustre_tree, force=False):
             "-v", "ltvm-ccache:/ccache:Z",
             "-e", f"JOBS={jobs}",
             "-e", f"LNXMAJ={target_info['lnxmaj']}",
+            "-e", f"LNXREL={target_info['lnxrel']}",
             image_tag,
             "-c", "/input/staging/kernel-build-inner.sh",
         ]

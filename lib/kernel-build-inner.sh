@@ -25,6 +25,7 @@ set -euo pipefail
 
 JOBS="${JOBS:-$(nproc)}"
 LNXMAJ="${LNXMAJ:-}"
+LNXREL="${LNXREL:-}"
 BUILD=/build/kernel-src
 
 echo "=== kernel-build-inner.sh ==="
@@ -122,6 +123,14 @@ fi
 
 echo "--- Running olddefconfig..."
 make olddefconfig 2>&1 | tail -3
+
+# Set EXTRAVERSION from LNXREL so kernel version matches the SRPM
+# e.g., 5.14.0 becomes 5.14.0-611.13.1.el9_7_lustre
+if [[ -n "$LNXREL" ]]; then
+	EXTRAVER="-${LNXREL}_lustre"
+	sed -i "s/^EXTRAVERSION.*/EXTRAVERSION = ${EXTRAVER}/" Makefile
+	echo "    EXTRAVERSION set to: ${EXTRAVER}"
+fi
 
 # ------------------------------------------------------------------
 # 5. Build

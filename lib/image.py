@@ -37,7 +37,8 @@ def _run(cmd, **kwargs):
 def _need_root():
     if os.geteuid() != 0:
         raise PermissionError(
-            "Image build requires root (mount, losetup)")
+            "Image build requires root (mount, losetup). "
+            "Run with sudo or use: sudo ltvm build-image <target>")
 
 
 def _container_image_tag(target_config):
