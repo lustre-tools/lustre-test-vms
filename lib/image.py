@@ -164,6 +164,16 @@ def _export_to_ext4(container_tag, image_path):
         tmpfile = tempfile.mktemp(
             suffix=".ext4", prefix="ltvm-image-")
 
+        # Make all files user-readable so mke2fs -d can
+        # access them. Use find to avoid changing directory
+        # permissions (which would break setuid binaries etc.)
+        log.info("Fixing file permissions for rootless "
+                 "mke2fs ...")
+        subprocess.run(
+            ["find", tmpdir, "-not", "-readable",
+             "-exec", "chmod", "u+r", "{}", "+"],
+            capture_output=True)
+
         log.info("Creating ext4 image with mke2fs -d ...")
         _run([
             "mke2fs",

@@ -142,11 +142,5 @@ COPY <<'EOF' /etc/modprobe.d/no-drm.conf
 blacklist drm
 EOF
 
-# Make restricted files user-readable so rootless mke2fs -d
-# can read them. Only target specific files (shadow, etc.)
-# rather than chmod -R / which breaks sshd key permissions.
-RUN chmod u+r /etc/shadow /etc/shadow- \
-        /etc/gshadow /etc/gshadow- 2>/dev/null || true
-
 # Clean up caches
 RUN dnf clean all && rm -rf /var/cache/dnf /tmp/*
