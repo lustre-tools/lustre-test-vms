@@ -25,6 +25,9 @@ CONFIG_VIRTIO_CONSOLE=y
 # Filesystem support built-in
 CONFIG_EXT4_FS=y
 
+# sunrpc built-in (Lustre lnet needs rpc_pton/rpc_ntop)
+CONFIG_SUNRPC=y
+
 # Serial console
 CONFIG_SERIAL_8250=y
 CONFIG_SERIAL_8250_CONSOLE=y
