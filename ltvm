@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lib.config import TargetConfig, list_targets
 from lib.kernel import build_kernel, kernel_status
 from lib.image import build_image, image_status
+from lib import runtime
 
 log = logging.getLogger("ltvm")
 
@@ -430,50 +431,191 @@ def cmd_update(args):
 
 
 # ------------------------------------------------------------------
-# Runtime stubs
+# Runtime: VM management
 # ------------------------------------------------------------------
 
-_RUNTIME_STUB_MSG = "Not yet implemented, use vm.sh directly."
+def _runtime_result(res, use_json):
+    """Print a runtime result dict and return the exit code."""
+    if use_json:
+        print(json.dumps(res, indent=2))
+    else:
+        if res["output"]:
+            print(res["output"])
+        if not res["ok"] and not res["output"]:
+            print("Command failed with no output",
+                  file=sys.stderr)
+    return 0 if res["ok"] else res.get("returncode", EXIT_ERROR)
 
 
 def cmd_vm(args):
     use_json = args.json
-    if use_json:
-        print(json.dumps({"error": _RUNTIME_STUB_MSG}),
-              file=sys.stderr)
-    else:
-        print(_RUNTIME_STUB_MSG)
-    return EXIT_ERROR
+    action = args.action
+    vm_args = args.vm_args
+
+    if action == "list":
+        res = runtime.vm_list(json_output=use_json)
+        return _runtime_result(res, use_json)
+
+    if action == "status":
+        if not vm_args:
+            return _error("vm status requires a VM name",
+                          use_json)
+        res = runtime.vm_status(vm_args[0],
+                                json_output=use_json)
+        return _runtime_result(res, use_json)
+
+    if action in ("create", "ensure"):
+        if not vm_args:
+            return _error(f"vm {action} requires a VM name",
+                          use_json)
+        name = vm_args[0]
+        # Parse optional flags from vm_args[1:]
+        kwargs = _parse_vm_kwargs(vm_args[1:])
+        fn = (runtime.vm_create if action == "create"
+              else runtime.vm_ensure)
+        res = fn(name, **kwargs)
+        return _runtime_result(res, use_json)
+
+    if action == "destroy":
+        if not vm_args:
+            return _error("vm destroy requires a VM name",
+                          use_json)
+        res = runtime.vm_destroy(vm_args[0])
+        return _runtime_result(res, use_json)
+
+    if action in ("start", "stop", "restart"):
+        if not vm_args:
+            return _error(f"vm {action} requires a VM name",
+                          use_json)
+        fn = getattr(runtime, f"vm_{action}")
+        res = fn(vm_args[0])
+        return _runtime_result(res, use_json)
+
+    return _error(f"Unknown vm action: {action}", use_json)
+
+
+def _parse_vm_kwargs(extra_args):
+    """Parse --vcpus, --mem, --mdt-disks, --ost-disks, --target
+    from a flat list of strings."""
+    kwargs = {}
+    i = 0
+    while i < len(extra_args):
+        arg = extra_args[i]
+        if arg == "--vcpus" and i + 1 < len(extra_args):
+            kwargs["vcpus"] = int(extra_args[i + 1])
+            i += 2
+        elif arg == "--mem" and i + 1 < len(extra_args):
+            kwargs["mem"] = int(extra_args[i + 1])
+            i += 2
+        elif arg == "--mdt-disks" and i + 1 < len(extra_args):
+            kwargs["mdt_disks"] = int(extra_args[i + 1])
+            i += 2
+        elif arg == "--ost-disks" and i + 1 < len(extra_args):
+            kwargs["ost_disks"] = int(extra_args[i + 1])
+            i += 2
+        elif arg == "--target" and i + 1 < len(extra_args):
+            kwargs["target"] = extra_args[i + 1]
+            i += 2
+        else:
+            i += 1
+    return kwargs
 
 
 def cmd_deploy(args):
     use_json = args.json
-    if use_json:
-        print(json.dumps({"error": _RUNTIME_STUB_MSG}),
-              file=sys.stderr)
-    else:
-        print(_RUNTIME_STUB_MSG)
-    return EXIT_ERROR
+    build_path = Path(args.build).resolve()
+    if not build_path.is_dir():
+        return _error(
+            f"Build path not found: {build_path}",
+            use_json)
+    res = runtime.deploy(args.vm, str(build_path),
+                         mount=args.mount)
+    return _runtime_result(res, use_json)
 
 
 def cmd_exec(args):
     use_json = args.json
-    if use_json:
-        print(json.dumps({"error": _RUNTIME_STUB_MSG}),
-              file=sys.stderr)
-    else:
-        print(_RUNTIME_STUB_MSG)
-    return EXIT_ERROR
+    if not args.cmd:
+        return _error("exec requires a command", use_json)
+    cmd_str = " ".join(args.cmd)
+    timeout = getattr(args, "timeout", 120)
+    res = runtime.vm_exec(args.vm, cmd_str, timeout=timeout)
+    return _runtime_result(res, use_json)
 
 
 def cmd_cluster(args):
     use_json = args.json
-    if use_json:
-        print(json.dumps({"error": _RUNTIME_STUB_MSG}),
-              file=sys.stderr)
-    else:
-        print(_RUNTIME_STUB_MSG)
-    return EXIT_ERROR
+    action = args.action
+    cargs = args.cluster_args
+
+    if action == "create":
+        if len(cargs) < 2:
+            return _error(
+                "cluster create requires a name and "
+                "at least one node spec",
+                use_json,
+                hint="ltvm cluster create <name> "
+                     "<role:vm[:disks]> ...")
+        name = cargs[0]
+        specs = cargs[1:]
+        res = runtime.cluster_create(name, *specs)
+        return _runtime_result(res, use_json)
+
+    if action == "destroy":
+        if not cargs:
+            return _error(
+                "cluster destroy requires a name",
+                use_json)
+        res = runtime.cluster_destroy(cargs[0])
+        return _runtime_result(res, use_json)
+
+    if action == "deploy":
+        if not cargs:
+            return _error(
+                "cluster deploy requires a name",
+                use_json)
+        name = cargs[0]
+        # Parse --build and --mount from remaining args
+        build_path = "."
+        mount = False
+        i = 1
+        while i < len(cargs):
+            if cargs[i] == "--build" and i + 1 < len(cargs):
+                build_path = cargs[i + 1]
+                i += 2
+            elif cargs[i] == "--mount":
+                mount = True
+                i += 1
+            else:
+                i += 1
+        res = runtime.cluster_deploy(name, build_path,
+                                     mount=mount)
+        return _runtime_result(res, use_json)
+
+    if action == "status":
+        if not cargs:
+            return _error(
+                "cluster status requires a name",
+                use_json)
+        res = runtime.cluster_status(cargs[0])
+        return _runtime_result(res, use_json)
+
+    if action == "exec":
+        if len(cargs) < 3:
+            return _error(
+                "cluster exec requires a name, role, "
+                "and command",
+                use_json,
+                hint="ltvm cluster exec <name> <role> "
+                     "'<cmd>'")
+        name = cargs[0]
+        role = cargs[1]
+        cmd_str = " ".join(cargs[2:])
+        res = runtime.cluster_exec(name, role, cmd_str)
+        return _runtime_result(res, use_json)
+
+    return _error(f"Unknown cluster action: {action}",
+                  use_json)
 
 
 # ------------------------------------------------------------------
@@ -602,6 +744,9 @@ def build_parser():
         "exec", parents=[common],
         help="Execute a command in a VM")
     sp.add_argument("vm", help="VM name")
+    sp.add_argument(
+        "--timeout", type=int, default=120,
+        help="Command timeout in seconds (default: 120)")
     sp.add_argument("cmd", nargs=argparse.REMAINDER,
                     help="Command to run")
     sp.set_defaults(func=cmd_exec)
@@ -612,7 +757,8 @@ def build_parser():
         help="Cluster management (create/destroy/...)")
     sp.add_argument(
         "action",
-        choices=["create", "destroy", "deploy", "status"],
+        choices=["create", "destroy", "deploy",
+                 "status", "exec"],
         help="Cluster action")
     sp.add_argument("cluster_args", nargs="*")
     sp.set_defaults(func=cmd_cluster)
