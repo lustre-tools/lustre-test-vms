@@ -23,6 +23,22 @@ from lib import runtime
 
 log = logging.getLogger("ltvm")
 
+
+def _resolve_lustre_tree(arg_value):
+    """Resolve --lustre-tree, defaulting to cwd.
+
+    Returns (Path, error_string).  error_string is None on success.
+    """
+    p = Path(arg_value).resolve() if arg_value else Path.cwd()
+    if not p.is_dir():
+        return None, f"Not a directory: {p}"
+    kp = p / "lustre" / "kernel_patches"
+    if not kp.is_dir():
+        return None, (f"{p} does not look like a Lustre tree "
+                       f"(no lustre/kernel_patches/)")
+    return p, None
+
+
 # Exit codes
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -116,17 +132,12 @@ def cmd_init(args):
     if err is not None:
         return err
 
-    if not args.lustre_tree:
-        return _error(
-            "--lustre-tree is required for kernel builds",
-            use_json,
-            hint="ltvm init <target> --lustre-tree /path/to/lustre-release")
-
-    lustre_tree = Path(args.lustre_tree).resolve()
-    if not lustre_tree.is_dir():
-        return _error(
-            f"Lustre tree not found: {lustre_tree}",
-            use_json)
+    lustre_tree, err_msg = _resolve_lustre_tree(
+        args.lustre_tree)
+    if err_msg:
+        return _error(err_msg, use_json,
+                       hint="Run from a Lustre tree, or pass "
+                            "--lustre-tree /path/to/lustre-release")
 
     results = {}
 
@@ -215,17 +226,12 @@ def cmd_build_kernel(args):
     if err is not None:
         return err
 
-    if not args.lustre_tree:
-        return _error(
-            "--lustre-tree is required for kernel builds",
-            use_json,
-            hint="ltvm build-kernel <target> --lustre-tree /path/to/lustre-release")
-
-    lustre_tree = Path(args.lustre_tree).resolve()
-    if not lustre_tree.is_dir():
-        return _error(
-            f"Lustre tree not found: {lustre_tree}",
-            use_json)
+    lustre_tree, err_msg = _resolve_lustre_tree(
+        args.lustre_tree)
+    if err_msg:
+        return _error(err_msg, use_json,
+                       hint="Run from a Lustre tree, or pass "
+                            "--lustre-tree /path/to/lustre-release")
 
     if not use_json:
         print(f"Building kernel for {args.target}...")
@@ -632,11 +638,10 @@ def cmd_validate(args):
 
     lustre_tree = None
     if args.lustre_tree:
-        lustre_tree = Path(args.lustre_tree).resolve()
-        if not lustre_tree.is_dir():
-            return _error(
-                f"Lustre tree not found: {lustre_tree}",
-                use_json)
+        lustre_tree, err_msg = _resolve_lustre_tree(
+            args.lustre_tree)
+        if err_msg:
+            return _error(err_msg, use_json)
 
     try:
         summary = validate_target(
@@ -681,7 +686,7 @@ def build_parser():
     sp.add_argument("target")
     sp.add_argument(
         "--lustre-tree",
-        help="Path to Lustre source tree (required)")
+        help="Path to Lustre source tree (default: cwd)")
     sp.add_argument(
         "--force", action="store_true",
         help="Rebuild even if artifacts are current")
@@ -701,7 +706,7 @@ def build_parser():
     sp.add_argument("target")
     sp.add_argument(
         "--lustre-tree",
-        help="Path to Lustre source tree (required)")
+        help="Path to Lustre source tree (default: cwd)")
     sp.add_argument(
         "--force", action="store_true",
         help="Rebuild even if inputs unchanged")

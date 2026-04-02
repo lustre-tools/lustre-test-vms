@@ -3,8 +3,8 @@ FROM rockylinux:9
 # Rocky 9 build container for kernel and Lustre builds.
 # GCC 11 matches the EL9 5.14.0 kernel build environment.
 
-# Enable CRB repo (needed for libyaml-devel, etc.)
-RUN dnf -y install dnf-plugins-core \
+# Enable CRB + EPEL repos
+RUN dnf -y install dnf-plugins-core epel-release \
     && dnf config-manager --set-enabled crb
 
 # Kernel build dependencies
