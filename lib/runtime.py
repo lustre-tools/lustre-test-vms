@@ -11,9 +11,18 @@ VM_SH = "vm.sh"
 DEPLOY_SH = "deploy-lustre.sh"
 
 
+def _run_raw(cmd, timeout=None):
+    """Run a command list as-is (no sudo prefix)."""
+    return _run_impl(cmd, timeout)
+
+
 def _run(cmd, timeout=None):
     """Run a command list under sudo, capture output, return result dict."""
     full = ["sudo"] + cmd
+    return _run_impl(full, timeout)
+
+
+def _run_impl(full, timeout=None):
     try:
         r = subprocess.run(
             full,
@@ -124,12 +133,72 @@ def vm_dmesg(name, tail=100):
 # Deploy
 # ------------------------------------------------------------------
 
-def deploy(vm_name, build_path=".", mount=False):
+def deploy(vm_name, build_path=".", mount=False,
+           kernel_modules=None):
+    """Deploy Lustre to a VM.
+
+    If kernel_modules is set (path to modules/ from kernel
+    build output containing lib/modules/<ver>/), rsync them
+    into the VM first so kernel deps like sunrpc are
+    available when Lustre modules load.
+    """
     build_path = str(Path(build_path).resolve())
+
+    # Deploy kernel modules if provided
+    if kernel_modules:
+        mods = Path(kernel_modules)
+        lib_mods = mods / "lib" / "modules"
+        if lib_mods.is_dir():
+            res = _deploy_kernel_modules(vm_name, lib_mods)
+            if not res["ok"]:
+                return res
+
     cmd = [DEPLOY_SH, "--vm", vm_name, "--build", build_path]
     if mount:
         cmd.append("--mount")
     return _run(cmd, timeout=300)
+
+
+def _deploy_kernel_modules(vm_name, lib_modules_path):
+    """Rsync kernel modules into the VM and run depmod.
+
+    lib_modules_path: path to lib/modules/ containing
+    <version>/ subdirectories.
+    """
+    # Rsync the modules tree into the VM
+    res = _run([VM_SH, "exec", "--timeout", "5",
+                vm_name, "mkdir -p /lib/modules"])
+    if not res["ok"]:
+        return res
+
+    # Use vm.sh cp-to for the module tree
+    # First find the version directory
+    versions = [d for d in lib_modules_path.iterdir()
+                if d.is_dir()]
+    if not versions:
+        return {"ok": False,
+                "output": "No version dirs in "
+                          f"{lib_modules_path}",
+                "returncode": 1}
+
+    for ver_dir in versions:
+        ver = ver_dir.name
+        # Tar up the module directory and extract on VM
+        # (more reliable than rsync for large trees)
+        res = _run_raw([
+            "bash", "-c",
+            f"sudo tar -C {lib_modules_path} -cf - {ver} "
+            f"| ssh root@$(sudo {VM_SH} exec --timeout 5 "
+            f"{vm_name} 'hostname -I' 2>/dev/null | "
+            f"tr -d '[:space:]') "
+            f"'tar -C /lib/modules -xf -'"
+        ], timeout=120)
+        if not res["ok"]:
+            return res
+
+    # Run depmod for the VM's running kernel
+    return _run([VM_SH, "exec", "--timeout", "10",
+                 vm_name, "depmod -a"])
 
 
 # ------------------------------------------------------------------

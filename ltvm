@@ -535,8 +535,21 @@ def cmd_deploy(args):
         return _error(
             f"Build path not found: {build_path}",
             use_json)
+
+    # Auto-detect kernel modules from ltvm output
+    kernel_modules = None
+    target = getattr(args, "target", "rocky9")
+    mods_path = (Path(__file__).parent / "output" /
+                 target / "kernel" / "modules")
+    if mods_path.is_dir():
+        kernel_modules = str(mods_path)
+        if not use_json:
+            print(f"  Deploying kernel modules from "
+                  f"{mods_path}")
+
     res = runtime.deploy(args.vm, str(build_path),
-                         mount=args.mount)
+                         mount=args.mount,
+                         kernel_modules=kernel_modules)
     return _runtime_result(res, use_json)
 
 
@@ -789,6 +802,9 @@ def build_parser():
     sp.add_argument(
         "--mount", action="store_true",
         help="Mount filesystem after deploy")
+    sp.add_argument(
+        "--target", default="rocky9",
+        help="Target OS for kernel modules (default: rocky9)")
     sp.set_defaults(func=cmd_deploy)
 
     # -- exec --
