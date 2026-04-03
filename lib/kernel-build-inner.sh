@@ -200,78 +200,37 @@ KVER=$(make -s kernelrelease)
 echo "    Kernel version: $KVER"
 
 # Create the build tree for Lustre module compilation.
-# We need: source + configured tree + Module.symvers.
-# Rather than copying everything (multi-GB), we keep
-# the build in place and bind-mount at build time.
-# For now, copy the essentials.
+# Lustre needs the full source tree (not just headers)
+# because ldiskfs builds from the ext4 source.
+# Use rsync to copy everything except .o/.ko files
+# (which are huge and not needed for external builds).
 
 BUILD_TREE=/output/build-tree
 rm -rf "$BUILD_TREE"
 mkdir -p "$BUILD_TREE"
 
-# Copy the files needed for external module builds
-echo "--- Populating build tree..."
+echo "--- Populating build tree (full source)..."
+rsync -a \
+	--exclude='*.o' \
+	--exclude='*.ko' \
+	--exclude='*.cmd' \
+	--exclude='.tmp_*' \
+	--exclude='vmlinux' \
+	--exclude='vmlinuz' \
+	--exclude='bzImage' \
+	--exclude='*.a' \
+	./ "$BUILD_TREE/"
 
-# Core build infrastructure
-cp .config "$BUILD_TREE/"
+# Copy back the essential build artifacts that were
+# excluded by the .o filter
 cp Module.symvers "$BUILD_TREE/"
-cp Makefile "$BUILD_TREE/"
-
-# Kbuild / Kconfig infrastructure
-find . -name 'Makefile*' -o -name 'Kconfig*' \
-	-o -name 'Kbuild*' | \
-	while IFS= read -r f; do
-		d="$BUILD_TREE/$(dirname "$f")"
-		mkdir -p "$d"
-		cp "$f" "$d/"
-	done
-
-# Generated headers (include/generated, include/config)
-if [[ -d include/generated ]]; then
-	mkdir -p "$BUILD_TREE/include"
-	cp -a include/generated "$BUILD_TREE/include/"
-fi
-if [[ -d include/config ]]; then
-	mkdir -p "$BUILD_TREE/include"
-	cp -a include/config "$BUILD_TREE/include/"
-fi
-
-# Architecture headers and boot files
-if [[ -d arch/x86/include/generated ]]; then
-	mkdir -p "$BUILD_TREE/arch/x86/include"
-	cp -a arch/x86/include/generated \
-		"$BUILD_TREE/arch/x86/include/"
-fi
-
-# scripts/ directory (fixdep, modpost, etc.)
+cp .config "$BUILD_TREE/"
 if [[ -d scripts ]]; then
-	cp -a scripts "$BUILD_TREE/"
+	rsync -a scripts/ "$BUILD_TREE/scripts/"
 fi
-
-# tools/objtool (needed by some module builds)
 if [[ -d tools/objtool ]]; then
-	mkdir -p "$BUILD_TREE/tools"
-	cp -a tools/objtool "$BUILD_TREE/tools/"
+	rsync -a tools/objtool/ "$BUILD_TREE/tools/objtool/"
 fi
-
-# All headers (include/ and arch/x86/include/)
-# Use rsync to merge with already-copied generated dirs
-rsync -a --ignore-existing include/ \
-	"$BUILD_TREE/include/"
-if [[ -d arch/x86/include ]]; then
-	mkdir -p "$BUILD_TREE/arch/x86"
-	rsync -a --ignore-existing arch/x86/include/ \
-		"$BUILD_TREE/arch/x86/include/"
-fi
-
-# Arch Makefiles and configs
-for f in arch/x86/Makefile arch/x86/Makefile.postlink \
-		arch/x86/Kconfig; do
-	if [[ -f "$f" ]]; then
-		mkdir -p "$BUILD_TREE/$(dirname "$f")"
-		cp "$f" "$BUILD_TREE/$f"
-	fi
-done
 
 # Record kernel version in build tree
 echo "$KVER" > "$BUILD_TREE/kernel-version"
