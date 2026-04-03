@@ -280,8 +280,10 @@ echo "$KVER" > "$BUILD_TREE/kernel-version"
 echo "--- Installing modules..."
 MODULES_DIR=/output/modules
 rm -rf "$MODULES_DIR"
-make INSTALL_MOD_PATH="$MODULES_DIR" modules_install \
-	2>&1 | tail -3
+make INSTALL_MOD_PATH="$MODULES_DIR" \
+	INSTALL_MOD_STRIP=1 \
+	CONFIG_MODULE_SIG_ALL= \
+	modules_install 2>&1 | tail -5
 echo "    Modules: $(du -sh "$MODULES_DIR" | cut -f1)"
 
 echo "=== Kernel build complete ==="
