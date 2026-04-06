@@ -31,3 +31,12 @@ CONFIG_SUNRPC=y
 # Serial console
 CONFIG_SERIAL_8250=y
 CONFIG_SERIAL_8250_CONSOLE=y
+
+# Networking: bridge + NAT for nested VM testing
+# (running setup.sh --network inside a VM)
+CONFIG_BRIDGE=m
+CONFIG_NETFILTER=y
+CONFIG_NF_NAT=m
+CONFIG_NF_TABLES=m
+CONFIG_IP_NF_IPTABLES=m
+CONFIG_IP_NF_NAT=m

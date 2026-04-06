@@ -249,6 +249,13 @@ setup_network() {
 		pkg_install dnsmasq iptables
 	fi
 
+	# Verify critical dependencies are present
+	for cmd in dnsmasq iptables; do
+		if ! command -v "${cmd}" &>/dev/null; then
+			die "${cmd} not found after install -- check package manager errors above"
+		fi
+	done
+
 	# sysctl: enable IP forwarding
 	cp -f "${SCRIPT_DIR}/qemu/host-config/99-qemu-vms.conf" \
 		/etc/sysctl.d/
@@ -507,8 +514,16 @@ main() {
 		return $?
 	fi
 
-	check_kvm
 	check_prerequisites
+
+	# KVM is needed to actually run VMs but not to build
+	# QEMU or install scripts.  Warn instead of failing
+	# for individual steps; only hard-fail on full setup.
+	if $do_all; then
+		check_kvm
+	elif ! [[ -e /dev/kvm ]]; then
+		warn "/dev/kvm not found -- VMs won't run without KVM"
+	fi
 
 	if $do_all; then
 		install_qemu
@@ -526,10 +541,10 @@ main() {
 		info "  sudo vm.sh ensure co1-single \\"
 		info "      --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3"
 	else
-		$do_qemu    && install_qemu
-		$do_network && setup_network
-		$do_install && install_scripts
-		$do_ssh     && setup_ssh_config
+		if $do_qemu;    then install_qemu;    fi
+		if $do_network; then setup_network;   fi
+		if $do_install; then install_scripts; fi
+		if $do_ssh;     then setup_ssh_config; fi
 	fi
 }
 
