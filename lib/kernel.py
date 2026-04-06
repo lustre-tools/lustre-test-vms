@@ -171,7 +171,7 @@ def _ensure_container_image(target_config: TargetConfig) -> str:
 
     Returns the image tag.
     """
-    tag = f"ltvm-{target_config.name}-builder"
+    tag = f"ltvm-build-{target_config.name}"
     dockerfile = target_config.target_dir / "container.Dockerfile"
 
     log.info("Building container image: %s", tag)

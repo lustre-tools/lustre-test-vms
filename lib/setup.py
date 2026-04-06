@@ -102,10 +102,11 @@ def _run(
     cmd: list[str],
     check: bool = True,
     quiet: bool = False,
+    cwd: str | Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command, return CompletedProcess."""
     log.debug("run: %s", " ".join(str(c) for c in cmd))
-    r = subprocess.run(cmd, capture_output=quiet, text=True)
+    r = subprocess.run(cmd, capture_output=quiet, text=True, cwd=cwd)
     if check and r.returncode != 0:
         raise RuntimeError(
             f"Command failed (rc={r.returncode}): "

@@ -47,6 +47,13 @@ class VMInfo:
     ost_disks: int = 0
     image: str = ""  # base image path; empty = default (rocky9)
     kernel: str = ""  # kernel path; empty = default (vmlinux)
+    created: int = 0  # epoch seconds when VM was created
+    last_boot: int = 0  # epoch seconds when QEMU was last started
+    last_deploy: int = 0  # epoch seconds when deploy-lustre.sh last ran
+    build_path: str = ""  # Lustre build tree last deployed
+    kver: str = ""  # kernel version running in the VM
+    base_image: str = ""  # base image name (e.g. rocky9-base.ext4)
+    os_id: str = ""  # OS identifier (e.g. rocky9, ubuntu24)
 
     @property
     def info_path(self) -> Path:
@@ -80,19 +87,43 @@ class VMInfo:
             f"OST_DISKS={self.ost_disks}\n"
             f"IMAGE={self.image}\n"
             f"KERNEL={self.kernel}\n"
+            f"CREATED={self.created}\n"
+            f"LAST_BOOT={self.last_boot}\n"
+            f"LAST_DEPLOY={self.last_deploy}\n"
+            f"BUILD_PATH={self.build_path}\n"
+            f"KVER={self.kver}\n"
+            f"BASE_IMAGE={self.base_image}\n"
+            f"OS_ID={self.os_id}\n"
         )
+
+    def _update_field(self, key: str, value: str | int) -> None:
+        """Update a single field in the info file (add if missing)."""
+        if not self.info_path.exists():
+            return
+        text = self.info_path.read_text()
+        pattern = rf"^{key}=.*$"
+        replacement = f"{key}={value}"
+        if re.search(pattern, text, flags=re.MULTILINE):
+            text = re.sub(pattern, replacement, text, flags=re.MULTILINE)
+        else:
+            text = text.rstrip("\n") + f"\n{replacement}\n"
+        self.info_path.write_text(text)
 
     def update_pid(self, pid: int) -> None:
         self.pid = pid
-        if self.info_path.exists():
-            text = self.info_path.read_text()
-            text = re.sub(
-                r"^PID=.*$",
-                f"PID={pid}",
-                text,
-                flags=re.MULTILINE,
-            )
-            self.info_path.write_text(text)
+        self._update_field("PID", pid)
+
+    def update_last_boot(self, epoch: int) -> None:
+        self.last_boot = epoch
+        self._update_field("LAST_BOOT", epoch)
+
+    def update_deploy(self, epoch: int, build_path: str, kver: str) -> None:
+        self.last_deploy = epoch
+        self.build_path = build_path
+        self.kver = kver
+        self._update_field("LAST_DEPLOY", epoch)
+        self._update_field("BUILD_PATH", build_path)
+        self._update_field("KVER", kver)
 
     @staticmethod
     def load(name: str) -> VMInfo:

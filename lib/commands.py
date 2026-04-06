@@ -733,7 +733,6 @@ def cmd_install(args: argparse.Namespace) -> int:
             f"No artifacts for {args.target}",
             use_json,
             hint=f"Run 'ltvm fetch {args.target}' or "
-            f"'ltvm fetch {args.target}' or "
             f"'ltvm build-all {args.target}' first",
         )
 

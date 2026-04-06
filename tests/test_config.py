@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from lib.config import _infer_os, add_target
 from tests.conftest import _ROCKY9_YAML, _make_config, _write_targets_yaml
 
 
@@ -420,3 +421,212 @@ class TestListTargets:
         ):
             targets = cfg.list_targets()
         assert set(targets) == {"rocky9", "ubuntu2404"}
+
+
+# ------------------------------------------------------------------
+# _infer_os
+# ------------------------------------------------------------------
+
+
+class TestInferOs:
+    def test_rockylinux(self) -> None:
+        assert _infer_os("rockylinux:9.7") == ("rocky", "rhel", "9.7")
+
+    def test_almalinux(self) -> None:
+        assert _infer_os("almalinux:9.4") == ("alma", "rhel", "9.4")
+
+    def test_ubuntu(self) -> None:
+        assert _infer_os("ubuntu:24.04") == ("ubuntu", "debian", "24.04")
+
+    def test_debian(self) -> None:
+        assert _infer_os("debian:12") == ("debian", "debian", "12")
+
+    def test_centos(self) -> None:
+        assert _infer_os("centos:7") == ("centos", "rhel", "7")
+
+    def test_with_registry_prefix(self) -> None:
+        assert _infer_os("docker.io/library/ubuntu:22.04") == (
+            "ubuntu",
+            "debian",
+            "22.04",
+        )
+
+    def test_unknown_image(self) -> None:
+        name, family, ver = _infer_os("suse:15")
+        assert family == "unknown"
+
+    def test_no_tag(self) -> None:
+        name, family, ver = _infer_os("rockylinux")
+        assert name == "rocky"
+        assert ver == "unknown"
+
+
+# ------------------------------------------------------------------
+# add_target
+# ------------------------------------------------------------------
+
+
+class TestAddTarget:
+    def test_creates_directory_and_files(self, tmp_targets: Path) -> None:
+        import lib.config as cfg
+
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            result = add_target("alma9", "almalinux:9.4", kernel="5.14-rhel9.4")
+
+        assert result["name"] == "alma9"
+        target_dir = Path(result["target_dir"])
+        assert target_dir.is_dir()
+        assert (target_dir / "container.Dockerfile").exists()
+        assert (target_dir / "image.Dockerfile").exists()
+        assert (target_dir / "packages-os.txt").exists()
+
+    def test_from_line_substituted(self, tmp_targets: Path) -> None:
+        import lib.config as cfg
+
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            add_target("alma9", "almalinux:9.4")
+
+        df = tmp_targets / "targets" / "alma9" / "container.Dockerfile"
+        content = df.read_text()
+        assert content.startswith("FROM almalinux:9.4\n")
+        assert "FROM rockylinux" not in content
+
+    def test_yaml_entry_added(self, tmp_targets: Path) -> None:
+        import lib.config as cfg
+
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            add_target(
+                "alma9",
+                "almalinux:9.4",
+                kernel="5.14-rhel9.4",
+                srpm_url="https://example.com/srpms",
+            )
+
+        data = yaml.safe_load(
+            (tmp_targets / "targets" / "targets.yaml").read_text()
+        )
+        assert "alma9" in data["targets"]
+        entry = data["targets"]["alma9"]
+        assert entry["os_name"] == "alma"
+        assert entry["container_image"] == "almalinux:9.4"
+        assert entry["status"] == "planned"
+        assert entry["srpm_url"] == "https://example.com/srpms"
+        assert entry["kernels"]["default"] == "5.14-rhel9.4"
+
+    def test_duplicate_target_raises(self, tmp_targets: Path) -> None:
+        import lib.config as cfg
+
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+            pytest.raises(ValueError, match="already exists"),
+        ):
+            add_target("rocky9", "rockylinux:9.7")
+
+    def test_debian_target_generates_apt_dockerfile(
+        self, tmp_targets: Path
+    ) -> None:
+        import lib.config as cfg
+
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            add_target("debian12", "debian:12", server=False)
+
+        df = tmp_targets / "targets" / "debian12" / "container.Dockerfile"
+        content = df.read_text()
+        assert "apt-get" in content
+        assert "dnf" not in content
+
+    def test_no_server_flag(self, tmp_targets: Path) -> None:
+        import lib.config as cfg
+
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            add_target("debian12", "debian:12", server=False)
+
+        data = yaml.safe_load(
+            (tmp_targets / "targets" / "targets.yaml").read_text()
+        )
+        assert data["targets"]["debian12"]["server"] is False
+
+    def test_os_family_set_for_non_rhel(self, tmp_targets: Path) -> None:
+        import lib.config as cfg
+
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            add_target("debian12", "debian:12")
+
+        data = yaml.safe_load(
+            (tmp_targets / "targets" / "targets.yaml").read_text()
+        )
+        assert data["targets"]["debian12"]["os_family"] == "debian"
+
+    def test_rhel_target_omits_os_family(self, tmp_targets: Path) -> None:
+        """RHEL is the default, so os_family should not be in the YAML."""
+        import lib.config as cfg
+
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            add_target("alma9", "almalinux:9.4")
+
+        data = yaml.safe_load(
+            (tmp_targets / "targets" / "targets.yaml").read_text()
+        )
+        assert "os_family" not in data["targets"]["alma9"]

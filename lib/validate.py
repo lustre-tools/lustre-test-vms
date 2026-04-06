@@ -157,13 +157,13 @@ def check_artifacts(target_config: TargetConfig) -> CheckResult:
     """Check 1: Verify all build artifacts exist."""
     t0 = time.monotonic()
     out = target_config.output_dir
+    kernel_dir = target_config.kernel_output_dir()
     missing = []
 
     checks = {
-        "vmlinux": out / "kernel" / "vmlinux",
-        "build-tree/.config": out / "kernel" / "build-tree" / ".config",
-        "build-tree/Module.symvers": out
-        / "kernel"
+        "vmlinux": kernel_dir / "vmlinux",
+        "build-tree/.config": kernel_dir / "build-tree" / ".config",
+        "build-tree/Module.symvers": kernel_dir
         / "build-tree"
         / "Module.symvers",
         "base.ext4": out / "image" / "base.ext4",
@@ -187,10 +187,10 @@ def check_artifacts(target_config: TargetConfig) -> CheckResult:
 def check_version_consistency(target_config: TargetConfig) -> CheckResult:
     """Check 2: Kernel version matches across artifacts."""
     t0 = time.monotonic()
-    out = target_config.output_dir
 
     # Read version from kernel meta.json
-    meta_path = out / "kernel" / "meta.json"
+    kernel_dir = target_config.kernel_output_dir()
+    meta_path = kernel_dir / "meta.json"
     if not meta_path.exists():
         return CheckResult(
             "Version consistency",
@@ -204,7 +204,7 @@ def check_version_consistency(target_config: TargetConfig) -> CheckResult:
 
     # Read version from build-tree kernel.release
     kr_path = (
-        out / "kernel" / "build-tree" / "include" / "config" / "kernel.release"
+        kernel_dir / "build-tree" / "include" / "config" / "kernel.release"
     )
     if not kr_path.exists():
         return CheckResult(
