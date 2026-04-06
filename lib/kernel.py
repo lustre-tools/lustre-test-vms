@@ -5,6 +5,8 @@ and builds inside a podman container.  Outputs vmlinux, vmlinuz,
 a full build tree (for Lustre module builds), and meta.json.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -14,6 +16,10 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .config import TargetConfig
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +35,9 @@ INNER_SCRIPT = Path(__file__).parent / "kernel-build-inner.sh"
 # ------------------------------------------------------------------
 
 
-def parse_lustre_target(lustre_tree, lustre_target):
+def parse_lustre_target(
+    lustre_tree: str | Path, lustre_target: str
+) -> dict[str, str]:
     """Parse a Lustre .target file for SRPM version info.
 
     Returns dict with keys: lnxmaj, lnxrel, srpm, series.
@@ -61,7 +69,7 @@ def parse_lustre_target(lustre_tree, lustre_target):
     }
 
 
-def _shell_var(text, name):
+def _shell_var(text: str, name: str) -> str | None:
     """Extract a simple VAR=value or VAR="value" assignment."""
     # Match: VAR=value, VAR="value", or VAR='value'
     # Also handle shell expansions like ${lnxmaj}-${lnxrel}
@@ -77,7 +85,11 @@ def _shell_var(text, name):
 # ------------------------------------------------------------------
 
 
-def resolve_lustre_files(lustre_tree, lustre_target, target_info):
+def resolve_lustre_files(
+    lustre_tree: str | Path,
+    lustre_target: str,
+    target_info: dict[str, str],
+) -> dict[str, Path | list[Path]]:
     """Locate kernel config, series file, and patch files.
 
     Returns dict with keys: config, series_file, patches (list).
@@ -118,12 +130,12 @@ def resolve_lustre_files(lustre_tree, lustre_target, target_info):
 # ------------------------------------------------------------------
 
 
-def _find_srpm_url(srpm_name):
+def _find_srpm_url(srpm_name: str) -> str:
     """Find the download URL for a kernel SRPM."""
     return f"{ROCKY9_PKGS}/{srpm_name}"
 
 
-def download_srpm(srpm_name, cache_dir):
+def download_srpm(srpm_name: str, cache_dir: str | Path) -> Path:
     """Download a kernel SRPM if not already cached.
 
     Returns Path to the downloaded file.
@@ -151,7 +163,7 @@ def download_srpm(srpm_name, cache_dir):
 # ------------------------------------------------------------------
 
 
-def _ensure_container_image(target_config):
+def _ensure_container_image(target_config: TargetConfig) -> str:
     """Build the container image if needed.
 
     Returns the image tag.
@@ -181,7 +193,7 @@ def _ensure_container_image(target_config):
 # ------------------------------------------------------------------
 
 
-def _build_config_fragment(target_config):
+def _build_config_fragment(target_config: TargetConfig) -> str:
     """Assemble the merged config fragment (common + target).
 
     Returns the fragment text.
@@ -207,7 +219,11 @@ def _build_config_fragment(target_config):
 # ------------------------------------------------------------------
 
 
-def build_kernel(target_config, lustre_tree, force=False):
+def build_kernel(
+    target_config: TargetConfig,
+    lustre_tree: str | Path,
+    force: bool = False,
+) -> dict[str, object]:
     """Build a kernel for the given target.
 
     Args:
@@ -248,8 +264,8 @@ def build_kernel(target_config, lustre_tree, force=False):
     build_tree = kernel_out / "build-tree"
 
     # Prepare staging area with patches and config
-    with tempfile.TemporaryDirectory(prefix="ltvm-kbuild-") as staging:
-        staging = Path(staging)
+    with tempfile.TemporaryDirectory(prefix="ltvm-kbuild-") as staging_str:
+        staging = Path(staging_str)
 
         # Copy patches
         patches_dir = staging / "patches"
@@ -345,7 +361,7 @@ def build_kernel(target_config, lustre_tree, force=False):
 # ------------------------------------------------------------------
 
 
-def kernel_status(target_config):
+def kernel_status(target_config: TargetConfig) -> dict[str, object]:
     """Return kernel build status for a target.
 
     Returns dict with version, build date, staleness, etc.

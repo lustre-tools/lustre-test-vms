@@ -1,5 +1,7 @@
 """Target configuration parsing for ltvm."""
 
+from __future__ import annotations
+
 import configparser
 import hashlib
 import json
@@ -13,7 +15,7 @@ OUTPUT_DIR = REPO_ROOT / "output"
 class TargetConfig:
     """Parsed target configuration."""
 
-    def __init__(self, name):
+    def __init__(self, name: str) -> None:
         self.name = name
         self.target_dir = TARGETS_DIR / name
         self.output_dir = OUTPUT_DIR / name
@@ -25,55 +27,55 @@ class TargetConfig:
         self._target.read(self.target_dir / "target.conf")
 
         self._kernel = configparser.RawConfigParser()
-        self._kernel.optionxform = str  # preserve case
+        self._kernel.optionxform = str  # type: ignore[method-assign]  # preserve case
         self._kernel.read(self.target_dir / "kernel.conf")
 
     @property
-    def os_family(self):
+    def os_family(self) -> str:
         return self._target.get("target", "os_family")
 
     @property
-    def os_name(self):
+    def os_name(self) -> str:
         return self._target.get("target", "os_name")
 
     @property
-    def os_version(self):
+    def os_version(self) -> str:
         return self._target.get("target", "os_version")
 
     @property
-    def server(self):
+    def server(self) -> bool:
         return self._target.getboolean("target", "server")
 
     @property
-    def arch(self):
+    def arch(self) -> str:
         return self._target.get("target", "arch")
 
     @property
-    def container_image(self):
+    def container_image(self) -> str:
         return self._target.get("target", "container_image")
 
     @property
-    def lustre_target(self):
+    def lustre_target(self) -> str:
         return self._kernel.get("kernel", "lustre_target")
 
     @property
-    def kernel_config_overrides(self):
+    def kernel_config_overrides(self) -> dict[str, str]:
         """Microvm-specific kernel config overrides."""
-        overrides = {}
+        overrides: dict[str, str] = {}
         if self._kernel.has_section("config"):
             overrides.update(dict(self._kernel.items("config")))
         return overrides
 
-    def kernel_output_dir(self):
+    def kernel_output_dir(self) -> Path:
         return self.output_dir / "kernel"
 
-    def image_output_dir(self):
+    def image_output_dir(self) -> Path:
         return self.output_dir / "image"
 
-    def container_output_dir(self):
+    def container_output_dir(self) -> Path:
         return self.output_dir / "container"
 
-    def input_hash(self, artifact):
+    def input_hash(self, artifact: str) -> str:
         """Hash the inputs for an artifact to detect staleness.
 
         artifact: 'container', 'kernel', or 'image'
@@ -104,7 +106,7 @@ class TargetConfig:
 
         return h.hexdigest()[:16]
 
-    def is_stale(self, artifact):
+    def is_stale(self, artifact: str) -> bool:
         """Check if an artifact needs rebuilding."""
         meta_file = self.output_dir / artifact / "meta.json"
         if not meta_file.exists():
@@ -112,7 +114,7 @@ class TargetConfig:
         meta = json.loads(meta_file.read_text())
         return meta.get("input_hash") != self.input_hash(artifact)
 
-    def write_meta(self, artifact, **extra):
+    def write_meta(self, artifact: str, **extra: object) -> None:
         """Write build metadata after successful build."""
         out_dir = self.output_dir / artifact
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -123,7 +125,7 @@ class TargetConfig:
         }
         (out_dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
 
-    def _hash_package_lists(self, *roles):
+    def _hash_package_lists(self, *roles: str) -> str:
         parts = []
         for role in roles:
             common = TARGETS_DIR / "common" / f"packages-{role}.txt"
@@ -135,7 +137,7 @@ class TargetConfig:
         return "\n".join(parts)
 
 
-def list_targets():
+def list_targets() -> list[str]:
     """Return names of all configured targets."""
     targets = []
     for d in sorted(TARGETS_DIR.iterdir()):

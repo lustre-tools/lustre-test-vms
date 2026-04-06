@@ -1,16 +1,19 @@
 """Package, fetch, and install target artifacts.
 
 One package per target containing everything needed to boot
-VMs and build Lustre:
+VMs, build Lustre, and optionally deploy pre-built Lustre:
   - vmlinux / vmlinuz (kernel for QEMU direct boot + kdump)
   - modules/ (kernel modules deployed into VMs)
   - build-tree/ (kernel source for compiling Lustre)
   - image.ext4 (VM rootfs)
+  - lustre/ (optional: pre-built Lustre tree for deploy)
   - meta.json (version, build info)
 
 Users can replace the kernel later with `ltvm build-kernel`
 if they need custom patches or a different version.
 """
+
+from __future__ import annotations
 
 import json
 import os
@@ -19,10 +22,11 @@ import tempfile
 from pathlib import Path
 
 
-def _find_artifacts(output_dir):
-    """Verify all expected artifacts exist in output_dir.
+def _find_artifacts(output_dir: str | Path) -> dict[str, Path]:
+    """Verify required artifacts exist in output_dir.
 
     Returns dict of paths or raises ValueError.
+    Lustre is optional -- included if present.
     """
     output_dir = Path(output_dir)
     kernel_dir = output_dir / "kernel"
@@ -55,10 +59,83 @@ def _find_artifacts(output_dir):
             f"Run 'ltvm build-all <target>' to build them"
         )
 
+    # Lustre is optional
+    lustre_dir = output_dir / "lustre"
+    if lustre_dir.is_dir():
+        required["lustre"] = lustre_dir
+
     return required
 
 
-def package_target(target_name, output_dir, dest_dir=None):
+def snapshot_lustre(lustre_tree: str | Path, output_dir: str | Path) -> Path:
+    """Copy the deployable subset of a built Lustre tree
+    into output/<target>/lustre/.
+
+    Includes everything deploy-lustre.sh needs: .ko files,
+    libraries, binaries, test scripts, config.  Excludes
+    .git, .o files, and kernel_patches (large, not needed
+    for deploy).
+
+    Returns the output lustre directory path.
+    """
+    lustre_tree = Path(lustre_tree).resolve()
+    dest = Path(output_dir) / "lustre"
+
+    # Verify the tree looks built
+    ko_files = [
+        f for f in lustre_tree.rglob("*.ko") if "kconftest" not in str(f)
+    ]
+    if not ko_files:
+        raise ValueError(f"No .ko files in {lustre_tree} -- build Lustre first")
+
+    print(f"  Snapshotting Lustre tree to {dest}")
+    print(f"    Source: {lustre_tree}")
+    print(f"    Modules: {len(ko_files)} .ko files")
+
+    # rsync the tree, excluding large unnecessary items
+    subprocess.run(
+        [
+            "rsync",
+            "-a",
+            "--delete",
+            "--exclude=.git",
+            "--exclude=*.o",
+            "--exclude=*.cmd",
+            "--exclude=.tmp_*",
+            "--exclude=lustre/kernel_patches",
+            "--exclude=libcfs/libcfs/util/.libs/*.o",
+            str(lustre_tree) + "/",
+            str(dest) + "/",
+        ],
+        check=True,
+    )
+
+    size_mb = _dir_size_mb(dest)
+    print(f"    Snapshot size: {size_mb:.0f} MB")
+
+    # Write metadata
+    meta = {
+        "source": str(lustre_tree),
+        "ko_count": len(ko_files),
+    }
+    (dest / ".ltvm-snapshot.json").write_text(json.dumps(meta, indent=2) + "\n")
+
+    return dest
+
+
+def _dir_size_mb(path: str | Path) -> float:
+    """Get directory size in MB via du."""
+    r = subprocess.run(["du", "-sm", str(path)], capture_output=True, text=True)
+    if r.returncode == 0:
+        return float(r.stdout.split()[0])
+    return 0.0
+
+
+def package_target(
+    target_name: str,
+    output_dir: str | Path,
+    dest_dir: str | Path | None = None,
+) -> Path:
     """Create a compressed tarball of all target artifacts.
 
     Returns the path to the created tarball.
@@ -83,10 +160,10 @@ def package_target(target_name, output_dir, dest_dir=None):
     print(f"  Packaging {target_name} -> {tarball.name}")
     print(f"    Kernel: {artifacts['vmlinux']}")
     print(f"    Image:  {artifacts['image']}")
+    if "lustre" in artifacts:
+        print(f"    Lustre: {artifacts['lustre']}")
 
     # Use tar + zstd via subprocess for streaming compression
-    # (Python's tarfile doesn't support zstd natively on
-    # older Python)
     cmd = [
         "tar",
         "--zstd",
@@ -118,6 +195,7 @@ def package_target(target_name, output_dir, dest_dir=None):
         "target": target_name,
         "kernel_version": version,
         "contents": list(artifacts.keys()),
+        "has_lustre": "lustre" in artifacts,
         "size_bytes": tarball.stat().st_size,
     }
     manifest_path = tarball.with_suffix(tarball.suffix + ".json")
@@ -126,7 +204,7 @@ def package_target(target_name, output_dir, dest_dir=None):
     return tarball
 
 
-def fetch_target(target_name, url, output_base):
+def fetch_target(target_name: str, url: str, output_base: str | Path) -> Path:
     """Download and extract a target package.
 
     url: direct URL to the tarball
@@ -168,19 +246,27 @@ def fetch_target(target_name, url, output_base):
         )
 
     # Verify the artifacts are there
-    _find_artifacts(target_dir)
+    artifacts = _find_artifacts(target_dir)
     print(f"    Artifacts verified in {target_dir}")
+    if "lustre" in artifacts:
+        print("    Includes pre-built Lustre")
 
     return target_dir
 
 
-# Default install paths (matching vm.sh conventions)
+# Default install paths (matching vm.py conventions)
 DEFAULT_KERNEL_DIR = Path("/opt/qemu-vms/kernel")
 DEFAULT_IMAGE_DIR = Path("/opt/qemu-vms/images")
 
 
-def install_target(target_name, output_dir, *, kernel_dir=None, image_dir=None):
-    """Install kernel + image to system paths for vm.sh.
+def install_target(
+    target_name: str,
+    output_dir: str | Path,
+    *,
+    kernel_dir: str | Path | None = None,
+    image_dir: str | Path | None = None,
+) -> dict[str, str]:
+    """Install kernel + image to system paths for vm.py.
 
     This requires sudo (writes to /opt/qemu-vms/).
     Returns dict of installed paths.
@@ -206,8 +292,7 @@ def install_target(target_name, output_dir, *, kernel_dir=None, image_dir=None):
         ["sudo", "cp", str(artifacts["vmlinuz"]), str(vmlinuz_dest)], check=True
     )
 
-    # Also install as the default vmlinux if no default exists
-    # or if this is the only target
+    # Also install as the default vmlinux if none exists
     default_vmlinux = kernel_dir / "vmlinux"
     if not default_vmlinux.exists():
         subprocess.run(
@@ -228,6 +313,10 @@ def install_target(target_name, output_dir, *, kernel_dir=None, image_dir=None):
     subprocess.run(["sudo", "cp", str(image_src), str(image_dest)], check=True)
 
     installed["image"] = str(image_dest)
+
+    # Note Lustre availability
+    if "lustre" in artifacts:
+        installed["lustre"] = str(artifacts["lustre"])
 
     print("  Installed:")
     for k, v in installed.items():

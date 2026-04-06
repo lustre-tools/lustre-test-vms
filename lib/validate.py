@@ -6,12 +6,18 @@ scratch -- catching hidden dependencies on host config, manually
 installed packages, or environment assumptions.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
 import subprocess
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .config import TargetConfig
 
 log = logging.getLogger(__name__)
 
@@ -36,13 +42,15 @@ EXPECTED_PACKAGES = [
 class CheckResult:
     """Result of a single validation check."""
 
-    def __init__(self, name, passed, detail="", elapsed=0.0):
+    def __init__(
+        self, name: str, passed: bool, detail: str = "", elapsed: float = 0.0
+    ) -> None:
         self.name = name
         self.passed = passed
         self.detail = detail
         self.elapsed = elapsed
 
-    def to_dict(self):
+    def to_dict(self) -> dict[str, str | bool | float]:
         return {
             "name": self.name,
             "passed": self.passed,
@@ -50,34 +58,40 @@ class CheckResult:
             "elapsed_s": round(self.elapsed, 2),
         }
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         status = "PASS" if self.passed else "FAIL"
         return f"{self.name}: {status} ({self.detail})"
 
 
-def _vm_name(target):
+def _vm_name(target: str) -> str:
     """Generate a unique temporary VM name."""
     return f"validate-{target}-{os.getpid()}"
 
 
-def _vm_exec(vm_name, cmd, timeout=30):
+def _vm_exec(vm_name: str, cmd: str, timeout: int = 30) -> tuple[int, str, str]:
     """Run a command in a VM via vm.sh exec.
 
     Returns (returncode, stdout, stderr).
     """
     result = subprocess.run(
-        ["sudo", "vm.sh", "exec", "--timeout", str(timeout), vm_name, cmd],
+        ["sudo", "vm.py", "exec", "--timeout", str(timeout), vm_name, cmd],
         capture_output=True,
         text=True,
     )
     return result.returncode, result.stdout, result.stderr
 
 
-def _vm_ensure(vm_name, image_path, kernel_path, mdt_disks=0, ost_disks=0):
+def _vm_ensure(
+    vm_name: str,
+    image_path: Path,
+    kernel_path: Path,
+    mdt_disks: int = 0,
+    ost_disks: int = 0,
+) -> subprocess.CompletedProcess[str]:
     """Create/ensure a validation VM."""
     cmd = [
         "sudo",
-        "vm.sh",
+        "vm.py",
         "ensure",
         vm_name,
         "--vcpus",
@@ -102,16 +116,18 @@ def _vm_ensure(vm_name, image_path, kernel_path, mdt_disks=0, ost_disks=0):
     return result
 
 
-def _vm_destroy(vm_name):
+def _vm_destroy(vm_name: str) -> None:
     """Destroy a validation VM (best-effort)."""
     subprocess.run(
-        ["sudo", "vm.sh", "destroy", vm_name],
+        ["sudo", "vm.py", "destroy", vm_name],
         capture_output=True,
         text=True,
     )
 
 
-def _deploy_lustre(vm_name, lustre_tree):
+def _deploy_lustre(
+    vm_name: str, lustre_tree: Path
+) -> subprocess.CompletedProcess[str]:
     """Deploy Lustre to a VM."""
     result = subprocess.run(
         [
@@ -137,7 +153,7 @@ def _deploy_lustre(vm_name, lustre_tree):
 # ------------------------------------------------------------------
 
 
-def check_artifacts(target_config):
+def check_artifacts(target_config: TargetConfig) -> CheckResult:
     """Check 1: Verify all build artifacts exist."""
     t0 = time.monotonic()
     out = target_config.output_dir
@@ -168,7 +184,7 @@ def check_artifacts(target_config):
     )
 
 
-def check_version_consistency(target_config):
+def check_version_consistency(target_config: TargetConfig) -> CheckResult:
     """Check 2: Kernel version matches across artifacts."""
     t0 = time.monotonic()
     out = target_config.output_dir
@@ -212,7 +228,7 @@ def check_version_consistency(target_config):
     return CheckResult("Version consistency", True, meta_version, elapsed)
 
 
-def check_vm_boot(target_config, vm_name):
+def check_vm_boot(target_config: TargetConfig, vm_name: str) -> CheckResult:
     """Check 3a: VM boots and responds."""
     t0 = time.monotonic()
 
@@ -228,7 +244,9 @@ def check_vm_boot(target_config, vm_name):
     )
 
 
-def check_vm_kernel_version(target_config, vm_name):
+def check_vm_kernel_version(
+    target_config: TargetConfig, vm_name: str
+) -> CheckResult:
     """Check 3b: uname -r matches expected kernel version."""
     t0 = time.monotonic()
 
@@ -267,7 +285,7 @@ def check_vm_kernel_version(target_config, vm_name):
     return CheckResult("Kernel version match", True, actual, elapsed)
 
 
-def check_networking(vm_name):
+def check_networking(vm_name: str) -> CheckResult:
     """Check 3c: VM can reach the host bridge."""
     t0 = time.monotonic()
 
@@ -284,7 +302,7 @@ def check_networking(vm_name):
     return CheckResult("Networking", True, "", elapsed)
 
 
-def check_packages(vm_name):
+def check_packages(vm_name: str) -> CheckResult:
     """Check 3d: Expected packages are installed."""
     t0 = time.monotonic()
 
@@ -317,7 +335,7 @@ def check_packages(vm_name):
     )
 
 
-def check_no_lustre(vm_name):
+def check_no_lustre(vm_name: str) -> CheckResult:
     """Check 3e: No Lustre modules loaded on virgin boot."""
     t0 = time.monotonic()
 
@@ -333,7 +351,7 @@ def check_no_lustre(vm_name):
     return CheckResult("No Lustre loaded", True, "", elapsed)
 
 
-def check_lustre_deploy(vm_name, lustre_tree):
+def check_lustre_deploy(vm_name: str, lustre_tree: Path) -> CheckResult:
     """Check 4a: Deploy Lustre and mount filesystem."""
     t0 = time.monotonic()
 
@@ -361,7 +379,7 @@ def check_lustre_deploy(vm_name, lustre_tree):
     return CheckResult("Lustre deploy + mount", True, "", elapsed)
 
 
-def check_basic_io(vm_name):
+def check_basic_io(vm_name: str) -> CheckResult:
     """Check 4b: Write and read back a file on Lustre."""
     t0 = time.monotonic()
 

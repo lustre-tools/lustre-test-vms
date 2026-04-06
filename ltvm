@@ -5,12 +5,15 @@ Single entry point for building containers, kernels, and VM images,
 plus runtime VM management (stubs for now).
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import logging
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 # Ensure lib/ is importable
 sys.path.insert(0, str(Path(__file__).parent))
@@ -21,13 +24,20 @@ from lib.config import TargetConfig, list_targets
 from lib.image import build_image, image_status
 from lib.kernel import build_kernel, kernel_status
 from lib.lustre import build_lustre
-from lib.package import fetch_target, install_target, package_target
+from lib.package import (
+    fetch_target,
+    install_target,
+    package_target,
+    snapshot_lustre,
+)
 from lib.validate import print_results, validate_target
 
 log = logging.getLogger("ltvm")
 
 
-def _resolve_lustre_tree(arg_value):
+def _resolve_lustre_tree(
+    arg_value: str | None,
+) -> tuple[Path | None, str | None]:
     """Resolve --lustre-tree, defaulting to cwd.
 
     Returns (Path, error_string).  error_string is None on success.
@@ -54,7 +64,7 @@ EXIT_NOT_FOUND = 2
 # ------------------------------------------------------------------
 
 
-def _output(data, use_json):
+def _output(data: Any, use_json: bool) -> None:
     """Print data as JSON or as a human-readable string."""
     if use_json:
         print(json.dumps(data, indent=2))
@@ -69,7 +79,7 @@ def _output(data, use_json):
                 print(item)
 
 
-def _error(msg, use_json, hint=None):
+def _error(msg: str, use_json: bool, hint: str | None = None) -> int:
     """Print an error message and return EXIT_ERROR."""
     if use_json:
         err = {"error": msg}
@@ -83,7 +93,7 @@ def _error(msg, use_json, hint=None):
     return EXIT_ERROR
 
 
-def _not_found(msg, use_json, hint=None):
+def _not_found(msg: str, use_json: bool, hint: str | None = None) -> int:
     """Print a not-found message and return EXIT_NOT_FOUND."""
     if use_json:
         err = {"error": msg}
@@ -97,7 +107,9 @@ def _not_found(msg, use_json, hint=None):
     return EXIT_NOT_FOUND
 
 
-def _load_target(name, use_json):
+def _load_target(
+    name: str, use_json: bool
+) -> tuple[TargetConfig | None, int | None]:
     """Load a TargetConfig, returning (config, None) or
     (None, exit_code) on failure."""
     try:
@@ -118,7 +130,7 @@ def _load_target(name, use_json):
 # ------------------------------------------------------------------
 
 
-def _container_status(target_config):
+def _container_status(target_config: TargetConfig) -> dict[str, Any]:
     """Return status dict for the build container artifact."""
     meta_file = target_config.container_output_dir() / "meta.json"
     if not meta_file.exists():
@@ -134,7 +146,7 @@ def _container_status(target_config):
 # ------------------------------------------------------------------
 
 
-def cmd_build_all(args):
+def cmd_build_all(args: argparse.Namespace) -> int:
     """Build container + kernel + image for a target.
 
     With --lustre-build, also builds the Lustre source tree
@@ -210,7 +222,7 @@ def cmd_build_all(args):
 # ------------------------------------------------------------------
 
 
-def _do_build_container(target_config):
+def _do_build_container(target_config: TargetConfig) -> str:
     """Run podman build for the build container and write meta."""
     tag = f"ltvm-build-{target_config.name}"
     dockerfile = target_config.target_dir / "container.Dockerfile"
@@ -230,7 +242,7 @@ def _do_build_container(target_config):
     return tag
 
 
-def cmd_build_container(args):
+def cmd_build_container(args: argparse.Namespace) -> int:
     use_json = args.json
     tc, err = _load_target(args.target, use_json)
     if err is not None:
@@ -254,7 +266,7 @@ def cmd_build_container(args):
 # ------------------------------------------------------------------
 
 
-def cmd_build_kernel(args):
+def cmd_build_kernel(args: argparse.Namespace) -> int:
     use_json = args.json
     tc, err = _load_target(args.target, use_json)
     if err is not None:
@@ -286,7 +298,7 @@ def cmd_build_kernel(args):
 # ------------------------------------------------------------------
 
 
-def cmd_build_image(args):
+def cmd_build_image(args: argparse.Namespace) -> int:
     use_json = args.json
     tc, err = _load_target(args.target, use_json)
     if err is not None:
@@ -310,7 +322,7 @@ def cmd_build_image(args):
 # ------------------------------------------------------------------
 
 
-def cmd_build_lustre(args):
+def cmd_build_lustre(args: argparse.Namespace) -> int:
     use_json = args.json
     tc, err = _load_target(args.target, use_json)
     if err is not None:
@@ -377,11 +389,24 @@ def cmd_build_lustre(args):
 # ------------------------------------------------------------------
 
 
-def cmd_package(args):
+def cmd_package(args: argparse.Namespace) -> int:
     use_json = args.json
     tc, err = _load_target(args.target, use_json)
     if err is not None:
         return err
+
+    # Snapshot Lustre tree if --lustre-tree provided
+    lustre_tree_arg = getattr(args, "lustre_tree", None)
+    if lustre_tree_arg:
+        lustre_path, err_msg = _resolve_lustre_tree(lustre_tree_arg)
+        if err_msg:
+            return _error(err_msg, use_json)
+        if not use_json:
+            print("Snapshotting Lustre tree...")
+        try:
+            snapshot_lustre(lustre_path, tc.output_dir)
+        except Exception as e:
+            return _error(f"Lustre snapshot failed: {e}", use_json)
 
     if not use_json:
         print(f"Packaging {args.target}...")
@@ -403,7 +428,7 @@ def cmd_package(args):
 # ------------------------------------------------------------------
 
 
-def cmd_fetch(args):
+def cmd_fetch(args: argparse.Namespace) -> int:
     use_json = args.json
 
     if not args.url:
@@ -433,7 +458,7 @@ def cmd_fetch(args):
 # ------------------------------------------------------------------
 
 
-def cmd_install(args):
+def cmd_install(args: argparse.Namespace) -> int:
     use_json = args.json
     tc, err = _load_target(args.target, use_json)
     if err is not None:
@@ -465,7 +490,7 @@ def cmd_install(args):
 # ------------------------------------------------------------------
 
 
-def cmd_shell(args):
+def cmd_shell(args: argparse.Namespace) -> int:
     use_json = args.json
     tc, err = _load_target(args.target, use_json)
     if err is not None:
@@ -517,7 +542,7 @@ def cmd_shell(args):
 # ------------------------------------------------------------------
 
 
-def cmd_status(args):
+def cmd_status(args: argparse.Namespace) -> int:
     use_json = args.json
     targets = list_targets()
 
@@ -556,7 +581,7 @@ def cmd_status(args):
     return EXIT_OK
 
 
-def _artifact_label(status_dict):
+def _artifact_label(status_dict: dict[str, Any]) -> str:
     """Produce a human label like 'current', 'stale (config changed)',
     or 'not built'."""
     if not status_dict.get("built", False):
@@ -571,7 +596,7 @@ def _artifact_label(status_dict):
 # ------------------------------------------------------------------
 
 
-def cmd_update(args):
+def cmd_update(args: argparse.Namespace) -> int:
     use_json = args.json
 
     if args.all:
@@ -582,7 +607,7 @@ def cmd_update(args):
     if not targets:
         return _error("No targets to update", use_json)
 
-    results = {}
+    results: dict[str, str | list[str]] = {}
     for name in targets:
         tc, err = _load_target(name, use_json)
         if err is not None:
@@ -645,7 +670,7 @@ def cmd_update(args):
 # ------------------------------------------------------------------
 
 
-def _runtime_result(res, use_json):
+def _runtime_result(res: dict[str, Any], use_json: bool) -> int:
     """Print a runtime result dict and return the exit code."""
     if use_json:
         print(json.dumps(res, indent=2))
@@ -657,7 +682,7 @@ def _runtime_result(res, use_json):
     return 0 if res["ok"] else res.get("returncode", EXIT_ERROR)
 
 
-def cmd_vm(args):
+def cmd_vm(args: argparse.Namespace) -> int:
     use_json = args.json
     action = args.action
     vm_args = args.vm_args
@@ -698,7 +723,7 @@ def cmd_vm(args):
     return _error(f"Unknown vm action: {action}", use_json)
 
 
-def _parse_vm_kwargs(extra_args):
+def _parse_vm_kwargs(extra_args: list[str]) -> dict[str, Any]:
     """Parse --vcpus, --mem, --mdt-disks, --ost-disks, --target
     from a flat list of strings."""
     kwargs = {}
@@ -725,16 +750,32 @@ def _parse_vm_kwargs(extra_args):
     return kwargs
 
 
-def cmd_deploy(args):
+def cmd_deploy(args: argparse.Namespace) -> int:
     use_json = args.json
-    build_path = Path(args.build).resolve()
+    target = getattr(args, "target", "rocky9")
+    ltvm_root = Path(__file__).parent
+
+    # Resolve build path: explicit --build, or packaged Lustre,
+    # or cwd
+    build_arg = getattr(args, "build", ".")
+    if build_arg == ".":
+        # Check for packaged Lustre tree first
+        packaged = ltvm_root / "output" / target / "lustre"
+        if packaged.is_dir():
+            build_path = packaged
+            if not use_json:
+                print(f"  Using packaged Lustre from {packaged}")
+        else:
+            build_path = Path(".").resolve()
+    else:
+        build_path = Path(build_arg).resolve()
+
     if not build_path.is_dir():
         return _error(f"Build path not found: {build_path}", use_json)
 
     # Auto-detect kernel modules from ltvm output
     kernel_modules = None
-    target = getattr(args, "target", "rocky9")
-    mods_path = Path(__file__).parent / "output" / target / "kernel" / "modules"
+    mods_path = ltvm_root / "output" / target / "kernel" / "modules"
     if mods_path.is_dir():
         kernel_modules = str(mods_path)
         if not use_json:
@@ -749,7 +790,7 @@ def cmd_deploy(args):
     return _runtime_result(res, use_json)
 
 
-def cmd_exec(args):
+def cmd_exec(args: argparse.Namespace) -> int:
     use_json = args.json
     if not args.cmd:
         return _error("exec requires a command", use_json)
@@ -759,7 +800,7 @@ def cmd_exec(args):
     return _runtime_result(res, use_json)
 
 
-def cmd_cluster(args):
+def cmd_cluster(args: argparse.Namespace) -> int:
     use_json = args.json
     action = args.action
     cargs = args.cluster_args
@@ -829,7 +870,7 @@ def cmd_cluster(args):
 # ------------------------------------------------------------------
 
 
-def cmd_validate(args):
+def cmd_validate(args: argparse.Namespace) -> int:
     """Run validation checks on a built target."""
     use_json = args.json
     tc, err = _load_target(args.target, use_json)
@@ -862,7 +903,7 @@ def cmd_validate(args):
 # ------------------------------------------------------------------
 
 
-def cmd_setup(args):
+def cmd_setup(args: argparse.Namespace) -> int:
     """Run host setup (QEMU, network, scripts, SSH)."""
     use_json = args.json
 
@@ -909,7 +950,7 @@ def cmd_setup(args):
 # ------------------------------------------------------------------
 
 
-def build_parser():
+def build_parser() -> argparse.ArgumentParser:
     # Common flags accepted by all subcommands
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
@@ -1065,9 +1106,13 @@ def build_parser():
         "package",
         parents=[common],
         help="Create a distributable tarball of target "
-        "artifacts (kernel + image)",
+        "artifacts (kernel + image + optional Lustre)",
     )
     sp.add_argument("target")
+    sp.add_argument(
+        "--lustre-tree",
+        help="Include a built Lustre tree in the package",
+    )
     sp.add_argument(
         "--output",
         default=None,
@@ -1219,7 +1264,7 @@ def build_parser():
 # ------------------------------------------------------------------
 
 
-def main():
+def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 

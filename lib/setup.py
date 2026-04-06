@@ -1,8 +1,10 @@
 """Host setup for Lustre QEMU test VMs.
 
 Prepares a Linux host: builds QEMU, configures the network
-bridge, installs vm.sh/deploy-lustre.sh, and sets up SSH.
+bridge, installs vm.py/deploy-lustre.sh, and sets up SSH.
 """
+
+from __future__ import annotations
 
 import logging
 import os
@@ -11,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -41,11 +44,11 @@ HOST_CONFIG_DIR = QEMU_DIR / "host-config"
 class HostInfo:
     """Detected host OS and package manager."""
 
-    def __init__(self):
-        self.id = "unknown"
-        self.version = "0"
-        self.pretty_name = "unknown"
-        self.pkg_mgr = None  # "dnf" or "apt"
+    def __init__(self) -> None:
+        self.id: str = "unknown"
+        self.version: str = "0"
+        self.pretty_name: str = "unknown"
+        self.pkg_mgr: str | None = None  # "dnf" or "apt"
 
         osr = Path("/etc/os-release")
         if not osr.exists():
@@ -72,7 +75,7 @@ class HostInfo:
                 "No supported package manager (need dnf or apt-get)"
             )
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"{self.pretty_name} ({self.pkg_mgr})"
 
 
@@ -88,14 +91,18 @@ _PKG_MAP = {
 }
 
 
-def _translate_pkgs(pkgs, host):
+def _translate_pkgs(pkgs: tuple[str, ...], host: HostInfo) -> list[str]:
     """Translate RHEL package names for apt hosts."""
     if host.pkg_mgr != "apt":
         return list(pkgs)
     return [_PKG_MAP.get(p, p) for p in pkgs]
 
 
-def _run(cmd, check=True, quiet=False):
+def _run(
+    cmd: list[str],
+    check: bool = True,
+    quiet: bool = False,
+) -> subprocess.CompletedProcess[str]:
     """Run a command, return CompletedProcess."""
     log.debug("run: %s", " ".join(str(c) for c in cmd))
     r = subprocess.run(cmd, capture_output=quiet, text=True)
@@ -107,19 +114,21 @@ def _run(cmd, check=True, quiet=False):
     return r
 
 
-def _run_quiet(cmd, check=True):
+def _run_quiet(
+    cmd: list[str], check: bool = True
+) -> subprocess.CompletedProcess[str]:
     return _run(cmd, check=check, quiet=True)
 
 
-def _pkg_install(host, *pkgs):
+def _pkg_install(host: HostInfo, *pkgs: str) -> None:
     """Install packages using the host's package manager."""
-    pkgs = _translate_pkgs(pkgs, host)
+    translated = _translate_pkgs(pkgs, host)
     if host.pkg_mgr == "dnf":
-        _run(["dnf", "install", "-y"] + pkgs, check=False)
+        _run(["dnf", "install", "-y", *translated], check=False)
     elif host.pkg_mgr == "apt":
         env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
         subprocess.run(
-            ["apt-get", "install", "-y"] + pkgs, env=env, check=False
+            ["apt-get", "install", "-y", *translated], env=env, check=False
         )
 
 
@@ -128,7 +137,7 @@ def _pkg_install(host, *pkgs):
 # ------------------------------------------------------------------
 
 
-def check_prerequisites(host):
+def check_prerequisites(host: HostInfo) -> None:
     """Verify and install basic prerequisites."""
     needed = {
         "curl": "curl",
@@ -156,7 +165,7 @@ def check_prerequisites(host):
         )
 
 
-def check_kvm(require=True):
+def check_kvm(require: bool = True) -> bool:
     """Check for /dev/kvm.  Returns True if present."""
     if Path("/dev/kvm").exists():
         return True
@@ -176,7 +185,7 @@ def check_kvm(require=True):
 # ------------------------------------------------------------------
 
 
-def _qemu_installed_version():
+def _qemu_installed_version() -> str | None:
     """Return installed QEMU version string, or None."""
     qemu = QEMU_PREFIX / "bin" / "qemu-system-x86_64"
     if not qemu.exists():
@@ -189,7 +198,7 @@ def _qemu_installed_version():
         return None
 
 
-def install_qemu(host, force=False):
+def install_qemu(host: HostInfo, force: bool = False) -> None:
     """Build and install QEMU with microvm support."""
     existing = _qemu_installed_version()
     if existing == QEMU_VERSION and not force:
@@ -286,7 +295,7 @@ def install_qemu(host, force=False):
 # ------------------------------------------------------------------
 
 
-def setup_network(host, subnet=DEFAULT_SUBNET):
+def setup_network(host: HostInfo, subnet: str = DEFAULT_SUBNET) -> None:
     """Configure fcbr0 bridge, dnsmasq, and NAT."""
     log.info("Configuring network bridge (fcbr0) on %s.0/24", subnet)
 
@@ -349,14 +358,14 @@ def setup_network(host, subnet=DEFAULT_SUBNET):
 # ------------------------------------------------------------------
 
 
-def install_scripts(host):
-    """Install vm.sh, deploy-lustre.sh, and dk-filter."""
-    log.info("Installing vm.sh and deploy-lustre.sh")
+def install_scripts(host: HostInfo) -> None:
+    """Install vm.py, deploy-lustre.sh, and dk-filter."""
+    log.info("Installing vm.py and deploy-lustre.sh")
 
     for d in ("overlays", "sockets", "kernel", "images"):
         (VM_DIR / d).mkdir(parents=True, exist_ok=True)
 
-    for script in ("vm.sh", "deploy-lustre.sh"):
+    for script in ("vm.py", "deploy-lustre.sh"):
         src = QEMU_DIR / script
         if not src.exists():
             log.warning("%s not found at %s, skipping", script, src)
@@ -391,7 +400,7 @@ def install_scripts(host):
 MARKER = "# lustre-test-vms"
 
 
-def setup_ssh(subnet=DEFAULT_SUBNET):
+def setup_ssh(subnet: str = DEFAULT_SUBNET) -> None:
     """Configure host SSH for fast VM access."""
     log.info("Configuring SSH for fast VM access")
 
@@ -446,9 +455,9 @@ Host {subnet}.*
 # ------------------------------------------------------------------
 
 
-def verify(subnet=DEFAULT_SUBNET):
+def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
     """Check existing setup.  Returns dict of results."""
-    results = {}
+    results: dict[str, Any] = {}
 
     # QEMU
     ver = _qemu_installed_version()
@@ -480,7 +489,7 @@ def verify(subnet=DEFAULT_SUBNET):
     }
 
     # Scripts
-    for script in ("vm.sh", "deploy-lustre.sh"):
+    for script in ("vm.py", "deploy-lustre.sh"):
         results[script] = {
             "installed": shutil.which(script) is not None,
             "path": shutil.which(script),
@@ -512,7 +521,7 @@ def verify(subnet=DEFAULT_SUBNET):
             results["kvm"]["available"],
             results["bridge"]["up"],
             results["dnsmasq"]["running"],
-            results["vm.sh"]["installed"],
+            results["vm.py"]["installed"],
             results["deploy-lustre.sh"]["installed"],
             results["podman"]["installed"],
             results["ssh"]["configured"],
@@ -522,13 +531,13 @@ def verify(subnet=DEFAULT_SUBNET):
     return results
 
 
-def print_verify(results):
+def print_verify(results: dict[str, Any]) -> None:
     """Print verify results in human-readable form."""
 
-    def ok(msg):
+    def ok(msg: str) -> None:
         print(f"  {msg}")
 
-    def fail(msg):
+    def fail(msg: str) -> None:
         print(f"  WARNING: {msg}")
 
     q = results["qemu"]
@@ -553,7 +562,7 @@ def print_verify(results):
     else:
         fail("dnsmasq: not running")
 
-    for script in ("vm.sh", "deploy-lustre.sh"):
+    for script in ("vm.py", "deploy-lustre.sh"):
         s = results[script]
         if s["installed"]:
             ok(f"{script}: {s['path']}")
@@ -584,8 +593,11 @@ def print_verify(results):
 
 
 def run_setup(
-    steps=None, subnet=DEFAULT_SUBNET, force=False, json_output=False
-):
+    steps: list[str] | None = None,
+    subnet: str = DEFAULT_SUBNET,
+    force: bool = False,
+    json_output: bool = False,
+) -> None:
     """Run host setup.
 
     steps: list of step names, or None for all.
@@ -600,7 +612,7 @@ def run_setup(
     check_prerequisites(host)
 
     all_steps = steps is None
-    steps = set(steps or ["qemu", "network", "install", "ssh"])
+    active: set[str] = set(steps or ["qemu", "network", "install", "ssh"])
 
     # KVM: hard-fail on full setup, warn on individual
     # steps
@@ -609,13 +621,13 @@ def run_setup(
     else:
         check_kvm(require=False)
 
-    if "qemu" in steps:
+    if "qemu" in active:
         install_qemu(host, force=force)
-    if "network" in steps:
+    if "network" in active:
         setup_network(host, subnet=subnet)
-    if "install" in steps:
+    if "install" in active:
         install_scripts(host)
-    if "ssh" in steps:
+    if "ssh" in active:
         setup_ssh(subnet=subnet)
 
     if all_steps:

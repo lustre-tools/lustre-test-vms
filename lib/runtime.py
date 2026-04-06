@@ -4,25 +4,35 @@ Each function shells out to the battle-tested existing tools and
 returns a consistent dict: {'ok': bool, 'output': str, 'returncode': int}.
 """
 
+from __future__ import annotations
+
 import subprocess
 from pathlib import Path
+from typing import TypedDict
 
-VM_SH = "vm.sh"
+
+class RunResult(TypedDict):
+    ok: bool
+    output: str
+    returncode: int
+
+
+VM_SH = "vm.py"
 DEPLOY_SH = "deploy-lustre.sh"
 
 
-def _run_raw(cmd, timeout=None):
+def _run_raw(cmd: list[str], timeout: int | None = None) -> RunResult:
     """Run a command list as-is (no sudo prefix)."""
     return _run_impl(cmd, timeout)
 
 
-def _run(cmd, timeout=None):
+def _run(cmd: list[str], timeout: int | None = None) -> RunResult:
     """Run a command list under sudo, capture output, return result dict."""
     full = ["sudo"] + cmd
     return _run_impl(full, timeout)
 
 
-def _run_impl(full, timeout=None):
+def _run_impl(full: list[str], timeout: int | None = None) -> RunResult:
     try:
         r = subprocess.run(
             full,
@@ -53,7 +63,14 @@ def _run_impl(full, timeout=None):
 # ------------------------------------------------------------------
 
 
-def vm_create(name, target=None, vcpus=2, mem=4096, mdt_disks=0, ost_disks=0):
+def vm_create(
+    name: str,
+    target: str | None = None,
+    vcpus: int = 2,
+    mem: int = 4096,
+    mdt_disks: int = 0,
+    ost_disks: int = 0,
+) -> RunResult:
     """Create a VM.  --target is accepted but currently ignored
     (vm.sh uses its own default kernel)."""
     cmd = [
@@ -73,7 +90,14 @@ def vm_create(name, target=None, vcpus=2, mem=4096, mdt_disks=0, ost_disks=0):
     return _run(cmd)
 
 
-def vm_ensure(name, target=None, vcpus=2, mem=4096, mdt_disks=0, ost_disks=0):
+def vm_ensure(
+    name: str,
+    target: str | None = None,
+    vcpus: int = 2,
+    mem: int = 4096,
+    mdt_disks: int = 0,
+    ost_disks: int = 0,
+) -> RunResult:
     """Idempotent create-if-missing, start-if-stopped."""
     cmd = [VM_SH, "ensure", name, "--vcpus", str(vcpus), "--mem", str(mem)]
     if mdt_disks:
@@ -83,30 +107,30 @@ def vm_ensure(name, target=None, vcpus=2, mem=4096, mdt_disks=0, ost_disks=0):
     return _run(cmd)
 
 
-def vm_destroy(name):
+def vm_destroy(name: str) -> RunResult:
     return _run([VM_SH, "destroy", name])
 
 
-def vm_start(name):
+def vm_start(name: str) -> RunResult:
     return _run([VM_SH, "start", name])
 
 
-def vm_stop(name):
+def vm_stop(name: str) -> RunResult:
     return _run([VM_SH, "stop", name])
 
 
-def vm_restart(name):
+def vm_restart(name: str) -> RunResult:
     return _run([VM_SH, "restart", name])
 
 
-def vm_list(json_output=False):
+def vm_list(json_output: bool = False) -> RunResult:
     cmd = [VM_SH, "list"]
     if json_output:
         cmd.append("--json")
     return _run(cmd)
 
 
-def vm_status(name, json_output=False):
+def vm_status(name: str, json_output: bool = False) -> RunResult:
     cmd = [VM_SH, "status"]
     if json_output:
         cmd.append("--json")
@@ -114,7 +138,7 @@ def vm_status(name, json_output=False):
     return _run(cmd)
 
 
-def vm_exec(name, cmd, timeout=120):
+def vm_exec(name: str, cmd: str, timeout: int = 120) -> RunResult:
     """Execute a command inside a VM.
 
     Returns the usual result dict.  The returncode reflects
@@ -127,11 +151,11 @@ def vm_exec(name, cmd, timeout=120):
     )
 
 
-def vm_log(name, lines=50):
+def vm_log(name: str, lines: int = 50) -> RunResult:
     return _run([VM_SH, "log", name, str(lines)])
 
 
-def vm_dmesg(name, tail=100):
+def vm_dmesg(name: str, tail: int = 100) -> RunResult:
     return _run([VM_SH, "dmesg", "--tail", str(tail), name])
 
 
@@ -140,7 +164,12 @@ def vm_dmesg(name, tail=100):
 # ------------------------------------------------------------------
 
 
-def deploy(vm_name, build_path=".", mount=False, kernel_modules=None):
+def deploy(
+    vm_name: str,
+    build_path: str | Path = ".",
+    mount: bool = False,
+    kernel_modules: str | Path | None = None,
+) -> RunResult:
     """Deploy Lustre to a VM.
 
     If kernel_modules is set (path to modules/ from kernel
@@ -165,7 +194,7 @@ def deploy(vm_name, build_path=".", mount=False, kernel_modules=None):
     return _run(cmd, timeout=300)
 
 
-def _deploy_kernel_modules(vm_name, lib_modules_path):
+def _deploy_kernel_modules(vm_name: str, lib_modules_path: Path) -> RunResult:
     """Rsync kernel modules into the VM and run depmod.
 
     lib_modules_path: path to lib/modules/ containing
@@ -216,17 +245,19 @@ def _deploy_kernel_modules(vm_name, lib_modules_path):
 # ------------------------------------------------------------------
 
 
-def cluster_create(name, *node_specs):
+def cluster_create(name: str, *node_specs: str) -> RunResult:
     """node_specs: strings like 'mgs+mds:c1-srv:1'."""
     cmd = [VM_SH, "cluster", "create", name] + list(node_specs)
     return _run(cmd)
 
 
-def cluster_destroy(name):
+def cluster_destroy(name: str) -> RunResult:
     return _run([VM_SH, "cluster", "destroy", name])
 
 
-def cluster_deploy(name, build_path, mount=False):
+def cluster_deploy(
+    name: str, build_path: str | Path, mount: bool = False
+) -> RunResult:
     build_path = str(Path(build_path).resolve())
     cmd = [VM_SH, "cluster", "deploy", name, "--build", build_path]
     if mount:
@@ -234,9 +265,9 @@ def cluster_deploy(name, build_path, mount=False):
     return _run(cmd, timeout=300)
 
 
-def cluster_status(name):
+def cluster_status(name: str) -> RunResult:
     return _run([VM_SH, "cluster", "status", name])
 
 
-def cluster_exec(name, role, cmd):
+def cluster_exec(name: str, role: str, cmd: str) -> RunResult:
     return _run([VM_SH, "cluster", "exec", name, role, cmd])

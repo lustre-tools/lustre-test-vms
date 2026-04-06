@@ -14,12 +14,31 @@ The container image (e.g., ltvm-build-rocky9) is retained by
 podman after `ltvm build-container` or `ltvm build-all`.
 """
 
+from __future__ import annotations
+
 import os
 import subprocess
 from pathlib import Path
+from typing import TypedDict
 
 
-def _kernel_release(build_tree):
+class BuildResult(TypedDict):
+    lustre_tree: str
+    kernel_tree: str
+    kernel_version: str
+    ko_count: int
+    container: str | None
+
+
+class StatusResult(TypedDict):
+    configured: bool
+    ko_count: int
+    built_against: str | None
+    current_kernel: str | None
+    stale: bool
+
+
+def _kernel_release(build_tree: str | Path) -> str:
     """Read kernel version from the build-tree stamp file."""
     stamp = Path(build_tree) / "kernel-version"
     if stamp.exists():
@@ -34,13 +53,18 @@ def _kernel_release(build_tree):
     return r.stdout.strip() if r.returncode == 0 else "unknown"
 
 
-def _container_exists(tag):
+def _container_exists(tag: str) -> bool:
     """Check if a podman image exists."""
     r = subprocess.run(["podman", "image", "exists", tag], capture_output=True)
     return r.returncode == 0
 
 
-def _needs_reconfigure(lustre_tree, build_tree, force, container_path):
+def _needs_reconfigure(
+    lustre_tree: Path,
+    build_tree: Path,
+    force: bool,
+    container_path: Path,
+) -> bool:
     """Return True if configure needs to be re-run.
 
     container_path is the path to the kernel build-tree as
@@ -80,15 +104,15 @@ def _needs_reconfigure(lustre_tree, build_tree, force, container_path):
 
 
 def build_lustre(
-    lustre_tree,
-    build_tree,
+    lustre_tree: str | Path,
+    build_tree: str | Path,
     *,
-    container_tag=None,
-    enable_server=True,
-    extra_configure=None,
-    jobs=None,
-    force=False,
-):
+    container_tag: str | None = None,
+    enable_server: bool = True,
+    extra_configure: list[str] | None = None,
+    jobs: int | None = None,
+    force: bool = False,
+) -> BuildResult:
     """Build a Lustre source tree.
 
     Runs inside the build container when available (cross-OS
@@ -161,15 +185,15 @@ def build_lustre(
 
 
 def _build_in_container(
-    lustre_tree,
-    build_tree,
-    container_tag,
-    kver,
-    enable_server,
-    extra_configure,
-    jobs,
-    force,
-):
+    lustre_tree: Path,
+    build_tree: Path,
+    container_tag: str,
+    kver: str,
+    enable_server: bool,
+    extra_configure: list[str] | None,
+    jobs: int,
+    force: bool,
+) -> BuildResult:
     """Build Lustre inside the build container.
 
     Mount layout:
@@ -252,8 +276,14 @@ def _build_in_container(
 
 
 def _build_on_host(
-    lustre_tree, build_tree, kver, enable_server, extra_configure, jobs, force
-):
+    lustre_tree: Path,
+    build_tree: Path,
+    kver: str,
+    enable_server: bool,
+    extra_configure: list[str] | None,
+    jobs: int,
+    force: bool,
+) -> BuildResult:
     """Build Lustre directly on the host."""
     print(f"  Lustre:  {lustre_tree}")
     print(f"  Kernel:  {build_tree}")
@@ -306,7 +336,7 @@ def _build_on_host(
     }
 
 
-def _run_step(cmd, cwd, label):
+def _run_step(cmd: list[str], cwd: Path, label: str) -> None:
     """Run a build step, streaming output.  Raises on failure."""
     print(f"--- {label}...")
     r = subprocess.run(cmd, cwd=str(cwd))
@@ -314,7 +344,9 @@ def _run_step(cmd, cwd, label):
         raise RuntimeError(f"{label} failed (rc={r.returncode})")
 
 
-def lustre_status(lustre_tree, build_tree):
+def lustre_status(
+    lustre_tree: str | Path, build_tree: str | Path
+) -> StatusResult:
     """Return a status dict for the Lustre build."""
     lustre_tree = Path(lustre_tree).resolve()
     build_tree = Path(build_tree).resolve()

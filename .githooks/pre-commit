@@ -1,0 +1,21 @@
+#!/bin/bash
+# Pre-commit hook: lint + format check via ruff
+# Install: git config core.hooksPath .githooks
+
+set -e
+
+if ! command -v uv >/dev/null 2>&1; then
+	echo "pre-commit: uv not found, skipping checks"
+	exit 0
+fi
+
+echo "pre-commit: ruff check..."
+uv run ruff check .
+
+echo "pre-commit: ruff format..."
+uv run ruff format --check .
+
+echo "pre-commit: mypy..."
+uv run mypy ltvm lib/
+
+echo "pre-commit: all checks passed"
