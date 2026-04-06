@@ -6,35 +6,105 @@ or AGENTS.md. Replace paths like `~/lustre-release` and
 
 ## Building
 
-### Kernel Build
-
-The ltvm repo builds a kernel with the full build tree
-needed for Lustre module compilation. The build tree
-lives at `<ltvm-repo>/output/<target>/kernel/build-tree/`.
+### Quick Start (download pre-built artifacts)
 
 ```bash
-# One-time: build kernel + VM image for rocky9
 cd ~/lustre-test-vms-v2
-./ltvm init rocky9
+
+# Download pre-built kernel + image + Lustre (~1.4 GB)
+./ltvm fetch rocky9 --url <tarball-url>
+
+# Install kernel + image to system paths
+./ltvm install rocky9
+
+# Create a VM and deploy the packaged Lustre
+sudo vm.py create --name co1-single \
+    --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
+./ltvm deploy co1-single --mount
+```
+
+No building required. Four commands from download to
+mounted Lustre filesystem.
+
+### Building from Scratch
+
+```bash
+cd ~/lustre-test-vms-v2
+
+# Build container + kernel + image (~45 min first time)
+./ltvm build-all rocky9
+
+# Install kernel + image to system paths
+./ltvm install rocky9
 
 # Check what's built
 ./ltvm status
 ```
 
-### Lustre Build
+### Kernel Build
 
-Point fullbuild at the ltvm kernel build tree:
+ltvm builds kernels using Lustre's authoritative configs
+from `lustre/kernel_patches/`. Each target supports
+multiple kernel versions.
 
 ```bash
-cd ~/lustre-release
-fullbuild --with-linux=~/lustre-test-vms-v2/output/rocky9/kernel/build-tree
+# Build default kernel for rocky9
+./ltvm build-kernel rocky9
+
+# Build a specific kernel version
+./ltvm build-kernel rocky9 --kernel 5.14-rhel9.5
+
+# Check available kernels
+./ltvm status
 ```
 
-Incremental build: `make` (aliased to `sudo make -j16`
-with ccache). Only needs `--with-linux` on the initial
-configure; subsequent `make` runs remember it.
+Output lives at
+`<ltvm-repo>/output/<target>/kernels/<kernel-name>/`.
+Each kernel directory contains: vmlinux, vmlinuz,
+modules/, and build-tree/ (kernel source for Lustre
+module compilation, no object files).
 
-To build RPMs: `make rpms`.
+### Lustre Build
+
+`ltvm build-lustre` compiles Lustre inside the target's
+build container (cross-OS capable). The container has
+the correct GCC and Whamcloud-patched e2fsprogs.
+
+```bash
+cd ~/lustre-test-vms-v2
+
+# Build Lustre against the default kernel
+./ltvm build-lustre rocky9 \
+    --lustre-tree ~/lustre-release
+
+# Build against a specific kernel
+./ltvm build-lustre rocky9 \
+    --kernel 5.14-rhel9.5 \
+    --lustre-tree ~/lustre-release
+
+# Force clean rebuild
+./ltvm build-lustre rocky9 --force \
+    --lustre-tree ~/lustre-release
+```
+
+Incremental builds skip configure and go straight to
+make. The container is retained by podman; ccache is
+persisted in a named volume across runs.
+
+### Packaging (for distribution)
+
+```bash
+# Package kernel + image + built Lustre
+./ltvm package rocky9 \
+    --lustre-tree ~/lustre-release
+
+# Package a specific kernel version
+./ltvm package rocky9 --kernel 5.14-rhel9.5 \
+    --lustre-tree ~/lustre-release
+```
+
+Produces a `.tar.zst` (~1.4 GB) containing everything
+needed to boot VMs and deploy Lustre.
 
 ### Deploy Workflow (QEMU microVMs)
 
@@ -44,39 +114,27 @@ Supports kdump for crash analysis. VMs survive
 stop/start -- overlays and disks persist until
 explicitly destroyed.
 
-`ltvm` is the single entry point for VM lifecycle,
-deployment, and execution. It replaces the older
-`vm.sh` and `deploy-lustre.sh` tools.
+`ltvm` handles builds, packaging, and deployment.
+VM lifecycle uses `vm.py` (Python, despite the name)
+which ltvm wraps for deploy operations.
 
 #### Single-node VMs
 
 ```bash
-# Create a test VM (also starts it)
-sudo ltvm vm create --name co1-single \
-    --vcpus 2 --mem 2048
-
 # Create a VM with Lustre backing disks
-sudo ltvm vm create --name co1-single \
+sudo vm.py create --name co1-single \
     --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 
 # Idempotent: create if missing, start if stopped
-sudo ltvm vm ensure co1-single \
+sudo vm.py ensure co1-single \
     --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 
-# List VMs (status, disk usage, resource totals)
-sudo ltvm vm list
-sudo ltvm vm list --json
-
-# Stop / start / restart (preserves overlay + disks)
-sudo ltvm vm stop co1-single
-sudo ltvm vm start co1-single
-sudo ltvm vm restart co1-single
-
-# Health check
-sudo ltvm vm status co1-single
-
-# Destroy the VM (deletes overlay + disks)
-sudo ltvm vm destroy co1-single
+# List / status / stop / start / destroy
+sudo vm.py list
+sudo vm.py status co1-single
+sudo vm.py stop co1-single
+sudo vm.py start co1-single
+sudo vm.py destroy co1-single
 ```
 
 #### Execution and file transfer
@@ -88,37 +146,35 @@ ssh co1-single
 # Non-interactive exec with timeout + exit codes
 # Exit codes: 0=ok, 1=error, 2=not-found,
 #             3=timeout, 4=unreachable
-sudo ltvm exec --timeout 30 co1-single 'lctl dl'
+sudo vm.py exec --timeout 30 co1-single 'lctl dl'
 
 # Copy files to/from VM
-sudo ltvm cp-to co1-single local.txt /tmp/
-sudo ltvm cp-from co1-single /tmp/out.txt .
+sudo vm.py cp-to co1-single local.txt /tmp/
+sudo vm.py cp-from co1-single /tmp/out.txt .
 
 # Kernel log
-sudo ltvm dmesg --tail 100 co1-single
+sudo vm.py dmesg --tail 100 co1-single
 ```
 
 #### Deploy and Mount
 
 `ltvm deploy` is idempotent -- safe to redeploy over
 existing mounts (unmounts, unloads, cleans dm devices
-first). When run from a Lustre build tree, `--build`
-defaults to cwd.
+first). Auto-detects packaged Lustre and kernel
+modules from the ltvm output directory.
 
 ```bash
-# Deploy built Lustre to VM (from Lustre tree)
-cd ~/lustre-release
-sudo ltvm deploy co1-single
+# Deploy packaged Lustre (from fetch or build)
+./ltvm deploy co1-single --mount
 
-# Deploy and mount a single-node filesystem
-sudo ltvm deploy co1-single --mount
-
-# Explicit build path (from anywhere)
-sudo ltvm deploy co1-single \
+# Deploy from a specific Lustre build tree
+./ltvm deploy co1-single \
     --build ~/lustre-release --mount
 
-# Deploy server-only (no client)
-sudo ltvm deploy co1-single --mount --server-only
+# Deploy using a specific kernel's modules
+./ltvm deploy co1-single \
+    --kernel 5.14-rhel9.5 \
+    --build ~/lustre-release --mount
 ```
 
 #### Multi-node Clusters
@@ -129,22 +185,17 @@ Roles: `mgs`, `mds`, `oss`, `client` (join with `+`).
 
 ```bash
 # Combined MGS/MDS + OSS
-sudo ltvm cluster create co2 \
+sudo vm.py cluster create co2 \
     mgs+mds:co2-mds:1 oss:co2-oss:3
 
 # Deploy + mount
-sudo ltvm cluster deploy co2 \
+sudo vm.py cluster deploy co2 \
     --build ~/lustre-release --mount
 
-# Cluster info
-sudo ltvm cluster list
-sudo ltvm cluster status co2
-
-# Exec on a node by role
-sudo ltvm cluster exec co2 oss 'lctl dl'
-
-# Destroy cluster + all VMs
-sudo ltvm cluster destroy co2
+# Cluster info / exec / destroy
+sudo vm.py cluster status co2
+sudo vm.py cluster exec co2 oss 'lctl dl'
+sudo vm.py cluster destroy co2
 ```
 
 **Cluster deploy details:** rsyncs the full build
@@ -179,13 +230,13 @@ these collide when multiple checkouts are in use.
 
 - QEMU binary: `/opt/qemu/bin/qemu-system-x86_64`
 - Base image: `<ltvm-repo>/output/<target>/image/base.ext4`
-- Kernel: `<ltvm-repo>/output/<target>/kernel/vmlinux`
+- Kernel: `<ltvm-repo>/output/<target>/kernels/<name>/vmlinux`
 - Kernel build tree:
-  `<ltvm-repo>/output/<target>/kernel/build-tree/`
+  `<ltvm-repo>/output/<target>/kernels/<name>/build-tree/`
 - qcow2 overlays in `/opt/qemu-vms/overlays/`
 - TAP devices on `fcbr0` bridge, `192.168.100.0/24`
 - IPs derived from VM name (md5 hash -> last octet)
-- After host reboot: `sudo ltvm vm start-all`
+- After host reboot: `sudo vm.py start-all`
   (no auto-start)
 - Requires root/sudo for TAP and QEMU operations
 
@@ -205,27 +256,45 @@ Pre-installed in the base image:
 - **Test deps:** attr, acl, bc, rsync, perl, pdsh,
   pdsh-rcmd-ssh, nfs-utils, sg3_utils
 
+## Day-to-Day Iteration
+
+```bash
+# Edit Lustre code, then:
+./ltvm build-lustre rocky9            # incremental, fast
+./ltvm deploy co1-single --mount      # redeploy
+
+# Image recipe iteration:
+# Edit targets/rocky9/image.Dockerfile or
+# targets/common/packages-*.txt
+./ltvm build-image rocky9
+./ltvm install rocky9
+sudo vm.py destroy co1-single
+sudo vm.py create --name co1-single \
+    --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
+./ltvm deploy co1-single --mount
+```
+
 ## Testing
 
 ### Test Environment
 
 Testing is done inside QEMU microVMs. Building is done
-on the host; loading/unloading Lustre and running tests
-happens inside the VM.
+on the host (or in containers via ltvm); loading/
+unloading Lustre and running tests happens inside the VM.
 
 Single-node (checkout 1):
 ```bash
-sudo ltvm vm ensure co1-single \
+sudo vm.py ensure co1-single \
     --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
-sudo ltvm deploy co1-single \
+./ltvm deploy co1-single \
     --build ~/lustre-release --mount
 ```
 
 Multi-node cluster (checkout 2):
 ```bash
-sudo ltvm cluster create co2 \
+sudo vm.py cluster create co2 \
     mgs+mds:co2-mds:1 oss:co2-oss:3
-sudo ltvm cluster deploy co2 \
+sudo vm.py cluster deploy co2 \
     --build ~/lustre-release --mount
 ```
 
@@ -245,10 +314,10 @@ If `llmount.sh` mkfs fails, try
 `llmountcleanup.sh` can be slow or hang. If you
 don't need to preserve logs or other VM state:
 ```bash
-sudo ltvm vm destroy co1-single
-sudo ltvm vm ensure co1-single \
+sudo vm.py destroy co1-single
+sudo vm.py ensure co1-single \
     --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
-sudo ltvm deploy co1-single \
+./ltvm deploy co1-single \
     --build ~/lustre-release --mount
 ```
 
@@ -296,11 +365,12 @@ Set debug_mb extremely large -- kernel clamps to max.
 
 **From the host:**
 ```bash
-sudo ltvm exec co1-single \
+sudo vm.py exec --timeout 30 co1-single \
     'lctl set_param debug=-1 && lctl clear'
 # ... reproduce ...
-sudo ltvm exec co1-single 'lctl dk /tmp/dk.log'
-sudo ltvm cp-from co1-single /tmp/dk.log .
+sudo vm.py exec --timeout 30 co1-single \
+    'lctl dk /tmp/dk.log'
+sudo vm.py cp-from co1-single /tmp/dk.log .
 ```
 
 ### kdump / Crash Analysis
@@ -312,19 +382,19 @@ to `/var/crash/` and reboots.
 
 **Triggering a crash:**
 ```bash
-sudo ltvm exec co1-single \
+sudo vm.py exec --timeout 30 co1-single \
     'echo c > /proc/sysrq-trigger'
 ```
 VM reboots after kdump completes (~15s).
 
 **Collecting and analyzing:**
 ```bash
-sudo ltvm cp-from co1-single \
+sudo vm.py cp-from co1-single \
     /var/crash/latest/vmcore /tmp/
 
 crash-tool recipes lustre \
     --vmcore /tmp/vmcore \
-    --vmlinux <ltvm-repo>/output/rocky9/kernel/vmlinux \
+    --vmlinux <ltvm>/output/rocky9/kernels/5.14-rhel9.7/vmlinux \
     --mod-dir ~/lustre-release
 ```
 
@@ -337,9 +407,35 @@ and structured JSON output.
 - `--mod-dir <build-tree>` loads Lustre module debug
   symbols. Build tree .ko files have debug_info.
 - drgn runs from the host -- copy vmcore out with
-  `ltvm cp-from`.
+  `vm.py cp-from`.
 - vmlinux is at
-  `<ltvm-repo>/output/<target>/kernel/vmlinux`
+  `<ltvm>/output/<target>/kernels/<name>/vmlinux`
 
 **Parallel testing:** use separate numbered checkouts
 and separate VMs (or separate clusters).
+
+## ltvm Command Reference
+
+```
+ltvm build-all <target>         Build container + kernel + image
+ltvm build-container <target>   Build the build container
+ltvm build-kernel <target>      Build a kernel (--kernel <ver>)
+ltvm build-image <target>       Build the VM base image
+ltvm build-lustre [target]      Build Lustre in container (--kernel <ver>)
+
+ltvm package <target>           Create distributable tarball
+ltvm fetch <target> --url URL   Download pre-built package
+ltvm install <target>           Install kernel + image to system paths
+
+ltvm deploy <vm>                Deploy Lustre to a VM
+ltvm exec <vm> <cmd>            Execute command in a VM
+ltvm vm <action> [args]         VM lifecycle (create/destroy/etc.)
+ltvm cluster <action> [args]    Cluster management
+
+ltvm status                     Show build status of all targets
+ltvm shell <target>             Enter build container interactively
+ltvm setup                      Set up host (QEMU, network, SSH)
+```
+
+Global flags: `--json`, `--verbose`, `--kernel <ver>`
+(on commands that operate on a specific kernel).
