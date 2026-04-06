@@ -40,6 +40,28 @@ from .net import (
 )
 from .process import die, is_running, kill_qemu, launch_qemu, run
 
+
+def _fmt_epoch(epoch: int) -> str:
+    """Format epoch seconds as a human-readable timestamp, or '-' if 0."""
+    if not epoch:
+        return "-"
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(epoch))
+
+
+def _ago(epoch: int) -> str:
+    """Format epoch as relative time (e.g. '2h ago', '3d ago'), or '-'."""
+    if not epoch:
+        return "-"
+    delta = int(time.time()) - epoch
+    if delta < 60:
+        return "just now"
+    if delta < 3600:
+        return f"{delta // 60}m ago"
+    if delta < 86400:
+        return f"{delta // 3600}h ago"
+    return f"{delta // 86400}d ago"
+
+
 # ── lifecycle ────────────────────────────────────────────
 
 
@@ -60,6 +82,15 @@ def cmd_create(args: argparse.Namespace) -> None:
     image = getattr(args, "image", "") or args.rootfs or str(BASE_IMAGE)
     kernel = getattr(args, "kernel", "") or ""
 
+    base_name = Path(image).name if image else "rocky9-base.ext4"
+    os_id = (
+        "ubuntu24"
+        if "ubuntu" in base_name
+        else "rocky8"
+        if "rocky8" in base_name
+        else "rocky9"
+    )
+
     vm = VMInfo(
         name=name,
         ip=ip,
@@ -71,6 +102,9 @@ def cmd_create(args: argparse.Namespace) -> None:
         ost_disks=args.ost_disks,
         image=image if image != str(BASE_IMAGE) else "",
         kernel=kernel,
+        created=int(time.time()),
+        base_image=base_name,
+        os_id=os_id,
     )
 
     # Create overlay
@@ -551,20 +585,38 @@ def cmd_status(args: argparse.Namespace) -> None:
                     "mem": vm.mem,
                     "mdt_disks": vm.mdt_disks,
                     "ost_disks": vm.ost_disks,
+                    "created": vm.created,
+                    "last_boot": vm.last_boot,
+                    "last_deploy": vm.last_deploy,
+                    "build_path": vm.build_path,
+                    "kver": vm.kver,
+                    "base_image": vm.base_image,
+                    "os_id": vm.os_id,
                 }
             )
         )
     else:
-        print(f"{'name:':<12} {vm.name}")
-        print(f"{'ip:':<12} {vm.ip}")
-        print(f"{'qemu:':<12} {qemu_status} (pid {vm.pid})")
-        print(f"{'ssh:':<12} {ssh_status}")
-        print(f"{'lustre:':<12} {lustre_status}")
-        print(f"{'mount:':<12} {mount_status}")
+        print(f"{'name:':<14} {vm.name}")
+        print(f"{'ip:':<14} {vm.ip}")
+        print(f"{'qemu:':<14} {qemu_status} (pid {vm.pid})")
+        print(f"{'ssh:':<14} {ssh_status}")
+        print(f"{'lustre:':<14} {lustre_status}")
+        print(f"{'mount:':<14} {mount_status}")
         print(
-            f"{'resources:':<12} vcpus={vm.vcpus} mem={vm.mem} "
+            f"{'resources:':<14} vcpus={vm.vcpus} mem={vm.mem} "
             f"mdt={vm.mdt_disks} ost={vm.ost_disks}"
         )
+        print(f"{'os:':<14} {vm.os_id or '-'} ({vm.base_image or '-'})")
+        print(f"{'created:':<14} {_fmt_epoch(vm.created)}")
+        print(
+            f"{'last boot:':<14} {_fmt_epoch(vm.last_boot)} ({_ago(vm.last_boot)})"
+        )
+        if vm.last_deploy:
+            print(
+                f"{'deployed:':<14} {_fmt_epoch(vm.last_deploy)} ({_ago(vm.last_deploy)})"
+            )
+            print(f"{'build:':<14} {vm.build_path}")
+            print(f"{'kver:':<14} {vm.kver}")
 
 
 def cmd_log(args: argparse.Namespace) -> None:

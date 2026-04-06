@@ -267,7 +267,7 @@ class TestEnsureContainerImage:
         cfg = self._make_target_config(tmp_path)
         with patch("lib.kernel.subprocess.run"):
             tag = _ensure_container_image(cfg)
-        assert tag == "ltvm-rocky9-builder"
+        assert tag == "ltvm-build-rocky9"
 
     def test_calls_podman_build(self, tmp_path: Path) -> None:
         cfg = self._make_target_config(tmp_path)
@@ -283,7 +283,7 @@ class TestEnsureContainerImage:
         with patch("lib.kernel.subprocess.run") as mock_run:
             _ensure_container_image(cfg)
         cmd = mock_run.call_args[0][0]
-        assert "ltvm-rocky9-builder" in cmd
+        assert "ltvm-build-rocky9" in cmd
 
     def test_podman_build_uses_dockerfile(self, tmp_path: Path) -> None:
         cfg = self._make_target_config(tmp_path)

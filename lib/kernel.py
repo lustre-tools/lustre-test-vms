@@ -66,14 +66,26 @@ def parse_lustre_target(
 
 
 def _shell_var(text: str, name: str) -> str | None:
-    """Extract a simple VAR=value or VAR="value" assignment."""
-    # Match: VAR=value, VAR="value", or VAR='value'
-    # Also handle shell expansions like ${lnxmaj}-${lnxrel}
-    # by doing a second pass.
-    m = re.search(rf'^{name}=["\']?([^"\'$\n]+)["\']?\s*$', text, re.MULTILINE)
-    if m:
-        return m.group(1).strip()
-    return None
+    """Extract a simple VAR=value or VAR="value" assignment.
+
+    Handles literal values and simple ${var} expansions by
+    substituting previously parsed variables from the same file.
+    """
+    # Match the value (allow $ for shell expansions)
+    m = re.search(rf'^{name}=["\']?([^"\'\n]+?)["\']?\s*$', text, re.MULTILINE)
+    if not m:
+        return None
+    val = m.group(1).strip()
+    # If value contains ${...}, substitute from other vars in the file
+    if "${" in val:
+
+        def _sub(match: re.Match[str]) -> str:
+            ref = match.group(1)
+            resolved = _shell_var(text, ref)
+            return resolved if resolved is not None else match.group(0)
+
+        val = re.sub(r"\$\{(\w+)\}", _sub, val)
+    return val
 
 
 # ------------------------------------------------------------------

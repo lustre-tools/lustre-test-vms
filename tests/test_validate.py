@@ -37,7 +37,9 @@ from lib.validate import (
 
 def _fake_target(output_dir: Path, name: str = "testarch") -> SimpleNamespace:
     """Minimal stand-in for TargetConfig."""
-    return SimpleNamespace(name=name, output_dir=output_dir)
+    ns = SimpleNamespace(name=name, output_dir=output_dir)
+    ns.kernel_output_dir = lambda kernel=None: output_dir / "kernel"
+    return ns
 
 
 def _make_artifact_tree(out: Path) -> None:
