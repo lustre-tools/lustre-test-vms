@@ -29,40 +29,21 @@ def _make_completed(returncode: int, stdout: str = "") -> MagicMock:
 
 
 class TestKernelRelease:
-    def test_reads_stamp_file(self, tmp_path: Path) -> None:
-        (tmp_path / "kernel-version").write_text("5.14.0-427.el9.x86_64\n")
+    def _release_file(self, build_tree: Path) -> Path:
+        p = build_tree / "include" / "config"
+        p.mkdir(parents=True, exist_ok=True)
+        return p / "kernel.release"
+
+    def test_reads_release_file(self, tmp_path: Path) -> None:
+        self._release_file(tmp_path).write_text("5.14.0-427.el9.x86_64\n")
         assert _kernel_release(tmp_path) == "5.14.0-427.el9.x86_64"
 
     def test_strips_whitespace(self, tmp_path: Path) -> None:
-        (tmp_path / "kernel-version").write_text("  5.14.0-1.el9  \n")
+        self._release_file(tmp_path).write_text("  5.14.0-1.el9  \n")
         assert _kernel_release(tmp_path) == "5.14.0-1.el9"
 
-    def test_falls_back_to_make_when_stamp_missing(
-        self, tmp_path: Path
-    ) -> None:
-        with patch("lib.lustre.subprocess.run") as mock_run:
-            mock_run.return_value = _make_completed(0, "5.14.0-make\n")
-            result = _kernel_release(tmp_path)
-        assert result == "5.14.0-make"
-        mock_run.assert_called_once_with(
-            ["make", "-s", "kernelrelease"],
-            cwd=str(tmp_path),
-            capture_output=True,
-            text=True,
-        )
-
-    def test_returns_unknown_when_make_fails(self, tmp_path: Path) -> None:
-        with patch("lib.lustre.subprocess.run") as mock_run:
-            mock_run.return_value = _make_completed(2, "")
-            result = _kernel_release(tmp_path)
-        assert result == "unknown"
-
-    def test_stamp_takes_priority_over_make(self, tmp_path: Path) -> None:
-        (tmp_path / "kernel-version").write_text("stamp-version")
-        with patch("lib.lustre.subprocess.run") as mock_run:
-            result = _kernel_release(tmp_path)
-        mock_run.assert_not_called()
-        assert result == "stamp-version"
+    def test_returns_unknown_when_file_missing(self, tmp_path: Path) -> None:
+        assert _kernel_release(tmp_path) == "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -110,7 +91,10 @@ class TestNeedsReconfigure:
         lustre, kernel = self._tree(tmp_path)
         (lustre / "configure").write_text("#!/bin/sh\n")
         (lustre / "config.status").write_text("# status\n")
-        (kernel / "kernel-version").write_text(kver + "\n")
+        # kernel.release is the canonical version file written by build_kernel
+        release_dir = kernel / "include" / "config"
+        release_dir.mkdir(parents=True)
+        (release_dir / "kernel.release").write_text(kver + "\n")
         (lustre / ".ltvm-kernel").write_text(kver + "\n")
         (lustre / ".ltvm-kernel-path").write_text("/kernel\n")
         return lustre, kernel
@@ -151,8 +135,10 @@ class TestNeedsReconfigure:
         self, tmp_path: Path
     ) -> None:
         lustre, kernel = self._full_tree(tmp_path, kver="5.14.0-old")
-        # Stamp records old version; kernel-version file records new version
-        (kernel / "kernel-version").write_text("5.14.0-new\n")
+        # Stamp records old version; kernel.release records new version
+        release_dir = kernel / "include" / "config"
+        release_dir.mkdir(parents=True, exist_ok=True)
+        (release_dir / "kernel.release").write_text("5.14.0-new\n")
         result = _needs_reconfigure(
             lustre, kernel, force=False, container_path=Path("/kernel")
         )
@@ -200,7 +186,9 @@ class TestLustreStatus:
     def _make_kernel(self, tmp_path: Path, kver: str = "5.14.0") -> Path:
         kt = tmp_path / "kernel"
         kt.mkdir()
-        (kt / "kernel-version").write_text(kver + "\n")
+        release_dir = kt / "include" / "config"
+        release_dir.mkdir(parents=True)
+        (release_dir / "kernel.release").write_text(kver + "\n")
         return kt
 
     def test_stale_true_when_no_stamp(self, tmp_path: Path) -> None:

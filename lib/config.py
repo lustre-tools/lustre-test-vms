@@ -87,6 +87,12 @@ class TargetConfig:
     def status(self) -> str:
         return str(self._data.get("status", "unknown"))
 
+    @property
+    def srpm_url(self) -> str | None:
+        """Base URL for downloading kernel SRPMs, or None if not applicable."""
+        v = self._data.get("srpm_url")
+        return str(v) if v is not None else None
+
     # ------------------------------------------------------------------
     # Kernel metadata
     # ------------------------------------------------------------------

@@ -39,18 +39,15 @@ class StatusResult(TypedDict):
 
 
 def _kernel_release(build_tree: str | Path) -> str:
-    """Read kernel version from the build-tree stamp file."""
-    stamp = Path(build_tree) / "kernel-version"
-    if stamp.exists():
-        return stamp.read_text().strip()
-    # Fallback: ask make
-    r = subprocess.run(
-        ["make", "-s", "kernelrelease"],
-        cwd=str(build_tree),
-        capture_output=True,
-        text=True,
-    )
-    return r.stdout.strip() if r.returncode == 0 else "unknown"
+    """Read the kernel version from the build-tree.
+
+    Reads include/config/kernel.release, which is written by the
+    kernel build (kernel.py).  Returns "unknown" if not present.
+    """
+    release_file = Path(build_tree) / "include" / "config" / "kernel.release"
+    if release_file.exists():
+        return release_file.read_text().strip()
+    return "unknown"
 
 
 def _container_exists(tag: str) -> bool:

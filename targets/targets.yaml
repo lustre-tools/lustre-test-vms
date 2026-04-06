@@ -14,6 +14,8 @@
 #   kernels.default: lustre target name used when --kernel not specified
 #   kernels.available: all lustre target names for this OS
 #   kernels.config:  kernel .config overrides (merged with common fragment)
+#   srpm_url:        base URL for downloading kernel SRPMs
+#                    (omit for targets that don't use SRPMs, e.g. Ubuntu)
 
 defaults:
   arch: x86_64
@@ -26,6 +28,7 @@ targets:
     os_version: "9.7"
     container_image: rockylinux:9.7
     status: working
+    srpm_url: "https://dl.rockylinux.org/pub/rocky/9/BaseOS/source/tree/Packages/k"
     kernels:
       default: 5.14-rhel9.7
       available:
@@ -39,6 +42,7 @@ targets:
     os_version: "8.10"
     container_image: rockylinux:8.10
     status: planned
+    srpm_url: "https://dl.rockylinux.org/pub/rocky/8/BaseOS/source/tree/Packages/k"
     kernels:
       default: 4.18-rhel8.10
       available:

@@ -12,7 +12,6 @@ from lib.runtime import (
     _deploy_kernel_modules,
     _run,
     _run_impl,
-    _run_raw,
     cluster_create,
     cluster_deploy,
     cluster_destroy,
@@ -80,15 +79,6 @@ class TestRunSudo:
         args = mock_run.call_args[0][0]
         assert args[0] == "sudo"
         assert args[1] == "vm.py"
-
-    @patch("lib.runtime.subprocess.run")
-    def test_raw_no_sudo(self, mock_run: MagicMock) -> None:
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout="ok", stderr=""
-        )
-        _run_raw(["echo", "hello"])
-        args = mock_run.call_args[0][0]
-        assert args[0] == "echo"
 
 
 class TestVmCreate:
@@ -358,67 +348,45 @@ class TestDeploy:
 class TestDeployKernelModules:
     @patch("lib.runtime._run")
     def test_empty_versions_dir(self, mock_run: MagicMock) -> None:
-        """No version subdirs -> return failure without calling _run_raw."""
+        """No version subdirs -> return failure without calling _run."""
         mock_run.return_value = _OK
         with tempfile.TemporaryDirectory() as tmpdir:
             lib_mods = Path(tmpdir)
-            # lib_mods exists but has no subdirectories
             result = _deploy_kernel_modules("my-vm", lib_mods)
         assert result["ok"] is False
         assert "No version dirs" in result["output"]
+        mock_run.assert_not_called()
 
-    @patch("lib.runtime._run_raw")
     @patch("lib.runtime._run")
-    def test_with_version_dir_success(
-        self, mock_run: MagicMock, mock_run_raw: MagicMock
-    ) -> None:
-        """With a version subdir, calls mkdir exec then _run_raw tar pipeline."""
+    def test_with_version_dir_success(self, mock_run: MagicMock) -> None:
+        """With a version subdir, calls cp-to then depmod."""
         mock_run.return_value = _OK
-        mock_run_raw.return_value = _OK
         with tempfile.TemporaryDirectory() as tmpdir:
             lib_mods = Path(tmpdir)
             ver_dir = lib_mods / "5.14.0-1"
             ver_dir.mkdir()
             result = _deploy_kernel_modules("my-vm", lib_mods)
         assert result["ok"] is True
-        # First _run call: mkdir exec
-        first_cmd = mock_run.call_args_list[0][0][0]
-        assert "exec" in first_cmd
-        assert "mkdir" in " ".join(first_cmd)
-        # _run_raw called once for tar pipeline
-        assert mock_run_raw.call_count == 1
-        raw_cmd = mock_run_raw.call_args[0][0]
-        assert "tar" in " ".join(raw_cmd)
+        assert mock_run.call_count == 2
+        # First call: cp-to
+        cp_cmd = mock_run.call_args_list[0][0][0]
+        assert "cp-to" in cp_cmd
+        assert "my-vm" in cp_cmd
+        assert str(ver_dir) in cp_cmd
+        assert "/lib/modules/" in cp_cmd
+        # Second call: depmod
+        depmod_cmd = mock_run.call_args_list[1][0][0]
+        assert "depmod" in " ".join(depmod_cmd)
 
-    @patch("lib.runtime._run_raw")
     @patch("lib.runtime._run")
-    def test_mkdir_failure_returns_early(
-        self, mock_run: MagicMock, mock_run_raw: MagicMock
-    ) -> None:
-        """If mkdir exec fails, return early without calling _run_raw."""
+    def test_cp_failure_returns_early(self, mock_run: MagicMock) -> None:
+        """If cp-to fails, return early without calling depmod."""
         mock_run.return_value = _FAIL
-        mock_run_raw.return_value = _OK
         with tempfile.TemporaryDirectory() as tmpdir:
             lib_mods = Path(tmpdir)
             (lib_mods / "5.14.0-1").mkdir()
             result = _deploy_kernel_modules("my-vm", lib_mods)
         assert result["ok"] is False
-        mock_run_raw.assert_not_called()
-
-    @patch("lib.runtime._run_raw")
-    @patch("lib.runtime._run")
-    def test_tar_pipeline_failure_returns_early(
-        self, mock_run: MagicMock, mock_run_raw: MagicMock
-    ) -> None:
-        """If _run_raw tar pipeline fails, return its failure result."""
-        mock_run.return_value = _OK
-        mock_run_raw.return_value = _FAIL
-        with tempfile.TemporaryDirectory() as tmpdir:
-            lib_mods = Path(tmpdir)
-            (lib_mods / "5.14.0-1").mkdir()
-            result = _deploy_kernel_modules("my-vm", lib_mods)
-        assert result["ok"] is False
-        # depmod exec (_run second call) must not have been called
         assert mock_run.call_count == 1
 
 

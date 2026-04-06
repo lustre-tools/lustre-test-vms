@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from lib.kernel import (
-    ROCKY9_PKGS,
     _build_config_fragment,
     _ensure_container_image,
     _find_srpm_url,
@@ -20,6 +19,10 @@ from lib.kernel import (
     resolve_lustre_files,
 )
 from tests.conftest import _make_config
+
+_ROCKY9_SRPM_URL = (
+    "https://dl.rockylinux.org/pub/rocky/9/BaseOS/source/tree/Packages/k"
+)
 
 
 class TestShellVar:
@@ -168,24 +171,26 @@ class TestResolveLustreFiles:
 
 class TestFindSrpmUrl:
     def test_returns_url_with_base(self) -> None:
-        url = _find_srpm_url("kernel-5.14.0-503.26.1.el9_7.src.rpm")
-        assert ROCKY9_PKGS in url
+        url = _find_srpm_url(
+            "kernel-5.14.0-503.26.1.el9_7.src.rpm", _ROCKY9_SRPM_URL
+        )
+        assert _ROCKY9_SRPM_URL in url
 
     def test_returns_url_with_srpm_name(self) -> None:
         srpm = "kernel-5.14.0-503.26.1.el9_7.src.rpm"
-        url = _find_srpm_url(srpm)
+        url = _find_srpm_url(srpm, _ROCKY9_SRPM_URL)
         assert srpm in url
 
     def test_url_combines_base_and_name(self) -> None:
         srpm = "kernel-5.14.0-503.26.1.el9_7.src.rpm"
-        url = _find_srpm_url(srpm)
-        assert url == f"{ROCKY9_PKGS}/{srpm}"
+        url = _find_srpm_url(srpm, _ROCKY9_SRPM_URL)
+        assert url == f"{_ROCKY9_SRPM_URL}/{srpm}"
 
-    def test_different_srpm_name(self) -> None:
-        srpm = "kernel-6.1.0-100.el9.src.rpm"
-        url = _find_srpm_url(srpm)
-        assert ROCKY9_PKGS in url
-        assert srpm in url
+    def test_different_base_url(self) -> None:
+        srpm = "kernel-4.18.0-100.el8.src.rpm"
+        base = "https://dl.rockylinux.org/pub/rocky/8/BaseOS/source/tree/Packages/k"
+        url = _find_srpm_url(srpm, base)
+        assert url == f"{base}/{srpm}"
 
 
 # ------------------------------------------------------------------
@@ -204,7 +209,7 @@ class TestDownloadSrpm:
         cached.touch()
 
         with patch("lib.kernel.subprocess.run") as mock_run:
-            result = download_srpm(srpm, cache_dir)
+            result = download_srpm(srpm, cache_dir, _ROCKY9_SRPM_URL)
 
         assert result == cached
         mock_run.assert_not_called()
@@ -214,7 +219,7 @@ class TestDownloadSrpm:
         cache_dir = tmp_path / "cache"
 
         with patch("lib.kernel.subprocess.run") as mock_run:
-            result = download_srpm(srpm, cache_dir)
+            result = download_srpm(srpm, cache_dir, _ROCKY9_SRPM_URL)
 
         assert result == cache_dir / srpm
         mock_run.assert_called_once()
@@ -227,7 +232,7 @@ class TestDownloadSrpm:
         cache_dir = tmp_path / "cache" / "nested"
 
         with patch("lib.kernel.subprocess.run"):
-            download_srpm(srpm, cache_dir)
+            download_srpm(srpm, cache_dir, _ROCKY9_SRPM_URL)
 
         assert cache_dir.exists()
 
@@ -236,10 +241,10 @@ class TestDownloadSrpm:
         cache_dir = tmp_path / "cache"
 
         with patch("lib.kernel.subprocess.run") as mock_run:
-            download_srpm(srpm, cache_dir)
+            download_srpm(srpm, cache_dir, _ROCKY9_SRPM_URL)
 
         cmd = mock_run.call_args[0][0]
-        expected_url = f"{ROCKY9_PKGS}/{srpm}"
+        expected_url = f"{_ROCKY9_SRPM_URL}/{srpm}"
         assert expected_url in cmd
 
 

@@ -23,10 +23,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-ROCKY9_PKGS = (
-    "https://dl.rockylinux.org/pub/rocky/9/BaseOS/source/tree/Packages/k"
-)
-
 INNER_SCRIPT = Path(__file__).parent / "kernel-build-inner.sh"
 
 
@@ -136,14 +132,15 @@ def resolve_lustre_files(
 # ------------------------------------------------------------------
 
 
-def _find_srpm_url(srpm_name: str) -> str:
-    """Find the download URL for a kernel SRPM."""
-    return f"{ROCKY9_PKGS}/{srpm_name}"
+def _find_srpm_url(srpm_name: str, base_url: str) -> str:
+    """Construct the download URL for a kernel SRPM."""
+    return f"{base_url}/{srpm_name}"
 
 
-def download_srpm(srpm_name: str, cache_dir: str | Path) -> Path:
+def download_srpm(srpm_name: str, cache_dir: str | Path, base_url: str) -> Path:
     """Download a kernel SRPM if not already cached.
 
+    base_url: per-target SRPM base URL from targets.yaml (srpm_url field).
     Returns Path to the downloaded file.
     """
     cache_dir = Path(cache_dir)
@@ -154,7 +151,7 @@ def download_srpm(srpm_name: str, cache_dir: str | Path) -> Path:
         log.info("Using cached SRPM: %s", cached)
         return cached
 
-    url = _find_srpm_url(srpm_name)
+    url = _find_srpm_url(srpm_name, base_url)
     log.info("Downloading SRPM: %s", url)
 
     subprocess.run(
@@ -277,8 +274,14 @@ def build_kernel(
         old_out.rename(new_out)
 
     # Download SRPM
+    srpm_url = target_config.srpm_url
+    if not srpm_url:
+        raise ValueError(
+            f"Target {target_config.name!r} has no srpm_url configured "
+            f"in targets.yaml -- cannot download kernel SRPM"
+        )
     cache_dir = target_config.output_dir / "cache"
-    srpm_path = download_srpm(target_info["srpm"], cache_dir)
+    srpm_path = download_srpm(target_info["srpm"], cache_dir, srpm_url)
 
     # Ensure container image
     image_tag = _ensure_container_image(target_config)
