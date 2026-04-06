@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lib.config import TargetConfig, list_targets
 from lib.kernel import build_kernel, kernel_status
 from lib.image import build_image, image_status
+from lib.lustre import build_lustre, lustre_status
 from lib.validate import validate_target, print_results
 from lib import runtime
 
@@ -126,7 +127,11 @@ def _container_status(target_config):
 # ------------------------------------------------------------------
 
 def cmd_init(args):
-    """Build container + kernel + image for a target."""
+    """Build container + kernel + image for a target.
+
+    With --lustre-build, also builds the Lustre source tree
+    against the freshly built kernel.
+    """
     use_json = args.json
     tc, err = _load_target(args.target, use_json)
     if err is not None:
@@ -167,6 +172,22 @@ def cmd_init(args):
         results["image"] = "ok"
     except Exception as e:
         return _error(f"Image build failed: {e}", use_json)
+
+    # 4. Lustre (optional -- only when --lustre-build is passed)
+    if getattr(args, "lustre_build", False):
+        if not use_json:
+            print(f"==> Building Lustre against "
+                  f"{args.target} kernel tree...")
+        build_tree = tc.kernel_output_dir() / "build-tree"
+        try:
+            lmeta = build_lustre(
+                lustre_tree, build_tree,
+                enable_server=tc.server,
+                force=args.force)
+            results["lustre"] = lmeta
+        except Exception as e:
+            return _error(
+                f"Lustre build failed: {e}", use_json)
 
     _output(results, use_json)
     return EXIT_OK
@@ -266,6 +287,63 @@ def cmd_build_image(args):
 
     result = {"target": args.target, "path": str(path)}
     _output(result, use_json)
+    return EXIT_OK
+
+
+# ------------------------------------------------------------------
+# Subcommand: build-lustre
+# ------------------------------------------------------------------
+
+def cmd_build_lustre(args):
+    use_json = args.json
+    tc, err = _load_target(args.target, use_json)
+    if err is not None:
+        return err
+
+    lustre_tree, err_msg = _resolve_lustre_tree(
+        getattr(args, "lustre_tree", None))
+    if err_msg:
+        return _error(err_msg, use_json,
+                      hint="Pass --lustre-tree or run from "
+                           "a Lustre source tree")
+
+    build_tree = tc.kernel_output_dir() / "build-tree"
+    if not build_tree.is_dir():
+        return _error(
+            f"Kernel build-tree not found: {build_tree}",
+            use_json,
+            hint=f"Run: ltvm build-kernel {args.target}")
+
+    # Server build follows target.conf unless overridden
+    enable_server = tc.server
+    if getattr(args, "disable_server", False):
+        enable_server = False
+    elif getattr(args, "enable_server", False):
+        enable_server = True
+
+    extra = []
+    if getattr(args, "configure", None):
+        import shlex
+        extra = shlex.split(args.configure)
+
+    jobs = getattr(args, "jobs", None)
+
+    if not use_json:
+        srv = "server+client" if enable_server else "client-only"
+        print(f"Building Lustre ({srv}) against "
+              f"{args.target} kernel tree...")
+
+    try:
+        meta = build_lustre(
+            lustre_tree, build_tree,
+            enable_server=enable_server,
+            extra_configure=extra,
+            jobs=jobs,
+            force=getattr(args, "force", False))
+    except Exception as e:
+        return _error(f"Lustre build failed: {e}", use_json)
+
+    _output(meta, use_json)
     return EXIT_OK
 
 
@@ -701,6 +779,10 @@ def build_parser():
         "--lustre-tree",
         help="Path to Lustre source tree (default: cwd)")
     sp.add_argument(
+        "--lustre-build", action="store_true",
+        help="Also build Lustre against the target kernel "
+             "(full pipeline)")
+    sp.add_argument(
         "--force", action="store_true",
         help="Rebuild even if artifacts are current")
     sp.set_defaults(func=cmd_init)
@@ -734,6 +816,33 @@ def build_parser():
         "--force", action="store_true",
         help="Rebuild even if inputs unchanged")
     sp.set_defaults(func=cmd_build_image)
+
+    # -- build-lustre --
+    sp = sub.add_parser(
+        "build-lustre", parents=[common],
+        help="Build a Lustre source tree against the "
+             "target kernel build-tree")
+    sp.add_argument("target", nargs="?", default="rocky9",
+                    help="Target (default: rocky9)")
+    sp.add_argument(
+        "--lustre-tree",
+        help="Path to Lustre source tree (default: cwd)")
+    sp.add_argument(
+        "--enable-server", action="store_true", default=False,
+        help="Force --enable-server (default: per target.conf)")
+    sp.add_argument(
+        "--disable-server", action="store_true", default=False,
+        help="Force --disable-server")
+    sp.add_argument(
+        "--configure",
+        help="Extra configure arguments (quoted string)")
+    sp.add_argument(
+        "--jobs", type=int, default=None,
+        help="Parallel jobs (default: nproc)")
+    sp.add_argument(
+        "--force", action="store_true",
+        help="Clean and reconfigure before building")
+    sp.set_defaults(func=cmd_build_lustre)
 
     # -- shell --
     sp = sub.add_parser(

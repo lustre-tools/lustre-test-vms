@@ -1,0 +1,29 @@
+FROM rockylinux:8
+
+# Rocky 8 ships GCC 8.5 -- the compiler RHEL8 kernels are designed for.
+# Building with GCC 11 (EL9 host) causes -Werror failures on packed
+# struct address-of, misleading indentation, and string overflow, plus
+# a stack-protector false positive in start_secondary() that panics
+# every secondary CPU on boot.
+
+# Kernel build deps
+RUN dnf -y install \
+        gcc gcc-c++ make bc bison flex \
+        elfutils-libelf-devel openssl-devel \
+        perl-interpreter perl-Carp perl-devel \
+        ncurses-devel hmaccalc \
+        net-tools hostname diffutils findutils \
+    && dnf clean all
+
+# Lustre build deps (autogen + configure + make)
+# libyaml-devel is in PowerTools repo
+RUN dnf -y install dnf-plugins-core \
+    && dnf config-manager --set-enabled powertools \
+    && dnf -y install \
+        autoconf automake libtool git patch \
+        libyaml-devel libnl3-devel libmount-devel \
+        python3 nasm \
+    && dnf clean all
+
+WORKDIR /build
+ENTRYPOINT ["/bin/bash"]

@@ -1,0 +1,96 @@
+#!/usr/bin/awk -f
+#
+# dk-filter -- filter Lustre dk log output
+#
+# Usage:
+#   dk-filter [options] [file ...]
+#
+# Options (awk -v VAR=VAL):
+#   -v fpid=NNN         filter by PID
+#   -v fsub=HEX         filter by subsystem hex (e.g., 00000080)
+#   -v fmask=HEX        filter by mask hex (e.g., 00010000)
+#   -v ffunc=PATTERN    filter by function name (regex)
+#   -v ffile=PATTERN    filter by source file (regex)
+#   -v after=SEC.USEC   only lines after this timestamp
+#   -v before=SEC.USEC  only lines before this timestamp
+#   -v marker=STRING    only lines between matching markers
+#   -v ftext=PATTERN    filter by message text (regex)
+#   -v xid=NNN          filter by RPC xid in message text
+#   -v invert=1         invert match (show non-matching)
+#
+# Examples:
+#   lctl dk | dk-filter -v fpid=1234
+#   dk-filter -v fsub=00000080 -v fmask=00200000 /tmp/dk.log
+#   dk-filter -v ffunc=ll_file_open /tmp/dk.log
+#   dk-filter -v after=1774820204.815900 /tmp/dk.log
+#   dk-filter -v marker=repro /tmp/dk.log
+#   dk-filter -v xid=1861032805985664 /tmp/dk.log
+#
+# dk line format (colon-separated):
+#   1       2      3          4              5      6    7     8      9     10
+#   SUBSYS: MASK:  CPU.TYPE:  SEC.USEC:      STACK: PID: EPID: (FILE: LINE: FUNC()) TEXT
+#   00000080:00200000:0.0F:1774820204.815885:0:8014:0:(file.c:6208:ll_inode_revalidate()) VFS Op:...
+#
+
+BEGIN {
+	in_marker = (marker == "") ? 1 : 0
+}
+
+!/^[0-9a-f]{8}:/ { next }
+
+{
+	split($0, a, ":")
+	p_sub = a[1]
+	p_mask = a[2]
+	# a[3] = CPU.TYPE[F]
+	# a[4] = SEC.USEC (single field, dot-separated)
+	p_ts = a[4]
+	p_stack = a[5]
+	p_pid = a[6]
+	p_epid = a[7]
+	p_file = a[8]
+	gsub("^\\(", "", p_file)
+	p_line = a[9]
+	p_rest = a[10]
+	split(p_rest, fr, "\\)")
+	p_func = fr[1]
+
+	if (marker != "" && index($0, "DEBUG MARKER")) {
+		if (index($0, marker)) {
+			in_marker = !in_marker
+		}
+		next
+	}
+	if (!in_marker) next
+
+	matched = 1
+	if (fpid != "" && p_pid != fpid) matched = 0
+	if (fsub != "" && p_sub != fsub) matched = 0
+	if (fmask != "" && p_mask != fmask) matched = 0
+	if (ffunc != "" && p_func !~ ffunc) matched = 0
+	if (ffile != "" && p_file !~ ffile) matched = 0
+	if (ftext != "" && $0 !~ ftext) matched = 0
+	if (xid != "" && $0 !~ ("xid " xid "|xid:" xid)) matched = 0
+
+	if (after != "") {
+		if (compare_ts(p_ts, after) < 0) matched = 0
+	}
+	if (before != "") {
+		if (compare_ts(p_ts, before) > 0) matched = 0
+	}
+
+	if (invert) matched = !matched
+	if (matched) print
+}
+
+function compare_ts(a, b,    sa, sb, ua, ub) {
+	split(a, _a, ".")
+	split(b, _b, ".")
+	sa = _a[1] + 0; ua = _a[2] + 0
+	sb = _b[1] + 0; ub = _b[2] + 0
+	if (sa < sb) return -1
+	if (sa > sb) return 1
+	if (ua < ub) return -1
+	if (ua > ub) return 1
+	return 0
+}

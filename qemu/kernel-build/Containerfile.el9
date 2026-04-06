@@ -1,0 +1,27 @@
+FROM rockylinux:9
+
+# Rocky 9 ships GCC 11 -- matches the EL9 5.14.0 kernel build
+# environment.
+
+# Kernel build deps
+RUN dnf -y install \
+        gcc gcc-c++ make bc bison flex \
+        elfutils-libelf-devel openssl-devel \
+        perl-interpreter perl-Carp perl-devel \
+        ncurses-devel dwarves \
+        net-tools hostname diffutils findutils \
+    && dnf clean all
+
+# Lustre build deps (autogen + configure + make)
+# libyaml-devel is in CRB (Code Ready Builder) repo
+RUN dnf -y install dnf-plugins-core \
+    && dnf config-manager --set-enabled crb \
+    && dnf -y install \
+        autoconf automake libtool git patch \
+        libyaml-devel libnl3-devel libmount-devel \
+        python3 \
+    && dnf -y install nasm 2>/dev/null || true \
+    && dnf clean all
+
+WORKDIR /build
+ENTRYPOINT ["/bin/bash"]
