@@ -147,6 +147,13 @@ class VMInfo:
             ost_disks=int(vals.get("OST_DISKS", 0)),
             image=vals.get("IMAGE", ""),
             kernel=vals.get("KERNEL", ""),
+            created=int(vals.get("CREATED", 0)),
+            last_boot=int(vals.get("LAST_BOOT", 0)),
+            last_deploy=int(vals.get("LAST_DEPLOY", 0)),
+            build_path=vals.get("BUILD_PATH", ""),
+            kver=vals.get("KVER", ""),
+            base_image=vals.get("BASE_IMAGE", ""),
+            os_id=vals.get("OS_ID", ""),
         )
 
     @staticmethod

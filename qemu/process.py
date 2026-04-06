@@ -125,6 +125,7 @@ def launch_qemu(vm: VMInfo) -> None:
 
     pid = int(vm.pid_path.read_text().strip())
     vm.update_pid(pid)
+    vm.update_last_boot(int(time.time()))
 
 
 def kill_qemu(vm: VMInfo) -> None:

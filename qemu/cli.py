@@ -107,7 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stop + delete everything",
     )
     c.add_argument("names", nargs="+", metavar="NAME")
-    sub.add_parser("rm", help=argparse.SUPPRESS)
+    c = sub.add_parser("rm", help=argparse.SUPPRESS)
+    c.add_argument("names", nargs="+", metavar="NAME")
 
     # exec
     c = sub.add_parser(
@@ -132,14 +133,20 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("name")
     c.add_argument("src")
     c.add_argument("dest")
-    sub.add_parser("push", help=argparse.SUPPRESS)
+    c = sub.add_parser("push", help=argparse.SUPPRESS)
+    c.add_argument("name")
+    c.add_argument("src")
+    c.add_argument("dest")
 
     # cp-from
     c = sub.add_parser("cp-from", help="Copy file(s) from VM")
     c.add_argument("name")
     c.add_argument("src")
     c.add_argument("dest")
-    sub.add_parser("pull", help=argparse.SUPPRESS)
+    c = sub.add_parser("pull", help=argparse.SUPPRESS)
+    c.add_argument("name")
+    c.add_argument("src")
+    c.add_argument("dest")
 
     # list
     c = sub.add_parser(
@@ -148,7 +155,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     c.add_argument("--json", action="store_true")
     for alias in ("ls", "ps"):
-        sub.add_parser(alias, help=argparse.SUPPRESS)
+        c = sub.add_parser(alias, help=argparse.SUPPRESS)
+        c.add_argument("--json", action="store_true")
 
     # status
     c = sub.add_parser("status", help="Health check")
@@ -176,7 +184,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     c.add_argument("name")
     c.add_argument("tag", nargs="?", default="")
-    sub.add_parser("snap", help=argparse.SUPPRESS)
+    c = sub.add_parser("snap", help=argparse.SUPPRESS)
+    c.add_argument("name")
+    c.add_argument("tag", nargs="?", default="")
 
     # restore
     c = sub.add_parser(
@@ -244,9 +254,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cc.add_argument("name", help="Cluster name")
     cc.add_argument(
-        "--build",
+        "--lustre-source",
         required=True,
-        help="Path to built lustre-release tree",
+        metavar="DIR",
+        help=(
+            "Path to a built Lustre source tree "
+            "(must have configure.ac and built .ko files)"
+        ),
     )
     cc.add_argument(
         "--mount",

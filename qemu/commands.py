@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from .models import (
     BASE_IMAGE,
@@ -456,7 +457,7 @@ def cmd_list(args: argparse.Namespace) -> None:
     total_mem = 0
     running_count = 0
     stopped_count = 0
-    entries = []
+    entries: list[dict[str, Any]] = []
 
     for name in VMInfo.all_names():
         vm = VMInfo.load(name)
@@ -484,6 +485,12 @@ def cmd_list(args: argparse.Namespace) -> None:
                 "mdt_disks": vm.mdt_disks,
                 "ost_disks": vm.ost_disks,
                 "disk": disk_mb,
+                "created": vm.created,
+                "last_boot": vm.last_boot,
+                "last_deploy": vm.last_deploy,
+                "build_path": vm.build_path,
+                "kver": vm.kver,
+                "os_id": vm.os_id,
             }
         )
 
@@ -519,11 +526,14 @@ def cmd_list(args: argparse.Namespace) -> None:
         for e in entries:
             disks = ""
             if e["mdt_disks"] + e["ost_disks"] > 0:
-                disks = f" mdt={e['mdt_disks']} ost={e['ost_disks']}"
+                disks = f"mdt={e['mdt_disks']} ost={e['ost_disks']}"
+            deploy = _ago(e["last_deploy"]) if e["last_deploy"] else "-"
+            boot = _ago(e["last_boot"]) if e["last_boot"] else "-"
+            os_id = e.get("os_id") or "-"
             print(
                 f"{e['name']:<20} {e['ip']:<18} {e['status']:<8} "
-                f"pid={e['pid']:<8} vcpus={e['vcpus']} "
-                f"mem={e['mem']:<6} disk={e['disk']:<8}{disks}"
+                f"{os_id:<8} {disks:<14} "
+                f"boot={boot:<10} deploy={deploy}"
             )
         print("---")
         print(

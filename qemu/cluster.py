@@ -282,7 +282,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
         print(f"  {n.name:<20} {n.ip:<18} {'+'.join(n.roles)}")
     print(
         f"\nNext: vm.py cluster deploy {cluster_name} "
-        f"--build /path/to/lustre-release [--mount]"
+        f"--lustre-source /path/to/lustre-release [--mount]"
     )
 
 
@@ -329,13 +329,43 @@ def _write_cluster_local_sh(
     return node_name, r.returncode, combined.rstrip("\n")
 
 
+def _validate_lustre_source(path: Path) -> None:
+    """Die with a clear message if path is not a built Lustre source tree.
+
+    Checks:
+    A) Looks like a Lustre source tree (configure.ac + lustre/ + lnet/)
+    B) Has been built (at least one .ko file outside kconftest)
+    """
+    if not path.is_dir():
+        die(f"--lustre-source: '{path}' is not a directory")
+
+    # A) Source tree markers
+    missing = [
+        name
+        for name in ("configure.ac", "lustre", "lnet")
+        if not (path / name).exists()
+    ]
+    if missing:
+        die(
+            f"--lustre-source: '{path}' does not look like a Lustre "
+            f"source tree (missing: {', '.join(missing)})"
+        )
+
+    # B) Built kernel modules
+    ko_files = [f for f in path.rglob("*.ko") if "kconftest" not in str(f)]
+    if not ko_files:
+        die(
+            f"--lustre-source: '{path}' has no built .ko files -- "
+            "run 'make' in the Lustre tree first"
+        )
+
+
 def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     cluster = ClusterInfo.load(args.name)
     nodes = cluster.get_nodes()
-    build = str(Path(args.build).resolve())
-
-    if not Path(build).is_dir():
-        die(f"build directory '{build}' not found")
+    src = Path(args.lustre_source).expanduser().resolve()
+    _validate_lustre_source(src)
+    build = str(src)
 
     print(f"=== Deploying to cluster '{cluster.name}' ===")
     print(f"    Build: {build}")

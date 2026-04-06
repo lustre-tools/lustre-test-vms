@@ -586,7 +586,7 @@ class TestClusterDeploy:
         assert "cluster" in cmd
         assert "deploy" in cmd
         assert "c1" in cmd
-        assert "--build" in cmd
+        assert "--lustre-source" in cmd
         assert "--mount" not in cmd
 
     @patch("lib.vmctl._run")

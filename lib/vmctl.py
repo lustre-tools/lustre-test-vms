@@ -261,7 +261,7 @@ def cluster_deploy(
     name: str, build_path: str | Path, mount: bool = False
 ) -> RunResult:
     build_path = str(Path(build_path).resolve())
-    cmd = [VM_SH, "cluster", "deploy", name, "--build", build_path]
+    cmd = [VM_SH, "cluster", "deploy", name, "--lustre-source", build_path]
     if mount:
         cmd.append("--mount")
     return _run(cmd, timeout=300)

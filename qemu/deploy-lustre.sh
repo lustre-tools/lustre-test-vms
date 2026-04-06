@@ -286,6 +286,19 @@ fi
 
 echo "=== Deploy complete ==="
 
+# Update VM metadata with deploy info
+_update_info_field() {
+	local key="$1" val="$2"
+	if grep -q "^${key}=" "${INFO}" 2>/dev/null; then
+		sed -i "s|^${key}=.*|${key}=${val}|" "${INFO}"
+	else
+		echo "${key}=${val}" >> "${INFO}"
+	fi
+}
+_update_info_field "LAST_DEPLOY" "$(date +%s)"
+_update_info_field "BUILD_PATH" "${BUILD_DIR}"
+_update_info_field "KVER" "${KVER}"
+
 # --- Configure Lustre devices in cfg/local.sh if VM has extra disks ---
 MDT_DISKS="${MDT_DISKS:-0}"
 OST_DISKS="${OST_DISKS:-0}"
