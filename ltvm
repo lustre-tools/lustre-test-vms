@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lib.commands import (
     EXIT_ERROR,
     _error,
+    cmd_add_target,  # noqa: F401 (used via set_defaults)
     cmd_build_all,
     cmd_build_container,
     cmd_build_image,
@@ -115,6 +116,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Bridge subnet (default: 192.168.100)",
     )
     sp.set_defaults(func=cmd_setup)
+
+    # -- add-target --
+    sp = sub.add_parser(
+        "add-target",
+        parents=[common],
+        help="Scaffold a new target (directory, Dockerfiles, YAML entry)",
+    )
+    sp.add_argument("name", help="Target name (e.g. rocky8, ubuntu2404)")
+    sp.add_argument(
+        "--image",
+        required=True,
+        help="Container base image (e.g. rockylinux:8.10, ubuntu:24.04)",
+    )
+    sp.add_argument(
+        "--kernel",
+        default=None,
+        help="Default Lustre kernel target name (e.g. 4.18-rhel8.10)",
+    )
+    sp.add_argument(
+        "--srpm-url",
+        default=None,
+        help="Base URL for kernel SRPM downloads",
+    )
+    sp.add_argument(
+        "--no-server",
+        action="store_true",
+        help="Mark target as client-only (no server builds)",
+    )
+    sp.set_defaults(func=cmd_add_target)
 
     # -- build-all --
     sp = sub.add_parser(
