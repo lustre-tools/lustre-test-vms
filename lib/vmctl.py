@@ -1,7 +1,15 @@
-"""Runtime wrappers around vm.sh and deploy-lustre.sh.
+"""Subprocess client for qemu/vm.py and deploy-lustre.sh.
 
-Each function shells out to the battle-tested existing tools and
-returns a consistent dict: {'ok': bool, 'output': str, 'returncode': int}.
+VM operations (TAP devices, QEMU, disk I/O) require root.
+This module provides a normal-user Python API that delegates
+to vm.py and deploy-lustre.sh via sudo subprocess calls.
+
+Every function returns RunResult: {'ok': bool, 'output': str,
+'returncode': int}.
+
+The implementation lives in qemu/ (commands.py, cluster.py,
+net.py, etc.).  This module is the boundary between the ltvm
+build pipeline (runs as user) and the VM engine (runs as root).
 """
 
 from __future__ import annotations

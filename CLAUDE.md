@@ -24,9 +24,11 @@ targets/
     packages-os.txt         OS-specific packages
 lib/
   config.py                 Target config parsing, staleness
+  commands.py               CLI command implementations
   kernel.py                 Kernel build system
   kernel-build-inner.sh     Runs inside build container
   image.py                  VM image builder (ext4 export)
+  vmctl.py                  Subprocess client for qemu/vm.py (sudo boundary)
 output/                     Build artifacts (gitignored)
   <target>/
     container.tag
@@ -279,6 +281,29 @@ to the Lustre source tree as usual.
   merges config, builds vmlinux + bzImage + modules,
   and populates the build tree for external module
   builds.
+
+## Code Review Guidance
+
+When reviewing or auditing this codebase, watch for:
+
+- **Functionality duplication between layers.** The
+  repo has two deployment paths: single-node
+  (`deploy-lustre.sh` / `lib/vmctl.py:deploy`) and
+  cluster (`qemu/cluster.py`). Changes to deploy
+  logic must be reflected in both, or factored into
+  shared code. Check that new features haven't been
+  added to one path but not the other.
+
+- **Subprocess command building.** Never interpolate
+  variables into shell strings (`bash -c f"...{x}"`).
+  Always use argument lists so subprocess handles
+  quoting. This applies to `lib/`, `qemu/`, and
+  test helpers.
+
+- **sudo boundary.** `lib/vmctl.py` is the boundary
+  between user-space code (lib/) and root operations
+  (qemu/). Code in lib/ must not assume root. Code
+  in qemu/ runs as root via sudo. Don't mix these.
 
 ## Issue Tracking
 

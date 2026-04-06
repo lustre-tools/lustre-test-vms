@@ -140,7 +140,7 @@ def unregister_ssh_name(name: str) -> None:
     if not ssh_cfg.exists():
         return
     lines = ssh_cfg.read_text().splitlines()
-    out = []
+    out: list[str] = []
     skip = False
     for line in lines:
         if f"Host {name} {marker}" in line:

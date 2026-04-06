@@ -142,8 +142,12 @@ def _export_to_ext4(container_tag: str, image_path: Path) -> Path:
             container_id[:12],
         )
 
-        # Create ext4 image file path
-        tmpfile = tempfile.mktemp(suffix=".ext4", prefix="ltvm-image-")
+        # Create ext4 image file (NamedTemporaryFile avoids mktemp TOCTOU)
+        tmp_f = tempfile.NamedTemporaryFile(
+            suffix=".ext4", prefix="ltvm-image-", delete=False
+        )
+        tmpfile = tmp_f.name
+        tmp_f.close()
 
         # Use fakeroot to preserve root ownership.
         # Without it, extracted files would be owned by

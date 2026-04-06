@@ -16,7 +16,7 @@ from typing import Any
 
 from lib import setup as host_setup
 from lib import vmctl
-from lib.config import TargetConfig, list_targets
+from lib.config import TargetConfig, add_target, list_targets
 from lib.image import build_image, image_status
 from lib.kernel import build_kernel, kernel_status
 from lib.lustre import build_lustre
@@ -1182,5 +1182,52 @@ def cmd_setup(args: argparse.Namespace) -> int:
         return _error(str(e), use_json)
     except Exception as e:
         return _error(f"Setup failed: {e}", use_json)
+
+    return EXIT_OK
+
+
+# ------------------------------------------------------------------
+# Subcommand: add-target
+# ------------------------------------------------------------------
+
+
+def cmd_add_target(args: argparse.Namespace) -> int:
+    """Scaffold a new target: directory, Dockerfiles, YAML entry."""
+    use_json = args.json
+    name = args.name
+    image = args.image
+
+    kernel = getattr(args, "kernel", None)
+    srpm_url = getattr(args, "srpm_url", None)
+    server = None
+    if getattr(args, "no_server", False):
+        server = False
+
+    try:
+        result = add_target(
+            name,
+            image,
+            kernel=kernel,
+            srpm_url=srpm_url,
+            server=server,
+        )
+    except ValueError as e:
+        return _error(str(e), use_json)
+
+    if use_json:
+        _output(result, use_json)
+    else:
+        print(f"Created target {name!r}:")
+        print(f"  Directory: {result['target_dir']}")
+        for f in result["files_created"]:
+            print(f"  + {f}")
+        print()
+        print("Next steps:")
+        print(f"  1. Review and customize the Dockerfiles in targets/{name}/")
+        print("  2. Edit targets/targets.yaml to adjust settings")
+        if kernel:
+            print(f"  3. Run: ltvm build-all {name} --lustre-tree <path>")
+        else:
+            print(f"  3. Add a kernel entry, then: ltvm build-all {name}")
 
     return EXIT_OK

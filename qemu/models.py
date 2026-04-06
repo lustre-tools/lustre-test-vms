@@ -201,6 +201,7 @@ class ClusterInfo:
         from .process import die
 
         die("cluster has no MGS node")
+        raise AssertionError("unreachable")
 
     def mds_nodes(self) -> list[ClusterNode]:
         return [n for n in self.get_nodes() if n.is_mds]

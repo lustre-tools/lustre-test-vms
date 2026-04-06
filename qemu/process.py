@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from .models import (
     BRIDGE,
@@ -19,7 +20,9 @@ from .models import (
 )
 
 
-def run(cmd: list | str, **kwargs) -> subprocess.CompletedProcess:
+def run(
+    cmd: list[str] | str, **kwargs: Any
+) -> subprocess.CompletedProcess[Any]:
     """Run a command, return CompletedProcess."""
     kwargs.setdefault("capture_output", True)
     kwargs.setdefault("text", True)

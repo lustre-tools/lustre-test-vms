@@ -9,7 +9,6 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .commands import cmd_create
 from .models import (
     EXIT_TIMEOUT,
     OVERLAYS,
@@ -178,6 +177,39 @@ def cmd_cluster(args: argparse.Namespace) -> None:
         die(f"unknown cluster command: {subcmd}")
 
 
+def _create_one_node(
+    node: ClusterNode, vcpus: int, mem: int
+) -> tuple[str, int, str]:
+    """Create a single cluster VM via vm.py subprocess.
+
+    Returns (node_name, returncode, combined_output).
+    Running via subprocess avoids threading issues with shared print/state
+    inside cmd_create, and lets all nodes boot concurrently.
+    """
+    mgs_disk = 1 if (node.is_mgs and not node.is_mds) else 0
+    cmd = [
+        "sudo",
+        "vm.py",
+        "create",
+        "--name",
+        node.name,
+        "--vcpus",
+        str(vcpus),
+        "--mem",
+        str(mem),
+    ]
+    if node.mdt_disks + mgs_disk:
+        cmd += ["--mdt-disks", str(node.mdt_disks + mgs_disk)]
+    if node.ost_disks:
+        cmd += ["--ost-disks", str(node.ost_disks)]
+
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    combined = r.stdout
+    if r.stderr:
+        combined = combined + r.stderr if combined else r.stderr
+    return node.name, r.returncode, combined.rstrip("\n")
+
+
 def cmd_cluster_create(args: argparse.Namespace) -> None:
     cluster_name = args.name
     if (SOCKETS / f"{cluster_name}.cluster").exists():
@@ -198,28 +230,35 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     mem = args.mem
 
     print(f"=== Creating cluster '{cluster_name}' ===")
+    print(f"    Creating {len(node_specs)} nodes in parallel...")
+
+    failed = []
+    with ThreadPoolExecutor(max_workers=len(node_specs)) as executor:
+        futures = {
+            executor.submit(_create_one_node, node, vcpus, mem): node
+            for node in node_specs
+        }
+        for future in as_completed(futures):
+            node = futures[future]
+            name, rc, output = future.result()
+            if rc != 0:
+                print(f"\n--- {name}: FAILED (rc={rc}) ---\n{output}")
+                failed.append(name)
+            else:
+                print(f"  {name}: up")
+
+    if failed:
+        # Clean up any nodes that did start
+        for node in node_specs:
+            if node.name not in failed:
+                subprocess.run(
+                    ["sudo", "vm.py", "destroy", node.name],
+                    capture_output=True,
+                )
+        die(f"vm create failed for: {', '.join(failed)}")
+
+    # Load IPs now that all VMs are running
     for node in node_specs:
-        mdt = node.mdt_disks
-        ost = node.ost_disks
-        mgs_disk = 1 if (node.is_mgs and not node.is_mds) else 0
-
-        print(
-            f"--- Creating {node.name} ({'+'.join(node.roles)})...",
-        )
-
-        create_args = argparse.Namespace(
-            name=node.name,
-            vcpus=vcpus,
-            mem=mem,
-            ip=None,
-            rootfs=None,
-            image="",
-            kernel="",
-            mdt_disks=mdt + mgs_disk,
-            ost_disks=ost,
-        )
-        cmd_create(create_args)
-
         vm = VMInfo.load(node.name)
         node.ip = vm.ip
 
@@ -439,17 +478,17 @@ def cmd_cluster_ssh(args: argparse.Namespace) -> None:
     target = args.target
     nodes = cluster.get_nodes()
 
-    found = None
-    for n in nodes:
-        if n.name == target or target in n.roles:
-            found = n
-            break
-    if not found:
+    matched = next(
+        (n for n in nodes if n.name == target or target in n.roles),
+        None,
+    )
+    if matched is None:
         die(
             f"no node matching '{target}' in cluster '{args.name}'",
         )
+        raise AssertionError("unreachable")
 
-    vm = VMInfo.load(found.name)
+    vm = VMInfo.load(matched.name)
     ssh_args = [
         "sshpass",
         "-p",
@@ -469,18 +508,18 @@ def cmd_cluster_exec(args: argparse.Namespace) -> None:
     target = args.target
     nodes = cluster.get_nodes()
 
-    found = None
-    for n in nodes:
-        if n.name == target or target in n.roles:
-            found = n
-            break
-    if not found:
+    matched = next(
+        (n for n in nodes if n.name == target or target in n.roles),
+        None,
+    )
+    if matched is None:
         die(
             f"no node matching '{target}' in cluster '{args.name}'",
         )
+        raise AssertionError("unreachable")
 
     command = " ".join(args.command)
-    vm = VMInfo.load(found.name)
+    vm = VMInfo.load(matched.name)
     try:
         r = run_ssh(vm.ip, command, timeout=args.timeout)
         if r.stdout:

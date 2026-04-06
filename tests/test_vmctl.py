@@ -1,4 +1,4 @@
-"""Tests for lib/runtime.py -- subprocess wrappers and command building."""
+"""Tests for lib/vmctl.py -- subprocess client for qemu/vm.py."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from lib.runtime import (
+from lib.vmctl import (
     RunResult,
     _deploy_kernel_modules,
     _run,
@@ -70,7 +70,7 @@ class TestRunImpl:
 
 
 class TestRunSudo:
-    @patch("lib.runtime.subprocess.run")
+    @patch("lib.vmctl.subprocess.run")
     def test_prepends_sudo(self, mock_run: MagicMock) -> None:
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout="ok", stderr=""
@@ -82,7 +82,7 @@ class TestRunSudo:
 
 
 class TestVmCreate:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_basic_create(self, mock: MagicMock) -> None:
         mock.return_value: RunResult = {
             "ok": True,
@@ -95,7 +95,7 @@ class TestVmCreate:
         assert "--name" in cmd
         assert "test-vm" in cmd
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_with_disks(self, mock: MagicMock) -> None:
         mock.return_value: RunResult = {
             "ok": True,
@@ -109,7 +109,7 @@ class TestVmCreate:
         assert "--ost-disks" in cmd
         assert "3" in cmd
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_no_disks_flags_omitted(self, mock: MagicMock) -> None:
         mock.return_value: RunResult = {
             "ok": True,
@@ -123,7 +123,7 @@ class TestVmCreate:
 
 
 class TestVmEnsure:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_ensure_cmd(self, mock: MagicMock) -> None:
         mock.return_value: RunResult = {
             "ok": True,
@@ -137,7 +137,7 @@ class TestVmEnsure:
         assert "4" in cmd
         assert "8192" in cmd
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_ensure_with_disks(self, mock: MagicMock) -> None:
         mock.return_value: RunResult = {
             "ok": True,
@@ -153,7 +153,7 @@ class TestVmEnsure:
 
 
 class TestVmExec:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_exec_with_timeout(self, mock: MagicMock) -> None:
         mock.return_value: RunResult = {
             "ok": True,
@@ -172,7 +172,7 @@ class TestVmExec:
 
 
 class TestVmExecDefaults:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_default_timeout_120(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_exec("test-vm", "echo hello")
@@ -182,7 +182,7 @@ class TestVmExecDefaults:
 
 
 class TestVmCreateDefaults:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_default_vcpus_and_mem(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_create("test-vm")
@@ -192,7 +192,7 @@ class TestVmCreateDefaults:
 
 
 class TestVmEnsureDefaults:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_default_vcpus_and_mem(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_ensure("test-vm")
@@ -200,7 +200,7 @@ class TestVmEnsureDefaults:
         assert "2" in cmd
         assert "4096" in cmd
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_no_disks_flags_omitted(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_ensure("test-vm")
@@ -210,7 +210,7 @@ class TestVmEnsureDefaults:
 
 
 class TestVmCreateNonDefaultDisks:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_mdt_only(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_create("test-vm", mdt_disks=2)
@@ -220,7 +220,7 @@ class TestVmCreateNonDefaultDisks:
         assert cmd[idx + 1] == "2"
         assert "--ost-disks" not in cmd
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_ost_only(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_create("test-vm", ost_disks=5)
@@ -230,7 +230,7 @@ class TestVmCreateNonDefaultDisks:
         assert cmd[idx + 1] == "5"
         assert "--mdt-disks" not in cmd
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_both_mdt_and_ost(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_create("test-vm", mdt_disks=2, ost_disks=4)
@@ -242,7 +242,7 @@ class TestVmCreateNonDefaultDisks:
 
 
 class TestVmEnsureNonDefaultDisks:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_mdt_only(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_ensure("test-vm", mdt_disks=3)
@@ -251,7 +251,7 @@ class TestVmEnsureNonDefaultDisks:
         assert cmd[idx + 1] == "3"
         assert "--ost-disks" not in cmd
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_ost_only(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_ensure("test-vm", ost_disks=6)
@@ -260,7 +260,7 @@ class TestVmEnsureNonDefaultDisks:
         assert cmd[idx + 1] == "6"
         assert "--mdt-disks" not in cmd
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_both_mdt_and_ost(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_ensure("test-vm", mdt_disks=2, ost_disks=4)
@@ -270,7 +270,7 @@ class TestVmEnsureNonDefaultDisks:
         assert cmd[mdt_idx + 1] == "2"
         assert cmd[ost_idx + 1] == "4"
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_custom_vcpus_and_mem(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_ensure("test-vm", vcpus=8, mem=16384)
@@ -280,7 +280,7 @@ class TestVmEnsureNonDefaultDisks:
 
 
 class TestVmList:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_plain_list(self, mock: MagicMock) -> None:
         mock.return_value: RunResult = {
             "ok": True,
@@ -292,7 +292,7 @@ class TestVmList:
         assert "list" in cmd
         assert "--json" not in cmd
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_json_list(self, mock: MagicMock) -> None:
         mock.return_value: RunResult = {
             "ok": True,
@@ -305,7 +305,7 @@ class TestVmList:
 
 
 class TestVmStatus:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_status_with_json(self, mock: MagicMock) -> None:
         mock.return_value: RunResult = {
             "ok": True,
@@ -324,7 +324,7 @@ _FAIL: RunResult = {"ok": False, "output": "error", "returncode": 1}
 
 
 class TestVmDestroy:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_destroy(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_destroy("my-vm")
@@ -334,7 +334,7 @@ class TestVmDestroy:
 
 
 class TestVmStart:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_start(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_start("my-vm")
@@ -344,7 +344,7 @@ class TestVmStart:
 
 
 class TestVmStop:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_stop(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_stop("my-vm")
@@ -354,7 +354,7 @@ class TestVmStop:
 
 
 class TestVmRestart:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_restart(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_restart("my-vm")
@@ -364,7 +364,7 @@ class TestVmRestart:
 
 
 class TestVmLog:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_log_default_lines(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_log("my-vm")
@@ -373,7 +373,7 @@ class TestVmLog:
         assert "my-vm" in cmd
         assert "50" in cmd
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_log_custom_lines(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_log("my-vm", lines=200)
@@ -382,7 +382,7 @@ class TestVmLog:
 
 
 class TestVmDmesg:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_dmesg_default_tail(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_dmesg("my-vm")
@@ -392,7 +392,7 @@ class TestVmDmesg:
         assert "100" in cmd
         assert "my-vm" in cmd
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_dmesg_custom_tail(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         vm_dmesg("my-vm", tail=50)
@@ -401,7 +401,7 @@ class TestVmDmesg:
 
 
 class TestDeploy:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_plain_deploy(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         deploy("my-vm", build_path="/some/build")
@@ -411,14 +411,14 @@ class TestDeploy:
         assert "--build" in cmd
         assert "--mount" not in cmd
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_deploy_with_mount(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         deploy("my-vm", build_path="/some/build", mount=True)
         cmd = mock.call_args[0][0]
         assert "--mount" in cmd
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_deploy_kernel_modules_no_lib_modules(
         self, mock: MagicMock
     ) -> None:
@@ -432,8 +432,8 @@ class TestDeploy:
         cmd = mock.call_args[0][0]
         assert "--vm" in cmd
 
-    @patch("lib.runtime._deploy_kernel_modules")
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._deploy_kernel_modules")
+    @patch("lib.vmctl._run")
     def test_deploy_kernel_modules_failure_returns_early(
         self, mock_run: MagicMock, mock_deploy_mods: MagicMock
     ) -> None:
@@ -454,7 +454,7 @@ class TestDeploy:
 
 
 class TestDeployKernelModules:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_empty_versions_dir(self, mock_run: MagicMock) -> None:
         """No version subdirs -> return failure without calling _run."""
         mock_run.return_value = _OK
@@ -465,7 +465,7 @@ class TestDeployKernelModules:
         assert "No version dirs" in result["output"]
         mock_run.assert_not_called()
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_with_version_dir_success(self, mock_run: MagicMock) -> None:
         """With a version subdir, calls cp-to then depmod."""
         mock_run.return_value = _OK
@@ -486,7 +486,7 @@ class TestDeployKernelModules:
         depmod_cmd = mock_run.call_args_list[1][0][0]
         assert "depmod" in " ".join(depmod_cmd)
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_multiple_version_dirs(self, mock_run: MagicMock) -> None:
         """Multiple version dirs each get a cp-to call."""
         mock_run.return_value = _OK
@@ -501,7 +501,7 @@ class TestDeployKernelModules:
         for call in mock_run.call_args_list[:2]:
             assert "cp-to" in call[0][0]
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_cp_failure_returns_early(self, mock_run: MagicMock) -> None:
         """If cp-to fails, return early without calling depmod."""
         mock_run.return_value = _FAIL
@@ -512,7 +512,7 @@ class TestDeployKernelModules:
         assert result["ok"] is False
         assert mock_run.call_count == 1
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_second_cp_failure_skips_rest(self, mock_run: MagicMock) -> None:
         """If second cp-to fails, depmod is not called."""
         mock_run.side_effect = [_OK, _FAIL]
@@ -526,33 +526,35 @@ class TestDeployKernelModules:
 
 
 class TestLustreMount:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_mount_calls_vm_exec(self, mock_run: MagicMock) -> None:
-        """lustre_mount calls vm_exec with llmount.sh."""
-        from lib.runtime import lustre_mount
+        """lustre_mount calls vm_exec with llmount.sh at standard path."""
+        from lib.vmctl import lustre_mount
 
         mock_run.return_value = _OK
-        result = lustre_mount("my-vm", build_path="/some/lustre")
+        result = lustre_mount("my-vm")
         assert result["ok"] is True
         cmd = mock_run.call_args[0][0]
         assert "exec" in cmd
         assert "my-vm" in cmd
-        assert "llmount.sh" in " ".join(cmd)
+        shell_cmd = " ".join(cmd)
+        assert "llmount.sh" in shell_cmd
+        assert "/usr/lib64/lustre/tests" in shell_cmd
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_mount_timeout_180(self, mock_run: MagicMock) -> None:
         """lustre_mount uses 180s inner timeout (210s outer)."""
-        from lib.runtime import lustre_mount
+        from lib.vmctl import lustre_mount
 
         mock_run.return_value = _OK
-        lustre_mount("my-vm", build_path="/some/lustre")
+        lustre_mount("my-vm")
         cmd = mock_run.call_args[0][0]
         assert "180" in cmd
         assert mock_run.call_args[1]["timeout"] == 210
 
 
 class TestClusterCreate:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_create_with_node_specs(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         cluster_create("c1", "mgs+mds:c1-srv:1", "oss:c1-oss:3")
@@ -565,7 +567,7 @@ class TestClusterCreate:
 
 
 class TestClusterDestroy:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_destroy(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         cluster_destroy("c1")
@@ -576,7 +578,7 @@ class TestClusterDestroy:
 
 
 class TestClusterDeploy:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_deploy_no_mount(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         cluster_deploy("c1", build_path="/some/build")
@@ -587,7 +589,7 @@ class TestClusterDeploy:
         assert "--build" in cmd
         assert "--mount" not in cmd
 
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_deploy_with_mount(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         cluster_deploy("c1", build_path="/some/build", mount=True)
@@ -596,7 +598,7 @@ class TestClusterDeploy:
 
 
 class TestClusterStatus:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_status(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         cluster_status("c1")
@@ -607,7 +609,7 @@ class TestClusterStatus:
 
 
 class TestClusterExec:
-    @patch("lib.runtime._run")
+    @patch("lib.vmctl._run")
     def test_exec_forwards_role_and_cmd(self, mock: MagicMock) -> None:
         mock.return_value = _OK
         cluster_exec("c1", "oss", "lctl dl")

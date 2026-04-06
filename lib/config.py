@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import yaml
 
@@ -269,3 +269,310 @@ def list_targets() -> list[str]:
     """Return names of all targets declared in targets.yaml."""
     registry = _load_registry()
     return list(registry.get("targets", {}).keys())
+
+
+# ------------------------------------------------------------------
+# Target scaffolding
+# ------------------------------------------------------------------
+
+
+def _infer_os(image: str) -> tuple[str, str, str]:
+    """Infer (os_name, os_family, os_version) from a container image tag.
+
+    Examples:
+        rockylinux:9.7  -> (rocky, rhel, 9.7)
+        almalinux:9.4   -> (alma, rhel, 9.4)
+        ubuntu:24.04    -> (ubuntu, debian, 24.04)
+        debian:12       -> (debian, debian, 12)
+    """
+    base = image.split("/")[-1]  # strip registry prefix
+    name_part, _, ver = base.partition(":")
+    name_part = name_part.lower()
+    ver = ver or "unknown"
+
+    rhel_names = {
+        "rockylinux": "rocky",
+        "almalinux": "alma",
+        "centos": "centos",
+        "oraclelinux": "oracle",
+    }
+    debian_names = {"ubuntu", "debian"}
+
+    for key, short in rhel_names.items():
+        if key in name_part:
+            return short, "rhel", ver
+
+    for dname in debian_names:
+        if dname in name_part:
+            return dname, "debian", ver
+
+    return name_part, "unknown", ver
+
+
+class ScaffoldResult(TypedDict):
+    """Result of add_target scaffolding."""
+
+    name: str
+    target_dir: str
+    files_created: list[str]
+
+
+def add_target(
+    name: str,
+    image: str,
+    *,
+    kernel: str | None = None,
+    srpm_url: str | None = None,
+    server: bool | None = None,
+    status: str = "planned",
+) -> ScaffoldResult:
+    """Scaffold a new target: directory, Dockerfiles, YAML entry.
+
+    Creates targets/<name>/ with container.Dockerfile,
+    image.Dockerfile, and packages-os.txt from templates.
+    Adds the target entry to targets.yaml.
+
+    Raises ValueError if the target already exists.
+    """
+    registry = _load_registry()
+    targets = registry.get("targets", {})
+    if name in targets:
+        raise ValueError(f"Target {name!r} already exists in {TARGETS_YAML}")
+
+    os_name, os_family, os_version = _infer_os(image)
+
+    # Create target directory
+    target_dir = TARGETS_DIR / name
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    files_created: list[str] = []
+
+    # Find a reference target to copy from (prefer same os_family)
+    ref_dir = _find_reference_target(os_family)
+
+    # Generate container.Dockerfile
+    container_df = target_dir / "container.Dockerfile"
+    if not container_df.exists():
+        _generate_container_dockerfile(container_df, image, os_family, ref_dir)
+        files_created.append(str(container_df))
+
+    # Generate image.Dockerfile
+    image_df = target_dir / "image.Dockerfile"
+    if not image_df.exists():
+        _generate_image_dockerfile(image_df, image, name, os_family, ref_dir)
+        files_created.append(str(image_df))
+
+    # Generate packages-os.txt stub
+    pkg_file = target_dir / "packages-os.txt"
+    if not pkg_file.exists():
+        _generate_packages_os(pkg_file, os_name, os_family)
+        files_created.append(str(pkg_file))
+
+    # Add to targets.yaml
+    entry: dict[str, Any] = {
+        "os_name": os_name,
+        "os_version": os_version,
+        "container_image": image,
+        "status": status,
+    }
+    if os_family != "rhel":
+        entry["os_family"] = os_family
+    if server is not None and not server:
+        entry["server"] = False
+    if srpm_url:
+        entry["srpm_url"] = srpm_url
+    if kernel:
+        entry["kernels"] = {
+            "default": kernel,
+            "available": [kernel],
+            "config": {},
+        }
+
+    targets[name] = entry
+    registry["targets"] = targets
+    TARGETS_YAML.write_text(yaml.dump(registry, default_flow_style=False))
+    files_created.append(str(TARGETS_YAML))
+
+    return {
+        "name": name,
+        "target_dir": str(target_dir),
+        "files_created": files_created,
+    }
+
+
+def _find_reference_target(os_family: str) -> Path | None:
+    """Find an existing target directory to use as a template."""
+    try:
+        registry = _load_registry()
+    except FileNotFoundError:
+        return None
+
+    targets: dict[str, Any] = registry.get("targets", {})
+    for tname, tdata in targets.items():
+        tfamily = tdata.get("os_family", "rhel")
+        if tfamily == os_family:
+            candidate = TARGETS_DIR / tname
+            if (candidate / "container.Dockerfile").exists():
+                return candidate
+    return None
+
+
+def _generate_container_dockerfile(
+    path: Path, image: str, os_family: str, ref_dir: Path | None
+) -> None:
+    """Generate a container.Dockerfile for the new target."""
+    if ref_dir and (ref_dir / "container.Dockerfile").exists():
+        # Copy from reference and substitute the FROM line
+        content = (ref_dir / "container.Dockerfile").read_text()
+        lines = content.split("\n")
+        new_lines = []
+        for line in lines:
+            if line.startswith("FROM "):
+                new_lines.append(f"FROM {image}")
+            else:
+                new_lines.append(line)
+        path.write_text("\n".join(new_lines))
+        return
+
+    # No reference -- generate a minimal stub
+    if os_family == "debian":
+        path.write_text(f"""\
+FROM {image}
+
+# TODO: Customize for this target
+# Build container for kernel and Lustre builds.
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \\
+        build-essential bc bison flex \\
+        libelf-dev libssl-dev \\
+        rsync tar gzip xz-utils \\
+        kmod git python3 python3-dev \\
+    && rm -rf /var/lib/apt/lists/*
+
+# Lustre build dependencies
+RUN apt-get update && apt-get install -y \\
+        autoconf automake libtool \\
+        libyaml-dev libselinux1-dev zlib1g-dev \\
+        module-assistant \\
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+ENTRYPOINT ["/bin/bash"]
+""")
+    else:
+        path.write_text(f"""\
+FROM {image}
+
+# TODO: Customize for this target
+# Build container for kernel and Lustre builds.
+
+RUN dnf -y install dnf-plugins-core epel-release \\
+    && dnf -y install \\
+        rpm-build gcc gcc-c++ make bc bison flex \\
+        elfutils-libelf-devel openssl-devel \\
+        perl-interpreter ncurses-devel dwarves \\
+        rsync tar gzip xz kmod \\
+        python3 python3-devel \\
+    && dnf clean all
+
+# Lustre build dependencies
+RUN dnf -y install \\
+        autoconf automake libtool git patch \\
+        libyaml-devel libmount-devel \\
+        libselinux-devel zlib-devel \\
+    && dnf clean all
+
+WORKDIR /build
+ENTRYPOINT ["/bin/bash"]
+""")
+
+
+def _generate_image_dockerfile(
+    path: Path,
+    image: str,
+    name: str,
+    os_family: str,
+    ref_dir: Path | None,
+) -> None:
+    """Generate an image.Dockerfile for the new target."""
+    if ref_dir and (ref_dir / "image.Dockerfile").exists():
+        content = (ref_dir / "image.Dockerfile").read_text()
+        lines = content.split("\n")
+        ref_name = ref_dir.name
+        new_lines = []
+        for line in lines:
+            if line.startswith("FROM "):
+                new_lines.append(f"FROM {image}")
+            else:
+                # Replace references to the old target name in COPY paths
+                new_lines.append(line.replace(f"{ref_name}/", f"{name}/"))
+        path.write_text("\n".join(new_lines))
+        return
+
+    # No reference -- minimal stub
+    if os_family == "debian":
+        path.write_text(f"""\
+FROM {image}
+
+# TODO: Customize for this target
+# VM base image -- exported to raw ext4 for QEMU microvm use.
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+COPY common/packages-base.txt /tmp/packages-base.txt
+COPY {name}/packages-os.txt /tmp/packages-os.txt
+
+RUN apt-get update \\
+    && cat /tmp/packages-base.txt /tmp/packages-os.txt \\
+        | grep -v '^\\s*#' | grep -v '^\\s*$' \\
+        | sort -u \\
+        | xargs apt-get install -y \\
+    && rm -rf /var/lib/apt/lists/*
+
+# TODO: Add SSH setup, serial console, networking, kdump
+# See an existing rhel target's image.Dockerfile for reference.
+
+ENTRYPOINT ["/bin/bash"]
+""")
+    else:
+        path.write_text(f"""\
+FROM {image}
+
+# TODO: Customize for this target
+# VM base image -- exported to raw ext4 for QEMU microvm use.
+
+COPY common/packages-base.txt /tmp/packages-base.txt
+COPY {name}/packages-os.txt /tmp/packages-os.txt
+
+RUN cat /tmp/packages-base.txt /tmp/packages-os.txt \\
+    | grep -v '^\\s*#' | grep -v '^\\s*$' \\
+    | sort -u \\
+    | xargs dnf -y --allowerasing install \\
+    && dnf clean all
+
+# TODO: Add SSH setup, serial console, networking, kdump
+# See an existing rhel target's image.Dockerfile for reference.
+
+ENTRYPOINT ["/bin/bash"]
+""")
+
+
+def _generate_packages_os(path: Path, os_name: str, os_family: str) -> None:
+    """Generate a packages-os.txt stub."""
+    if os_family == "debian":
+        path.write_text(f"""\
+# packages-os.txt -- {os_name}-specific packages
+# Add distro-specific packages here
+
+# TODO: Add {os_name}-specific packages
+""")
+    else:
+        path.write_text(f"""\
+# packages-os.txt -- {os_name}-specific packages
+# Add distro-specific packages here
+
+{os_name}-release
+epel-release
+""")

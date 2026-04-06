@@ -21,7 +21,7 @@ import os
 
 import pytest
 
-from lib.runtime import (
+from lib.vmctl import (
     vm_create,
     vm_destroy,
     vm_ensure,
