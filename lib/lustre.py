@@ -156,6 +156,7 @@ def build_lustre(
     use_container = container_tag and _container_exists(container_tag)
 
     if use_container:
+        assert container_tag is not None  # narrowing for mypy
         return _build_in_container(
             lustre_tree,
             build_tree,

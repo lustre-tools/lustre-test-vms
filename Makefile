@@ -1,4 +1,4 @@
-.PHONY: lint fix format check
+.PHONY: lint fix format typecheck check
 
 # Lint only (report errors, don't fix)
 lint:
@@ -14,5 +14,9 @@ fix:
 format:
 	uv run ruff format .
 
-# Alias: CI-friendly check (non-zero exit on any issue)
-check: lint
+# Type check
+typecheck:
+	uv run mypy ltvm lib/
+
+# CI-friendly check (non-zero exit on any issue)
+check: lint typecheck

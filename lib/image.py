@@ -5,6 +5,8 @@ by building a container image (Dockerfile) and exporting it to
 raw ext4.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -13,8 +15,13 @@ import subprocess
 import tempfile
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from .config import TARGETS_DIR
+
+if TYPE_CHECKING:
+    from .config import TargetConfig
 
 log = logging.getLogger(__name__)
 
@@ -22,7 +29,7 @@ log = logging.getLogger(__name__)
 _IMAGE_SIZE_MB = 4096
 
 
-def _run(cmd, **kwargs):
+def _run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
     """Run a command, logging it and raising on failure."""
     log.info("Running: %s", " ".join(str(c) for c in cmd))
     return subprocess.run(
@@ -34,7 +41,7 @@ def _run(cmd, **kwargs):
     )
 
 
-def _check_mke2fs():
+def _check_mke2fs() -> None:
     """Verify mke2fs supports -d (populate from directory)."""
     result = subprocess.run(["mke2fs", "-V"], capture_output=True, text=True)
     # -d support was added in e2fsprogs 1.43 (2016)
@@ -43,11 +50,11 @@ def _check_mke2fs():
         raise RuntimeError("mke2fs not found; install e2fsprogs")
 
 
-def _container_image_tag(target_config):
+def _container_image_tag(target_config: TargetConfig) -> str:
     return f"ltvm-image-{target_config.name}"
 
 
-def build_image(target_config, force=False):
+def build_image(target_config: TargetConfig, force: bool = False) -> Path:
     """Build a VM base image for the given target.
 
     Steps:
@@ -110,7 +117,7 @@ def build_image(target_config, force=False):
     return image_path
 
 
-def _export_to_ext4(container_tag, image_path):
+def _export_to_ext4(container_tag: str, image_path: Path) -> Path:
     """Create a raw ext4 image from a container's filesystem.
 
     Entirely rootless using mke2fs -d (populate from directory).
@@ -188,7 +195,7 @@ def _export_to_ext4(container_tag, image_path):
             os.unlink(tmpfile)
 
 
-def _get_package_manifest(container_tag):
+def _get_package_manifest(container_tag: str) -> list[str]:
     """Get installed RPM list from the container image."""
     try:
         result = _run(
@@ -210,7 +217,9 @@ def _get_package_manifest(container_tag):
         return []
 
 
-def image_status(target_config):
+def image_status(
+    target_config: TargetConfig,
+) -> dict[str, bool | str | float | None]:
     """Return status dict for the target's image artifact.
 
     Keys:

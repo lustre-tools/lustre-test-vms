@@ -2,13 +2,15 @@
 
 One package per target containing everything needed to boot
 VMs, build Lustre, and optionally deploy pre-built Lustre:
-  - vmlinux / vmlinuz (kernel for QEMU direct boot + kdump)
-  - modules/ (kernel modules deployed into VMs)
-  - build-tree/ (kernel source for compiling Lustre)
+  - kernels/<kernel-name>/vmlinux
+  - kernels/<kernel-name>/vmlinuz
+  - kernels/<kernel-name>/modules/
+  - kernels/<kernel-name>/build-tree/
   - image.ext4 (VM rootfs)
-  - lustre/ (optional: pre-built Lustre tree for deploy)
+  - kernels/<kernel-name>/lustre/ (optional: pre-built Lustre)
   - meta.json (version, build info)
 
+Multiple kernels are supported under output/<target>/kernels/.
 Users can replace the kernel later with `ltvm build-kernel`
 if they need custom patches or a different version.
 """
@@ -22,17 +24,61 @@ import tempfile
 from pathlib import Path
 
 
-def _find_artifacts(output_dir: str | Path) -> dict[str, Path]:
+def _resolve_kernel(output_dir: Path, kernel: str | None) -> tuple[str, Path]:
+    """Resolve kernel name and directory.
+
+    If kernel is provided, return (kernel, output_dir/kernels/kernel).
+    If kernel is None, auto-detect by scanning output_dir/kernels/ for
+    a subdirectory containing vmlinux; picks the first match.
+
+    Raises ValueError if no kernel can be found.
+    """
+    kernels_dir = output_dir / "kernels"
+
+    if kernel is not None:
+        return kernel, kernels_dir / kernel
+
+    # Auto-detect: scan for subdirectories containing vmlinux
+    if not kernels_dir.is_dir():
+        raise ValueError(
+            f"No kernels/ directory in {output_dir}. "
+            f"Run 'ltvm build-kernel <target>' to build one."
+        )
+
+    candidates = sorted(
+        d
+        for d in kernels_dir.iterdir()
+        if d.is_dir() and (d / "vmlinux").exists()
+    )
+    if not candidates:
+        raise ValueError(
+            f"No kernel with vmlinux found under {kernels_dir}. "
+            f"Run 'ltvm build-kernel <target>' to build one."
+        )
+
+    chosen = candidates[0]
+    return chosen.name, chosen
+
+
+def _find_artifacts(
+    output_dir: str | Path,
+    kernel: str | None = None,
+) -> dict[str, Path]:
     """Verify required artifacts exist in output_dir.
 
     Returns dict of paths or raises ValueError.
     Lustre is optional -- included if present.
+
+    If kernel is None, auto-detects by scanning output_dir/kernels/
+    for a subdirectory containing vmlinux.
     """
     output_dir = Path(output_dir)
-    kernel_dir = output_dir / "kernel"
+
+    kernel_name, kernel_dir = _resolve_kernel(output_dir, kernel)
+
     image_dir = output_dir / "image"
 
-    required = {
+    required: dict[str, Path] = {
         "vmlinux": kernel_dir / "vmlinux",
         "vmlinuz": kernel_dir / "vmlinuz",
         "build-tree": kernel_dir / "build-tree",
@@ -54,32 +100,43 @@ def _find_artifacts(output_dir: str | Path) -> dict[str, Path]:
 
     if missing:
         raise ValueError(
-            f"Missing artifacts in {output_dir}: "
+            f"Missing artifacts in {output_dir} (kernel={kernel_name}): "
             f"{', '.join(missing)}\n"
             f"Run 'ltvm build-all <target>' to build them"
         )
 
-    # Lustre is optional
-    lustre_dir = output_dir / "lustre"
+    # Lustre is optional -- lives under the kernel directory
+    lustre_dir = kernel_dir / "lustre"
     if lustre_dir.is_dir():
         required["lustre"] = lustre_dir
 
     return required
 
 
-def snapshot_lustre(lustre_tree: str | Path, output_dir: str | Path) -> Path:
+def snapshot_lustre(
+    lustre_tree: str | Path,
+    output_dir: str | Path,
+    kernel: str | None = None,
+) -> Path:
     """Copy the deployable subset of a built Lustre tree
-    into output/<target>/lustre/.
+    into output/<target>/kernels/<kernel>/lustre/.
 
     Includes everything deploy-lustre.sh needs: .ko files,
     libraries, binaries, test scripts, config.  Excludes
     .git, .o files, and kernel_patches (large, not needed
     for deploy).
 
+    kernel must be provided or resolvable via auto-detection.
+    Raises ValueError if kernel is None and cannot be auto-detected.
+
     Returns the output lustre directory path.
     """
     lustre_tree = Path(lustre_tree).resolve()
-    dest = Path(output_dir) / "lustre"
+    output_dir = Path(output_dir)
+
+    kernel_name, kernel_dir = _resolve_kernel(output_dir, kernel)
+
+    dest = kernel_dir / "lustre"
 
     # Verify the tree looks built
     ko_files = [
@@ -90,6 +147,7 @@ def snapshot_lustre(lustre_tree: str | Path, output_dir: str | Path) -> Path:
 
     print(f"  Snapshotting Lustre tree to {dest}")
     print(f"    Source: {lustre_tree}")
+    print(f"    Kernel: {kernel_name}")
     print(f"    Modules: {len(ko_files)} .ko files")
 
     # rsync the tree, excluding large unnecessary items
@@ -116,6 +174,7 @@ def snapshot_lustre(lustre_tree: str | Path, output_dir: str | Path) -> Path:
     # Write metadata
     meta = {
         "source": str(lustre_tree),
+        "kernel": kernel_name,
         "ko_count": len(ko_files),
     }
     (dest / ".ltvm-snapshot.json").write_text(json.dumps(meta, indent=2) + "\n")
@@ -134,30 +193,35 @@ def _dir_size_mb(path: str | Path) -> float:
 def package_target(
     target_name: str,
     output_dir: str | Path,
+    kernel: str | None = None,
     dest_dir: str | Path | None = None,
 ) -> Path:
     """Create a compressed tarball of all target artifacts.
 
+    kernel: kernel name under kernels/; auto-detected if None.
     Returns the path to the created tarball.
     """
     output_dir = Path(output_dir)
-    artifacts = _find_artifacts(output_dir)
+    artifacts = _find_artifacts(output_dir, kernel=kernel)
 
     if dest_dir is None:
         dest_dir = output_dir.parent
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
+    # Resolve actual kernel name for tarball naming
+    kernel_name, kernel_dir = _resolve_kernel(output_dir, kernel)
+
     # Read version from kernel meta
-    kernel_meta = output_dir / "kernel" / "meta.json"
+    kernel_meta = kernel_dir / "meta.json"
     version = "unknown"
     if kernel_meta.exists():
         meta = json.loads(kernel_meta.read_text())
         version = meta.get("kernel_version", "unknown")
 
-    tarball = dest_dir / f"{target_name}-{version}.tar.zst"
+    tarball = dest_dir / f"{target_name}-{kernel_name}-{version}.tar.zst"
 
-    print(f"  Packaging {target_name} -> {tarball.name}")
+    print(f"  Packaging {target_name} (kernel={kernel_name}) -> {tarball.name}")
     print(f"    Kernel: {artifacts['vmlinux']}")
     print(f"    Image:  {artifacts['image']}")
     if "lustre" in artifacts:
@@ -176,7 +240,7 @@ def package_target(
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         # Fallback: try gzip if zstd not available
-        tarball = dest_dir / f"{target_name}-{version}.tar.gz"
+        tarball = dest_dir / f"{target_name}-{kernel_name}-{version}.tar.gz"
         cmd = [
             "tar",
             "-czf",
@@ -193,6 +257,7 @@ def package_target(
     # Write a manifest alongside the tarball
     manifest = {
         "target": target_name,
+        "kernel": kernel_name,
         "kernel_version": version,
         "contents": list(artifacts.keys()),
         "has_lustre": "lustre" in artifacts,
@@ -245,7 +310,7 @@ def fetch_target(target_name: str, url: str, output_base: str | Path) -> Path:
             f"Expected {target_dir} after extraction but not found"
         )
 
-    # Verify the artifacts are there
+    # Verify the artifacts are there (auto-detect kernel)
     artifacts = _find_artifacts(target_dir)
     print(f"    Artifacts verified in {target_dir}")
     if "lustre" in artifacts:
@@ -262,28 +327,33 @@ DEFAULT_IMAGE_DIR = Path("/opt/qemu-vms/images")
 def install_target(
     target_name: str,
     output_dir: str | Path,
+    kernel: str | None = None,
     *,
     kernel_dir: str | Path | None = None,
     image_dir: str | Path | None = None,
 ) -> dict[str, str]:
     """Install kernel + image to system paths for vm.py.
 
+    kernel: kernel name under kernels/; auto-detected if None.
     This requires sudo (writes to /opt/qemu-vms/).
     Returns dict of installed paths.
     """
     output_dir = Path(output_dir)
-    artifacts = _find_artifacts(output_dir)
+    artifacts = _find_artifacts(output_dir, kernel=kernel)
+
+    # Resolve kernel name for installed file naming
+    kernel_name, _ = _resolve_kernel(output_dir, kernel)
 
     kernel_dir = Path(kernel_dir or DEFAULT_KERNEL_DIR)
     image_dir = Path(image_dir or DEFAULT_IMAGE_DIR)
 
-    installed = {}
+    installed: dict[str, str] = {}
 
-    # Install kernel
-    vmlinux_dest = kernel_dir / f"vmlinux-{target_name}"
-    vmlinuz_dest = kernel_dir / f"vmlinuz-{target_name}"
+    # Install kernel -- include kernel name in destination filename
+    vmlinux_dest = kernel_dir / f"vmlinux-{target_name}-{kernel_name}"
+    vmlinuz_dest = kernel_dir / f"vmlinuz-{target_name}-{kernel_name}"
 
-    print(f"  Installing kernel to {kernel_dir}/")
+    print(f"  Installing kernel ({kernel_name}) to {kernel_dir}/")
     subprocess.run(["sudo", "mkdir", "-p", str(kernel_dir)], check=True)
     subprocess.run(
         ["sudo", "cp", str(artifacts["vmlinux"]), str(vmlinux_dest)], check=True
@@ -299,7 +369,7 @@ def install_target(
             ["sudo", "ln", "-sf", str(vmlinux_dest), str(default_vmlinux)],
             check=True,
         )
-        print(f"    Default kernel -> vmlinux-{target_name}")
+        print(f"    Default kernel -> vmlinux-{target_name}-{kernel_name}")
 
     installed["vmlinux"] = str(vmlinux_dest)
     installed["vmlinuz"] = str(vmlinuz_dest)

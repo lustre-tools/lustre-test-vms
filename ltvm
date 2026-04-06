@@ -30,6 +30,7 @@ from lib.package import (
     package_target,
     snapshot_lustre,
 )
+from lib.runtime import RunResult
 from lib.validate import print_results, validate_target
 
 log = logging.getLogger("ltvm")
@@ -156,6 +157,7 @@ def cmd_build_all(args: argparse.Namespace) -> int:
     tc, err = _load_target(args.target, use_json)
     if err is not None:
         return err
+    assert tc is not None
 
     lustre_tree, err_msg = _resolve_lustre_tree(args.lustre_tree)
     if err_msg:
@@ -165,8 +167,12 @@ def cmd_build_all(args: argparse.Namespace) -> int:
             hint="Run from a Lustre tree, or pass "
             "--lustre-tree /path/to/lustre-release",
         )
+    assert lustre_tree is not None
 
-    results = {}
+    kernel = getattr(args, "kernel", None)
+    resolved_kernel = tc.resolve_kernel(kernel)
+
+    results: dict[str, Any] = {}
 
     # 1. Container
     if not use_json:
@@ -179,9 +185,14 @@ def cmd_build_all(args: argparse.Namespace) -> int:
 
     # 2. Kernel
     if not use_json:
-        print(f"==> Building kernel for {args.target}...")
+        print(f"==> Building kernel {resolved_kernel} for {args.target}...")
     try:
-        kmeta = build_kernel(tc, lustre_tree, force=args.force)
+        kmeta = build_kernel(
+            tc,
+            lustre_tree,
+            force=args.force,
+            kernel=kernel,
+        )
         results["kernel"] = kmeta
     except Exception as e:
         return _error(f"Kernel build failed: {e}", use_json)
@@ -198,8 +209,10 @@ def cmd_build_all(args: argparse.Namespace) -> int:
     # 4. Lustre (optional -- only when --lustre-build is passed)
     if getattr(args, "lustre_build", False):
         if not use_json:
-            print(f"==> Building Lustre against {args.target} kernel tree...")
-        build_tree = tc.kernel_output_dir() / "build-tree"
+            print(
+                f"==> Building Lustre against {resolved_kernel} kernel tree..."
+            )
+        build_tree = tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree"
         try:
             container_tag = f"ltvm-build-{args.target}"
             lmeta = build_lustre(
@@ -247,6 +260,7 @@ def cmd_build_container(args: argparse.Namespace) -> int:
     tc, err = _load_target(args.target, use_json)
     if err is not None:
         return err
+    assert tc is not None
 
     if not use_json:
         print(f"Building container for {args.target}...")
@@ -271,6 +285,7 @@ def cmd_build_kernel(args: argparse.Namespace) -> int:
     tc, err = _load_target(args.target, use_json)
     if err is not None:
         return err
+    assert tc is not None
 
     lustre_tree, err_msg = _resolve_lustre_tree(args.lustre_tree)
     if err_msg:
@@ -280,12 +295,21 @@ def cmd_build_kernel(args: argparse.Namespace) -> int:
             hint="Run from a Lustre tree, or pass "
             "--lustre-tree /path/to/lustre-release",
         )
+    assert lustre_tree is not None
+
+    kernel = getattr(args, "kernel", None)
 
     if not use_json:
-        print(f"Building kernel for {args.target}...")
+        k = tc.resolve_kernel(kernel)
+        print(f"Building kernel {k} for {args.target}...")
 
     try:
-        meta = build_kernel(tc, lustre_tree, force=args.force)
+        meta = build_kernel(
+            tc,
+            lustre_tree,
+            force=args.force,
+            kernel=kernel,
+        )
     except Exception as e:
         return _error(f"Kernel build failed: {e}", use_json)
 
@@ -303,6 +327,7 @@ def cmd_build_image(args: argparse.Namespace) -> int:
     tc, err = _load_target(args.target, use_json)
     if err is not None:
         return err
+    assert tc is not None
 
     if not use_json:
         print(f"Building image for {args.target}...")
@@ -327,6 +352,7 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
     tc, err = _load_target(args.target, use_json)
     if err is not None:
         return err
+    assert tc is not None
 
     lustre_tree, err_msg = _resolve_lustre_tree(
         getattr(args, "lustre_tree", None)
@@ -337,13 +363,17 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
             use_json,
             hint="Pass --lustre-tree or run from a Lustre source tree",
         )
+    assert lustre_tree is not None
 
-    build_tree = tc.kernel_output_dir() / "build-tree"
+    kernel = getattr(args, "kernel", None)
+    resolved_kernel = tc.resolve_kernel(kernel)
+    build_tree = tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree"
     if not build_tree.is_dir():
         return _error(
             f"Kernel build-tree not found: {build_tree}",
             use_json,
-            hint=f"Run: ltvm build-kernel {args.target}",
+            hint=f"Run: ltvm build-kernel {args.target} "
+            f"--kernel {resolved_kernel}",
         )
 
     # Server build follows target.conf unless overridden
@@ -394,6 +424,9 @@ def cmd_package(args: argparse.Namespace) -> int:
     tc, err = _load_target(args.target, use_json)
     if err is not None:
         return err
+    assert tc is not None
+
+    kernel = getattr(args, "kernel", None)
 
     # Snapshot Lustre tree if --lustre-tree provided
     lustre_tree_arg = getattr(args, "lustre_tree", None)
@@ -401,10 +434,13 @@ def cmd_package(args: argparse.Namespace) -> int:
         lustre_path, err_msg = _resolve_lustre_tree(lustre_tree_arg)
         if err_msg:
             return _error(err_msg, use_json)
+        assert lustre_path is not None
         if not use_json:
             print("Snapshotting Lustre tree...")
         try:
-            snapshot_lustre(lustre_path, tc.output_dir)
+            snapshot_lustre(
+                lustre_path, tc.output_dir, kernel=kernel,
+            )
         except Exception as e:
             return _error(f"Lustre snapshot failed: {e}", use_json)
 
@@ -413,7 +449,9 @@ def cmd_package(args: argparse.Namespace) -> int:
 
     try:
         tarball = package_target(
-            args.target, tc.output_dir, dest_dir=getattr(args, "output", None)
+            args.target, tc.output_dir,
+            kernel=kernel,
+            dest_dir=getattr(args, "output", None),
         )
     except Exception as e:
         return _error(f"Package failed: {e}", use_json)
@@ -463,6 +501,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     tc, err = _load_target(args.target, use_json)
     if err is not None:
         return err
+    assert tc is not None
 
     if not tc.output_dir.is_dir():
         return _error(
@@ -473,11 +512,15 @@ def cmd_install(args: argparse.Namespace) -> int:
             f"'ltvm build-all {args.target}' first",
         )
 
+    kernel = getattr(args, "kernel", None)
+
     if not use_json:
         print(f"Installing {args.target} to system paths...")
 
     try:
-        installed = install_target(args.target, tc.output_dir)
+        installed = install_target(
+            args.target, tc.output_dir, kernel=kernel,
+        )
     except Exception as e:
         return _error(f"Install failed: {e}", use_json)
 
@@ -495,6 +538,7 @@ def cmd_shell(args: argparse.Namespace) -> int:
     tc, err = _load_target(args.target, use_json)
     if err is not None:
         return err
+    assert tc is not None
 
     tag = f"ltvm-build-{args.target}"
     mount_path = Path(args.path).resolve()
@@ -612,6 +656,7 @@ def cmd_update(args: argparse.Namespace) -> int:
         tc, err = _load_target(name, use_json)
         if err is not None:
             return err
+        assert tc is not None
 
         updated = []
 
@@ -670,7 +715,7 @@ def cmd_update(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------
 
 
-def _runtime_result(res: dict[str, Any], use_json: bool) -> int:
+def _runtime_result(res: RunResult, use_json: bool) -> int:
     """Print a runtime result dict and return the exit code."""
     if use_json:
         print(json.dumps(res, indent=2))
@@ -726,7 +771,7 @@ def cmd_vm(args: argparse.Namespace) -> int:
 def _parse_vm_kwargs(extra_args: list[str]) -> dict[str, Any]:
     """Parse --vcpus, --mem, --mdt-disks, --ost-disks, --target
     from a flat list of strings."""
-    kwargs = {}
+    kwargs: dict[str, Any] = {}
     i = 0
     while i < len(extra_args):
         arg = extra_args[i]
@@ -753,14 +798,25 @@ def _parse_vm_kwargs(extra_args: list[str]) -> dict[str, Any]:
 def cmd_deploy(args: argparse.Namespace) -> int:
     use_json = args.json
     target = getattr(args, "target", "rocky9")
+    kernel = getattr(args, "kernel", None)
     ltvm_root = Path(__file__).parent
+
+    # Resolve kernel name for path lookups
+    try:
+        tc = TargetConfig(target)
+        resolved_kernel = tc.resolve_kernel(kernel)
+    except ValueError:
+        resolved_kernel = kernel or "unknown"
 
     # Resolve build path: explicit --build, or packaged Lustre,
     # or cwd
     build_arg = getattr(args, "build", ".")
     if build_arg == ".":
         # Check for packaged Lustre tree first
-        packaged = ltvm_root / "output" / target / "lustre"
+        packaged = (
+            ltvm_root / "output" / target / "kernels"
+            / resolved_kernel / "lustre"
+        )
         if packaged.is_dir():
             build_path = packaged
             if not use_json:
@@ -775,7 +831,10 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
     # Auto-detect kernel modules from ltvm output
     kernel_modules = None
-    mods_path = ltvm_root / "output" / target / "kernel" / "modules"
+    mods_path = (
+        ltvm_root / "output" / target / "kernels"
+        / resolved_kernel / "modules"
+    )
     if mods_path.is_dir():
         kernel_modules = str(mods_path)
         if not use_json:
@@ -876,6 +935,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     tc, err = _load_target(args.target, use_json)
     if err is not None:
         return err
+    assert tc is not None
 
     lustre_tree = None
     if args.lustre_tree:
@@ -963,6 +1023,15 @@ def build_parser() -> argparse.ArgumentParser:
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
 
+    # Shared --kernel flag for subcommands that operate on
+    # a specific kernel version within a target
+    kernel_arg = argparse.ArgumentParser(add_help=False)
+    kernel_arg.add_argument(
+        "--kernel",
+        default=None,
+        help="Kernel version (default: from kernel.conf)",
+    )
+
     p = argparse.ArgumentParser(
         prog="ltvm",
         description="Lustre test VM infrastructure CLI",
@@ -1011,7 +1080,7 @@ def build_parser() -> argparse.ArgumentParser:
     # -- build-all --
     sp = sub.add_parser(
         "build-all",
-        parents=[common],
+        parents=[common, kernel_arg],
         help="Build container + kernel + image from scratch",
     )
     sp.add_argument("target")
@@ -1041,7 +1110,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # -- build-kernel --
     sp = sub.add_parser(
-        "build-kernel", parents=[common], help="Build the kernel for a target"
+        "build-kernel",
+        parents=[common, kernel_arg],
+        help="Build the kernel for a target",
     )
     sp.add_argument("target")
     sp.add_argument(
@@ -1067,7 +1138,7 @@ def build_parser() -> argparse.ArgumentParser:
     # -- build-lustre --
     sp = sub.add_parser(
         "build-lustre",
-        parents=[common],
+        parents=[common, kernel_arg],
         help="Build a Lustre source tree against the target kernel build-tree",
     )
     sp.add_argument(
@@ -1104,7 +1175,7 @@ def build_parser() -> argparse.ArgumentParser:
     # -- package --
     sp = sub.add_parser(
         "package",
-        parents=[common],
+        parents=[common, kernel_arg],
         help="Create a distributable tarball of target "
         "artifacts (kernel + image + optional Lustre)",
     )
@@ -1133,7 +1204,7 @@ def build_parser() -> argparse.ArgumentParser:
     # -- install --
     sp = sub.add_parser(
         "install",
-        parents=[common],
+        parents=[common, kernel_arg],
         help="Install kernel + image to system paths for vm.sh (requires sudo)",
     )
     sp.add_argument("target")
@@ -1212,7 +1283,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # -- deploy --
     sp = sub.add_parser(
-        "deploy", parents=[common], help="Deploy Lustre to a VM"
+        "deploy", parents=[common, kernel_arg],
+        help="Deploy Lustre to a VM",
     )
     sp.add_argument("vm", help="VM name")
     sp.add_argument(
@@ -1284,7 +1356,8 @@ def main() -> int:
                 hint="ltvm update <target> or ltvm update --all",
             )
 
-    return args.func(args)
+    result: int = args.func(args)
+    return result
 
 
 if __name__ == "__main__":

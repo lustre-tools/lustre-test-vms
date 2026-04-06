@@ -14,7 +14,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .config import TargetConfig
@@ -417,7 +417,11 @@ def check_basic_io(vm_name: str) -> CheckResult:
 # ------------------------------------------------------------------
 
 
-def validate_target(target_config, lustre_tree=None, verbose=False):
+def validate_target(
+    target_config: TargetConfig,
+    lustre_tree: str | Path | None = None,
+    verbose: bool = False,
+) -> dict[str, Any]:
     """Run the full validation suite for a target.
 
     Args:
@@ -505,7 +509,7 @@ def validate_target(target_config, lustre_tree=None, verbose=False):
     return _summary(target, results)
 
 
-def _summary(target, results):
+def _summary(target: str, results: list[CheckResult]) -> dict[str, Any]:
     """Build summary dict from a list of CheckResults."""
     passed = sum(1 for r in results if r.passed)
     total = len(results)
@@ -518,7 +522,7 @@ def _summary(target, results):
     }
 
 
-def print_results(summary, verbose=False):
+def print_results(summary: dict[str, Any], verbose: bool = False) -> None:
     """Print validation results in human-readable format."""
     target = summary["target"]
     print(f"Validating {target}...")

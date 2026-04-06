@@ -27,7 +27,7 @@ class TargetConfig:
         self._target.read(self.target_dir / "target.conf")
 
         self._kernel = configparser.RawConfigParser()
-        self._kernel.optionxform = str  # type: ignore[method-assign]  # preserve case
+        self._kernel.optionxform = str  # type: ignore[assignment]  # preserve case
         self._kernel.read(self.target_dir / "kernel.conf")
 
     @property
@@ -59,6 +59,11 @@ class TargetConfig:
         return self._kernel.get("kernel", "lustre_target")
 
     @property
+    def default_kernel(self) -> str:
+        """The default kernel name (lustre_target from kernel.conf)."""
+        return self.lustre_target
+
+    @property
     def kernel_config_overrides(self) -> dict[str, str]:
         """Microvm-specific kernel config overrides."""
         overrides: dict[str, str] = {}
@@ -66,8 +71,24 @@ class TargetConfig:
             overrides.update(dict(self._kernel.items("config")))
         return overrides
 
-    def kernel_output_dir(self) -> Path:
-        return self.output_dir / "kernel"
+    def resolve_kernel(self, kernel: str | None = None) -> str:
+        """Return the kernel name to use, falling back to the default."""
+        return kernel if kernel is not None else self.default_kernel
+
+    def kernel_output_dir(self, kernel: str | None = None) -> Path:
+        """Return the output directory for a kernel build.
+
+        When kernel is None, the default kernel (lustre_target) is used.
+        Kernels are stored under output/<target>/kernels/<kernel_name>/.
+        """
+        return self.output_dir / "kernels" / self.resolve_kernel(kernel)
+
+    def available_kernels(self) -> list[str]:
+        """Return a sorted list of kernel names that have been built."""
+        kernels_dir = self.output_dir / "kernels"
+        if not kernels_dir.exists():
+            return []
+        return sorted(d.name for d in kernels_dir.iterdir() if d.is_dir())
 
     def image_output_dir(self) -> Path:
         return self.output_dir / "image"
@@ -75,10 +96,12 @@ class TargetConfig:
     def container_output_dir(self) -> Path:
         return self.output_dir / "container"
 
-    def input_hash(self, artifact: str) -> str:
+    def input_hash(self, artifact: str, kernel: str | None = None) -> str:
         """Hash the inputs for an artifact to detect staleness.
 
         artifact: 'container', 'kernel', or 'image'
+        kernel: kernel name override for artifact=='kernel'; defaults to
+                lustre_target when None.
         """
         h = hashlib.sha256()
 
@@ -89,7 +112,7 @@ class TargetConfig:
             h.update(self._hash_package_lists("dev").encode())
 
         elif artifact == "kernel":
-            h.update(self.lustre_target.encode())
+            h.update(self.resolve_kernel(kernel).encode())
             for k, v in sorted(self.kernel_config_overrides.items()):
                 h.update(f"{k}={v}".encode())
             common_frag = TARGETS_DIR / "common" / "kernel-config.fragment"
@@ -106,21 +129,48 @@ class TargetConfig:
 
         return h.hexdigest()[:16]
 
-    def is_stale(self, artifact: str) -> bool:
-        """Check if an artifact needs rebuilding."""
-        meta_file = self.output_dir / artifact / "meta.json"
+    def _kernel_meta_file(self, kernel: str | None) -> Path:
+        """Return the meta.json path for a kernel artifact."""
+        return (
+            self.output_dir
+            / "kernels"
+            / self.resolve_kernel(kernel)
+            / "meta.json"
+        )
+
+    def is_stale(self, artifact: str, kernel: str | None = None) -> bool:
+        """Check if an artifact needs rebuilding.
+
+        For artifact=='kernel', kernel selects which kernel to check;
+        defaults to the configured lustre_target.
+        """
+        if artifact == "kernel":
+            meta_file = self._kernel_meta_file(kernel)
+        else:
+            meta_file = self.output_dir / artifact / "meta.json"
         if not meta_file.exists():
             return True
         meta = json.loads(meta_file.read_text())
-        return meta.get("input_hash") != self.input_hash(artifact)
+        return bool(
+            meta.get("input_hash") != self.input_hash(artifact, kernel=kernel)
+        )
 
-    def write_meta(self, artifact: str, **extra: object) -> None:
-        """Write build metadata after successful build."""
-        out_dir = self.output_dir / artifact
+    def write_meta(
+        self, artifact: str, kernel: str | None = None, **extra: object
+    ) -> None:
+        """Write build metadata after successful build.
+
+        For artifact=='kernel', kernel selects which kernel's metadata to
+        write; defaults to the configured lustre_target.
+        """
+        if artifact == "kernel":
+            out_dir = self._kernel_meta_file(kernel).parent
+        else:
+            out_dir = self.output_dir / artifact
         out_dir.mkdir(parents=True, exist_ok=True)
         meta = {
             "target": self.name,
-            "input_hash": self.input_hash(artifact),
+            "input_hash": self.input_hash(artifact, kernel=kernel),
             **extra,
         }
         (out_dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")

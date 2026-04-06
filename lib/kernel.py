@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 if TYPE_CHECKING:
     from .config import TargetConfig
@@ -85,11 +85,17 @@ def _shell_var(text: str, name: str) -> str | None:
 # ------------------------------------------------------------------
 
 
+class LustreFiles(TypedDict):
+    config: Path
+    series_file: Path
+    patches: list[Path]
+
+
 def resolve_lustre_files(
     lustre_tree: str | Path,
     lustre_target: str,
     target_info: dict[str, str],
-) -> dict[str, Path | list[Path]]:
+) -> LustreFiles:
     """Locate kernel config, series file, and patch files.
 
     Returns dict with keys: config, series_file, patches (list).
@@ -223,6 +229,7 @@ def build_kernel(
     target_config: TargetConfig,
     lustre_tree: str | Path,
     force: bool = False,
+    kernel: str | None = None,
 ) -> dict[str, object]:
     """Build a kernel for the given target.
 
@@ -230,17 +237,18 @@ def build_kernel(
         target_config: TargetConfig instance
         lustre_tree: Path to a Lustre source tree
         force: Build even if inputs haven't changed
+        kernel: Lustre target name to build (defaults to target_config.lustre_target)
 
     Returns:
         dict with build metadata
     """
     lustre_tree = Path(lustre_tree)
-    lustre_target = target_config.lustre_target
+    lustre_target = kernel or target_config.lustre_target
 
     # Staleness check
-    if not force and not target_config.is_stale("kernel"):
+    if not force and not target_config.is_stale("kernel", kernel=lustre_target):
         log.info("Kernel is up to date (use force=True to rebuild)")
-        return kernel_status(target_config)
+        return kernel_status(target_config, kernel=kernel)
 
     # Parse Lustre target file
     target_info = parse_lustre_target(lustre_tree, lustre_target)
@@ -248,8 +256,12 @@ def build_kernel(
 
     # Resolve Lustre kernel config and patches
     lustre_files = resolve_lustre_files(lustre_tree, lustre_target, target_info)
-    log.info("Kernel config: %s", lustre_files["config"])
-    log.info("Patches to apply: %d", len(lustre_files["patches"]))
+    lustre_config = lustre_files["config"]
+    assert isinstance(lustre_config, Path)
+    lustre_patches = lustre_files["patches"]
+    assert isinstance(lustre_patches, list)
+    log.info("Kernel config: %s", lustre_config)
+    log.info("Patches to apply: %d", len(lustre_patches))
 
     # Download SRPM
     cache_dir = target_config.output_dir / "cache"
@@ -259,7 +271,7 @@ def build_kernel(
     image_tag = _ensure_container_image(target_config)
 
     # Prepare output directory
-    kernel_out = target_config.kernel_output_dir()
+    kernel_out = target_config.kernel_output_dir(kernel=lustre_target)
     kernel_out.mkdir(parents=True, exist_ok=True)
     build_tree = kernel_out / "build-tree"
 
@@ -270,17 +282,15 @@ def build_kernel(
         # Copy patches
         patches_dir = staging / "patches"
         patches_dir.mkdir()
-        for p in lustre_files["patches"]:
+        for p in lustre_patches:
             shutil.copy2(p, patches_dir / p.name)
 
         # Write series file (just filenames)
         series_list = staging / "series"
-        series_list.write_text(
-            "\n".join(p.name for p in lustre_files["patches"]) + "\n"
-        )
+        series_list.write_text("\n".join(p.name for p in lustre_patches) + "\n")
 
         # Copy kernel config
-        shutil.copy2(lustre_files["config"], staging / "kernel.config")
+        shutil.copy2(lustre_config, staging / "kernel.config")
 
         # Write config fragment
         frag = _build_config_fragment(target_config)
@@ -345,12 +355,12 @@ def build_kernel(
         "lnxmaj": target_info["lnxmaj"],
         "lnxrel": target_info["lnxrel"],
         "lustre_target": lustre_target,
-        "patches_applied": len(lustre_files["patches"]),
+        "patches_applied": len(lustre_patches),
         "vmlinux_bytes": vmlinux_size,
         "vmlinuz_bytes": vmlinuz_size,
         "built_at": datetime.now(timezone.utc).isoformat(),
     }
-    target_config.write_meta("kernel", **meta)
+    target_config.write_meta("kernel", kernel=lustre_target, **meta)
 
     log.info("Kernel build complete")
     return meta
@@ -361,12 +371,19 @@ def build_kernel(
 # ------------------------------------------------------------------
 
 
-def kernel_status(target_config: TargetConfig) -> dict[str, object]:
+def kernel_status(
+    target_config: TargetConfig, kernel: str | None = None
+) -> dict[str, object]:
     """Return kernel build status for a target.
+
+    Args:
+        target_config: TargetConfig instance
+        kernel: Lustre target name to query (defaults to target_config.lustre_target)
 
     Returns dict with version, build date, staleness, etc.
     """
-    meta_file = target_config.kernel_output_dir() / "meta.json"
+    resolved = kernel or target_config.lustre_target
+    meta_file = target_config.kernel_output_dir(kernel=resolved) / "meta.json"
     if not meta_file.exists():
         return {
             "built": False,
@@ -376,6 +393,6 @@ def kernel_status(target_config: TargetConfig) -> dict[str, object]:
     meta = json.loads(meta_file.read_text())
     return {
         "built": True,
-        "stale": target_config.is_stale("kernel"),
+        "stale": target_config.is_stale("kernel", kernel=resolved),
         **meta,
     }
