@@ -465,28 +465,204 @@ def cmd_package(args: argparse.Namespace) -> int:
 # Subcommand: fetch
 # ------------------------------------------------------------------
 
+# GitHub repo for release downloads
+GITHUB_REPO = "lustre-tools/lustre-test-vms-v2"
+
+
+def _find_release_url(
+    target: str,
+    kernel: str | None = None,
+    release: str = "latest",
+) -> str:
+    """Query GitHub releases for a matching tarball URL.
+
+    Searches release assets for files matching the target
+    name (and optionally kernel name).  Returns the download
+    URL for the first match.
+    """
+    if release == "latest":
+        api = (
+            f"https://api.github.com/repos/{GITHUB_REPO}"
+            f"/releases/latest"
+        )
+    else:
+        api = (
+            f"https://api.github.com/repos/{GITHUB_REPO}"
+            f"/releases/tags/{release}"
+        )
+
+    r = subprocess.run(
+        ["curl", "-fsSL", api],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"GitHub API request failed (rc={r.returncode})"
+            f"\n  URL: {api}"
+            f"\n  {r.stderr.strip()}"
+        )
+
+    data = json.loads(r.stdout)
+    assets = data.get("assets", [])
+    tag = data.get("tag_name", release)
+
+    # Filter assets matching target (and kernel if given)
+    for asset in assets:
+        name = asset.get("name", "")
+        if not name.startswith(target):
+            continue
+        if kernel and kernel not in name:
+            continue
+        if name.endswith((".tar.zst", ".tar.gz")):
+            url = asset["browser_download_url"]
+            return url
+
+    # No match found -- list what's available
+    avail = [
+        a["name"] for a in assets
+        if a["name"].endswith((".tar.zst", ".tar.gz"))
+    ]
+    avail_str = "\n  ".join(avail) if avail else "(none)"
+    kernel_hint = f" --kernel {kernel}" if kernel else ""
+    raise RuntimeError(
+        f"No asset matching target={target}"
+        f"{kernel_hint} in release {tag}\n"
+        f"  Available assets:\n  {avail_str}"
+    )
+
 
 def cmd_fetch(args: argparse.Namespace) -> int:
     use_json = args.json
-
-    if not args.url:
-        return _error(
-            "No URL specified",
-            use_json,
-            hint="ltvm fetch rocky9 --url <tarball-url>",
-        )
+    url = getattr(args, "url", None)
+    kernel = getattr(args, "kernel", None)
+    release = getattr(args, "release", "latest")
 
     from lib.config import OUTPUT_DIR
+
+    # Resolve URL: explicit --url, or GitHub release lookup
+    if not url:
+        if not use_json:
+            print(
+                f"Looking up {args.target} from "
+                f"GitHub release ({release})..."
+            )
+        try:
+            url = _find_release_url(
+                args.target, kernel=kernel, release=release,
+            )
+        except RuntimeError as e:
+            return _error(str(e), use_json)
+        if not use_json:
+            print(f"  Found: {url}")
 
     if not use_json:
         print(f"Fetching {args.target}...")
 
     try:
-        target_dir = fetch_target(args.target, args.url, OUTPUT_DIR)
+        target_dir = fetch_target(args.target, url, OUTPUT_DIR)
     except Exception as e:
         return _error(f"Fetch failed: {e}", use_json)
 
     result = {"target": args.target, "path": str(target_dir)}
+    _output(result, use_json)
+    return EXIT_OK
+
+
+# ------------------------------------------------------------------
+# Subcommand: publish
+# ------------------------------------------------------------------
+
+
+def cmd_publish(args: argparse.Namespace) -> int:
+    """Upload a packaged tarball to a GitHub release."""
+    use_json = args.json
+    tc, err = _load_target(args.target, use_json)
+    if err is not None:
+        return err
+    assert tc is not None
+
+    kernel = getattr(args, "kernel", None)
+    tag = getattr(args, "tag", None)
+    tarball_path = getattr(args, "tarball", None)
+
+    # Find tarball: explicit path or auto-detect from output/
+    if tarball_path:
+        tarball = Path(tarball_path)
+        if not tarball.exists():
+            return _error(
+                f"Tarball not found: {tarball}", use_json,
+            )
+    else:
+        # Look for existing tarball in output/
+        pattern = f"{args.target}-*.tar.zst"
+        candidates = sorted(tc.output_dir.parent.glob(pattern))
+        if kernel:
+            candidates = [
+                c for c in candidates if kernel in c.name
+            ]
+        if not candidates:
+            return _error(
+                f"No tarball found matching {pattern}",
+                use_json,
+                hint=f"Run 'ltvm package {args.target}' first",
+            )
+        tarball = candidates[-1]  # newest
+
+    if not use_json:
+        print(f"Publishing {tarball.name}...")
+
+    # Generate tag if not provided
+    if not tag:
+        tag = tarball.stem.replace(".tar", "")
+        # Clean up double extensions
+        for ext in (".zst", ".gz"):
+            tag = tag.removesuffix(ext)
+
+    # Create release + upload via gh CLI
+    if not use_json:
+        print(f"  Tag: {tag}")
+        print(f"  Tarball: {tarball}")
+        print(f"  Size: {tarball.stat().st_size / (1024*1024):.0f} MB")
+
+    # Create release (ok if it already exists)
+    subprocess.run(
+        [
+            "gh", "release", "create", tag,
+            "--repo", GITHUB_REPO,
+            "--title", tag,
+            "--notes", f"Pre-built artifacts for {args.target}",
+        ],
+        capture_output=True,
+    )
+
+    # Upload asset
+    r = subprocess.run(
+        [
+            "gh", "release", "upload", tag,
+            str(tarball),
+            "--repo", GITHUB_REPO,
+            "--clobber",
+        ],
+    )
+    if r.returncode != 0:
+        return _error(
+            f"Upload failed (rc={r.returncode})", use_json,
+            hint="Check 'gh auth status' for credentials",
+        )
+
+    url = (
+        f"https://github.com/{GITHUB_REPO}"
+        f"/releases/tag/{tag}"
+    )
+    if not use_json:
+        print(f"  Published: {url}")
+
+    result = {
+        "target": args.target,
+        "tag": tag,
+        "tarball": str(tarball),
+        "url": url,
+    }
     _output(result, use_json)
     return EXIT_OK
 
@@ -1194,12 +1370,41 @@ def build_parser() -> argparse.ArgumentParser:
     # -- fetch --
     sp = sub.add_parser(
         "fetch",
-        parents=[common],
-        help="Download a pre-built target package (kernel + image)",
+        parents=[common, kernel_arg],
+        help="Download a pre-built target package "
+        "(default: latest GitHub release)",
     )
     sp.add_argument("target")
-    sp.add_argument("--url", required=True, help="URL of the target tarball")
+    sp.add_argument(
+        "--url",
+        default=None,
+        help="Direct URL (skip GitHub release lookup)",
+    )
+    sp.add_argument(
+        "--release",
+        default="latest",
+        help="GitHub release tag (default: latest)",
+    )
     sp.set_defaults(func=cmd_fetch)
+
+    # -- publish --
+    sp = sub.add_parser(
+        "publish",
+        parents=[common, kernel_arg],
+        help="Upload a packaged tarball to a GitHub release",
+    )
+    sp.add_argument("target")
+    sp.add_argument(
+        "--tag",
+        default=None,
+        help="Release tag (default: derived from tarball name)",
+    )
+    sp.add_argument(
+        "--tarball",
+        default=None,
+        help="Path to tarball (default: auto-detect from output/)",
+    )
+    sp.set_defaults(func=cmd_publish)
 
     # -- install --
     sp = sub.add_parser(
