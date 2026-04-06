@@ -273,12 +273,13 @@ def install_qemu(host: HostInfo, force: bool = False) -> None:
                 f"--prefix={QEMU_PREFIX}",
             ],
             check=True,
+            cwd=srcdir,
         )
 
         ncpu = os.cpu_count() or 4
         log.info("Building (this takes a few minutes)...")
-        _run(["make", f"-j{ncpu}"], check=True)
-        _run(["make", "install"], check=True)
+        _run(["make", f"-j{ncpu}"], check=True, cwd=srcdir)
+        _run(["make", "install"], check=True, cwd=srcdir)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

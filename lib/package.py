@@ -239,7 +239,14 @@ def package_target(
     ]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        # Fallback: try gzip if zstd not available
+        # Fallback: try gzip if zstd not available.
+        # Only fall back if the error looks like missing zstd;
+        # re-raise on other failures (disk full, permission, etc.)
+        if "zstd" not in (r.stderr or "").lower():
+            raise RuntimeError(
+                f"tar --zstd failed (rc={r.returncode}): {r.stderr}"
+            )
+        print("  zstd not available, falling back to gzip")
         tarball = dest_dir / f"{target_name}-{kernel_name}-{version}.tar.gz"
         cmd = [
             "tar",

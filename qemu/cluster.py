@@ -304,11 +304,14 @@ def _deploy_one_node(node_name: str, build: str) -> tuple[str, int, str]:
 
 
 def _write_cluster_local_sh(
-    node_ip: str, local_sh: str, ssh_opts: list[str]
-) -> None:
-    """Write cluster local.sh to the standard test location on a node."""
+    node_name: str, node_ip: str, local_sh: str, ssh_opts: list[str]
+) -> tuple[str, int, str]:
+    """Write cluster local.sh to the standard test location on a node.
+
+    Returns (node_name, returncode, output).
+    """
     cfg_path = "/usr/lib64/lustre/tests/cfg/local.sh"
-    subprocess.run(
+    r = subprocess.run(
         ["sshpass", "-p", "initial0", "ssh"]
         + ssh_opts
         + [
@@ -320,6 +323,10 @@ def _write_cluster_local_sh(
         text=True,
         timeout=10,
     )
+    combined = r.stdout
+    if r.stderr:
+        combined = combined + r.stderr if combined else r.stderr
+    return node_name, r.returncode, combined.rstrip("\n")
 
 
 def cmd_cluster_deploy(args: argparse.Namespace) -> None:
@@ -343,7 +350,6 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
             for node in nodes
         }
         for future in as_completed(futures):
-            node = futures[future]
             name, rc, output = future.result()
             if rc != 0:
                 print(f"\n--- {name}: FAILED (rc={rc}) ---\n{output}")
@@ -367,10 +373,29 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
         "-o",
         "LogLevel=ERROR",
     ]
-    for node in nodes:
-        vm = VMInfo.load(node.name)
-        _write_cluster_local_sh(vm.ip, local_sh, ssh_opts)
-        print(f"  {node.name}: local.sh written")
+    node_ips = {node.name: VMInfo.load(node.name).ip for node in nodes}
+    failed_sh = []
+    with ThreadPoolExecutor(max_workers=len(nodes)) as executor:
+        futures = {
+            executor.submit(
+                _write_cluster_local_sh,
+                node.name,
+                node_ips[node.name],
+                local_sh,
+                ssh_opts,
+            ): node
+            for node in nodes
+        }
+        for future in as_completed(futures):
+            name, rc, output = future.result()
+            if rc != 0:
+                print(f"\n--- {name}: local.sh FAILED (rc={rc}) ---\n{output}")
+                failed_sh.append(name)
+            else:
+                print(f"  {name}: local.sh written")
+
+    if failed_sh:
+        die(f"local.sh distribution failed for: {', '.join(failed_sh)}")
 
     if args.mount:
         print("=== Mounting Lustre filesystem ===")

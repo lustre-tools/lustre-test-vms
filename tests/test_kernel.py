@@ -61,10 +61,15 @@ class TestShellVar:
     def test_strips_whitespace(self) -> None:
         assert _shell_var("FOO=bar   ", "FOO") == "bar"
 
-    def test_skips_shell_expansions(self) -> None:
-        """Variables with ${} expansions should return None."""
+    def test_resolves_shell_expansions(self) -> None:
+        """Variables with ${} expansions are resolved from the same file."""
+        text = 'lnxmaj="5.14.0"\nlnxrel="611.el9"\nSRPM="kernel-${lnxmaj}-${lnxrel}.src.rpm"'
+        assert _shell_var(text, "SRPM") == "kernel-5.14.0-611.el9.src.rpm"
+
+    def test_unresolvable_expansion_kept(self) -> None:
+        """Expansions referencing undefined vars are kept as-is."""
         text = 'SRPM="kernel-${lnxmaj}-${lnxrel}.src.rpm"'
-        assert _shell_var(text, "SRPM") is None
+        assert _shell_var(text, "SRPM") == "kernel-${lnxmaj}-${lnxrel}.src.rpm"
 
 
 class TestParseLustreTarget:

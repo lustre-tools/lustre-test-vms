@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -154,19 +155,22 @@ def _export_to_ext4(container_tag: str, image_path: Path) -> Path:
         # our uid, and mke2fs -d bakes that into the ext4.
         # podman runs OUTSIDE fakeroot (it checks real uid),
         # tar + mke2fs run INSIDE fakeroot.
+        qcid = shlex.quote(container_id)
+        qtmp = shlex.quote(tmpdir)
+        qimg = shlex.quote(tmpfile)
         _run(
             [
                 "bash",
                 "-c",
-                f"podman export {container_id} "
+                f"podman export {qcid} "
                 f"| fakeroot bash -c '"
-                f"tar -C {tmpdir} -xf - --exclude=dev/* "
-                f"&& mkdir -p {tmpdir}/dev/pts {tmpdir}/dev/shm "
-                f"{tmpdir}/dev/mqueue "
-                f"&& find {tmpdir} ! -readable -exec "
+                f"tar -C {qtmp} -xf - --exclude=dev/* "
+                f"&& mkdir -p {qtmp}/dev/pts {qtmp}/dev/shm "
+                f"{qtmp}/dev/mqueue "
+                f"&& find {qtmp} ! -readable -exec "
                 f"chmod u+r {{}} + 2>/dev/null; "
-                f"mke2fs -t ext4 -d {tmpdir} -b 4096 "
-                f"-L rootfs {tmpfile} {_IMAGE_SIZE_MB}M'",
+                f"mke2fs -t ext4 -d {qtmp} -b 4096 "
+                f"-L rootfs {qimg} {_IMAGE_SIZE_MB}M'",
             ],
             capture_output=False,
         )
