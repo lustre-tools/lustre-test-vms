@@ -235,101 +235,36 @@ if $DEPLOY_MODULES; then
 fi
 
 # --- Userspace, libraries, and test framework ---
-# If a staging tree exists (from `make install DESTDIR=.staging`),
-# rsync it wholesale -- this is the preferred path because make
-# install already knows the correct layout.  Otherwise fall back
-# to file-by-file rsync from the build tree.
+# Require staging tree from `make install DESTDIR=.staging`.
+# ltvm build-lustre creates this automatically.
 STAGING="${BUILD_DIR}/.staging"
 
-if [[ -d "${STAGING}/usr" ]]; then
-    # Staging tree exists -- rsync the entire installed layout.
-    if $DEPLOY_USERSPACE || $DEPLOY_TESTS; then
-	echo "--- Syncing from staging tree..."
-	# Rsync only /usr/ -- not /, which would clobber FHS symlinks
-	# (/lib -> /usr/lib, /sbin -> /usr/sbin) on EL systems.
-	$SSHPASS rsync -az --force -e "ssh ${SSH_OPTS}" \
-		"${STAGING}/usr/" "${REMOTE}:/usr/" \
-		--exclude='*.la' --exclude='*.a' \
-		--exclude='include/' --exclude='share/man/' \
-		--exclude='lib/modules/'
-	# mount.lustre goes to /sbin on the staging tree; copy to /usr/sbin
-	# (which is /sbin via symlink on EL).
-	if [[ -f "${STAGING}/sbin/mount.lustre" ]]; then
-		$SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-			"${STAGING}/sbin/mount.lustre" "${REMOTE}:/usr/sbin/"
-	fi
-	# mount.lustre_tgt symlink (server mount helper, checks argv[0])
-	$SSHPASS ssh $SSH_OPTS ${REMOTE} \
-		"ln -sf /usr/sbin/mount.lustre /usr/sbin/mount.lustre_tgt 2>/dev/null || true"
-	$SSHPASS ssh $SSH_OPTS ${REMOTE} "ldconfig"
+if [[ ! -d "${STAGING}/usr" ]]; then
+    echo "ERROR: No staging tree at ${STAGING}/usr"
+    echo "  Run: ltvm build-lustre <target> --lustre-tree ${BUILD_DIR}"
+    echo "  Or:  make install DESTDIR=${BUILD_DIR}/.staging"
+    exit 1
+fi
+
+if $DEPLOY_USERSPACE || $DEPLOY_TESTS; then
+    echo "--- Syncing from staging tree..."
+    # Rsync only /usr/ -- not /, which would clobber FHS symlinks
+    # (/lib -> /usr/lib, /sbin -> /usr/sbin) on EL systems.
+    $SSHPASS rsync -az --force -e "ssh ${SSH_OPTS}" \
+	    "${STAGING}/usr/" "${REMOTE}:/usr/" \
+	    --exclude='*.la' --exclude='*.a' \
+	    --exclude='include/' --exclude='share/man/' \
+	    --exclude='lib/modules/'
+    # mount.lustre goes to /sbin on the staging tree; copy to /usr/sbin
+    # (which is /sbin via symlink on EL).
+    if [[ -f "${STAGING}/sbin/mount.lustre" ]]; then
+	    $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
+		    "${STAGING}/sbin/mount.lustre" "${REMOTE}:/usr/sbin/"
     fi
-else
-    # No staging tree -- fall back to file-by-file rsync.
-    if $DEPLOY_USERSPACE; then
-	LIBDIR="/usr/lib64"
-	[[ "${VM_OS_ID}" == "ubuntu" ]] && LIBDIR="/usr/lib"
-	echo "--- Syncing shared libraries..."
-	$SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p ${LIBDIR}"
-
-	$SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-		"${BUILD_DIR}/lustre/utils/.libs/liblustreapi.so"* \
-		"${REMOTE}:${LIBDIR}/"
-	$SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-		"${BUILD_DIR}/lnet/utils/lnetconfig/.libs/liblnetconfig.so"* \
-		"${REMOTE}:${LIBDIR}/"
-	$SSHPASS ssh $SSH_OPTS ${REMOTE} "ldconfig"
-
-	echo "--- Syncing userspace binaries..."
-	$SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p /usr/sbin /usr/bin"
-
-	for bin in lctl mkfs.lustre mount.lustre tunefs.lustre; do
-		src="${BUILD_DIR}/lustre/utils/.libs/${bin}"
-		[[ -f "${src}" ]] && $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-			"${src}" "${REMOTE}:/usr/sbin/"
-	done
-
-	# mount helper .so plugins -> /usr/lib64/lustre/ (where mkfs.lustre dlopen()s)
-	$SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p ${LIBDIR}/lustre"
-	for so in mount_osd_ldiskfs.so mount_osd_wbcfs.so; do
-		src="${BUILD_DIR}/lustre/utils/.libs/${so}"
-		[[ -f "${src}" ]] || src="${BUILD_DIR}/lustre/utils/${so}"
-		[[ -f "${src}" ]] && $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-			"${src}" "${REMOTE}:${LIBDIR}/lustre/"
-	done
-
-	for bin in lfs llog_reader lustre_rsync lhsmtool_posix; do
-		src="${BUILD_DIR}/lustre/utils/.libs/${bin}"
-		[[ -f "${src}" ]] && $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-			"${src}" "${REMOTE}:/usr/bin/"
-	done
-
-	LNETCTL="${BUILD_DIR}/lnet/utils/.libs/lnetctl"
-	[[ -f "${LNETCTL}" ]] && $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-		"${LNETCTL}" "${REMOTE}:/usr/sbin/"
-
-	for script in \
-		llstat llobdstat ll_decode_filter_fid \
-		ll_decode_linkea llverdev llverfs; do
-		src="${BUILD_DIR}/lustre/utils/${script}"
-		[[ -f "${src}" ]] && $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-			"${src}" "${REMOTE}:/usr/bin/"
-	done
-    fi
-
-    if $DEPLOY_TESTS; then
-	LUSTRE_DIR="$(dirname "${TESTDIR}")"
-	echo "--- Syncing test framework..."
-	$SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p ${TESTDIR}"
-	$SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-		"${BUILD_DIR}/lustre/tests/" \
-		"${REMOTE}:${TESTDIR}/" \
-		--exclude='*.o' --exclude='*.lo' --exclude='.libs' --exclude='.deps'
-	$SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p ${LUSTRE_DIR}/scripts"
-	$SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-		"${BUILD_DIR}/lustre/scripts/" \
-		"${REMOTE}:${LUSTRE_DIR}/scripts/" \
-		--exclude='*.o' --exclude='*.lo' --exclude='.libs' --exclude='.deps'
-    fi
+    # mount.lustre_tgt symlink (server mount helper, checks argv[0])
+    $SSHPASS ssh $SSH_OPTS ${REMOTE} \
+	    "ln -sf /usr/sbin/mount.lustre /usr/sbin/mount.lustre_tgt 2>/dev/null || true"
+    $SSHPASS ssh $SSH_OPTS ${REMOTE} "ldconfig"
 fi
 
 echo "=== Deploy complete ==="
