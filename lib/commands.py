@@ -984,7 +984,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     # Auto-detect target from VM metadata if not specified
     if not target:
         try:
-            res = vmctl.vm_status(args.vm)
+            res = vmctl.vm_status(args.vm, json_output=True)
             if res["ok"]:
                 import json as _json
                 status = _json.loads(res["output"])
