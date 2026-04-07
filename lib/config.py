@@ -229,6 +229,13 @@ class TargetConfig:
             h.update(self._hash_package_lists("base", "test", "debug").encode())
             if self.server:
                 h.update(self._hash_package_lists("server").encode())
+            # Hash all common/ files (scripts, rc.local, etc.) that
+            # get COPY'd into the image
+            common_dir = TARGETS_DIR / "common"
+            if common_dir.is_dir():
+                for f in sorted(common_dir.iterdir()):
+                    if f.is_file():
+                        h.update(f.read_bytes())
 
         return h.hexdigest()[:16]
 

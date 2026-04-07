@@ -20,8 +20,9 @@ cat > /etc/fstab <<'EOF'
 EOF
 
 # resolv.conf: host bridge acts as DNS (dnsmasq on 192.168.100.1)
-# Remove symlink first if it exists (Ubuntu uses systemd-resolved)
-rm -f /etc/resolv.conf
+# Remove symlink first if it exists (Ubuntu uses systemd-resolved).
+# In rootless podman, /etc/resolv.conf is bind-mounted -- truncate instead.
+rm -f /etc/resolv.conf 2>/dev/null || truncate -s 0 /etc/resolv.conf
 cat > /etc/resolv.conf <<'EOF'
 nameserver 192.168.100.1
 nameserver 8.8.8.8
