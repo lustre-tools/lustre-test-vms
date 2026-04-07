@@ -23,6 +23,7 @@ SERVER_ONLY=false
 DEPLOY_MODULES=true
 DEPLOY_USERSPACE=true
 DEPLOY_TESTS=true
+OS_FAMILY=""  # rhel or debian — passed from ltvm, auto-detected if empty
 
 usage() {
     cat <<EOF
@@ -49,6 +50,7 @@ while [[ $# -gt 0 ]]; do
         --server-only)     SERVER_ONLY=true; shift;;
         --userspace-only)  DEPLOY_MODULES=false; DEPLOY_TESTS=false; shift;;
         --tests-only)      DEPLOY_MODULES=false; DEPLOY_USERSPACE=false; shift;;
+        --os-family)       OS_FAMILY="$2"; shift 2;;
         -h|--help)         usage;;
         *)                 echo "Unknown option: $1"; usage;;
     esac
@@ -83,21 +85,29 @@ $SSHPASS ssh $SSH_OPTS -o ConnectTimeout=2 ${REMOTE} true 2>/dev/null || {
     exit 1
 }
 
+[[ -z "${OS_FAMILY}" ]] && { echo "ERROR: --os-family required (rhel or debian)"; exit 1; }
+
+# Set paths based on OS family
+if [[ "${OS_FAMILY}" == "debian" ]]; then
+    LIBDIR="/usr/lib"
+    PKG_CMD="apt-get install -y"
+else
+    LIBDIR="/usr/lib64"
+    PKG_CMD="dnf install -y -q"
+fi
+TESTDIR="${LIBDIR}/lustre/tests"
+LUSTRE_DIR="${LIBDIR}/lustre"
+
 # Ensure rsync is available on the VM
 $SSHPASS ssh $SSH_OPTS ${REMOTE} "which rsync" &>/dev/null || {
     echo "--- Installing rsync on VM..."
-    VM_OS_ID=$($SSHPASS ssh $SSH_OPTS ${REMOTE} '. /etc/os-release; echo $ID')
-    [[ -z "${VM_OS_ID}" ]] && { echo "ERROR: could not detect VM OS"; exit 1; }
-    if [[ "${VM_OS_ID}" == "ubuntu" ]]; then
-        $SSHPASS ssh $SSH_OPTS ${REMOTE} "apt-get install -y rsync" 2>&1 | tail -1
-    else
-        $SSHPASS ssh $SSH_OPTS ${REMOTE} "dnf install -y -q rsync" 2>&1 | tail -1
-    fi
+    $SSHPASS ssh $SSH_OPTS ${REMOTE} "${PKG_CMD} rsync" 2>&1 | tail -1
 }
 
 # Get kernel version on the VM
 KVER=$($SSHPASS ssh $SSH_OPTS ${REMOTE} uname -r)
 echo "    VM kernel: ${KVER}"
+echo "    VM OS family: ${OS_FAMILY}"
 
 # Check that Lustre modules match the VM kernel
 if ${DEPLOY_MODULES}; then
@@ -116,21 +126,6 @@ fi
 
 MODDIR="/lib/modules/${KVER}/extra/lustre"
 
-# Detect VM OS -- use ID field (rocky vs ubuntu) and VERSION_ID
-VM_OS_ID=$($SSHPASS ssh $SSH_OPTS ${REMOTE} '. /etc/os-release; echo $ID')
-[[ -z "${VM_OS_ID}" ]] && { echo "ERROR: could not detect VM OS"; exit 1; }
-VM_OS_VER=$($SSHPASS ssh $SSH_OPTS ${REMOTE} '. /etc/os-release; echo ${VERSION_ID%%.*}')
-[[ -z "${VM_OS_VER}" ]] && VM_OS_VER="unknown"
-
-# Set TESTDIR based on OS (Ubuntu uses /usr/lib, Rocky uses /usr/lib64)
-if [[ "${VM_OS_ID}" == "ubuntu" ]]; then
-	TESTDIR="/usr/lib/lustre/tests"
-else
-	TESTDIR="/usr/lib64/lustre/tests"
-fi
-
-echo "    VM OS: ${VM_OS_ID} ${VM_OS_VER}"
-
 # --- Clean up existing Lustre state ---
 echo "--- Cleaning existing Lustre state..."
 
@@ -139,7 +134,7 @@ $SSHPASS ssh $SSH_OPTS ${REMOTE} '
 	if mount -t lustre 2>/dev/null | grep -q lustre; then
 		echo "  Unmounting Lustre..."
 		cd /tmp
-		bash /usr/lib64/lustre/tests/llmountcleanup.sh 2>/dev/null || true
+		bash '"${TESTDIR}"'/llmountcleanup.sh 2>/dev/null || true
 		umount -a -t lustre 2>/dev/null || true
 	fi
 ' 2>/dev/null || true
@@ -344,8 +339,6 @@ if $DO_MOUNT; then
         LLMOUNT_ARGS=""
         $SERVER_ONLY && LLMOUNT_ARGS="--server-only"
 
-        LUSTRE_DIR="/usr/lib64/lustre"
-        [[ "${VM_OS_ID}" == "ubuntu" ]] && LUSTRE_DIR="/usr/lib/lustre"
         MOUNT_CMD="cd ${TESTDIR} && LUSTRE=${LUSTRE_DIR} bash llmount.sh ${LLMOUNT_ARGS}"
 
         if ! $SSHPASS ssh $SSH_OPTS ${REMOTE} "${MOUNT_CMD}" 2>&1; then

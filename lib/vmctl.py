@@ -179,6 +179,7 @@ def deploy(
     build_path: str | Path = ".",
     mount: bool = False,
     kernel_modules: str | Path | None = None,
+    os_family: str = "rhel",
 ) -> RunResult:
     """Deploy Lustre to a VM.
 
@@ -198,7 +199,8 @@ def deploy(
             if not res["ok"]:
                 return res
 
-    cmd = [DEPLOY_SH, "--vm", vm_name, "--build", build_path]
+    cmd = [DEPLOY_SH, "--vm", vm_name, "--build", build_path,
+           "--os-family", os_family]
     if mount:
         cmd.append("--mount")
     return _run(cmd, timeout=300)

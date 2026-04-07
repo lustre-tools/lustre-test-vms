@@ -1043,6 +1043,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         str(build_path),
         mount=args.mount,
         kernel_modules=kernel_modules,
+        os_family=tc.os_family,
     )
     return _runtime_result(res, use_json)
 

@@ -127,7 +127,7 @@ def _vm_destroy(vm_name: str) -> None:
 
 
 def _deploy_lustre(
-    vm_name: str, lustre_tree: Path
+    vm_name: str, lustre_tree: Path, os_family: str = "rhel"
 ) -> subprocess.CompletedProcess[str]:
     """Deploy Lustre to a VM."""
     result = subprocess.run(
@@ -138,6 +138,8 @@ def _deploy_lustre(
             vm_name,
             "--build",
             str(lustre_tree),
+            "--os-family",
+            os_family,
             "--mount",
         ],
         capture_output=True,
