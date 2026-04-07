@@ -174,14 +174,12 @@ if $DEPLOY_MODULES; then
     # Find ltvm output directory.  Try LTVM_DIR env, then common locations.
     _ltvm_dir="${LTVM_DIR:-}"
     if [[ -z "${_ltvm_dir}" ]]; then
+        # Try: script's own repo dir, then SUDO_USER's home
         for _d in \
             "$(dirname "$(dirname "$(readlink -f "$0")")")" \
             "${HOME}/lustre-test-vms-v2" \
-            /home/*/lustre-test-vms-v2; do
-            if [[ -d "${_d}/output" ]]; then
-                _ltvm_dir="${_d}"
-                break
-            fi
+            "$(getent passwd "${SUDO_USER:-}" 2>/dev/null | cut -d: -f6)/lustre-test-vms-v2"; do
+            [[ -n "${_d}" ]] && [[ -d "${_d}/output" ]] && { _ltvm_dir="${_d}"; break; }
         done
     fi
     HAS_KERNEL_DIR=$($SSHPASS ssh $SSH_OPTS ${REMOTE} \

@@ -977,9 +977,24 @@ def cmd_vm(args: argparse.Namespace) -> int:
 
 def cmd_deploy(args: argparse.Namespace) -> int:
     use_json = args.json
-    target = getattr(args, "target", "rocky9")
+    target = getattr(args, "target", None)
     kernel = getattr(args, "kernel", None)
     ltvm_root = Path(__file__).parent.parent
+
+    # Auto-detect target from VM metadata if not specified
+    if not target:
+        try:
+            res = vmctl.vm_status(args.vm)
+            if res["ok"]:
+                import json as _json
+                status = _json.loads(res["output"])
+                target = status.get("os_id") or None
+                if target and not use_json:
+                    print(f"  Auto-detected target: {target}")
+        except Exception:
+            pass
+        if not target:
+            target = "rocky9"
 
     # Resolve kernel name for path lookups
     try:

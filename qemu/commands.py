@@ -90,14 +90,8 @@ def cmd_create(args: argparse.Namespace) -> None:
     if args.mem == 2048 and os_arts.default_mem > 2048:
         args.mem = os_arts.default_mem
 
-    base_name = Path(image).name if image else "rocky9-base.ext4"
-    os_id = (
-        "ubuntu24"
-        if "ubuntu" in base_name
-        else "rocky8"
-        if "rocky8" in base_name
-        else "rocky9"
-    )
+    base_name = Path(image).name
+    os_id = os_target
 
     vm = VMInfo(
         name=name,

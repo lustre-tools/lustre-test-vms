@@ -219,6 +219,12 @@ class TargetConfig:
             if dockerfile.exists():
                 h.update(dockerfile.read_bytes())
             h.update(self._hash_package_lists("dev").encode())
+            # Hash common/ files that get COPY'd into the container
+            common_dir = TARGETS_DIR / "common"
+            if common_dir.is_dir():
+                for f in sorted(common_dir.iterdir()):
+                    if f.is_file():
+                        h.update(f.read_bytes())
 
         elif artifact == "kernel":
             h.update(self.resolve_kernel(kernel).encode())
