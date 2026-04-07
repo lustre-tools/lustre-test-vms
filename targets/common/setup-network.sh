@@ -19,14 +19,9 @@ cat > /etc/fstab <<'EOF'
 /dev/vda  /  ext4  defaults,noatime  0 1
 EOF
 
-# resolv.conf: host bridge acts as DNS (dnsmasq on 192.168.100.1)
-# Remove symlink first if it exists (Ubuntu uses systemd-resolved).
-# In rootless podman, /etc/resolv.conf is bind-mounted -- truncate instead.
-rm -f /etc/resolv.conf 2>/dev/null || truncate -s 0 /etc/resolv.conf
-cat > /etc/resolv.conf <<'EOF'
-nameserver 192.168.100.1
-nameserver 8.8.8.8
-EOF
+# resolv.conf: written at boot by rc.local (reads fc_ip/fc_gw from
+# kernel cmdline). No need to set it here -- during container builds
+# /etc/resolv.conf is a bind mount that can't be replaced anyway.
 
 # Disable NetworkManager auto-config (rc.local handles it)
 mkdir -p /etc/NetworkManager/conf.d

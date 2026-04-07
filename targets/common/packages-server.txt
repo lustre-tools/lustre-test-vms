@@ -14,6 +14,7 @@ fuse-libs
 # Library deps for Lustre userspace
 libmount-devel
 libyaml-devel
+libnl3-devel
 libaio-devel
 json-c-devel
 

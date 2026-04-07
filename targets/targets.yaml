@@ -59,12 +59,12 @@ targets:
     os_version: "10.1"
     container_image: quay.io/rockylinux/rockylinux:10.1
     status: working
-    srpm_url: "https://dl.rockylinux.org/pub/rocky/10/BaseOS/source/tree/Packages/k"
+    srpm_url: "https://dl.rockylinux.org/vault/rocky/10.0/BaseOS/source/tree/Packages/k"
     kernels:
-      default: 6.12-rhel10.1
+      default: 6.12-rhel10.0
       available:
-        - 6.12-rhel10.1
         - 6.12-rhel10.0
+        - 6.12-rhel10.1
       config:
         CONFIG_XEN_PVH: "y"
 
@@ -76,9 +76,11 @@ targets:
     server: false
     status: experimental
     kernel_deb_source: linux-source-6.8.0
+    configure_args:
+      - "--with-o2ib=no"
     kernels:
       default: 6.8-ubuntu2404
       available:
         - 6.8-ubuntu2404
       config:
-        CONFIG_XEN_PVH: "y"
+        CONFIG_PVH: "y"

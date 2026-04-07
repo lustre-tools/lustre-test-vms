@@ -382,7 +382,7 @@ def setup_network(host: HostInfo, subnet: str = DEFAULT_SUBNET) -> None:
 
 
 def install_scripts(host: HostInfo) -> None:
-    """Install vm.py, deploy-lustre.sh, and dk-filter."""
+    """Install vm.py, deploy-lustre.sh, dk-filter, and qemu package."""
     log.info("Installing vm.py and deploy-lustre.sh")
 
     for d in ("overlays", "sockets", "kernel", "images"):

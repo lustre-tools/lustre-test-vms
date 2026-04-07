@@ -108,6 +108,12 @@ class TargetConfig:
         return str(v) if v is not None else None
 
     @property
+    def configure_args(self) -> list[str]:
+        """Extra configure args specific to this target (e.g. --with-o2ib=no)."""
+        v = self._data.get("configure_args", [])
+        return list(v)
+
+    @property
     def root_password(self) -> str:
         """Root password for VM SSH access."""
         return str(self._data.get("root_password", "initial0"))

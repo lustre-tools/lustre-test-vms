@@ -21,10 +21,11 @@ RUN apt-get update && apt-get install -y \
 # Lustre build dependencies (autogen + configure + make)
 RUN apt-get update && apt-get install -y \
         autoconf automake libtool git patch \
-        libyaml-dev libnl-3-dev libmount-dev \
+        libyaml-dev libnl-3-dev libnl-genl-3-dev libmount-dev \
         libselinux1-dev zlib1g-dev \
         texinfo pkg-config \
         libkeyutils-dev libfuse-dev \
+        libjson-c-dev libaio-dev \
     && apt-get install -y nasm 2>/dev/null || true \
     && rm -rf /var/lib/apt/lists/*
 

@@ -26,8 +26,12 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Default image size before resize2fs shrink (4 GiB)
-_IMAGE_SIZE_MB = 4096
+# Image sizing:
+#   _IMAGE_SIZE_MB: initial mke2fs allocation (must fit all packages + build outputs)
+#   _IMAGE_HEADROOM_MB: free space added back after resize2fs -M shrink,
+#     so the running VM has room for Lustre modules (~500 MB debug) + runtime data.
+_IMAGE_SIZE_MB = 8192
+_IMAGE_HEADROOM_MB = 4096  # 4 GiB headroom in running VM
 
 
 def _run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -181,8 +185,9 @@ def _export_to_ext4(container_tag: str, image_path: Path) -> Path:
         )
         container_id = None
 
-        # Shrink to minimum size
-        _run(["resize2fs", "-M", tmpfile])
+        # The image is sized to fit all packages plus headroom for
+        # Lustre modules (~500 MiB unstripped) and runtime writes.
+        # No shrink -- the image is used directly at _IMAGE_SIZE_MB.
 
         # Move to final location
         if image_path.exists():

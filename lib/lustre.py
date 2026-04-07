@@ -216,19 +216,43 @@ def _build_in_container(
             "if [ -f Makefile ]; then make distclean 2>/dev/null || true; fi"
         )
 
-    if need_reconf:
-        script_parts.append("bash autogen.sh")
+    if need_reconf or force:
+        # Remove stale .ko files from any previous build before
+        # reconfiguring.  distclean only cleans dirs the current
+        # Makefile knows about, so server .ko files survive a
+        # client-only reconfigure (and vice versa).
+        script_parts.append("find . -name '*.ko' -delete 2>/dev/null || true")
+        # Remove configure residue that poisons re-runs: conftest dirs/files
+        # and the parallel kconftest/lpb directories.
+        script_parts.append(
+            "rm -rf conftest conftest.c conftest.dir _lpb"
+            " kconftest.dir conftest.err 2>/dev/null || true"
+        )
 
-        cfg = "./configure --with-linux=/kernel --disable-gss --disable-crypto"
-        if enable_server:
-            cfg += " --enable-server"
-        else:
-            cfg += " --disable-server"
-        if extra_configure:
-            cfg += " " + " ".join(extra_configure)
-        script_parts.append(cfg)
+    # Always run autogen.sh + configure inside the container.
+    # autogen.sh regenerates aclocal.m4 / libtool stubs with the
+    # container's toolchain (e.g. libtool 2.4.7 on Ubuntu 24.04).
+    # Running autogen.sh on the host (libtool 2.4.6) produces stubs
+    # that are incompatible with the container's libtool 2.4.7,
+    # causing a version mismatch error during the userspace build.
+    # Running configure explicitly (not relying on make's implicit
+    # remade-Makefile rules) prevents make from re-triggering
+    # configure with a different autoconf version mid-build.
+    script_parts.append("bash autogen.sh")
+    cfg = "./configure --with-linux=/kernel --disable-gss --disable-crypto"
+    if enable_server:
+        cfg += " --enable-server"
+    else:
+        cfg += " --disable-server"
+    if extra_configure:
+        cfg += " " + " ".join(extra_configure)
+    script_parts.append(cfg)
 
     script_parts.append(f"make -j{jobs}")
+    # Create a staging tree so deploy-lustre.sh can rsync the
+    # installed layout directly instead of tracking individual files.
+    script_parts.append("rm -rf /lustre/.staging")
+    script_parts.append(f"make install DESTDIR=/lustre/.staging -j{jobs}")
     script = "\n".join(script_parts)
 
     # Use a persistent ccache volume so incremental container
@@ -297,6 +321,15 @@ def _build_on_host(
                 ["make", "distclean"], cwd=str(lustre_tree), capture_output=True
             )
 
+    if need_reconf or force:
+        # Remove stale .ko files from any previous build before
+        # reconfiguring (see container build path for rationale).
+        subprocess.run(
+            ["find", ".", "-name", "*.ko", "-delete"],
+            cwd=str(lustre_tree),
+            capture_output=True,
+        )
+
     if need_reconf:
         _run_step(["bash", "autogen.sh"], lustre_tree, "autogen.sh")
 
@@ -319,6 +352,19 @@ def _build_on_host(
     (lustre_tree / ".ltvm-kernel-path").write_text(str(build_tree) + "\n")
 
     _run_step(["make", f"-j{jobs}"], lustre_tree, f"make -j{jobs}")
+
+    # Create a staging tree so deploy-lustre.sh can rsync the
+    # installed layout directly instead of tracking individual files.
+    staging = lustre_tree / ".staging"
+    if staging.exists():
+        import shutil
+
+        shutil.rmtree(staging)
+    _run_step(
+        ["make", "install", f"DESTDIR={staging}", f"-j{jobs}"],
+        lustre_tree,
+        "make install (staging)",
+    )
 
     ko_files = [
         f for f in lustre_tree.rglob("*.ko") if "kconftest" not in str(f)

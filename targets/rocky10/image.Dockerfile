@@ -26,7 +26,7 @@ RUN cat /tmp/packages-base.txt \
     | grep -v '^\s*#' | grep -v '^\s*$' \
     | grep -v '^kernel-devel$' \
     | sort -u \
-    | xargs dnf -y --allowerasing install \
+    | xargs dnf -y --allowerasing --skip-broken install \
     && dnf clean all
 
 # Copy shared setup scripts

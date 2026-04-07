@@ -26,7 +26,7 @@ class RunResult(TypedDict):
 
 
 VM_SH = "vm.py"
-DEPLOY_SH = "deploy-lustre.sh"
+DEPLOY_SH = "/usr/local/bin/deploy-lustre.sh"
 
 
 def _run(cmd: list[str], timeout: int | None = None) -> RunResult:
@@ -100,6 +100,8 @@ def vm_ensure(
     mem: int = 4096,
     mdt_disks: int = 0,
     ost_disks: int = 0,
+    image: str | Path | None = None,
+    kernel: str | Path | None = None,
 ) -> RunResult:
     """Idempotent create-if-missing, start-if-stopped."""
     cmd = [VM_SH, "ensure", name, "--vcpus", str(vcpus), "--mem", str(mem)]
@@ -107,6 +109,10 @@ def vm_ensure(
         cmd += ["--mdt-disks", str(mdt_disks)]
     if ost_disks:
         cmd += ["--ost-disks", str(ost_disks)]
+    if image:
+        cmd += ["--image", str(image)]
+    if kernel:
+        cmd += ["--kernel", str(kernel)]
     return _run(cmd)
 
 

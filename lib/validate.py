@@ -132,7 +132,7 @@ def _deploy_lustre(
     result = subprocess.run(
         [
             "sudo",
-            "deploy-lustre.sh",
+            "/usr/local/bin/deploy-lustre.sh",
             "--vm",
             vm_name,
             "--build",
@@ -141,10 +141,14 @@ def _deploy_lustre(
         ],
         capture_output=True,
         text=True,
-        timeout=300,
+        timeout=900,  # EL8 in-VM build can take 10+ minutes
     )
     if result.returncode != 0:
-        raise RuntimeError(f"Lustre deploy failed: {result.stderr.strip()}")
+        # deploy-lustre.sh prints errors to stdout; include both streams.
+        out = result.stdout.strip()
+        err = result.stderr.strip()
+        detail = "\n".join(filter(None, [out, err]))
+        raise RuntimeError(f"Lustre deploy failed: {detail}")
     return result
 
 
@@ -250,7 +254,7 @@ def check_vm_kernel_version(
     """Check 3b: uname -r matches expected kernel version."""
     t0 = time.monotonic()
 
-    meta_path = target_config.output_dir / "kernel" / "meta.json"
+    meta_path = target_config.kernel_output_dir() / "meta.json"
     if not meta_path.exists():
         return CheckResult(
             "Kernel version match",
@@ -437,7 +441,8 @@ def validate_target(
     target = target_config.name
     out = target_config.output_dir
     image_path = out / "image" / "base.ext4"
-    kernel_path = out / "kernel" / "vmlinux"
+    kernel_dir = target_config.kernel_output_dir()
+    kernel_path = kernel_dir / "vmlinuz"
 
     # -- Check 1: Artifacts --
     r = check_artifacts(target_config)

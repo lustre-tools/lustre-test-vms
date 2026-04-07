@@ -725,9 +725,13 @@ def cmd_crash_collect(args: argparse.Namespace) -> None:
         die(f"VM '{args.name}' not running")
 
     print("finding vmcore...")
+    # Support both RHEL format (/var/crash/*/vmcore) and
+    # Ubuntu kdump-tools format (/var/crash/<ts>/dump.<ts>)
     r = run_ssh(
         vm.ip,
-        "ls -td /var/crash/*/vmcore 2>/dev/null | head -1",
+        "find /var/crash -maxdepth 3 -type f"
+        r" \( -name 'vmcore' -o -name 'dump.*' \)"
+        " 2>/dev/null | xargs ls -dt 2>/dev/null | head -1",
         timeout=10,
     )
     vmcore_path = r.stdout.strip()
@@ -766,8 +770,11 @@ def cmd_crash_collect(args: argparse.Namespace) -> None:
 
     print(f"vmcore: {local_vmcore}")
 
+    # Use the VM's own kernel path when set (e.g. Ubuntu uses a
+    # target-specific vmlinux), otherwise fall back to the default.
+    vmlinux = Path(vm.kernel) if vm.kernel else KERNEL
+
     if args.mod_dir:
-        vmlinux = str(KERNEL)
         print("running lustre triage...")
         triage_script = Path(
             "/home/admin/llm_code_and_review_tools/"
@@ -784,7 +791,7 @@ def cmd_crash_collect(args: argparse.Namespace) -> None:
                 "--vmcore",
                 str(local_vmcore),
                 "--vmlinux",
-                vmlinux,
+                str(vmlinux),
                 "--mod-dir",
                 args.mod_dir,
                 "--pretty",
@@ -799,7 +806,7 @@ def cmd_crash_collect(args: argparse.Namespace) -> None:
         print(
             f"  crash-tool recipes lustre "
             f"--vmcore {local_vmcore} "
-            f"--vmlinux {KERNEL} "
+            f"--vmlinux {vmlinux} "
             f"--mod-dir <build-tree>"
         )
 

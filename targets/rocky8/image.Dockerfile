@@ -4,8 +4,9 @@ FROM rockylinux:8.10
 # Built via podman, exported to raw ext4 for QEMU microvm use.
 # No kernel installed -- QEMU passes it externally via -kernel.
 
-# Enable EPEL and PowerTools repos (PowerTools = CRB on EL8)
-RUN dnf -y install epel-release dnf-plugins-core \
+# Enable EPEL and PowerTools repos (PowerTools = CRB on EL8).
+# Also install findutils (xargs) + grep -- not present in minimal image.
+RUN dnf -y install epel-release dnf-plugins-core findutils grep \
     && dnf config-manager --set-enabled powertools \
     && dnf clean all
 
@@ -39,6 +40,13 @@ COPY common/rc.local           /etc/rc.d/rc.local
 COPY common/setup-network.sh   /tmp/setup-network.sh
 COPY common/setup-kdump.sh     /tmp/setup-kdump.sh
 COPY common/setup-services.sh  /tmp/setup-services.sh
+
+# EL8-specific: kernel-devel + lustre userspace build deps.
+# On EL8, deploy-lustre.sh builds Lustre userspace inside the VM (EL8 glibc
+# is incompatible with the EL9 host).  kernel-devel is excluded from the
+# common package list (not needed on EL9+), so install it explicitly here.
+RUN dnf -y install kernel-devel libnl3-devel libselinux-devel \
+    && dnf clean all
 
 # Source-built tools: IOR, mdtest, iozone, pjdfstest, FlameGraph, drgn
 RUN bash /tmp/build-tools.sh

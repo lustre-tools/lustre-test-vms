@@ -431,11 +431,11 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
     elif getattr(args, "enable_server", False):
         enable_server = True
 
-    extra = []
+    extra = list(tc.configure_args)
     if getattr(args, "configure", None):
         import shlex
 
-        extra = shlex.split(args.configure)
+        extra += shlex.split(args.configure)
 
     jobs = getattr(args, "jobs", None)
 

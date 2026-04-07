@@ -35,6 +35,15 @@ vim-enhanced
 
 # File transfer / sync
 rsync
+git
+curl
+
+# Build tools (needed by build-tools.sh for IOR, pjdfstest, etc.)
+gcc
+make
+autoconf
+automake
+libtool
 
 # Filesystem tools
 e2fsprogs

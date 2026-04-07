@@ -55,6 +55,7 @@ def launch_qemu(vm: VMInfo) -> None:
 
     boot_args = (
         f"console=ttyS0 reboot=k panic=1 crashkernel=512M "
+        f"net.ifnames=0 biosdevname=0 "
         f"root=/dev/vda rw fc_ip={vm.ip} fc_gw={GATEWAY} "
         f"fc_name={vm.name}"
     )

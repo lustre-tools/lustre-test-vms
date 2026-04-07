@@ -16,6 +16,18 @@ CONFIG_MODULE_SIG_KEY=""
 # that fail with defconfig's Werror default)
 CONFIG_WERROR=n
 
+# Debug info for drgn/crash analysis
+CONFIG_DEBUG_INFO=y
+CONFIG_DEBUG_INFO_DWARF5=y
+
+# initrd compression support (needed for kdump on Debian)
+CONFIG_RD_GZIP=y
+CONFIG_RD_ZSTD=y
+
+# /proc/config.gz (needed for kdump initrd generation)
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
+
 # Built-in drivers for microvm (no initramfs)
 # virtio transport + block + net must be =y for
 # direct kernel boot without initrd

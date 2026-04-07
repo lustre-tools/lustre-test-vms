@@ -128,16 +128,7 @@ else
 	TESTDIR="/usr/lib64/lustre/tests"
 fi
 
-# EL8 userspace cannot run EL9-built binaries (glibc version gap),
-# so we build userspace inside the VM for EL8 only.
-# Rocky 9 and Ubuntu 24 can use host-built binaries.
-BUILD_IN_VM=false
-[[ "${VM_OS_ID}" == "rocky" && "${VM_OS_VER}" == "8" ]] && BUILD_IN_VM=true
-if $BUILD_IN_VM; then
-	echo "    VM OS: EL${VM_OS_VER} -- userspace will be built in-VM"
-else
-	echo "    VM OS: ${VM_OS_ID} ${VM_OS_VER}"
-fi
+echo "    VM OS: ${VM_OS_ID} ${VM_OS_VER}"
 
 # --- Clean up existing Lustre state ---
 echo "--- Cleaning existing Lustre state..."
@@ -176,46 +167,113 @@ if $DEPLOY_MODULES; then
     $SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p ${MODDIR}"
     $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" "${KO_TMPDIR}/" "${REMOTE}:${MODDIR}/"
 
+    # Install kernel base modules if missing in VM.
+    # The ltvm kernel build places them under output/<target>/kernels/*/modules/.
+    # Find the right directory by matching the VM's kernel version.
+    # Find ltvm output directory.  Try LTVM_DIR env, then common locations.
+    _ltvm_dir="${LTVM_DIR:-}"
+    if [[ -z "${_ltvm_dir}" ]]; then
+        for _d in \
+            "$(dirname "$(dirname "$(readlink -f "$0")")")" \
+            "${HOME}/lustre-test-vms-v2" \
+            /home/*/lustre-test-vms-v2; do
+            if [[ -d "${_d}/output" ]]; then
+                _ltvm_dir="${_d}"
+                break
+            fi
+        done
+    fi
+    HAS_KERNEL_DIR=$($SSHPASS ssh $SSH_OPTS ${REMOTE} \
+        "test -d /lib/modules/${KVER}/kernel && echo yes || echo no")
+    if [[ "${HAS_KERNEL_DIR}" == "no" ]]; then
+        KMOD_SRC=""
+        for kdir in "${_ltvm_dir}"/output/*/kernels/*/modules/lib/modules/"${KVER}"; do
+            if [[ -d "${kdir}/kernel" ]]; then
+                KMOD_SRC="${kdir}"
+                break
+            fi
+        done
+        if [[ -n "${KMOD_SRC}" ]]; then
+            echo "--- Installing kernel base modules from ltvm build..."
+            $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" --exclude='build' \
+                "${KMOD_SRC}/" "${REMOTE}:/lib/modules/${KVER}/"
+        else
+            echo "    WARNING: No kernel base modules found for ${KVER}"
+            echo "    depmod may report warnings about missing modules.order"
+        fi
+    fi
+
+    # Install vmlinuz for kdump if missing
+    HAS_VMLINUZ=$($SSHPASS ssh $SSH_OPTS ${REMOTE} \
+        "test -f /boot/vmlinuz-${KVER} && echo yes || echo no")
+    if [[ "${HAS_VMLINUZ}" == "no" && -n "${_ltvm_dir}" ]]; then
+        for _vz in "${_ltvm_dir}"/output/*/kernels/*/vmlinuz; do
+            # Match by checking the kernel version in the same dir
+            _kdir="$(dirname "${_vz}")"
+            if [[ -f "${_kdir}/build-tree/kernel-version" ]]; then
+                _bkver=$(cat "${_kdir}/build-tree/kernel-version")
+                if [[ "${_bkver}" == "${KVER}" ]]; then
+                    echo "--- Installing vmlinuz for kdump..."
+                    $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
+                        "${_vz}" "${REMOTE}:/boot/vmlinuz-${KVER}"
+                    # Pre-load kdump kernel (skip initrd -- direct root mount)
+                    $SSHPASS ssh $SSH_OPTS ${REMOTE} \
+                        "kexec -p /boot/vmlinuz-${KVER} --reuse-cmdline 2>/dev/null" || true
+                    break
+                fi
+            fi
+        done
+    fi
+
+    # Remove autoconf probe .ko files (invalid, confuse depmod)
+    $SSHPASS ssh $SSH_OPTS ${REMOTE} \
+        "find ${MODDIR} -name '*_pc.ko' -delete 2>/dev/null" || true
+
     echo "--- Running depmod..."
     $SSHPASS ssh $SSH_OPTS ${REMOTE} "depmod -a ${KVER}"
 fi
 
-# --- Shared libraries and userspace binaries ---
-if $DEPLOY_USERSPACE; then
-    if $BUILD_IN_VM; then
-	# EL8: host-built binaries use EL9 glibc -- build in-VM instead.
-	# Rsync source (no .git, no build artifacts), configure, and
-	# make install inside the VM.  Kernel modules are still taken from
-	# the host build (they were compiled against the custom EL8 kernel).
-	KVER_DEVEL=$($SSHPASS ssh $SSH_OPTS ${REMOTE} \
-		'ls /usr/src/kernels/ 2>/dev/null | tail -1')
-	[[ -z "${KVER_DEVEL}" ]] && {
-		echo "ERROR: no kernel-devel found in VM; cannot build userspace"
-		exit 1
-	}
-	echo "--- Syncing source for in-VM build..."
-	$SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p ${BUILD_DIR}"
+# --- Userspace, libraries, and test framework ---
+# If a staging tree exists (from `make install DESTDIR=.staging`),
+# rsync it wholesale -- this is the preferred path because make
+# install already knows the correct layout.  Otherwise fall back
+# to file-by-file rsync from the build tree.
+STAGING="${BUILD_DIR}/.staging"
+
+if [[ -d "${STAGING}/usr" ]]; then
+    # Staging tree exists -- rsync the entire installed layout.
+    if $DEPLOY_USERSPACE; then
+	echo "--- Syncing userspace from staging tree..."
 	$SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-		--exclude='.git' \
-		--exclude='*.ko' --exclude='*.o' \
-		--exclude='*.a' --exclude='*.lo' \
-		"${BUILD_DIR}/" "${REMOTE}:${BUILD_DIR}/"
-	echo "--- Building Lustre userspace in-VM (EL8, kernel-devel ${KVER_DEVEL})..."
-	$SSHPASS ssh $SSH_OPTS ${REMOTE} "
-		set -e
-		cd ${BUILD_DIR}
-		# Remove stale kconftest artifacts that poison configure
-		rm -f kconftest.dir/conftest.* \
-		      kconftest.dir/*.o kconftest.dir/*.ko \
-		      kconftest.dir/*.mod* 2>/dev/null || true
-		./configure \
-			--with-linux=/usr/src/kernels/${KVER_DEVEL} \
-			--disable-gss --disable-crypto --disable-server
-		make -j\$(nproc)
-		make install
-		ldconfig
-	"
-    else
+		"${STAGING}/usr/" "${REMOTE}:/usr/" \
+		--exclude='*.la' --exclude='*.a' \
+		--exclude='include/' --exclude='share/man/'
+	$SSHPASS ssh $SSH_OPTS ${REMOTE} "ldconfig"
+    fi
+    if $DEPLOY_TESTS; then
+	echo "--- Syncing test framework from staging tree..."
+	LUSTRE_DIR="$(dirname "${TESTDIR}")"
+	# Tests and scripts are installed under pkglibdir (e.g.
+	# /usr/lib64/lustre/tests/).  The staging tree includes
+	# them, but the main rsync above excludes .o/.la files
+	# which is sufficient.  Sync scripts separately since
+	# make install may place them under share/ or libexec/.
+	$SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p ${TESTDIR}"
+	if [[ -d "${STAGING}${TESTDIR}" ]]; then
+		$SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
+			"${STAGING}${TESTDIR}/" "${REMOTE}:${TESTDIR}/" \
+			--exclude='*.o' --exclude='*.lo'
+	fi
+	$SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p ${LUSTRE_DIR}/scripts"
+	if [[ -d "${STAGING}${LUSTRE_DIR}/scripts" ]]; then
+		$SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
+			"${STAGING}${LUSTRE_DIR}/scripts/" \
+			"${REMOTE}:${LUSTRE_DIR}/scripts/"
+	fi
+    fi
+else
+    # No staging tree -- fall back to file-by-file rsync.
+    if $DEPLOY_USERSPACE; then
 	LIBDIR="/usr/lib64"
 	[[ "${VM_OS_ID}" == "ubuntu" ]] && LIBDIR="/usr/lib"
 	echo "--- Syncing shared libraries..."
@@ -232,7 +290,6 @@ if $DEPLOY_USERSPACE; then
 	echo "--- Syncing userspace binaries..."
 	$SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p /usr/sbin /usr/bin"
 
-	# Core binaries -> /usr/sbin
 	for bin in lctl mkfs.lustre mount.lustre tunefs.lustre; do
 		src="${BUILD_DIR}/lustre/utils/.libs/${bin}"
 		[[ -f "${src}" ]] && $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
@@ -240,7 +297,6 @@ if $DEPLOY_USERSPACE; then
 	done
 
 	# mount helper .so plugins -> /usr/lib64/lustre/ (where mkfs.lustre dlopen()s)
-	# Check .libs/ first, then parent dir for container-built trees.
 	$SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p ${LIBDIR}/lustre"
 	for so in mount_osd_ldiskfs.so mount_osd_wbcfs.so; do
 		src="${BUILD_DIR}/lustre/utils/.libs/${so}"
@@ -249,19 +305,16 @@ if $DEPLOY_USERSPACE; then
 			"${src}" "${REMOTE}:${LIBDIR}/lustre/"
 	done
 
-	# User-facing binaries -> /usr/bin
 	for bin in lfs llog_reader lustre_rsync lhsmtool_posix; do
 		src="${BUILD_DIR}/lustre/utils/.libs/${bin}"
 		[[ -f "${src}" ]] && $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
 			"${src}" "${REMOTE}:/usr/bin/"
 	done
 
-	# lnetctl
 	LNETCTL="${BUILD_DIR}/lnet/utils/.libs/lnetctl"
 	[[ -f "${LNETCTL}" ]] && $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
 		"${LNETCTL}" "${REMOTE}:/usr/sbin/"
 
-	# Shell script utils -> /usr/bin
 	for script in \
 		llstat llobdstat ll_decode_filter_fid \
 		ll_decode_linkea llverdev llverfs; do
@@ -270,22 +323,21 @@ if $DEPLOY_USERSPACE; then
 			"${src}" "${REMOTE}:/usr/bin/"
 	done
     fi
-fi
 
-# --- Test framework (needed for llmount.sh) ---
-if $DEPLOY_TESTS; then
-    echo "--- Syncing test framework..."
-    $SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p /usr/lib64/lustre/tests"
-    $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-        "${BUILD_DIR}/lustre/tests/" \
-        "${REMOTE}:/usr/lib64/lustre/tests/" \
-        --exclude='*.o' --exclude='*.lo' --exclude='.libs' --exclude='.deps'
-
-    $SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p /usr/lib64/lustre/scripts"
-    $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-        "${BUILD_DIR}/lustre/scripts/" \
-        "${REMOTE}:/usr/lib64/lustre/scripts/" \
-        --exclude='*.o' --exclude='*.lo' --exclude='.libs' --exclude='.deps'
+    if $DEPLOY_TESTS; then
+	LUSTRE_DIR="$(dirname "${TESTDIR}")"
+	echo "--- Syncing test framework..."
+	$SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p ${TESTDIR}"
+	$SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
+		"${BUILD_DIR}/lustre/tests/" \
+		"${REMOTE}:${TESTDIR}/" \
+		--exclude='*.o' --exclude='*.lo' --exclude='.libs' --exclude='.deps'
+	$SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p ${LUSTRE_DIR}/scripts"
+	$SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
+		"${BUILD_DIR}/lustre/scripts/" \
+		"${REMOTE}:${LUSTRE_DIR}/scripts/" \
+		--exclude='*.o' --exclude='*.lo' --exclude='.libs' --exclude='.deps'
+    fi
 fi
 
 echo "=== Deploy complete ==="
@@ -354,21 +406,31 @@ fi
 
 # --- Optional: mount Lustre ---
 if $DO_MOUNT; then
-    echo "=== Running llmount.sh ==="
-    LLMOUNT_ARGS=""
-    $SERVER_ONLY && LLMOUNT_ARGS="--server-only"
+    # Check if OSD plugin is present -- client-only builds have no
+    # osd_ldiskfs.ko and cannot run llmount.sh (no server support).
+    HAS_OSD=$($SSHPASS ssh $SSH_OPTS ${REMOTE} \
+        "test -f /lib/modules/${KVER}/extra/lustre/osd_ldiskfs.ko \
+         && echo yes || echo no" 2>/dev/null || echo no)
+    if [[ "${HAS_OSD}" != "yes" ]]; then
+        echo "--- Skipping llmount.sh: client-only build (no osd_ldiskfs.ko)"
+        echo "    To test, mount against a remote Lustre server."
+    else
+        echo "=== Running llmount.sh ==="
+        LLMOUNT_ARGS=""
+        $SERVER_ONLY && LLMOUNT_ARGS="--server-only"
 
-    LUSTRE_DIR="/usr/lib64/lustre"
-    [[ "${VM_OS_ID}" == "ubuntu" ]] && LUSTRE_DIR="/usr/lib/lustre"
-    MOUNT_CMD="cd ${TESTDIR} && LUSTRE=${LUSTRE_DIR} bash llmount.sh ${LLMOUNT_ARGS}"
+        LUSTRE_DIR="/usr/lib64/lustre"
+        [[ "${VM_OS_ID}" == "ubuntu" ]] && LUSTRE_DIR="/usr/lib/lustre"
+        MOUNT_CMD="cd ${TESTDIR} && LUSTRE=${LUSTRE_DIR} bash llmount.sh ${LLMOUNT_ARGS}"
 
-    if ! $SSHPASS ssh $SSH_OPTS ${REMOTE} "${MOUNT_CMD}" 2>&1; then
-        echo "--- llmount.sh failed, retrying after dmsetup remove_all..."
-        $SSHPASS ssh $SSH_OPTS ${REMOTE} "dmsetup remove_all 2>/dev/null" || true
-        $SSHPASS ssh $SSH_OPTS ${REMOTE} "${MOUNT_CMD}"
+        if ! $SSHPASS ssh $SSH_OPTS ${REMOTE} "${MOUNT_CMD}" 2>&1; then
+            echo "--- llmount.sh failed, retrying after dmsetup remove_all..."
+            $SSHPASS ssh $SSH_OPTS ${REMOTE} "dmsetup remove_all 2>/dev/null" || true
+            $SSHPASS ssh $SSH_OPTS ${REMOTE} "${MOUNT_CMD}"
+        fi
+
+        echo "=== Lustre mounted ==="
+        $SSHPASS ssh $SSH_OPTS ${REMOTE} "mount -t lustre" || true
+        $SSHPASS ssh $SSH_OPTS ${REMOTE} "lctl dl" || true
     fi
-
-    echo "=== Lustre mounted ==="
-    $SSHPASS ssh $SSH_OPTS ${REMOTE} "mount -t lustre" || true
-    $SSHPASS ssh $SSH_OPTS ${REMOTE} "lctl dl" || true
 fi

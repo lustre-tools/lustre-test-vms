@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
+from .config import TARGETS_DIR
+
 if TYPE_CHECKING:
     from .config import TargetConfig
 
@@ -199,7 +201,7 @@ def _ensure_container_image(target_config: TargetConfig) -> str:
             tag,
             "-f",
             str(dockerfile),
-            str(target_config.target_dir.parent),
+            str(TARGETS_DIR),
         ],
         check=True,
     )
