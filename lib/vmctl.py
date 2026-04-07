@@ -206,21 +206,20 @@ def deploy(
     return _run(cmd, timeout=300)
 
 
-def lustre_mount(vm_name: str) -> RunResult:
+def lustre_mount(vm_name: str, os_family: str = "rhel") -> RunResult:
     """Start Lustre on a VM that has already been deployed.
 
     Runs llmount.sh from the standard test framework location
-    (/usr/lib64/lustre/tests/) inside the VM.  deploy-lustre.sh
-    always rsyncs the test framework there (not to the host build
-    path), so this is independent of where the build tree lives on
-    the host.
+    inside the VM.  deploy-lustre.sh always rsyncs the test
+    framework there, so this is independent of where the build
+    tree lives on the host.
 
     The VM must have been deployed with deploy() first.
     """
+    libdir = "/usr/lib/lustre" if os_family == "debian" else "/usr/lib64/lustre"
     return vm_exec(
         vm_name,
-        "cd /usr/lib64/lustre/tests"
-        " && LUSTRE=/usr/lib64/lustre bash llmount.sh",
+        f"cd {libdir}/tests && LUSTRE={libdir} bash llmount.sh",
         timeout=180,
     )
 
