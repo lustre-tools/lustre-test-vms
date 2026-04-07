@@ -213,16 +213,83 @@ def _qemu_installed_version() -> str | None:
         return None
 
 
+def _install_qemu_path_profile() -> None:
+    """Ensure /opt/qemu/bin is in PATH for all users."""
+    profile = Path("/etc/profile.d/qemu-vms.sh")
+    profile.write_text(
+        f'# Added by ltvm setup\nexport PATH="{QEMU_PREFIX}/bin:$PATH"\n'
+    )
+
+
+def _system_qemu_has_microvm() -> str | None:
+    """Check if the system-packaged QEMU has microvm support.
+
+    Returns the qemu binary path if microvm is available, else None.
+    """
+    for binary in ("qemu-system-x86_64", "qemu-kvm", "/usr/libexec/qemu-kvm"):
+        path = shutil.which(binary) or binary
+        try:
+            r = _run_quiet([path, "-machine", "help"], check=False)
+            if r.returncode == 0 and "microvm" in r.stdout:
+                return path
+        except (FileNotFoundError, OSError):
+            continue
+    return None
+
+
 def install_qemu(host: HostInfo, force: bool = False) -> None:
-    """Build and install QEMU with microvm support."""
+    """Install QEMU with microvm support.
+
+    Tries the system package first (fast).  Falls back to building
+    from source only if the packaged QEMU lacks microvm support.
+    """
     existing = _qemu_installed_version()
-    if existing == QEMU_VERSION and not force:
+    if existing and not force:
         log.info("QEMU %s already installed", existing)
         return
+
+    # Step 1: check if a system QEMU already has microvm
+    sys_qemu = _system_qemu_has_microvm()
+
+    # Step 2: if not, try installing the system package
+    if not sys_qemu and not force:
+        log.info("Installing system QEMU package...")
+        if host.pkg_mgr == "dnf":
+            _pkg_install(host, "qemu-kvm")
+        elif host.pkg_mgr == "apt":
+            _run(["apt-get", "update", "-qq"], check=False)
+            _pkg_install(host, "qemu-system-x86")
+        sys_qemu = _system_qemu_has_microvm()
+
+    # Step 3: if system QEMU has microvm, symlink it
+    if sys_qemu and not force:
+        QEMU_PREFIX.mkdir(parents=True, exist_ok=True)
+        (QEMU_PREFIX / "bin").mkdir(exist_ok=True)
+        for tool in ("qemu-system-x86_64", "qemu-img"):
+            sys_tool = shutil.which(tool)
+            if sys_tool:
+                link = QEMU_PREFIX / "bin" / tool
+                link.unlink(missing_ok=True)
+                link.symlink_to(sys_tool)
+        ver_r = _run_quiet([sys_qemu, "--version"], check=False)
+        ver_m = re.search(r"version (\d+\.\d+\.\d+)", ver_r.stdout)
+        ver = ver_m.group(1) if ver_m else "unknown"
+        log.info("Using system QEMU %s (%s) -- has microvm", ver, sys_qemu)
+        _install_qemu_path_profile()
+        return
+
+    # Step 4: build from source -- installs to QEMU_PREFIX (/opt/qemu),
+    # does not replace the system QEMU.
+    log.info(
+        "System QEMU lacks microvm support. Building QEMU %s from "
+        "source into %s (will not replace system QEMU).",
+        QEMU_VERSION, QEMU_PREFIX,
+    )
+
     if existing:
         log.info("QEMU %s installed, rebuilding to %s", existing, QEMU_VERSION)
 
-    # Build dependencies
+    # Build from source
     log.info("Installing QEMU build dependencies...")
     if host.pkg_mgr == "dnf":
         _run(["dnf", "install", "-y", "epel-release"], check=False)
@@ -303,11 +370,7 @@ def install_qemu(host: HostInfo, force: bool = False) -> None:
     if "microvm" not in r.stdout:
         raise RuntimeError("QEMU built but microvm machine type not available")
 
-    # Ensure /opt/qemu/bin is in PATH for all users (qemu-img etc.)
-    profile = Path("/etc/profile.d/qemu-vms.sh")
-    profile.write_text(
-        f'# Added by ltvm setup\nexport PATH="{QEMU_PREFIX}/bin:$PATH"\n'
-    )
+    _install_qemu_path_profile()
 
     log.info("QEMU %s installed at %s", QEMU_VERSION, QEMU_PREFIX)
 
