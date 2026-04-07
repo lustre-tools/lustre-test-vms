@@ -326,10 +326,16 @@ def setup_network(host: HostInfo, subnet: str = DEFAULT_SUBNET) -> None:
     if is_wsl2():
         legacy = shutil.which("iptables-legacy")
         if legacy:
-            _run(["update-alternatives", "--set", "iptables", legacy], check=False)
+            _run(
+                ["update-alternatives", "--set", "iptables", legacy],
+                check=False,
+            )
             alt6 = shutil.which("ip6tables-legacy")
             if alt6:
-                _run(["update-alternatives", "--set", "ip6tables", alt6], check=False)
+                _run(
+                    ["update-alternatives", "--set", "ip6tables", alt6],
+                    check=False,
+                )
             log.info("WSL2: using iptables-legacy")
 
     if host.pkg_mgr == "dnf":

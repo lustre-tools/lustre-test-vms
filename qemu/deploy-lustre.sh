@@ -161,7 +161,7 @@ if $DEPLOY_MODULES; then
     echo "--- Syncing kernel modules..."
     KO_TMPDIR=$(mktemp -d)
     trap "rm -rf ${KO_TMPDIR}" EXIT
-    find "${BUILD_DIR}" -name '*.ko' -not -path '*/kconftest*' -exec cp {} "${KO_TMPDIR}/" \;
+    find "${BUILD_DIR}" -name '*.ko' -not -path '*/kconftest*' -not -path '*/.staging/*' -exec cp {} "${KO_TMPDIR}/" \;
     KO_COUNT=$(ls "${KO_TMPDIR}"/*.ko 2>/dev/null | wc -l)
     echo "    ${KO_COUNT} modules"
 
@@ -243,34 +243,25 @@ STAGING="${BUILD_DIR}/.staging"
 
 if [[ -d "${STAGING}/usr" ]]; then
     # Staging tree exists -- rsync the entire installed layout.
-    if $DEPLOY_USERSPACE; then
-	echo "--- Syncing userspace from staging tree..."
-	$SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
+    if $DEPLOY_USERSPACE || $DEPLOY_TESTS; then
+	echo "--- Syncing from staging tree..."
+	# Rsync only /usr/ -- not /, which would clobber FHS symlinks
+	# (/lib -> /usr/lib, /sbin -> /usr/sbin) on EL systems.
+	$SSHPASS rsync -az --force -e "ssh ${SSH_OPTS}" \
 		"${STAGING}/usr/" "${REMOTE}:/usr/" \
 		--exclude='*.la' --exclude='*.a' \
-		--exclude='include/' --exclude='share/man/'
+		--exclude='include/' --exclude='share/man/' \
+		--exclude='lib/modules/'
+	# mount.lustre goes to /sbin on the staging tree; copy to /usr/sbin
+	# (which is /sbin via symlink on EL).
+	if [[ -f "${STAGING}/sbin/mount.lustre" ]]; then
+		$SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
+			"${STAGING}/sbin/mount.lustre" "${REMOTE}:/usr/sbin/"
+	fi
+	# mount.lustre_tgt symlink (server mount helper, checks argv[0])
+	$SSHPASS ssh $SSH_OPTS ${REMOTE} \
+		"ln -sf /usr/sbin/mount.lustre /usr/sbin/mount.lustre_tgt 2>/dev/null || true"
 	$SSHPASS ssh $SSH_OPTS ${REMOTE} "ldconfig"
-    fi
-    if $DEPLOY_TESTS; then
-	echo "--- Syncing test framework from staging tree..."
-	LUSTRE_DIR="$(dirname "${TESTDIR}")"
-	# Tests and scripts are installed under pkglibdir (e.g.
-	# /usr/lib64/lustre/tests/).  The staging tree includes
-	# them, but the main rsync above excludes .o/.la files
-	# which is sufficient.  Sync scripts separately since
-	# make install may place them under share/ or libexec/.
-	$SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p ${TESTDIR}"
-	if [[ -d "${STAGING}${TESTDIR}" ]]; then
-		$SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-			"${STAGING}${TESTDIR}/" "${REMOTE}:${TESTDIR}/" \
-			--exclude='*.o' --exclude='*.lo'
-	fi
-	$SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p ${LUSTRE_DIR}/scripts"
-	if [[ -d "${STAGING}${LUSTRE_DIR}/scripts" ]]; then
-		$SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-			"${STAGING}${LUSTRE_DIR}/scripts/" \
-			"${REMOTE}:${LUSTRE_DIR}/scripts/"
-	fi
     fi
 else
     # No staging tree -- fall back to file-by-file rsync.
