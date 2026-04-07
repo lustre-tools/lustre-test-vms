@@ -327,8 +327,9 @@ def fetch_target(target_name: str, url: str, output_base: str | Path) -> Path:
 
 
 # Default install paths (matching vm.py conventions)
-DEFAULT_KERNEL_DIR = Path("/opt/qemu-vms/kernel")
-DEFAULT_IMAGE_DIR = Path("/opt/qemu-vms/images")
+_VM_DIR = Path(os.environ.get("LTVM_VM_DIR", "/opt/qemu-vms"))
+DEFAULT_KERNEL_DIR = _VM_DIR / "kernel"
+DEFAULT_IMAGE_DIR = _VM_DIR / "images"
 
 
 def install_target(

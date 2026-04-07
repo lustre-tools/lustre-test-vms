@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
 # ── constants ────────────────────────────────────────────
+# Configurable via environment variables; defaults match the
+# standard install layout from `ltvm setup`.
 
-VM_DIR = Path("/opt/qemu-vms")
-QEMU_PREFIX = Path("/opt/qemu")
+VM_DIR = Path(os.environ.get("LTVM_VM_DIR", "/opt/qemu-vms"))
+QEMU_PREFIX = Path(os.environ.get("LTVM_QEMU_PREFIX", "/opt/qemu"))
 QEMU = str(QEMU_PREFIX / "bin" / "qemu-system-x86_64")
 QEMU_IMG = str(QEMU_PREFIX / "bin" / "qemu-img")
 DISK_SIZE_BYTES = 8 * 1024 * 1024 * 1024  # 8 GiB
-BASE_IMAGE = Path("/opt/qemu-vms/images/rocky9-ltvm.ext4")
+BASE_IMAGE = VM_DIR / "images" / "rocky9-ltvm.ext4"
 KERNEL = VM_DIR / "kernel" / "vmlinux"
 IMAGES = VM_DIR / "images"
 KERNELS = VM_DIR / "kernel"

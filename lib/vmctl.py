@@ -14,6 +14,7 @@ build pipeline (runs as user) and the VM engine (runs as root).
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 from typing import TypedDict
@@ -26,7 +27,7 @@ class RunResult(TypedDict):
 
 
 VM_SH = "vm.py"
-DEPLOY_SH = "/usr/local/bin/deploy-lustre.sh"
+DEPLOY_SH = shutil.which("deploy-lustre.sh") or "/usr/local/bin/deploy-lustre.sh"
 
 
 def _run(cmd: list[str], timeout: int | None = None) -> RunResult:

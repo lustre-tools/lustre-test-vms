@@ -27,8 +27,8 @@ log.addHandler(_handler)
 log.propagate = False
 
 QEMU_VERSION = "9.2.2"
-QEMU_PREFIX = Path("/opt/qemu")
-VM_DIR = Path("/opt/qemu-vms")
+QEMU_PREFIX = Path(os.environ.get("LTVM_QEMU_PREFIX", "/opt/qemu"))
+VM_DIR = Path(os.environ.get("LTVM_VM_DIR", "/opt/qemu-vms"))
 DEFAULT_SUBNET = "192.168.100"
 
 # Directory containing qemu/ host-config templates,

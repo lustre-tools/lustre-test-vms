@@ -782,12 +782,16 @@ def cmd_crash_collect(args: argparse.Namespace) -> None:
 
     if args.mod_dir:
         print("running lustre triage...")
-        triage_script = Path(
-            "/home/admin/llm_code_and_review_tools/"
-            "lustre-drgn-tools/lustre_triage.py"
-        )
-        if not triage_script.exists():
-            print(f"triage script not found: {triage_script}")
+        triage_script = None
+        for candidate in (
+            Path.home() / "llm_code_and_review_tools/lustre-drgn-tools/lustre_triage.py",
+            Path(os.environ.get("LTVM_TRIAGE_SCRIPT", "")) if os.environ.get("LTVM_TRIAGE_SCRIPT") else None,
+        ):
+            if candidate and candidate.exists():
+                triage_script = candidate
+                break
+        if not triage_script:
+            print("triage script not found (set LTVM_TRIAGE_SCRIPT or install llm_code_and_review_tools)")
             print(f"vmcore dir: {local_dir}")
             return
         run(
