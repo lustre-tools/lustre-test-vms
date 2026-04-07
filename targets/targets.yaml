@@ -45,7 +45,7 @@ targets:
     os_name: rocky
     os_version: "8.9"
     container_image: rockylinux:8.9
-    server: false    # Lustre master ldiskfs needs fsverity (not in 4.18)
+    server: true     # server builds OK with --force (stale configure was the issue)
     status: working
     srpm_url: "https://dl.rockylinux.org/pub/rocky/8/BaseOS/source/tree/Packages/k"
     kernels:
@@ -59,7 +59,7 @@ targets:
     os_name: rocky
     os_version: "10.1"
     container_image: quay.io/rockylinux/rockylinux:10.1
-    server: false    # Lustre master ldiskfs not yet ported to 6.12 VFS changes
+    server: false    # Lustre ldiskfs.m4 lacks RHEL_RELEASE_NO 101 case; uses 6.12-ml.series instead of 6.12-rhel10.0.series
     default_mem: 4096  # 6.12 kernel + EL10 services need more RAM
     status: working
     srpm_url: "https://dl.rockylinux.org/pub/rocky/10/BaseOS/source/tree/Packages/k"
