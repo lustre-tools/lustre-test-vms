@@ -1,6 +1,11 @@
 #!/bin/bash
-# VM networking init -- reads IP/GW/hostname from kernel cmdline.
+# VM init -- networking + auto-resize root filesystem.
 # QEMU passes fc_ip=, fc_gw=, fc_name= on the kernel command line.
+
+# Grow root filesystem to fill the virtual disk (overlay may be larger
+# than the base image's shrunk ext4).
+ROOT_DEV=$(findmnt -no SOURCE / 2>/dev/null || echo /dev/vda)
+resize2fs "$ROOT_DEV" 2>/dev/null || true
 
 FC_IP=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_ip= | cut -d= -f2)
 FC_GW=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_gw= | cut -d= -f2)

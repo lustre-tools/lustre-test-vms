@@ -239,11 +239,14 @@ if $DEPLOY_USERSPACE; then
 			"${src}" "${REMOTE}:/usr/sbin/"
 	done
 
-	# mount helper .so plugins
+	# mount helper .so plugins -> /usr/lib64/lustre/ (where mkfs.lustre dlopen()s)
+	# Check .libs/ first, then parent dir for container-built trees.
+	$SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p ${LIBDIR}/lustre"
 	for so in mount_osd_ldiskfs.so mount_osd_wbcfs.so; do
 		src="${BUILD_DIR}/lustre/utils/.libs/${so}"
+		[[ -f "${src}" ]] || src="${BUILD_DIR}/lustre/utils/${so}"
 		[[ -f "${src}" ]] && $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-			"${src}" "${REMOTE}:${LIBDIR}/"
+			"${src}" "${REMOTE}:${LIBDIR}/lustre/"
 	done
 
 	# User-facing binaries -> /usr/bin

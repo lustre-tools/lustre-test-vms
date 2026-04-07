@@ -39,13 +39,14 @@ def parse_lustre_target(
 
     Returns dict with keys: lnxmaj, lnxrel, srpm, series.
     """
-    target_file = (
-        Path(lustre_tree)
-        / "lustre/kernel_patches/targets"
-        / f"{lustre_target}.target"
-    )
+    targets_dir = Path(lustre_tree) / "lustre/kernel_patches/targets"
+    target_file = targets_dir / f"{lustre_target}.target"
     if not target_file.exists():
-        raise FileNotFoundError(f"Lustre target file not found: {target_file}")
+        target_file = targets_dir / f"{lustre_target}.target.in"
+    if not target_file.exists():
+        raise FileNotFoundError(
+            f"Lustre target file not found: {targets_dir}/{lustre_target}.target[.in]"
+        )
 
     text = target_file.read_text()
 
@@ -188,6 +189,8 @@ def _ensure_container_image(target_config: TargetConfig) -> str:
     dockerfile = target_config.target_dir / "container.Dockerfile"
 
     log.info("Building container image: %s", tag)
+    # Build context must be targets/ (parent of target_dir) so that
+    # COPY common/... directives in the Dockerfile resolve correctly.
     subprocess.run(
         [
             "podman",
@@ -196,7 +199,7 @@ def _ensure_container_image(target_config: TargetConfig) -> str:
             tag,
             "-f",
             str(dockerfile),
-            str(target_config.target_dir),
+            str(target_config.target_dir.parent),
         ],
         check=True,
     )

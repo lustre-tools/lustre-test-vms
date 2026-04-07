@@ -15,6 +15,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .platform import is_wsl2
+
 log = logging.getLogger(__name__)
 
 # Override the log format for setup output so it
@@ -170,11 +172,23 @@ def check_kvm(require: bool = True) -> bool:
     """Check for /dev/kvm.  Returns True if present."""
     if Path("/dev/kvm").exists():
         return True
-    msg = (
-        "/dev/kvm not found -- VMs require KVM.  "
-        "Check CPU virtualization support and "
-        "nested virt if this is a VM."
-    )
+    if is_wsl2():
+        msg = (
+            "/dev/kvm not found -- KVM is required.\n"
+            "On WSL2, enable nested virtualisation:\n"
+            "  1. From an elevated PowerShell on the Windows host:\n"
+            "       Get-VM  # find your WSL VM name\n"
+            "       Set-VMProcessor -VMName <name>"
+            " -ExposeVirtualizationExtensions $true\n"
+            "  2. wsl --shutdown && restart WSL2\n"
+            "  3. Verify inside WSL2: ls /dev/kvm"
+        )
+    else:
+        msg = (
+            "/dev/kvm not found -- VMs require KVM.  "
+            "Check CPU virtualization support and "
+            "nested virt if this is a VM."
+        )
     if require:
         raise RuntimeError(msg)
     log.warning(msg)
@@ -289,6 +303,12 @@ def install_qemu(host: HostInfo, force: bool = False) -> None:
     if "microvm" not in r.stdout:
         raise RuntimeError("QEMU built but microvm machine type not available")
 
+    # Ensure /opt/qemu/bin is in PATH for all users (qemu-img etc.)
+    profile = Path("/etc/profile.d/qemu-vms.sh")
+    profile.write_text(
+        f'# Added by ltvm setup\nexport PATH="{QEMU_PREFIX}/bin:$PATH"\n'
+    )
+
     log.info("QEMU %s installed at %s", QEMU_VERSION, QEMU_PREFIX)
 
 
@@ -300,6 +320,17 @@ def install_qemu(host: HostInfo, force: bool = False) -> None:
 def setup_network(host: HostInfo, subnet: str = DEFAULT_SUBNET) -> None:
     """Configure fcbr0 bridge, dnsmasq, and NAT."""
     log.info("Configuring network bridge (fcbr0) on %s.0/24", subnet)
+
+    # WSL2: ensure iptables-legacy is used.
+    # iptables-nft can misbehave in WSL2 kernels lacking full nftables support.
+    if is_wsl2():
+        legacy = shutil.which("iptables-legacy")
+        if legacy:
+            _run(["update-alternatives", "--set", "iptables", legacy], check=False)
+            alt6 = shutil.which("ip6tables-legacy")
+            if alt6:
+                _run(["update-alternatives", "--set", "ip6tables", alt6], check=False)
+            log.info("WSL2: using iptables-legacy")
 
     if host.pkg_mgr == "dnf":
         _pkg_install(host, "dnsmasq", "iptables-nft")
@@ -378,6 +409,17 @@ def install_scripts(host: HostInfo) -> None:
         link = Path("/usr/local/bin") / script
         link.unlink(missing_ok=True)
         link.symlink_to(dst)
+
+    # vm.py imports from qemu/ package -- install it alongside
+    qemu_pkg_dst = VM_DIR / "qemu"
+    if QEMU_DIR.is_dir():
+        if qemu_pkg_dst.exists():
+            shutil.rmtree(str(qemu_pkg_dst))
+        shutil.copytree(
+            str(QEMU_DIR),
+            str(qemu_pkg_dst),
+            ignore=shutil.ignore_patterns("host-config"),
+        )
 
     # dk-filter
     dk = QEMU_DIR / "dk-filter"

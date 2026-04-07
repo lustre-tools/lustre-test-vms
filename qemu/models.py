@@ -10,9 +10,11 @@ from pathlib import Path
 # ── constants ────────────────────────────────────────────
 
 VM_DIR = Path("/opt/qemu-vms")
-QEMU = "/opt/qemu/bin/qemu-system-x86_64"
+QEMU_PREFIX = Path("/opt/qemu")
+QEMU = str(QEMU_PREFIX / "bin" / "qemu-system-x86_64")
+QEMU_IMG = str(QEMU_PREFIX / "bin" / "qemu-img")
 DISK_SIZE_BYTES = 8 * 1024 * 1024 * 1024  # 8 GiB
-BASE_IMAGE = Path("/opt/qemu-vms/images/rocky9-base.ext4")
+BASE_IMAGE = Path("/opt/qemu-vms/images/rocky9-ltvm.ext4")
 KERNEL = VM_DIR / "kernel" / "vmlinux"
 OVERLAYS = VM_DIR / "overlays"
 SOCKETS = VM_DIR / "sockets"

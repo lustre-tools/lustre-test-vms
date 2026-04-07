@@ -22,6 +22,7 @@ from .models import (
     KERNEL,
     MARKER,
     OVERLAYS,
+    QEMU_IMG,
     ROOT_PASSWORD,
     SOCKETS,
     SSH_TIMEOUT,
@@ -113,7 +114,7 @@ def cmd_create(args: argparse.Namespace) -> None:
     # Create overlay
     run(
         [
-            "qemu-img",
+            QEMU_IMG,
             "create",
             "-f",
             "qcow2",
@@ -123,6 +124,14 @@ def cmd_create(args: argparse.Namespace) -> None:
             "raw",
             str(vm.overlay_path),
         ],
+        capture_output=True,
+        check=True,
+    )
+
+    # Grow the qcow2 virtual disk so the VM has room for Lustre modules,
+    # logs, etc.  The ext4 filesystem is resized on first boot (rc.local).
+    run(
+        [QEMU_IMG, "resize", str(vm.overlay_path), "8G"],
         capture_output=True,
         check=True,
     )
@@ -807,7 +816,7 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
         print(f"stopping {vm.name} for snapshot...")
         kill_qemu(vm)
 
-    r = run(["qemu-img", "snapshot", "-c", tag, str(vm.overlay_path)])
+    r = run([QEMU_IMG, "snapshot", "-c", tag, str(vm.overlay_path)])
     if r.returncode != 0:
         die(f"snapshot failed: {r.stderr}")
 
@@ -827,7 +836,7 @@ def cmd_restore(args: argparse.Namespace) -> None:
     if not args.tag:
         print(f"snapshots for {vm.name}:")
         run(
-            ["qemu-img", "snapshot", "-l", "-U", str(vm.overlay_path)],
+            [QEMU_IMG, "snapshot", "-l", "-U", str(vm.overlay_path)],
             capture_output=False,
         )
         return
@@ -837,7 +846,7 @@ def cmd_restore(args: argparse.Namespace) -> None:
         kill_qemu(vm)
 
     r = run(
-        ["qemu-img", "snapshot", "-a", args.tag, str(vm.overlay_path)],
+        [QEMU_IMG, "snapshot", "-a", args.tag, str(vm.overlay_path)],
     )
     if r.returncode != 0:
         die(f"restore failed: {r.stderr}")
