@@ -84,9 +84,11 @@ def cmd_create(args: argparse.Namespace) -> None:
     mac = mac_for_name(name)
 
     os_target = getattr(args, "os", "") or "rocky9"
-    os_img, os_kern = resolve_os_artifacts(os_target)
-    image = getattr(args, "image", "") or args.rootfs or str(os_img)
-    kernel = getattr(args, "kernel", "") or str(os_kern)
+    os_arts = resolve_os_artifacts(os_target)
+    image = getattr(args, "image", "") or args.rootfs or str(os_arts.image)
+    kernel = getattr(args, "kernel", "") or str(os_arts.kernel)
+    if args.mem == 2048 and os_arts.default_mem > 2048:
+        args.mem = os_arts.default_mem
 
     base_name = Path(image).name if image else "rocky9-base.ext4"
     os_id = (

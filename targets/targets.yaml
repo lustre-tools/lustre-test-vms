@@ -60,6 +60,7 @@ targets:
     os_version: "10.1"
     container_image: quay.io/rockylinux/rockylinux:10.1
     server: false    # Lustre master ldiskfs not yet ported to 6.12 VFS changes
+    default_mem: 4096  # 6.12 kernel + EL10 services need more RAM
     status: working
     srpm_url: "https://dl.rockylinux.org/pub/rocky/10/BaseOS/source/tree/Packages/k"
     kernels:

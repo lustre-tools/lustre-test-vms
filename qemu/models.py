@@ -25,12 +25,18 @@ _LTVM_ROOT = Path(__file__).resolve().parent.parent
 TARGETS_YAML = _LTVM_ROOT / "targets" / "targets.yaml"
 
 
-def resolve_os_artifacts(os_name: str) -> tuple[Path, Path]:
-    """Return (image, kernel) paths for a target OS name.
+@dataclass
+class OSArtifacts:
+    image: Path
+    kernel: Path
+    default_mem: int = 2048
+
+
+def resolve_os_artifacts(os_name: str) -> OSArtifacts:
+    """Return image, kernel paths and defaults for a target OS.
 
     Reads targets.yaml (from the repo or installed copy) for the
-    default kernel name, then resolves installed paths. Falls back
-    to globbing if targets.yaml isn't available.
+    default kernel name, then resolves installed paths.
     """
     # Image: <os>-ltvm.ext4
     img = IMAGES / f"{os_name}-ltvm.ext4"
@@ -40,15 +46,20 @@ def resolve_os_artifacts(os_name: str) -> tuple[Path, Path]:
             f"Run: ltvm build-image {os_name} && sudo ltvm install {os_name}"
         )
 
-    # Kernel: try targets.yaml first, then glob
+    # Read targets.yaml for kernel suffix and defaults
     kern = KERNEL
     kernel_suffix = ""
+    default_mem = 2048
+    target_cfg: dict = {}
     if TARGETS_YAML.exists():
         try:
             import yaml
             with open(TARGETS_YAML) as f:
                 cfg = yaml.safe_load(f)
-            kernel_suffix = cfg.get("targets", {}).get(os_name, {}).get("kernels", {}).get("default", "")
+            defaults = cfg.get("defaults", {})
+            target_cfg = cfg.get("targets", {}).get(os_name, {})
+            kernel_suffix = target_cfg.get("kernels", {}).get("default", "")
+            default_mem = int(target_cfg.get("default_mem", defaults.get("default_mem", 2048)))
         except Exception:
             pass
 
@@ -80,7 +91,7 @@ def resolve_os_artifacts(os_name: str) -> tuple[Path, Path]:
             f"Run: ltvm build-kernel {os_name} && sudo ltvm install {os_name}"
         )
 
-    return img, kern
+    return OSArtifacts(image=img, kernel=kern, default_mem=default_mem)
 OVERLAYS = VM_DIR / "overlays"
 SOCKETS = VM_DIR / "sockets"
 BRIDGE = "fcbr0"
