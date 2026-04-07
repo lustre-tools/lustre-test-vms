@@ -251,6 +251,9 @@ make INSTALL_MOD_PATH="$MODULES_DIR" \
 	INSTALL_MOD_STRIP=1 \
 	CONFIG_MODULE_SIG_ALL= \
 	modules_install 2>&1 | tail -5
+# Remove build/source symlinks -- they point inside the container and
+# break scp -r during VM deployment.
+find "$MODULES_DIR" -maxdepth 3 \( -name build -o -name source \) -type l -exec rm -f {} +
 echo "    Modules: $(du -sh "$MODULES_DIR" | cut -f1)"
 
 echo "=== Kernel build complete ==="

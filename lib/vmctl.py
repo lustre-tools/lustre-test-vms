@@ -237,6 +237,9 @@ def _deploy_kernel_modules(vm_name: str, lib_modules_path: Path) -> RunResult:
             "returncode": 1,
         }
 
+    # Ensure /lib/modules exists (Ubuntu images may not have it)
+    _run([VM_SH, "exec", "--timeout", "5", vm_name, "mkdir -p /lib/modules"])
+
     for ver_dir in versions:
         res = _run(
             [VM_SH, "cp-to", vm_name, str(ver_dir), "/lib/modules/"],
