@@ -12,7 +12,8 @@
 set -euo pipefail
 
 VM_DIR=/opt/qemu-vms
-SSHPASS="sshpass -p initial0"
+VM_ROOT_PASSWORD="${VM_ROOT_PASSWORD:-initial0}"
+SSHPASS="sshpass -p $VM_ROOT_PASSWORD"
 SSH_OPTS="-o StrictHostKeyChecking=no -o LogLevel=ERROR"
 
 VM_NAME=""

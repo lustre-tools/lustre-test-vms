@@ -22,7 +22,9 @@ from .models import (
     KERNEL,
     MARKER,
     OVERLAYS,
+    ROOT_PASSWORD,
     SOCKETS,
+    SSH_TIMEOUT,
     VMInfo,
     VMNotFound,
 )
@@ -135,7 +137,7 @@ def cmd_create(args: argparse.Namespace) -> None:
 
     vm.save()
     launch_qemu(vm)
-    wait_for_ssh(vm.ip, 30)
+    wait_for_ssh(vm.ip, SSH_TIMEOUT)
     register_ssh_name(vm.name, vm.ip)
     deploy_ssh_key(vm.ip)
 
@@ -150,7 +152,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     for name in args.names:
         vm = VMInfo.load(name)
         launch_qemu(vm)
-        wait_for_ssh(vm.ip, 30)
+        wait_for_ssh(vm.ip, SSH_TIMEOUT)
         register_ssh_name(vm.name, vm.ip)
         print(f"started {name}")
 
@@ -161,7 +163,7 @@ def cmd_start_all(args: argparse.Namespace) -> None:
         vm = VMInfo.load(name)
         if not is_running(vm):
             launch_qemu(vm)
-            wait_for_ssh(vm.ip, 30)
+            wait_for_ssh(vm.ip, SSH_TIMEOUT)
             register_ssh_name(vm.name, vm.ip)
             started += 1
             print(f"started {name}")
@@ -191,7 +193,7 @@ def cmd_restart(args: argparse.Namespace) -> None:
         vm = VMInfo.load(name)
         kill_qemu(vm)
         launch_qemu(vm)
-        wait_for_ssh(vm.ip, 30)
+        wait_for_ssh(vm.ip, SSH_TIMEOUT)
         register_ssh_name(vm.name, vm.ip)
         print(f"restarted {name}")
 
@@ -221,7 +223,7 @@ def cmd_ensure(args: argparse.Namespace) -> None:
     if info_path.exists():
         vm = VMInfo.load(name)
         if is_running(vm):
-            wait_for_ssh(vm.ip, 30)
+            wait_for_ssh(vm.ip, SSH_TIMEOUT)
             register_ssh_name(vm.name, vm.ip)
             if args.json:
                 print(
@@ -237,7 +239,7 @@ def cmd_ensure(args: argparse.Namespace) -> None:
                 print(f"{name}: already running")
             return
         launch_qemu(vm)
-        wait_for_ssh(vm.ip, 30)
+        wait_for_ssh(vm.ip, SSH_TIMEOUT)
         register_ssh_name(vm.name, vm.ip)
         if args.json:
             print(
@@ -394,7 +396,7 @@ def cmd_ssh(args: argparse.Namespace) -> None:
     ssh_args = [
         "sshpass",
         "-p",
-        "initial0",
+        ROOT_PASSWORD,
         "ssh",
         "-o",
         "StrictHostKeyChecking=no",
@@ -411,7 +413,7 @@ def cmd_cp_to(args: argparse.Namespace) -> None:
         [
             "sshpass",
             "-p",
-            "initial0",
+            ROOT_PASSWORD,
             "scp",
             "-o",
             "StrictHostKeyChecking=no",
@@ -434,7 +436,7 @@ def cmd_cp_from(args: argparse.Namespace) -> None:
         [
             "sshpass",
             "-p",
-            "initial0",
+            ROOT_PASSWORD,
             "scp",
             "-o",
             "StrictHostKeyChecking=no",
@@ -736,7 +738,7 @@ def cmd_crash_collect(args: argparse.Namespace) -> None:
         [
             "sshpass",
             "-p",
-            "initial0",
+            ROOT_PASSWORD,
             "scp",
             "-o",
             "StrictHostKeyChecking=no",
@@ -814,7 +816,7 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
     if was_running:
         print(f"restarting {vm.name}...")
         launch_qemu(vm)
-        wait_for_ssh(vm.ip, 30)
+        wait_for_ssh(vm.ip, SSH_TIMEOUT)
         register_ssh_name(vm.name, vm.ip)
         print(f"started {vm.name}")
 

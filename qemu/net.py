@@ -10,7 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from .models import MARKER, SUBNET, VMInfo, VMNotFound
+from .models import MARKER, ROOT_PASSWORD, SUBNET, VMInfo, VMNotFound
 from .process import die, run
 
 
@@ -207,7 +207,7 @@ def run_ssh(
     ssh_cmd = [
         "sshpass",
         "-p",
-        "initial0",
+        ROOT_PASSWORD,
         "ssh",
         "-o",
         "StrictHostKeyChecking=no",

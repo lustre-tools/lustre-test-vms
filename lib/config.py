@@ -101,6 +101,16 @@ class TargetConfig:
         v = self._data.get("srpm_url")
         return str(v) if v is not None else None
 
+    @property
+    def root_password(self) -> str:
+        """Root password for VM SSH access."""
+        return str(self._data.get("root_password", "initial0"))
+
+    @property
+    def ssh_timeout(self) -> int:
+        """Seconds to wait for SSH after boot."""
+        return int(self._data.get("ssh_timeout", 30))
+
     # ------------------------------------------------------------------
     # Kernel metadata
     # ------------------------------------------------------------------

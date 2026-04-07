@@ -16,11 +16,15 @@
 #   kernels.config:  kernel .config overrides (merged with common fragment)
 #   srpm_url:        base URL for downloading kernel SRPMs
 #                    (omit for targets that don't use SRPMs, e.g. Ubuntu)
+#   root_password:   root password for VM SSH access (default: initial0)
+#   ssh_timeout:     seconds to wait for SSH after boot (default: 30)
 
 defaults:
   arch: x86_64
   os_family: rhel
   server: true
+  root_password: initial0
+  ssh_timeout: 30
 
 targets:
   rocky9:

@@ -20,6 +20,8 @@ BRIDGE = "fcbr0"
 SUBNET = "192.168.100"
 GATEWAY = f"{SUBNET}.1"
 MARKER = "# qemu-vm"
+ROOT_PASSWORD = "initial0"
+SSH_TIMEOUT = 30
 
 DEPLOY_SCRIPT = VM_DIR / "deploy-lustre.sh"
 

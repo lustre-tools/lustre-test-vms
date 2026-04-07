@@ -12,6 +12,7 @@ from pathlib import Path
 from .models import (
     EXIT_TIMEOUT,
     OVERLAYS,
+    ROOT_PASSWORD,
     SOCKETS,
     ClusterInfo,
     ClusterNode,
@@ -316,7 +317,7 @@ def _write_cluster_local_sh(
     """
     cfg_path = "/usr/lib64/lustre/tests/cfg/local.sh"
     r = subprocess.run(
-        ["sshpass", "-p", "initial0", "ssh"]
+        ["sshpass", "-p", ROOT_PASSWORD, "ssh"]
         + ssh_opts
         + [
             f"root@{node_ip}",
@@ -445,7 +446,7 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
 
         print(f"Running llmount.sh from {mgs.name}...")
         r = run(
-            ["sshpass", "-p", "initial0", "ssh"]
+            ["sshpass", "-p", ROOT_PASSWORD, "ssh"]
             + ssh_opts
             + [f"root@{mgs_vm.ip}", mount_cmd],
             capture_output=False,
@@ -551,7 +552,7 @@ def cmd_cluster_ssh(args: argparse.Namespace) -> None:
     ssh_args = [
         "sshpass",
         "-p",
-        "initial0",
+        ROOT_PASSWORD,
         "ssh",
         "-o",
         "StrictHostKeyChecking=no",
