@@ -257,7 +257,7 @@ if $DO_MOUNT; then
     # Check if OSD plugin is present -- client-only builds have no
     # osd_ldiskfs.ko and cannot run llmount.sh (no server support).
     HAS_OSD=$($SSHPASS ssh $SSH_OPTS ${REMOTE} \
-        "test -f /lib/modules/${KVER}/extra/lustre/osd_ldiskfs.ko \
+        "find /lib/modules/${KVER} -name osd_ldiskfs.ko 2>/dev/null | grep -q . \
          && echo yes || echo no" 2>/dev/null || echo no)
     if [[ "${HAS_OSD}" != "yes" ]]; then
         echo "--- Skipping llmount.sh: client-only build (no osd_ldiskfs.ko)"
