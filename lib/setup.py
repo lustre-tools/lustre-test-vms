@@ -147,6 +147,7 @@ def check_prerequisites(host: HostInfo) -> None:
         "tar": "tar",
         "make": "make",
         "gcc": "gcc",
+        "zstd": "zstd",
         "ip": "iproute2" if host.pkg_mgr == "apt" else "iproute",
     }
     missing = []
@@ -158,14 +159,18 @@ def check_prerequisites(host: HostInfo) -> None:
         _pkg_install(host, *missing)
 
     if not shutil.which("podman"):
-        pkg = "podman" if host.pkg_mgr == "dnf" else "podman"
-        log.warning(
-            "podman not found -- needed by ltvm for "
-            "container/image builds.  Install: "
-            "%s install %s",
-            host.pkg_mgr,
-            pkg,
-        )
+        log.info("Installing podman (needed for container/image builds)...")
+        _pkg_install(host, "podman")
+
+    # python3-pyyaml needed by ltvm fetch/resolve
+    try:
+        import yaml  # noqa: F401
+    except ImportError:
+        log.info("Installing python3-pyyaml...")
+        if host.pkg_mgr == "dnf":
+            _pkg_install(host, "python3-pyyaml")
+        elif host.pkg_mgr == "apt":
+            _pkg_install(host, "python3-yaml")
 
 
 def _detect_platform_hint() -> str:
