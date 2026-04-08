@@ -178,26 +178,14 @@ def deploy(
     vm_name: str,
     build_path: str | Path = ".",
     mount: bool = False,
-    kernel_modules: str | Path | None = None,
     os_family: str = "rhel",
 ) -> RunResult:
     """Deploy Lustre to a VM.
 
-    If kernel_modules is set (path to modules/ from kernel
-    build output containing lib/modules/<ver>/), rsync them
-    into the VM first so kernel deps like sunrpc are
-    available when Lustre modules load.
+    Rsyncs the staging tree (.staging/) into the VM.
+    Kernel modules are baked into the VM image at build time.
     """
     build_path = str(Path(build_path).resolve())
-
-    # Deploy kernel modules if provided
-    if kernel_modules:
-        mods = Path(kernel_modules)
-        lib_mods = mods / "lib" / "modules"
-        if lib_mods.is_dir():
-            res = _deploy_kernel_modules(vm_name, lib_mods)
-            if not res["ok"]:
-                return res
 
     cmd = [DEPLOY_SH, "--vm", vm_name, "--build", build_path,
            "--os-family", os_family]
@@ -224,63 +212,6 @@ def lustre_mount(vm_name: str, os_family: str = "rhel") -> RunResult:
     )
 
 
-def _deploy_kernel_modules(vm_name: str, lib_modules_path: Path) -> RunResult:
-    """Copy kernel modules into the VM and run depmod.
-
-    lib_modules_path: path to lib/modules/ containing
-    <version>/ subdirectories.
-    """
-    versions = [d for d in lib_modules_path.iterdir() if d.is_dir()]
-    if not versions:
-        return {
-            "ok": False,
-            "output": f"No version dirs in {lib_modules_path}",
-            "returncode": 1,
-        }
-
-    # Ensure /lib/modules exists (Ubuntu images may not have it)
-    _run([VM_SH, "exec", "--timeout", "5", vm_name, "mkdir -p /lib/modules"])
-
-    for ver_dir in versions:
-        res = _run(
-            [VM_SH, "cp-to", vm_name, str(ver_dir), "/lib/modules/"],
-            timeout=120,
-        )
-        if not res["ok"]:
-            return res
-
-    # Run depmod for the VM's running kernel
-    res = _run([VM_SH, "exec", "--timeout", "10", vm_name, "depmod -a"])
-    if not res["ok"]:
-        return res
-
-    # Install vmlinuz for kdump.
-    # lib_modules_path = .../modules/lib/modules  ->  vmlinuz is at .../vmlinuz
-    kernel_dir = lib_modules_path.parent.parent.parent
-    vmlinuz = kernel_dir / "vmlinuz"
-    if vmlinuz.exists():
-        kver = versions[0].name
-        _run(
-            [
-                VM_SH,
-                "cp-to",
-                vm_name,
-                str(vmlinuz),
-                f"/boot/vmlinuz-{kver}",
-            ],
-            timeout=30,
-        )
-        _run(
-            [
-                VM_SH,
-                "exec",
-                "--timeout",
-                "15",
-                vm_name,
-                "kdumpctl rebuild 2>/dev/null; systemctl restart kdump 2>/dev/null",
-            ],
-            timeout=20,
-        )
 
     return res
 

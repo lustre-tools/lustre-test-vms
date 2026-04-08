@@ -20,7 +20,6 @@ VM_NAME=""
 BUILD_DIR=""
 DO_MOUNT=false
 SERVER_ONLY=false
-DEPLOY_MODULES=true
 DEPLOY_USERSPACE=true
 DEPLOY_TESTS=true
 OS_FAMILY=""  # rhel or debian — passed from ltvm, auto-detected if empty
@@ -48,8 +47,8 @@ while [[ $# -gt 0 ]]; do
         --build)           BUILD_DIR="$2"; shift 2;;
         --mount)           DO_MOUNT=true; shift;;
         --server-only)     SERVER_ONLY=true; shift;;
-        --userspace-only)  DEPLOY_MODULES=false; DEPLOY_TESTS=false; shift;;
-        --tests-only)      DEPLOY_MODULES=false; DEPLOY_USERSPACE=false; shift;;
+        --userspace-only)  DEPLOY_TESTS=false; shift;;
+        --tests-only)      DEPLOY_USERSPACE=false; shift;;
         --os-family)       OS_FAMILY="$2"; shift 2;;
         -h|--help)         usage;;
         *)                 echo "Unknown option: $1"; usage;;
@@ -109,21 +108,6 @@ KVER=$($SSHPASS ssh $SSH_OPTS ${REMOTE} uname -r)
 echo "    VM kernel: ${KVER}"
 echo "    VM OS family: ${OS_FAMILY}"
 
-# Check that Lustre modules match the VM kernel
-if ${DEPLOY_MODULES}; then
-	SAMPLE_KO=$(find "${BUILD_DIR}/lustre" -name 'lustre.ko' -type f 2>/dev/null | head -1)
-	if [[ -n "${SAMPLE_KO}" ]]; then
-		MOD_VER=$(modinfo -F vermagic "${SAMPLE_KO}" | awk '{print $1}')
-		if [[ "${MOD_VER}" != "${KVER}" ]]; then
-			echo "ERROR: kernel mismatch"
-			echo "  Lustre modules built for: ${MOD_VER}"
-			echo "  VM running kernel:        ${KVER}"
-			echo "  Rebuild Lustre or fix the VM kernel."
-			exit 1
-		fi
-	fi
-fi
-
 MODDIR="/lib/modules/${KVER}/extra/lustre"
 
 # --- Clean up existing Lustre state ---
@@ -151,85 +135,10 @@ $SSHPASS ssh $SSH_OPTS ${REMOTE} '
 $SSHPASS ssh $SSH_OPTS ${REMOTE} \
 	"dmsetup remove_all 2>/dev/null" || true
 
-# --- Kernel modules ---
-if $DEPLOY_MODULES; then
-    echo "--- Syncing kernel modules..."
-    KO_TMPDIR=$(mktemp -d)
-    trap "rm -rf ${KO_TMPDIR}" EXIT
-    find "${BUILD_DIR}" -name '*.ko' -not -path '*/kconftest*' -not -path '*/.staging/*' -exec cp {} "${KO_TMPDIR}/" \;
-    KO_COUNT=$(ls "${KO_TMPDIR}"/*.ko 2>/dev/null | wc -l)
-    echo "    ${KO_COUNT} modules"
-
-    $SSHPASS ssh $SSH_OPTS ${REMOTE} "mkdir -p ${MODDIR}"
-    $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" "${KO_TMPDIR}/" "${REMOTE}:${MODDIR}/"
-
-    # Install kernel base modules if missing in VM.
-    # The ltvm kernel build places them under output/<target>/kernels/*/modules/.
-    # Find the right directory by matching the VM's kernel version.
-    # Find ltvm output directory.  Try LTVM_DIR env, then common locations.
-    _ltvm_dir="${LTVM_DIR:-}"
-    if [[ -z "${_ltvm_dir}" ]]; then
-        # Try: script's own repo dir, then SUDO_USER's home
-        for _d in \
-            "$(dirname "$(dirname "$(readlink -f "$0")")")" \
-            "${HOME}/lustre-test-vms-v2" \
-            "$(getent passwd "${SUDO_USER:-}" 2>/dev/null | cut -d: -f6)/lustre-test-vms-v2"; do
-            [[ -n "${_d}" ]] && [[ -d "${_d}/output" ]] && { _ltvm_dir="${_d}"; break; }
-        done
-    fi
-    HAS_KERNEL_DIR=$($SSHPASS ssh $SSH_OPTS ${REMOTE} \
-        "test -d /lib/modules/${KVER}/kernel && echo yes || echo no")
-    if [[ "${HAS_KERNEL_DIR}" == "no" ]]; then
-        KMOD_SRC=""
-        for kdir in "${_ltvm_dir}"/output/*/kernels/*/modules/lib/modules/"${KVER}"; do
-            if [[ -d "${kdir}/kernel" ]]; then
-                KMOD_SRC="${kdir}"
-                break
-            fi
-        done
-        if [[ -n "${KMOD_SRC}" ]]; then
-            echo "--- Installing kernel base modules from ltvm build..."
-            $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" --exclude='build' \
-                "${KMOD_SRC}/" "${REMOTE}:/lib/modules/${KVER}/"
-        else
-            echo "    WARNING: No kernel base modules found for ${KVER}"
-            echo "    depmod may report warnings about missing modules.order"
-        fi
-    fi
-
-    # Install vmlinuz for kdump if missing
-    HAS_VMLINUZ=$($SSHPASS ssh $SSH_OPTS ${REMOTE} \
-        "test -f /boot/vmlinuz-${KVER} && echo yes || echo no")
-    if [[ "${HAS_VMLINUZ}" == "no" && -n "${_ltvm_dir}" ]]; then
-        for _vz in "${_ltvm_dir}"/output/*/kernels/*/vmlinuz; do
-            # Match by checking the kernel version in the same dir
-            _kdir="$(dirname "${_vz}")"
-            if [[ -f "${_kdir}/build-tree/kernel-version" ]]; then
-                _bkver=$(cat "${_kdir}/build-tree/kernel-version")
-                if [[ "${_bkver}" == "${KVER}" ]]; then
-                    echo "--- Installing vmlinuz for kdump..."
-                    $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-                        "${_vz}" "${REMOTE}:/boot/vmlinuz-${KVER}"
-                    # Pre-load kdump kernel (skip initrd -- direct root mount)
-                    $SSHPASS ssh $SSH_OPTS ${REMOTE} \
-                        "kexec -p /boot/vmlinuz-${KVER} --reuse-cmdline 2>/dev/null" || true
-                    break
-                fi
-            fi
-        done
-    fi
-
-    # Remove autoconf probe .ko files (invalid, confuse depmod)
-    $SSHPASS ssh $SSH_OPTS ${REMOTE} \
-        "find ${MODDIR} -name '*_pc.ko' -delete 2>/dev/null" || true
-
-    echo "--- Running depmod..."
-    $SSHPASS ssh $SSH_OPTS ${REMOTE} "depmod -a ${KVER}"
-fi
-
-# --- Userspace, libraries, and test framework ---
-# Require staging tree from `make install DESTDIR=.staging`.
-# ltvm build-lustre creates this automatically.
+# --- Deploy from staging tree ---
+# The staging tree (from `make install DESTDIR=.staging`) has the
+# complete installed layout: binaries, libraries, test scripts,
+# AND kernel modules. One rsync does everything.
 STAGING="${BUILD_DIR}/.staging"
 
 if [[ ! -d "${STAGING}/usr" ]]; then
@@ -239,26 +148,45 @@ if [[ ! -d "${STAGING}/usr" ]]; then
     exit 1
 fi
 
-if $DEPLOY_USERSPACE || $DEPLOY_TESTS; then
-    echo "--- Syncing from staging tree..."
-    # Rsync only /usr/ -- not /, which would clobber FHS symlinks
-    # (/lib -> /usr/lib, /sbin -> /usr/sbin) on EL systems.
-    $SSHPASS rsync -az --force -e "ssh ${SSH_OPTS}" \
-	    "${STAGING}/usr/" "${REMOTE}:/usr/" \
-	    --exclude='*.la' --exclude='*.a' \
-	    --exclude='include/' --exclude='share/man/' \
-	    --exclude='lib/modules/'
-    # mount.lustre goes to /sbin on the staging tree; copy to /usr/sbin
-    # (which is /sbin via symlink on EL).
-    if [[ -f "${STAGING}/sbin/mount.lustre" ]]; then
-	    $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
-		    "${STAGING}/sbin/mount.lustre" "${REMOTE}:/usr/sbin/"
+# Verify Lustre modules match the VM kernel
+SAMPLE_KO=$(find "${STAGING}/lib/modules" -name 'lustre.ko' -type f 2>/dev/null | head -1)
+if [[ -n "${SAMPLE_KO}" ]]; then
+    MOD_VER=$(modinfo -F vermagic "${SAMPLE_KO}" | awk '{print $1}')
+    if [[ "${MOD_VER}" != "${KVER}" ]]; then
+        echo "ERROR: kernel mismatch"
+        echo "  Lustre modules built for: ${MOD_VER}"
+        echo "  VM running kernel:        ${KVER}"
+        echo "  Rebuild Lustre or fix the VM kernel."
+        exit 1
     fi
-    # mount.lustre_tgt symlink (server mount helper, checks argv[0])
-    $SSHPASS ssh $SSH_OPTS ${REMOTE} \
-	    "ln -sf /usr/sbin/mount.lustre /usr/sbin/mount.lustre_tgt 2>/dev/null || true"
-    $SSHPASS ssh $SSH_OPTS ${REMOTE} "ldconfig"
 fi
+
+echo "--- Syncing staging tree..."
+
+# /usr/ — binaries, libraries, test scripts
+$SSHPASS rsync -az --force -e "ssh ${SSH_OPTS}" \
+    "${STAGING}/usr/" "${REMOTE}:/usr/" \
+    --exclude='*.la' --exclude='*.a' \
+    --exclude='include/' --exclude='share/man/'
+
+# /lib/modules/ — Lustre kernel modules
+if [[ -d "${STAGING}/lib/modules" ]]; then
+    $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
+        "${STAGING}/lib/modules/" "${REMOTE}:/lib/modules/"
+    echo "--- Running depmod..."
+    $SSHPASS ssh $SSH_OPTS ${REMOTE} "depmod -a ${KVER}"
+fi
+
+# mount.lustre goes to /sbin on the staging tree; copy to /usr/sbin
+# (which is /sbin via symlink on EL).
+if [[ -f "${STAGING}/sbin/mount.lustre" ]]; then
+    $SSHPASS rsync -az -e "ssh ${SSH_OPTS}" \
+        "${STAGING}/sbin/mount.lustre" "${REMOTE}:/usr/sbin/"
+fi
+# mount.lustre_tgt symlink (server mount helper, checks argv[0])
+$SSHPASS ssh $SSH_OPTS ${REMOTE} \
+    "ln -sf /usr/sbin/mount.lustre /usr/sbin/mount.lustre_tgt 2>/dev/null || true"
+$SSHPASS ssh $SSH_OPTS ${REMOTE} "ldconfig"
 
 echo "=== Deploy complete ==="
 

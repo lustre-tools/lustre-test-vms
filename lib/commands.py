@@ -104,6 +104,13 @@ def _not_found(msg: str, use_json: bool, hint: str | None = None) -> int:
     return EXIT_NOT_FOUND
 
 
+def _build_container_tag(tc: TargetConfig) -> str:
+    """Return the podman container image tag for a target + arch."""
+    if tc.arch != "x86_64":
+        return f"ltvm-build-{tc.name}-{tc.arch}"
+    return f"ltvm-build-{tc.name}"
+
+
 def _load_target(
     name: str, use_json: bool, arch: str | None = None
 ) -> tuple[TargetConfig | None, int | None]:
@@ -279,13 +286,14 @@ def cmd_build_all(args: argparse.Namespace) -> int:
             )
         build_tree = tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree"
         try:
-            container_tag = f"ltvm-build-{args.target}"
+            container_tag = _build_container_tag(tc)
             lmeta = build_lustre(
                 lustre_tree,
                 build_tree,
                 container_tag=container_tag,
                 enable_server=tc.server,
                 force=args.force,
+                arch=tc.arch,
             )
             results["lustre"] = lmeta
         except Exception as e:
@@ -443,7 +451,7 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
         srv = "server+client" if enable_server else "client-only"
         print(f"Building Lustre ({srv}) against {args.target} kernel tree...")
 
-    container_tag = f"ltvm-build-{args.target}"
+    container_tag = _build_container_tag(tc)
 
     try:
         meta = build_lustre(
@@ -454,6 +462,7 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
             extra_configure=extra,
             jobs=jobs,
             force=getattr(args, "force", False),
+            arch=tc.arch,
         )
     except Exception as e:
         return _error(f"Lustre build failed: {e}", use_json)
@@ -1063,21 +1072,10 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     if not build_path.is_dir():
         return _error(f"Build path not found: {build_path}", use_json)
 
-    # Auto-detect kernel modules from ltvm output
-    kernel_modules = None
-    mods_path = (
-        ltvm_root / "output" / target / "kernels" / resolved_kernel / "modules"
-    )
-    if mods_path.is_dir():
-        kernel_modules = str(mods_path)
-        if not use_json:
-            print(f"  Deploying kernel modules from {mods_path}")
-
     res = vmctl.deploy(
         args.vm,
         str(build_path),
         mount=args.mount,
-        kernel_modules=kernel_modules,
         os_family=tc.os_family,
     )
     return _runtime_result(res, use_json)
