@@ -62,6 +62,12 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
+    common.add_argument(
+        "--arch",
+        default=None,
+        help="Target CPU architecture override (e.g. aarch64). "
+        "Defaults to the target's configured arch (usually x86_64).",
+    )
 
     # Shared --kernel flag for subcommands that operate on
     # a specific kernel version within a target
@@ -80,11 +86,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = p.add_subparsers(dest="command")
 
-    # -- setup --
+    # -- install (host setup) --
     sp = sub.add_parser(
-        "setup",
+        "install",
         parents=[common],
-        help="Set up host (QEMU, network, scripts, SSH)",
+        aliases=["setup"],
+        help="Install ltvm: QEMU, network, scripts, SSH, ltvm to PATH",
     )
     sp.add_argument(
         "--qemu", action="store_true", help="Build and install QEMU only"

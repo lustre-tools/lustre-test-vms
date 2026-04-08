@@ -916,13 +916,19 @@ def run_setup(
     if "ssh" in active:
         setup_ssh(subnet=subnet)
 
+    # Always symlink ltvm to PATH
+    ltvm_script = REPO_ROOT / "ltvm"
+    if ltvm_script.exists():
+        link = Path("/usr/local/bin/ltvm")
+        link.unlink(missing_ok=True)
+        link.symlink_to(ltvm_script)
+        log.info("ltvm installed to %s", link)
+
     if all_steps:
         log.info("")
-        log.info("Host setup complete.")
+        log.info("Install complete.")
         log.info("")
-        log.info("Next: build VM artifacts with ltvm:")
-        log.info("  ./ltvm init rocky9 --lustre-tree /path/to/lustre")
-        log.info("")
-        log.info("Then create a VM:")
-        log.info("  sudo ltvm vm ensure co1-single \\")
-        log.info("      --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3")
+        log.info("Next:")
+        log.info("  ltvm fetch rocky9")
+        log.info("  sudo vm.py create co1-test --vcpus 2 --mem 2048 --mdt-disks 1 --ost-disks 2")
+        log.info("  sudo ltvm deploy co1-test --mount")
