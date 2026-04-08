@@ -209,7 +209,7 @@ def deploy(
         import subprocess as _sp
         build_cmd = [
             "ltvm", "build-lustre", target,
-            "--lustre-tree", build_path, "--force",
+            "--lustre-tree", build_path,
         ]
         sudo_user = _os.environ.get("SUDO_USER")
         if sudo_user and _os.geteuid() == 0:
