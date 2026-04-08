@@ -331,13 +331,13 @@ for target in rocky9 rocky10; do
         cp build/qemu-system-x86_64 build/qemu-img /output/
     '
     cd /tmp && tar cf - -C qemu-out qemu-system-x86_64 qemu-img \
-        | zstd -9 > "qemu-9.2.2-${suffix}.tar.zst"
+        | gzip -9 > "qemu-9.2.2-${suffix}.tar.gz"
     rm -rf /tmp/qemu-out/*
 done
 
 # Publish (updates existing release)
-gh release upload qemu-9.2.2 /tmp/qemu-9.2.2-el9.tar.zst --clobber
-gh release upload qemu-9.2.2 /tmp/qemu-9.2.2-el10.tar.zst --clobber
+gh release upload qemu-9.2.2 /tmp/qemu-9.2.2-el9.tar.gz --clobber
+gh release upload qemu-9.2.2 /tmp/qemu-9.2.2-el10.tar.gz --clobber
 ```
 
 Notes:
