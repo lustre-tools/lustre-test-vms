@@ -14,6 +14,7 @@ build pipeline (runs as user) and the VM engine (runs as root).
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -182,16 +183,63 @@ def deploy(
 ) -> RunResult:
     """Deploy Lustre to a VM.
 
-    Rsyncs the staging tree (.staging/) into the VM.
-    Kernel modules are baked into the VM image at build time.
+    1. rsync the build tree to /lustre/ in the VM
+    2. make install inside the VM
+    3. depmod + ldconfig
+    4. optionally mount via llmount.sh
     """
     build_path = str(Path(build_path).resolve())
 
-    cmd = [DEPLOY_SH, "--vm", vm_name, "--build", build_path,
-           "--os-family", os_family]
+    # Get VM IP
+    res = vm_status(vm_name, json_output=True)
+    if not res["ok"]:
+        return res
+    import json as _json
+    status = _json.loads(res["output"])
+    ip = status["ip"]
+
+    # Tar the staging tree (make install output) to the VM and install.
+    # The staging tree was created by `make install DESTDIR=.staging`
+    # during ltvm build-lustre (inside the build container where the
+    # kernel tree is available).
+    staging = Path(build_path) / ".staging"
+    if not staging.is_dir():
+        return {
+            "ok": False,
+            "output": f"No .staging/ in {build_path} -- run: ltvm build-lustre",
+            "returncode": 1,
+        }
+
+    # Stream the staging tree into the VM and unpack directly into /.
+    # --keep-directory-symlink prevents tar from replacing /sbin (symlink
+    # to /usr/sbin) with a real directory.
+    tar_res = _run_impl(
+        [
+            "bash", "-c",
+            f"tar cf - -C {shlex.quote(str(staging))} . "
+            f"| sshpass -p initial0 ssh "
+            f"-o StrictHostKeyChecking=no -o LogLevel=ERROR "
+            f"root@{ip} 'tar xf - -C / --keep-directory-symlink'",
+        ],
+        timeout=120,
+    )
+    if not tar_res["ok"]:
+        return tar_res
+
+    # depmod + ldconfig to pick up the new modules and libraries
+    install_res = _run(
+        [VM_SH, "exec", "--timeout", "30", vm_name,
+         "depmod -a && ldconfig"],
+        timeout=60,
+    )
+    if not install_res["ok"]:
+        return install_res
+
+    # optionally mount
     if mount:
-        cmd.append("--mount")
-    return _run(cmd, timeout=300)
+        return lustre_mount(vm_name, os_family=os_family)
+
+    return install_res
 
 
 def lustre_mount(vm_name: str, os_family: str = "rhel") -> RunResult:

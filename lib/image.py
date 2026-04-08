@@ -229,32 +229,87 @@ def build_image(target_config: TargetConfig, force: bool = False) -> Path:
         capture_output=False,
     )
 
-    # Find kernel modules and Lustre staging tree to bake into the image
-    kernel_modules_dir = None
-    lustre_staging_dir = None
+    # ── Step 1b: Add kernel modules + Lustre via a second Dockerfile stage ──
+    final_tag = tag
     try:
         kernel_name = target_config.resolve_kernel(None)
         kdir = target_config.output_dir / "kernels" / kernel_name
-        lib_mods = kdir / "modules" / "lib" / "modules"
-        if lib_mods.is_dir():
-            kernel_modules_dir = lib_mods
-            log.info("Including kernel modules from %s", kdir / "modules")
-        else:
-            log.warning("No kernel modules found -- build kernel first for full image")
-        staging = kdir / "lustre" / ".staging"
-        if staging.is_dir():
-            lustre_staging_dir = staging
-            log.info("Including pre-built Lustre from %s", staging)
+        modules_dir = kdir / "modules"
+        staging_dir = kdir / "lustre" / ".staging"
+        has_modules = (modules_dir / "lib" / "modules").is_dir()
+        has_lustre = staging_dir.is_dir()
+
+        if has_modules or has_lustre:
+            # Build a context dir with the files to inject
+            inject_dir = out_dir / "_inject"
+            if inject_dir.exists():
+                shutil.rmtree(str(inject_dir))
+            inject_dir.mkdir()
+
+            # Write a tiny Dockerfile
+            lines = [f"FROM {tag}"]
+            if has_modules:
+                log.info("Including kernel modules")
+                # Copy modules into inject context, clean symlinks
+                mod_dest = inject_dir / "modules"
+                shutil.copytree(
+                    str(modules_dir / "lib" / "modules"),
+                    str(mod_dest),
+                    symlinks=False,
+                    ignore=shutil.ignore_patterns("build", "source"),
+                )
+                lines.append("COPY modules/ /lib/modules/")
+            if has_lustre:
+                log.info("Including pre-built Lustre")
+                # Copy staging subdirs that are safe (no FHS symlink clobbering)
+                for subdir in ("usr",):
+                    src = staging_dir / subdir
+                    if src.is_dir():
+                        shutil.copytree(str(src), str(inject_dir / subdir))
+                # sbin/ contents go into usr/sbin/ (FHS merge)
+                sbin_src = staging_dir / "sbin"
+                if sbin_src.is_dir():
+                    sbin_dest = inject_dir / "usr" / "sbin"
+                    sbin_dest.mkdir(parents=True, exist_ok=True)
+                    for f in sbin_src.iterdir():
+                        if f.is_file():
+                            shutil.copy2(str(f), str(sbin_dest / f.name))
+                # lib/modules/ from staging (Lustre .ko files)
+                staging_mods = staging_dir / "lib" / "modules"
+                if staging_mods.is_dir():
+                    # Merge into the modules dir we already copied
+                    mod_dest = inject_dir / "modules"
+                    if not mod_dest.exists():
+                        mod_dest.mkdir()
+                    subprocess.run(
+                        ["cp", "-a", str(staging_mods) + "/.", str(mod_dest) + "/"],
+                        check=True,
+                    )
+                    lines.append("# Lustre modules already merged into modules/")
+                lines.append("COPY usr/ /usr/")
+            lines.append("RUN ldconfig && depmod -a $(ls /lib/modules/ | head -1)")
+            lines.append(
+                "RUN ln -sf mount.lustre /usr/sbin/mount.lustre_tgt 2>/dev/null || true"
+            )
+
+            inject_dockerfile = inject_dir / "Dockerfile"
+            inject_dockerfile.write_text("\n".join(lines) + "\n")
+
+            final_tag = f"{tag}-final"
+            log.info("Building final image with kernel modules + Lustre...")
+            _run(
+                ["podman", "build", "-t", final_tag,
+                 "-f", str(inject_dockerfile), str(inject_dir)],
+                capture_output=False,
+            )
+            # Clean up inject dir
+            shutil.rmtree(str(inject_dir), ignore_errors=True)
     except (ValueError, FileNotFoundError):
         log.warning("Could not resolve kernel -- image will not include kernel modules")
 
     # ── Step 2: Export to ext4 ──
     log.info("Exporting container to ext4 ...")
-    image_path = _export_to_ext4(
-        tag, image_path,
-        kernel_modules_dir=kernel_modules_dir,
-        lustre_staging_dir=lustre_staging_dir,
-    )
+    image_path = _export_to_ext4(final_tag, image_path)
 
     elapsed = time.monotonic() - t0
 
@@ -277,15 +332,11 @@ def build_image(target_config: TargetConfig, force: bool = False) -> Path:
 def _export_to_ext4(
     container_tag: str,
     image_path: Path,
-    kernel_modules_dir: Path | None = None,
-    lustre_staging_dir: Path | None = None,
 ) -> Path:
-    """Create a raw ext4 image from a container's filesystem.
+    """Export a container image to a raw ext4 file.
 
-    1. podman create from the image tag
-    2. podman cp kernel modules + Lustre into the container
-    3. podman export | fakeroot mke2fs -d → ext4
-    4. resize2fs -M to shrink
+    1. podman create + podman export | fakeroot tar + mke2fs
+    2. resize2fs -M to shrink
     """
     tmpdir = None
     tmpfile = None
@@ -296,49 +347,6 @@ def _export_to_ext4(
         container_id = result.stdout.strip()
         log.info("Container: %s", container_id[:12])
 
-        # Install kernel modules and Lustre via `make install` in the
-        # image container — same mechanism as deploy to a VM.
-        if kernel_modules_dir and kernel_modules_dir.is_dir():
-            mods_parent = kernel_modules_dir.parent.parent  # .../modules/
-            log.info("  Installing kernel modules via bind mount")
-            _run(["podman", "rm", "-f", container_id])
-            # Re-create with the modules dir mounted, run make modules_install
-            install_name = container_id[:12] + "-install"
-            _run([
-                "podman", "run", "--name", install_name,
-                "--entrypoint", "/bin/bash",
-                "-v", f"{mods_parent}:/mnt/modules:ro,Z",
-                container_tag,
-                "-c", "cp -a /mnt/modules/lib/modules/* /lib/modules/ && "
-                      "rm -f /lib/modules/*/build /lib/modules/*/source && "
-                      "depmod -a $(ls /lib/modules/ | head -1)",
-            ])
-            container_id = install_name
-
-        if lustre_staging_dir and lustre_staging_dir.is_dir():
-            log.info("  Installing Lustre from staging tree")
-            with_mods_tag = f"{container_tag}-with-mods"
-            _run(["podman", "commit", container_id, with_mods_tag])
-            _run(["podman", "rm", "-f", container_id])
-            # Mount the staging tree and cp the installed layout.
-            # /usr/ goes to /usr/, /sbin/* goes to /usr/sbin/ (FHS merge),
-            # /lib/modules/ goes to /lib/modules/.
-            lustre_name = container_id[:12] + "-lustre"
-            _run([
-                "podman", "run", "--name", lustre_name,
-                "--entrypoint", "/bin/bash",
-                "-v", f"{lustre_staging_dir}:/mnt/staging:ro,Z",
-                with_mods_tag,
-                "-c",
-                "cp -a /mnt/staging/usr/. /usr/ && "
-                "cp -a /mnt/staging/sbin/* /usr/sbin/ 2>/dev/null; "
-                "cp -a /mnt/staging/lib/modules/. /lib/modules/ 2>/dev/null; "
-                "ln -sf mount.lustre /usr/sbin/mount.lustre_tgt && "
-                "ldconfig && depmod -a $(ls /lib/modules/ | head -1)",
-            ])
-            container_id = lustre_name
-
-        # Export container to ext4
         tmpdir = tempfile.mkdtemp(prefix="ltvm-rootfs-")
         tmp_f = tempfile.NamedTemporaryFile(
             suffix=".ext4", prefix="ltvm-image-", delete=False
