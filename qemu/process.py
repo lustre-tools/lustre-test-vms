@@ -16,6 +16,8 @@ from .models import (
     GATEWAY,
     QEMU,
     VMInfo,
+    qemu_binary_for_arch,
+    qemu_machine_for_arch,
 )
 
 
@@ -52,8 +54,11 @@ def launch_qemu(vm: VMInfo) -> None:
     if not vm.overlay_path.exists():
         die(f"overlay missing for '{vm.name}'")
 
+    # aarch64 virt uses PL011 UART (ttyAMA0); x86 uses 8250 (ttyS0)
+    console = "ttyAMA0" if vm.arch == "aarch64" else "ttyS0"
+
     boot_args = (
-        f"console=ttyS0 reboot=k panic=1 crashkernel=512M "
+        f"console={console} reboot=k panic=1 crashkernel=512M "
         f"net.ifnames=0 biosdevname=0 "
         f"root=/dev/vda rw fc_ip={vm.ip} fc_gw={GATEWAY} "
         f"fc_name={vm.name}"
@@ -72,12 +77,25 @@ def launch_qemu(vm: VMInfo) -> None:
         die(f"VM '{vm.name}' has no kernel path set — recreate with --os")
     kernel = Path(vm.kernel)
 
+    arch = vm.arch
+    qemu_bin = qemu_binary_for_arch(arch)
+    machine = qemu_machine_for_arch(arch)
+
+    # Device model suffix: microvm uses virtio-*-device (MMIO),
+    # virt machine uses virtio-*-pci.
+    if arch == "aarch64":
+        blk_driver = "virtio-blk-pci"
+        net_driver = "virtio-net-pci"
+    else:
+        blk_driver = "virtio-blk-device"
+        net_driver = "virtio-net-device"
+
     qemu_args = [
-        QEMU,
+        qemu_bin,
         "-name",
         vm.name,
         "-machine",
-        "microvm,accel=kvm,pit=off,pic=off,rtc=on",
+        machine,
         "-cpu",
         "host",
         "-smp",
@@ -91,18 +109,20 @@ def launch_qemu(vm: VMInfo) -> None:
         "-nodefaults",
         "-no-user-config",
         "-nographic",
+        "-object", "rng-random,id=rng0,filename=/dev/urandom",
+        "-device", "virtio-rng-device,rng=rng0",
         "-serial",
         "chardev:serial0",
         "-chardev",
         f"file,id=serial0,path={vm.log_path}",
         "-device",
-        "virtio-blk-device,drive=rootfs",
+        f"{blk_driver},drive=rootfs",
         "-drive",
         f"id=rootfs,file={vm.overlay_path},format=qcow2,if=none",
         "-netdev",
         f"tap,id=net0,ifname={vm.tap},script=no,downscript=no",
         "-device",
-        f"virtio-net-device,netdev=net0,mac={vm.mac}",
+        f"{net_driver},netdev=net0,mac={vm.mac}",
         "-daemonize",
         "-pidfile",
         str(vm.pid_path),
@@ -117,7 +137,7 @@ def launch_qemu(vm: VMInfo) -> None:
             die(f"disk{n} missing for '{vm.name}'")
         qemu_args += [
             "-device",
-            f"virtio-blk-device,drive=disk{n}",
+            f"{blk_driver},drive=disk{n}",
             "-drive",
             f"id=disk{n},file={disk},format=raw,if=none",
         ]

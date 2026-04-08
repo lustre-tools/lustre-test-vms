@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .config import TARGETS_DIR
+from .config import TARGETS_DIR, arch_deb
 
 if TYPE_CHECKING:
     from .config import TargetConfig
@@ -56,7 +56,20 @@ def _check_mke2fs() -> None:
 
 
 def _container_image_tag(target_config: TargetConfig) -> str:
+    if target_config.arch != "x86_64":
+        return f"ltvm-image-{target_config.name}-{target_config.arch}"
     return f"ltvm-image-{target_config.name}"
+
+
+def _podman_platform(target_config: TargetConfig) -> list[str]:
+    """Return --platform flag for podman if cross-arch build needed."""
+    import platform
+    host_machine = platform.machine()
+    if target_config.arch == "aarch64" and host_machine != "aarch64":
+        return ["--platform", "linux/arm64"]
+    if target_config.arch == "x86_64" and host_machine != "x86_64":
+        return ["--platform", "linux/amd64"]
+    return []
 
 
 def build_image(target_config: TargetConfig, force: bool = False) -> Path:
@@ -96,9 +109,11 @@ def build_image(target_config: TargetConfig, force: bool = False) -> Path:
     # ── Step 1: Build container image ──
     log.info("Building container image %s ...", tag)
     log.info("Running: podman build -t %s -f %s %s", tag, dockerfile, TARGETS_DIR)
+    platform_args = _podman_platform(target_config)
     _run(
         [
             "podman", "build",
+            *platform_args,
             "--build-arg", f"BASE_IMAGE={target_config.container_image}",
             "-t", tag,
             "-f", str(dockerfile),
@@ -107,9 +122,23 @@ def build_image(target_config: TargetConfig, force: bool = False) -> Path:
         capture_output=False,
     )
 
+    # Find kernel modules to bake into the image
+    kernel_modules_dir = None
+    try:
+        kernel_name = target_config.resolve_kernel(None)
+        kdir = target_config.output_dir / "kernels" / kernel_name / "modules"
+        lib_mods = kdir / "lib" / "modules"
+        if lib_mods.is_dir():
+            kernel_modules_dir = lib_mods
+            log.info("Including kernel modules from %s", kdir)
+        else:
+            log.warning("No kernel modules found -- build kernel first for full image")
+    except (ValueError, FileNotFoundError):
+        log.warning("Could not resolve kernel -- image will not include kernel modules")
+
     # ── Step 2: Export to ext4 ──
     log.info("Exporting container to ext4 ...")
-    image_path = _export_to_ext4(tag, image_path)
+    image_path = _export_to_ext4(tag, image_path, kernel_modules_dir=kernel_modules_dir)
 
     elapsed = time.monotonic() - t0
 
@@ -129,14 +158,18 @@ def build_image(target_config: TargetConfig, force: bool = False) -> Path:
     return image_path
 
 
-def _export_to_ext4(container_tag: str, image_path: Path) -> Path:
+def _export_to_ext4(
+    container_tag: str,
+    image_path: Path,
+    kernel_modules_dir: Path | None = None,
+) -> Path:
     """Create a raw ext4 image from a container's filesystem.
 
     Entirely rootless using mke2fs -d (populate from directory).
 
     1. podman create + podman export | tar into temp directory
-    2. mke2fs -d <dir> to create populated ext4 image
-    3. resize2fs -M to shrink
+    2. (optional) copy kernel modules into the temp directory
+    3. mke2fs -d <dir> to create populated ext4 image
     """
     tmpdir = None
     tmpfile = None
@@ -169,6 +202,8 @@ def _export_to_ext4(container_tag: str, image_path: Path) -> Path:
         qcid = shlex.quote(container_id)
         qtmp = shlex.quote(tmpdir)
         qimg = shlex.quote(tmpfile)
+
+        # Export container filesystem
         _run(
             [
                 "bash",
@@ -179,9 +214,37 @@ def _export_to_ext4(container_tag: str, image_path: Path) -> Path:
                 f"&& mkdir -p {qtmp}/dev/pts {qtmp}/dev/shm "
                 f"{qtmp}/dev/mqueue "
                 f"&& find {qtmp} ! -readable -exec "
-                f"chmod u+r {{}} + 2>/dev/null; "
-                f"mke2fs -t ext4 -d {qtmp} -b 4096 "
-                f"-L rootfs {qimg} {_IMAGE_SIZE_MB}M'",
+                f"chmod u+r {{}} + 2>/dev/null; true'",
+            ],
+            capture_output=False,
+        )
+
+        # Inject kernel modules into the rootfs
+        if kernel_modules_dir and kernel_modules_dir.is_dir():
+            dest = Path(tmpdir) / "lib" / "modules"
+            dest.mkdir(parents=True, exist_ok=True)
+            for kver_dir in kernel_modules_dir.iterdir():
+                if kver_dir.is_dir():
+                    log.info("  Copying modules: %s", kver_dir.name)
+                    subprocess.run(
+                        ["cp", "-a", str(kver_dir), str(dest / kver_dir.name)],
+                        check=True,
+                    )
+                    # Remove dangling build/source symlinks
+                    for name in ("build", "source"):
+                        link = dest / kver_dir.name / name
+                        if link.is_symlink():
+                            link.unlink()
+
+        # Create ext4 image
+        _run(
+            [
+                "fakeroot",
+                "mke2fs", "-t", "ext4",
+                "-d", tmpdir,
+                "-b", "4096",
+                "-L", "rootfs",
+                tmpfile, f"{_IMAGE_SIZE_MB}M",
             ],
             capture_output=False,
         )
