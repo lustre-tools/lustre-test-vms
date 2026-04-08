@@ -792,6 +792,7 @@ def cmd_install(args: argparse.Namespace) -> int:
             args.target,
             tc.output_dir,
             kernel=kernel,
+            arch=tc.arch,
         )
     except Exception as e:
         return _error(f"Install failed: {e}", use_json)
@@ -812,7 +813,7 @@ def cmd_shell(args: argparse.Namespace) -> int:
         return err
     assert tc is not None
 
-    tag = f"ltvm-build-{args.target}"
+    tag = _build_container_tag(tc)
     mount_path = Path(args.path).resolve()
 
     if not mount_path.is_dir():
@@ -996,10 +997,27 @@ def cmd_vm(args: argparse.Namespace) -> int:
         if not vm_args:
             return _error(f"vm {action} requires a VM name", use_json)
         name = vm_args[0]
-        # Parse optional flags from vm_args[1:]
-        kwargs = _parse_vm_kwargs(vm_args[1:])
+        mount_lustre = "--mount-lustre" in vm_args
+        remaining = [a for a in vm_args[1:] if a != "--mount-lustre"]
+        kwargs = _parse_vm_kwargs(remaining)
         fn = vmctl.vm_create if action == "create" else vmctl.vm_ensure
         res = fn(name, **kwargs)
+        if not res["ok"]:
+            return _runtime_result(res, use_json)
+        if mount_lustre:
+            # Detect os_family from VM metadata
+            os_family = "rhel"
+            try:
+                st = vmctl.vm_status(name, json_output=True)
+                if st["ok"]:
+                    import json as _json
+                    info = _json.loads(st["output"])
+                    os_id = info.get("os_id", "")
+                    tc = TargetConfig(os_id)
+                    os_family = tc.os_family
+            except Exception:
+                pass
+            res = vmctl.lustre_mount(name, os_family=os_family)
         return _runtime_result(res, use_json)
 
     if action == "destroy":

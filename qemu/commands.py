@@ -87,7 +87,8 @@ def cmd_create(args: argparse.Namespace) -> None:
     if not os_target:
         os_target = "rocky9"
         print(f"using default target: {os_target}")
-    os_arts = resolve_os_artifacts(os_target)
+    arch = getattr(args, "arch", None) or "x86_64"
+    os_arts = resolve_os_artifacts(os_target, arch=arch)
     image = getattr(args, "image", "") or args.rootfs or str(os_arts.image)
     kernel = getattr(args, "kernel", "") or str(os_arts.kernel)
     if args.mem == 2048 and os_arts.default_mem > 2048:
@@ -169,13 +170,6 @@ def cmd_create(args: argparse.Namespace) -> None:
             f"name={vm.name} ip={vm.ip} pid={vm.pid} "
             f"mdt_disks={vm.mdt_disks} ost_disks={vm.ost_disks}"
         )
-        print()
-        print("Next steps:")
-        print(f"  sudo ltvm vm mount-lustre {vm.name}                          # mount Lustre (pre-installed in image)")
-        print(f"  sudo ltvm deploy {vm.name} --build ~/lustre-release --mount  # deploy your own Lustre build")
-        print()
-        print(f"  sudo ltvm vm exec {vm.name} 'lfs df'  # run a command")
-        print(f"  sudo ltvm vm ssh {vm.name}             # interactive shell")
 
 
 def cmd_start(args: argparse.Namespace) -> None:
