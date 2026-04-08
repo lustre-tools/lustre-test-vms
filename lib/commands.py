@@ -105,12 +105,12 @@ def _not_found(msg: str, use_json: bool, hint: str | None = None) -> int:
 
 
 def _load_target(
-    name: str, use_json: bool
+    name: str, use_json: bool, arch: str | None = None
 ) -> tuple[TargetConfig | None, int | None]:
     """Load a TargetConfig, returning (config, None) or
     (None, exit_code) on failure."""
     try:
-        return TargetConfig(name), None
+        return TargetConfig(name, arch=arch), None
     except ValueError as e:
         targets = list_targets()
         hint = (
@@ -663,7 +663,7 @@ def cmd_publish(args: argparse.Namespace) -> int:
             )
     else:
         # Look for existing tarball in output/
-        pattern = f"{args.target}-*.tar.zst"
+        pattern = f"{args.target}-*.tar.*"
         candidates = sorted(tc.output_dir.parent.glob(pattern))
         if kernel:
             candidates = [c for c in candidates if kernel in c.name]

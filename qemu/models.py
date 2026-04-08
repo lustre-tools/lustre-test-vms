@@ -16,6 +16,22 @@ VM_DIR = Path(os.environ.get("LTVM_VM_DIR", "/opt/qemu-vms"))
 QEMU_PREFIX = Path(os.environ.get("LTVM_QEMU_PREFIX", "/opt/qemu"))
 QEMU = str(QEMU_PREFIX / "bin" / "qemu-system-x86_64")
 QEMU_IMG = str(QEMU_PREFIX / "bin" / "qemu-img")
+
+
+def qemu_binary_for_arch(arch: str = "x86_64") -> str:
+    """Return the full path to qemu-system-<arch>."""
+    _BINARY_MAP = {"x86_64": "qemu-system-x86_64", "aarch64": "qemu-system-aarch64"}
+    name = _BINARY_MAP.get(arch, f"qemu-system-{arch}")
+    return str(QEMU_PREFIX / "bin" / name)
+
+
+def qemu_machine_for_arch(arch: str = "x86_64") -> str:
+    """Return the -machine argument for a given arch."""
+    _MACHINE_MAP = {
+        "x86_64": "microvm,accel=kvm,pit=off,pic=off,rtc=on",
+        "aarch64": "virt,accel=kvm,gic-version=max",
+    }
+    return _MACHINE_MAP.get(arch, _MACHINE_MAP["x86_64"])
 DISK_SIZE_BYTES = 8 * 1024 * 1024 * 1024  # 8 GiB
 BASE_IMAGE = VM_DIR / "images" / "rocky9-ltvm.ext4"
 KERNEL = VM_DIR / "kernel" / "vmlinux"
@@ -33,24 +49,16 @@ class OSArtifacts:
     image: Path
     kernel: Path
     default_mem: int = 2048
+    arch: str = "x86_64"
 
 
-def resolve_os_artifacts(os_name: str) -> OSArtifacts:
+def resolve_os_artifacts(os_name: str, arch: str = "x86_64") -> OSArtifacts:
     """Return image, kernel paths and defaults for a target OS.
 
-    Reads targets.yaml (from the repo or installed copy) for the
-    default kernel name, then resolves installed paths.
+    Looks in output/<os>/ in the repo (from fetch or build).
+    No separate install step needed.
     """
-    # Image: <os>-ltvm.ext4
-    img = IMAGES / f"{os_name}-ltvm.ext4"
-    if not img.exists():
-        raise FileNotFoundError(
-            f"No image installed for '{os_name}': {img}\n"
-            f"Run: ltvm build-image {os_name} && sudo ltvm install {os_name}"
-        )
-
     # Read targets.yaml for kernel suffix and defaults
-    kern = KERNEL
     kernel_suffix = ""
     default_mem = 2048
     target_cfg: dict = {}
@@ -66,35 +74,54 @@ def resolve_os_artifacts(os_name: str) -> OSArtifacts:
         except Exception:
             pass
 
-    # Prefer vmlinuz (compressed bzImage) — works with all kernel
-    # versions via standard x86 boot protocol.  vmlinux (ELF) only
-    # works if the kernel was built with CONFIG_PVH=y (5.x+).
-    for prefix in ("vmlinuz", "vmlinux"):
-        if kernel_suffix:
-            exact = KERNELS / f"{prefix}-{os_name}-{kernel_suffix}"
-            if exact.exists():
-                kern = exact
-                break
+    output_dir = _LTVM_ROOT / "output" / os_name
 
-        # Fallback: look for any <prefix>-<os>-*
-        if kern == KERNEL:
-            candidates = list(KERNELS.glob(f"{prefix}-{os_name}-*"))
-            if len(candidates) == 1:
-                kern = candidates[0]
-                break
-            elif len(candidates) > 1:
-                raise FileNotFoundError(
-                    f"Multiple kernels installed for '{os_name}', specify --kernel:\n"
-                    + "\n".join(f"  {c}" for c in candidates)
-                )
-
-    if kern == KERNEL:
+    # Find image in output/<os>/image/
+    img = output_dir / "image" / "base.ext4"
+    if not img.exists():
+        img = None
+    if not img:
         raise FileNotFoundError(
-            f"No kernel installed for '{os_name}'\n"
-            f"Run: ltvm build-kernel {os_name} && sudo ltvm install {os_name}"
+            f"No image for '{os_name}'\n"
+            f"Run: ltvm fetch {os_name}  (or: ltvm build-image {os_name})"
         )
 
-    return OSArtifacts(image=img, kernel=kern, default_mem=default_mem)
+    # Find kernel: check output dir first, then install dir
+    # Prefer vmlinuz (works without PVH) over vmlinux
+    kern = None
+
+    # Search output/<os>/kernels/<suffix>/
+    if kernel_suffix:
+        kdir = output_dir / "kernels" / kernel_suffix
+        if not kdir.is_dir():
+            # Try glob for versioned subdirs
+            matches = sorted(output_dir.glob(f"kernels/{kernel_suffix}*"))
+            if matches:
+                kdir = matches[0]
+        for name in ("vmlinuz", "vmlinux"):
+            c = kdir / name
+            if c.exists():
+                kern = c
+                break
+
+    # Search output/<os>/kernels/*/ (any kernel)
+    if not kern and output_dir.is_dir():
+        for kdir in sorted(output_dir.glob("kernels/*/vmlinuz")):
+            kern = kdir
+            break
+        if not kern:
+            for kdir in sorted(output_dir.glob("kernels/*/vmlinux")):
+                kern = kdir
+                break
+
+    if not kern:
+        raise FileNotFoundError(
+            f"No kernel for '{os_name}'\n"
+            f"Run: ltvm fetch {os_name}  (or: ltvm build-kernel {os_name})"
+        )
+
+    target_arch = target_cfg.get("arch", arch)
+    return OSArtifacts(image=img, kernel=kern, default_mem=default_mem, arch=target_arch)
 OVERLAYS = VM_DIR / "overlays"
 SOCKETS = VM_DIR / "sockets"
 BRIDGE = "fcbr0"
@@ -137,6 +164,7 @@ class VMInfo:
     kver: str = ""  # kernel version running in the VM
     base_image: str = ""  # base image name (e.g. rocky9-base.ext4)
     os_id: str = ""  # OS identifier (e.g. rocky9, ubuntu24)
+    arch: str = "x86_64"  # CPU architecture (x86_64, aarch64)
 
     @property
     def info_path(self) -> Path:
@@ -181,6 +209,7 @@ class VMInfo:
             f"KVER={self.kver}\n"
             f"BASE_IMAGE={self.base_image}\n"
             f"OS_ID={self.os_id}\n"
+            f"ARCH={self.arch}\n"
         )
 
     def _update_field(self, key: str, value: str | int) -> None:
@@ -241,6 +270,7 @@ class VMInfo:
             kver=vals.get("KVER", ""),
             base_image=vals.get("BASE_IMAGE", ""),
             os_id=vals.get("OS_ID", ""),
+            arch=vals.get("ARCH", "x86_64"),
         )
 
     @staticmethod

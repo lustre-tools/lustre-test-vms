@@ -234,7 +234,7 @@ def package_target(
         meta = json.loads(kernel_meta.read_text())
         version = meta.get("kernel_version", "unknown")
 
-    tarball = dest_dir / f"{target_name}-{version}.tar.zst"
+    tarball = dest_dir / f"{target_name}-{version}.tar.gz"
 
     print(f"  Packaging {target_name} (kernel={kernel_name}) -> {tarball.name}")
     print(f"    Kernel: {artifacts['vmlinux']}")
@@ -242,36 +242,10 @@ def package_target(
     if "lustre" in artifacts:
         print(f"    Lustre: {artifacts['lustre']}")
 
-    # Use tar + zstd via subprocess for streaming compression
-    cmd = [
-        "tar",
-        "--zstd",
-        "-cf",
-        str(tarball),
-        "-C",
-        str(output_dir.parent),
-        target_name,
-    ]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        # Fallback: try gzip if zstd not available.
-        # Only fall back if the error looks like missing zstd;
-        # re-raise on other failures (disk full, permission, etc.)
-        if "zstd" not in (r.stderr or "").lower():
-            raise RuntimeError(
-                f"tar --zstd failed (rc={r.returncode}): {r.stderr}"
-            )
-        print("  zstd not available, falling back to gzip")
-        tarball = dest_dir / f"{target_name}-{kernel_name}-{version}.tar.gz"
-        cmd = [
-            "tar",
-            "-czf",
-            str(tarball),
-            "-C",
-            str(output_dir.parent),
-            target_name,
-        ]
-        subprocess.run(cmd, check=True)
+    subprocess.run(
+        ["tar", "-czf", str(tarball), "-C", str(output_dir.parent), target_name],
+        check=True,
+    )
 
     size_mb = tarball.stat().st_size / (1024 * 1024)
     print(f"    Size: {size_mb:.0f} MB")
