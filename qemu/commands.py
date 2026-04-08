@@ -159,6 +159,7 @@ def cmd_create(args: argparse.Namespace) -> None:
             f"name={vm.name} ip={vm.ip} pid={vm.pid} "
             f"mdt_disks={vm.mdt_disks} ost_disks={vm.ost_disks}"
         )
+        print(f"\n  sudo ltvm deploy {vm.name} --mount")
 
 
 def cmd_start(args: argparse.Namespace) -> None:
