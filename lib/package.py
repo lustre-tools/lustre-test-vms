@@ -171,13 +171,28 @@ def snapshot_lustre(
     size_mb = _dir_size_mb(dest)
     print(f"    Snapshot size: {size_mb:.0f} MB")
 
+    # Capture git commit hash if available
+    lustre_commit = None
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(lustre_tree), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False,
+        )
+        if r.returncode == 0:
+            lustre_commit = r.stdout.strip()
+    except FileNotFoundError:
+        pass
+
     # Write metadata
     meta = {
         "source": str(lustre_tree),
         "kernel": kernel_name,
         "ko_count": len(ko_files),
+        "lustre_commit": lustre_commit,
     }
     (dest / ".ltvm-snapshot.json").write_text(json.dumps(meta, indent=2) + "\n")
+    if lustre_commit:
+        print(f"    Lustre commit: {lustre_commit[:12]}")
 
     return dest
 
@@ -261,6 +276,13 @@ def package_target(
     size_mb = tarball.stat().st_size / (1024 * 1024)
     print(f"    Size: {size_mb:.0f} MB")
 
+    # Read lustre commit from snapshot metadata if present
+    lustre_commit = None
+    if "lustre" in artifacts:
+        snap_meta = artifacts["lustre"] / ".ltvm-snapshot.json"
+        if snap_meta.exists():
+            lustre_commit = json.loads(snap_meta.read_text()).get("lustre_commit")
+
     # Write a manifest alongside the tarball
     manifest = {
         "target": target_name,
@@ -268,6 +290,7 @@ def package_target(
         "kernel_version": version,
         "contents": list(artifacts.keys()),
         "has_lustre": "lustre" in artifacts,
+        "lustre_commit": lustre_commit,
         "size_bytes": tarball.stat().st_size,
     }
     manifest_path = tarball.with_suffix(tarball.suffix + ".json")
