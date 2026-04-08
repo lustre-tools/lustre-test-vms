@@ -219,7 +219,7 @@ def cmd_build_all(args: argparse.Namespace) -> int:
     against the freshly built kernel.
     """
     use_json = args.json
-    tc, err = _load_target(args.target, use_json)
+    tc, err = _load_target(args.target, use_json, arch=getattr(args, "arch", None))
     if err is not None:
         return err
     assert tc is not None
@@ -302,7 +302,7 @@ def cmd_build_all(args: argparse.Namespace) -> int:
 
 def cmd_build_container(args: argparse.Namespace) -> int:
     use_json = args.json
-    tc, err = _load_target(args.target, use_json)
+    tc, err = _load_target(args.target, use_json, arch=getattr(args, "arch", None))
     if err is not None:
         return err
     assert tc is not None
@@ -327,7 +327,7 @@ def cmd_build_container(args: argparse.Namespace) -> int:
 
 def cmd_build_kernel(args: argparse.Namespace) -> int:
     use_json = args.json
-    tc, err = _load_target(args.target, use_json)
+    tc, err = _load_target(args.target, use_json, arch=getattr(args, "arch", None))
     if err is not None:
         return err
     assert tc is not None
@@ -372,7 +372,7 @@ def cmd_build_kernel(args: argparse.Namespace) -> int:
 
 def cmd_build_image(args: argparse.Namespace) -> int:
     use_json = args.json
-    tc, err = _load_target(args.target, use_json)
+    tc, err = _load_target(args.target, use_json, arch=getattr(args, "arch", None))
     if err is not None:
         return err
     assert tc is not None
@@ -397,7 +397,7 @@ def cmd_build_image(args: argparse.Namespace) -> int:
 
 def cmd_build_lustre(args: argparse.Namespace) -> int:
     use_json = args.json
-    tc, err = _load_target(args.target, use_json)
+    tc, err = _load_target(args.target, use_json, arch=getattr(args, "arch", None))
     if err is not None:
         return err
     assert tc is not None
@@ -469,7 +469,7 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
 
 def cmd_package(args: argparse.Namespace) -> int:
     use_json = args.json
-    tc, err = _load_target(args.target, use_json)
+    tc, err = _load_target(args.target, use_json, arch=getattr(args, "arch", None))
     if err is not None:
         return err
     assert tc is not None
@@ -633,6 +633,14 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
     result = {"target": target, "path": str(target_dir)}
     _output(result, use_json)
+
+    if not use_json:
+        print()
+        print("Next:")
+        print(f"  sudo vm.py create co1-test --os {target} "
+              f"--vcpus 2 --mem 2048 --mdt-disks 1 --ost-disks 2")
+        print(f"  sudo ltvm deploy co1-test --mount")
+
     return EXIT_OK
 
 
@@ -644,7 +652,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 def cmd_publish(args: argparse.Namespace) -> int:
     """Upload a packaged tarball to a GitHub release."""
     use_json = args.json
-    tc, err = _load_target(args.target, use_json)
+    tc, err = _load_target(args.target, use_json, arch=getattr(args, "arch", None))
     if err is not None:
         return err
     assert tc is not None
@@ -749,7 +757,7 @@ def cmd_publish(args: argparse.Namespace) -> int:
 
 def cmd_install(args: argparse.Namespace) -> int:
     use_json = args.json
-    tc, err = _load_target(args.target, use_json)
+    tc, err = _load_target(args.target, use_json, arch=getattr(args, "arch", None))
     if err is not None:
         return err
     assert tc is not None
@@ -787,7 +795,7 @@ def cmd_install(args: argparse.Namespace) -> int:
 
 def cmd_shell(args: argparse.Namespace) -> int:
     use_json = args.json
-    tc, err = _load_target(args.target, use_json)
+    tc, err = _load_target(args.target, use_json, arch=getattr(args, "arch", None))
     if err is not None:
         return err
     assert tc is not None
@@ -895,7 +903,7 @@ def cmd_update(args: argparse.Namespace) -> int:
 
     results: dict[str, str | list[str]] = {}
     for name in targets:
-        tc, err = _load_target(name, use_json)
+        tc, err = _load_target(name, use_json, arch=getattr(args, "arch", None))
         if err is not None:
             return err
         assert tc is not None
@@ -1158,7 +1166,7 @@ def cmd_cluster(args: argparse.Namespace) -> int:
 def cmd_validate(args: argparse.Namespace) -> int:
     """Run validation checks on a built target."""
     use_json = args.json
-    tc, err = _load_target(args.target, use_json)
+    tc, err = _load_target(args.target, use_json, arch=getattr(args, "arch", None))
     if err is not None:
         return err
     assert tc is not None
