@@ -140,10 +140,30 @@ def snapshot_lustre(
 
     # Verify the tree looks built
     ko_files = [
-        f for f in lustre_tree.rglob("*.ko") if "kconftest" not in str(f)
+        f for f in lustre_tree.rglob("*.ko")
+        if "kconftest" not in str(f) and ".staging" not in str(f)
     ]
     if not ko_files:
         raise ValueError(f"No .ko files in {lustre_tree} -- build Lustre first")
+
+    # Verify the .ko files match the target kernel
+    meta_file = kernel_dir / "meta.json"
+    if meta_file.exists():
+        meta = json.loads(meta_file.read_text())
+        expected_kver = meta.get("kernel_version", "")
+        if expected_kver:
+            sample = ko_files[0]
+            r = subprocess.run(
+                ["modinfo", "-F", "vermagic", str(sample)],
+                capture_output=True, text=True, check=False,
+            )
+            actual_kver = r.stdout.split()[0] if r.returncode == 0 else ""
+            if actual_kver and actual_kver != expected_kver:
+                raise ValueError(
+                    f"Lustre modules built for {actual_kver} but target "
+                    f"kernel is {expected_kver}\n"
+                    f"  Rebuild: ltvm build-lustre <target> --lustre-tree {lustre_tree} --force"
+                )
 
     print(f"  Snapshotting Lustre tree to {dest}")
     print(f"    Source: {lustre_tree}")

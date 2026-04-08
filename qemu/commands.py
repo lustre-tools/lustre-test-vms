@@ -83,7 +83,10 @@ def cmd_create(args: argparse.Namespace) -> None:
     tap = tap_for_name(name)
     mac = mac_for_name(name)
 
-    os_target = getattr(args, "os", "") or "rocky9"
+    os_target = getattr(args, "os", "")
+    if not os_target:
+        os_target = "rocky9"
+        print(f"using default target: {os_target}")
     os_arts = resolve_os_artifacts(os_target)
     image = getattr(args, "image", "") or args.rootfs or str(os_arts.image)
     kernel = getattr(args, "kernel", "") or str(os_arts.kernel)
@@ -107,6 +110,7 @@ def cmd_create(args: argparse.Namespace) -> None:
         created=int(time.time()),
         base_image=base_name,
         os_id=os_id,
+        arch=os_arts.arch,
     )
 
     # Create overlay

@@ -38,9 +38,18 @@ KERNEL = VM_DIR / "kernel" / "vmlinux"
 IMAGES = VM_DIR / "images"
 KERNELS = VM_DIR / "kernel"
 
-# ltvm repo root — vm.py is installed to /opt/qemu-vms/qemu/models.py,
-# and the repo may also be at the symlink source of /usr/local/bin/ltvm.
-_LTVM_ROOT = Path(__file__).resolve().parent.parent
+# ltvm repo root — find via LTVM_ROOT env var, /usr/local/bin/ltvm
+# symlink, or fall back to this file's location.
+def _find_ltvm_root() -> Path:
+    env = os.environ.get("LTVM_ROOT")
+    if env:
+        return Path(env)
+    ltvm_link = Path("/usr/local/bin/ltvm")
+    if ltvm_link.is_symlink():
+        return ltvm_link.resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+_LTVM_ROOT = _find_ltvm_root()
 TARGETS_YAML = _LTVM_ROOT / "targets" / "targets.yaml"
 
 
