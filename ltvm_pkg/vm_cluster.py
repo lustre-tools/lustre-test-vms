@@ -283,9 +283,19 @@ def _deploy_one_node(
 
     Returns (node_name, returncode, combined_output).
     """
+    # Resolve staging dir from the output tree
+    from ltvm_pkg.lustre_build import staging_path as _staging_path
+    from ltvm_pkg.vm_state import VMInfo, VMNotFound
+    try:
+        vm = VMInfo.load(node_name)
+        target = vm.os_id or "rocky9"
+    except VMNotFound:
+        target = "rocky9"
+    staging = str(_staging_path(target))
+
     r = subprocess.run(
         ["sudo", "deploy-lustre.sh", "--vm", node_name, "--build", build,
-         "--os-family", os_family],
+         "--staging", staging, "--os-family", os_family],
         capture_output=True,
         text=True,
         timeout=300,

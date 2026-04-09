@@ -525,7 +525,7 @@ class TestCmdDeployBuildGating:
     def test_build_success_no_ko_files_returns_error(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """When build succeeds but .staging/ has no .ko files, cmd_deploy errors."""
+        """When build succeeds but staging has no .ko files, cmd_deploy errors."""
         from ltvm_pkg import cli as cli_mod
         from ltvm_pkg.vm_state import VMInfo
 
@@ -534,9 +534,9 @@ class TestCmdDeployBuildGating:
         build_path = tmp_path / "lustre-release"
         build_path.mkdir()
 
-        # Create .staging/ with NO .ko files
-        staging = build_path / ".staging"
-        staging.mkdir()
+        # Create staging dir (in output tree) with NO .ko files
+        staging = tmp_path / "output" / "rocky9" / "lustre" / "staging"
+        staging.mkdir(parents=True)
         (staging / "some-file.txt").write_text("not a kernel module")
 
         with patch("ltvm_pkg.vm_state.SOCKETS", sockets_dir):
@@ -554,6 +554,7 @@ class TestCmdDeployBuildGating:
                 patch("ltvm_pkg.cli._require_root", return_value=None),
                 patch("ltvm_pkg.vm_state.VMInfo.load", return_value=vm),
                 patch("ltvm_pkg.cli.TargetConfig") as mock_tc,
+                patch("ltvm_pkg.lustre_build.OUTPUT_DIR", tmp_path / "output"),
                 patch("subprocess.run", return_value=ok_result),
             ):
                 mock_tc.return_value.os_family = "rhel"

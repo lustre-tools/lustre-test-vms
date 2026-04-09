@@ -18,6 +18,7 @@ SSH_OPTS="-o StrictHostKeyChecking=no -o LogLevel=ERROR"
 
 VM_NAME=""
 BUILD_DIR=""
+STAGING_DIR=""
 DO_MOUNT=false
 SERVER_ONLY=false
 OS_FAMILY=""  # rhel or debian — passed from ltvm, auto-detected if empty
@@ -41,6 +42,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --vm)              VM_NAME="$2"; shift 2;;
         --build)           BUILD_DIR="$2"; shift 2;;
+        --staging)         STAGING_DIR="$2"; shift 2;;
         --mount)           DO_MOUNT=true; shift;;
         --server-only)     SERVER_ONLY=true; shift;;
         --os-family)       OS_FAMILY="$2"; shift 2;;
@@ -133,7 +135,12 @@ $SSHPASS ssh $SSH_OPTS ${REMOTE} \
 # The staging tree (from `make install DESTDIR=.staging`) has the
 # complete installed layout: binaries, libraries, test scripts,
 # AND kernel modules. One rsync does everything.
-STAGING="${BUILD_DIR}/.staging"
+# Staging dir: explicit --staging, or fall back to legacy .staging in source tree
+if [[ -n "${STAGING_DIR}" ]]; then
+    STAGING="${STAGING_DIR}"
+else
+    STAGING="${BUILD_DIR}/.staging"
+fi
 
 if [[ ! -d "${STAGING}/usr" ]]; then
     echo "ERROR: No staging tree at ${STAGING}/usr"

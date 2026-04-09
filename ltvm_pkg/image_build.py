@@ -240,7 +240,8 @@ def build_image(target_config: TargetConfig, force: bool = False) -> Path:
     if kernel_name is not None:
         kdir = target_config.output_dir / "kernels" / kernel_name
         modules_dir = kdir / "modules"
-        staging_dir = kdir / "lustre" / ".staging"
+        from ltvm_pkg.lustre_build import staging_path as _staging_path
+        staging_dir = _staging_path(target_config.name)
         has_modules = (modules_dir / "lib" / "modules").is_dir()
         has_lustre = staging_dir.is_dir()
 

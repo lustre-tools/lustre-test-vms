@@ -1283,32 +1283,25 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
     userspace_only = getattr(args, "userspace_only", False)
 
-    # Auto-build Lustre unless .staging-<target>/ is already fresh.
-    # Fresh = staging dir exists AND no source file is newer than the
-    # staging directory itself.  We use an exclude list (build artifacts,
-    # generated files, VCS dirs) rather than an include list so that new
-    # source languages (*.rs, *.py, etc.) are caught automatically.
-    staging = build_path / f".staging-{target}"
+    # Staging lives in the ltvm output dir, not the source tree.
+    from ltvm_pkg.lustre_build import staging_path as _staging_path
+    staging = _staging_path(target)
 
     def _staging_is_fresh(staging: Path, src: Path) -> bool:
+        """Check if the staging dir is newer than all source files."""
         if not staging.is_dir():
             return False
-        # staging must actually contain built modules
         if not any(staging.rglob("*.ko")):
             return False
-        # find any source file newer than .staging/ by excluding artifacts
+        # Staging is outside the source tree so the find exclusions are
+        # simpler -- just skip build artifacts and VCS dirs.
         r = subprocess.run(
             [
                 "find", str(src),
-                # prune entire directories first (fast)
-                "-path", str(staging), "-prune", "-o",
-                "-path", "*/.staging-*", "-prune", "-o",
-                "-path", "*/.staging", "-prune", "-o",
                 "-path", "*/.git", "-prune", "-o",
                 "-path", "*/autom4te.cache", "-prune", "-o",
                 "-path", "*/_lpb", "-prune", "-o",
                 "-path", "*/kconftest.dir", "-prune", "-o",
-                # exclude build artifacts and generated files by name
                 r"\(",
                 "-name", "*.o",
                 "-o", "-name", "*.ko",
@@ -1322,22 +1315,18 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 "-o", "-name", "config.log",
                 "-o", "-name", "config.status",
                 "-o", "-name", ".ltvm-*",
-                # Makefile is generated from Makefile.am; Makefile.am is source
                 "-o", "-name", "Makefile",
                 r"\)", "-prune", "-o",
-                # anything not excluded and newer than staging is a source hit
                 "-newer", str(staging), "-print", "-quit",
             ],
             capture_output=True, text=True,
         )
-        return r.stdout.strip() == ""  # no newer source files found
+        return r.stdout.strip() == ""
 
     if userspace_only:
-        # Userspace-only deploy: just need staging to exist; skip build and
-        # kernel module checks entirely.
         if not staging.is_dir():
             return _error(
-                f"No .staging-{target}/ in {build_path} -- run: ltvm build-lustre {target}",
+                f"No staging for {target} -- run: ltvm build-lustre {target}",
                 use_json,
             )
         if not use_json:
@@ -1347,7 +1336,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
         if staging_fresh:
             if not use_json:
-                print(f"  .staging/ is up to date, skipping build")
+                print(f"  Staging up to date, skipping build")
         else:
             build_cmd = ["ltvm", "build-lustre", target, "--lustre-tree", str(build_path)]
             sudo_user = os.environ.get("SUDO_USER")
@@ -1357,17 +1346,15 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             if r.returncode != 0:
                 return _error(f"Lustre build failed (rc={r.returncode})", use_json)
 
-            # Verify staging was actually (re)created by the build we just ran.
-            # A pre-existing stale .staging/ would pass the is_dir() check below.
             if not staging.is_dir() or not any(staging.rglob("*.ko")):
                 return _error(
-                    f"Lustre build succeeded but no .staging-{target}/ with modules found in {build_path}",
+                    f"Lustre build succeeded but no staging with modules for {target}",
                     use_json,
                 )
 
         if not staging.is_dir():
             return _error(
-                f"No .staging-{target}/ in {build_path} -- run: ltvm build-lustre {target}",
+                f"No staging for {target} -- run: ltvm build-lustre {target}",
                 use_json,
             )
 

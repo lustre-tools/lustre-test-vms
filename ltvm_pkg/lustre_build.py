@@ -21,6 +21,13 @@ import subprocess
 from pathlib import Path
 from typing import TypedDict
 
+from .target_config import OUTPUT_DIR
+
+
+def staging_path(target: str) -> Path:
+    """Return the host-side staging directory for a target."""
+    return OUTPUT_DIR / target / "lustre" / "staging"
+
 
 class BuildResult(TypedDict):
     lustre_tree: str
@@ -61,6 +68,8 @@ def _needs_reconfigure(
     build_tree: Path,
     force: bool,
     container_path: Path,
+    target: str = "rocky9",
+    enable_server: bool = True,
 ) -> bool:
     """Return True if configure needs to be re-run.
 
@@ -81,20 +90,29 @@ def _needs_reconfigure(
     if not config_status.exists():
         return True
 
-    # Check if previous configure used a different
-    # --with-linux path (host vs container path change)
-    stamp = lustre_tree / ".ltvm-kernel"
-    stamp_path = lustre_tree / ".ltvm-kernel-path"
+    # Check if previous configure used a different kernel, path, or
+    # server flag.  Stamps are per-target so switching targets forces
+    # reconfigure even when the source tree is shared.
+    stamp = lustre_tree / f".ltvm-kernel-{target}"
+    stamp_path = lustre_tree / f".ltvm-kernel-path-{target}"
+    stamp_server = lustre_tree / f".ltvm-server-{target}"
     if stamp.exists():
         prev = stamp.read_text().strip()
         cur = _kernel_release(build_tree)
         if prev != cur:
             print(f"  Kernel changed ({prev} -> {cur}), reconfiguring")
             return True
+    else:
+        return True  # no stamp = never built for this target
     if stamp_path.exists():
         prev_path = stamp_path.read_text().strip()
         if prev_path != str(container_path):
             print("  Kernel path changed, reconfiguring")
+            return True
+    if stamp_server.exists():
+        prev_server = stamp_server.read_text().strip()
+        if prev_server != str(enable_server):
+            print(f"  Server flag changed ({prev_server} -> {enable_server}), reconfiguring")
             return True
 
     return False
@@ -200,7 +218,8 @@ def _build_in_container(
 
     container_kernel = Path("/kernel")
     need_reconf = _needs_reconfigure(
-        lustre_tree, build_tree, force, container_kernel
+        lustre_tree, build_tree, force, container_kernel,
+        target=target, enable_server=enable_server,
     )
 
     # Detect cross-compilation
@@ -302,12 +321,15 @@ fi""")
     if cross_compiling:
         make_cross = " ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-"
     script_parts.append(f"make{make_cross} -j{jobs}")
-    # Create a staging tree so deploy-lustre.sh can rsync the
-    # installed layout directly instead of tracking individual files.
-    staging_dir = f".staging-{target}"
-    script_parts.append(f"rm -rf /lustre/{staging_dir}")
-    script_parts.append(f"make{make_cross} install DESTDIR=/lustre/{staging_dir} -j{jobs}")
+    # Install into /staging (bind-mounted from output/<target>/lustre/staging/)
+    # so build artifacts stay out of the source tree.
+    script_parts.append("rm -rf /staging/*")
+    script_parts.append(f"make{make_cross} install DESTDIR=/staging -j{jobs}")
     script = "\n".join(script_parts)
+
+    # Ensure the staging directory exists on the host before mounting
+    host_staging = staging_path(target)
+    host_staging.mkdir(parents=True, exist_ok=True)
 
     # Use a persistent ccache volume so incremental container
     # builds benefit from cached compilations across runs
@@ -321,6 +343,8 @@ fi""")
         f"{lustre_tree}:/lustre",
         "-v",
         f"{build_tree}:/kernel:ro",
+        "-v",
+        f"{host_staging}:/staging",
         "-v",
         f"ltvm-ccache-{container_tag.removeprefix('ltvm-build-')}:/ccache",
         container_tag,
@@ -339,13 +363,12 @@ fi""")
     if r.returncode != 0:
         raise RuntimeError(f"Container build failed (rc={r.returncode})")
 
-    # Record stamps on the host filesystem
-    (lustre_tree / ".ltvm-kernel").write_text(kver + "\n")
-    (lustre_tree / ".ltvm-kernel-path").write_text(str(container_kernel) + "\n")
+    # Record per-target stamps on the host filesystem
+    (lustre_tree / f".ltvm-kernel-{target}").write_text(kver + "\n")
+    (lustre_tree / f".ltvm-kernel-path-{target}").write_text(str(container_kernel) + "\n")
+    (lustre_tree / f".ltvm-server-{target}").write_text(str(enable_server) + "\n")
 
-    ko_files = [
-        f for f in lustre_tree.rglob("*.ko") if "kconftest" not in str(f)
-    ]
+    ko_files = list(host_staging.rglob("*.ko"))
     print(f"--- Build complete: {len(ko_files)} kernel modules")
 
     return {
@@ -354,21 +377,22 @@ fi""")
         "kernel_version": kver,
         "ko_count": len(ko_files),
         "container": container_tag,
+        "staging": str(host_staging),
     }
 
 
 def lustre_status(
-    lustre_tree: str | Path, build_tree: str | Path
+    lustre_tree: str | Path, build_tree: str | Path,
+    target: str = "rocky9",
 ) -> StatusResult:
     """Return a status dict for the Lustre build."""
     lustre_tree = Path(lustre_tree).resolve()
     build_tree = Path(build_tree).resolve()
 
-    stamp = lustre_tree / ".ltvm-kernel"
+    stamp = lustre_tree / f".ltvm-kernel-{target}"
     config_status = lustre_tree / "config.status"
-    ko_count = len(
-        [f for f in lustre_tree.rglob("*.ko") if "kconftest" not in str(f)]
-    )
+    host_staging = staging_path(target)
+    ko_count = len(list(host_staging.rglob("*.ko"))) if host_staging.is_dir() else 0
 
     built_against = stamp.read_text().strip() if stamp.exists() else None
     current_kver = _kernel_release(build_tree) if build_tree.exists() else None
