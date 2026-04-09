@@ -830,7 +830,7 @@ def cmd_publish(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------
 
 
-def cmd_shell(args: argparse.Namespace) -> int:
+def cmd_build_shell(args: argparse.Namespace) -> int:
     use_json = args.json
     tc, err = _load_target(args.target, use_json, arch=getattr(args, "arch", None))
     if err is not None:
@@ -929,75 +929,6 @@ def cmd_status(args: argparse.Namespace) -> int:
 # Subcommand: update
 # ------------------------------------------------------------------
 
-
-def cmd_update(args: argparse.Namespace) -> int:
-    use_json = args.json
-
-    if args.all:
-        targets = list_targets()
-    else:
-        targets = [args.target]
-
-    if not targets:
-        return _error("No targets to update", use_json)
-
-    results: dict[str, str | list[str]] = {}
-    for name in targets:
-        tc, err = _load_target(name, use_json, arch=getattr(args, "arch", None))
-        if err is not None:
-            return err
-        assert tc is not None
-
-        updated = []
-
-        if tc.is_stale("container"):
-            if not use_json:
-                print(f"Rebuilding container for {name}...")
-            try:
-                _do_build_container(tc)
-                updated.append("container")
-            except Exception as e:
-                return _error(
-                    f"Container rebuild failed for {name}: {e}", use_json
-                )
-
-        if tc.is_stale("image"):
-            if not use_json:
-                print(f"Rebuilding image for {name}...")
-            try:
-                build_image(tc, force=True)
-                updated.append("image")
-            except Exception as e:
-                return _error(f"Image rebuild failed for {name}: {e}", use_json)
-
-        # Kernel requires --lustre-tree, skip if not stale
-        if tc.is_stale("kernel"):
-            if args.lustre_tree:
-                if not use_json:
-                    print(f"Rebuilding kernel for {name}...")
-                try:
-                    build_kernel(
-                        tc, Path(args.lustre_tree).resolve(), force=True
-                    )
-                    updated.append("kernel")
-                except Exception as e:
-                    return _error(
-                        f"Kernel rebuild failed for {name}: {e}", use_json
-                    )
-            else:
-                if not use_json:
-                    print(
-                        f"Kernel for {name} is stale but "
-                        "--lustre-tree not provided, skipping"
-                    )
-
-        if not updated:
-            results[name] = "up to date"
-        else:
-            results[name] = updated
-
-    _output(results, use_json)
-    return EXIT_OK
 
 
 # ------------------------------------------------------------------

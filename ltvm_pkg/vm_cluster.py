@@ -164,7 +164,7 @@ def generate_local_sh(cluster: ClusterInfo, os_family: str = "rhel") -> str:
 def _create_one_node(
     node: ClusterNode, vcpus: int, mem: int
 ) -> tuple[str, int, str]:
-    """Create a single cluster VM via vm.py subprocess.
+    """Create a single cluster VM via ltvm subprocess.
 
     Returns (node_name, returncode, combined_output).
     Running via subprocess avoids threading issues with shared print/state

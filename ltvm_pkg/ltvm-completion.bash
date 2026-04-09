@@ -6,11 +6,11 @@ _ltvm_completions() {
 	cur="${COMP_WORDS[COMP_CWORD]}"
 	prev="${COMP_WORDS[COMP_CWORD-1]}"
 
-	commands="install add-target build-all build-container build-kernel
-		build-image build-lustre build-shell build-status package fetch
-		publish create ensure destroy start stop restart start-all
-		stop-all list ssh console-log dmesg nmi crash-collect snapshot
-		restore doctor deploy-lustre exec cluster"
+	commands="install build-all build-container build-kernel
+		build-image build-lustre build-shell build-status fetch
+		create ensure destroy start stop list ssh console-log dmesg
+		nmi crash-collect snapshot restore doctor deploy-lustre exec
+		cluster"
 
 	cluster_actions="create destroy deploy status exec list ssh"
 
@@ -28,7 +28,7 @@ _ltvm_completions() {
 
 	# Complete VM names for commands that take them
 	case "${COMP_WORDS[1]}" in
-		destroy|start|stop|restart|ssh|exec|deploy-lustre|deploy|log| \
+		destroy|start|stop|ssh|exec|deploy-lustre|deploy|console-log| \
 		dmesg|nmi|crash-collect|snapshot|restore)
 			if [[ $COMP_CWORD -eq 2 ]]; then
 				local vms

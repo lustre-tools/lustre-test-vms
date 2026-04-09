@@ -43,7 +43,7 @@ from ltvm_pkg.cli import (
     cmd_publish,
     cmd_restore,
     cmd_setup,
-    cmd_shell,
+    cmd_build_shell,
     cmd_snapshot,
     cmd_status,
     cmd_vm_ssh,
@@ -329,7 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=".",
         help="Path to mount in container (default: cwd)",
     )
-    sp.set_defaults(func=cmd_shell)
+    sp.set_defaults(func=cmd_build_shell)
 
     # -- build-status --
     sp = sub.add_parser(

@@ -412,7 +412,7 @@ def fetch_target(
     return target_dir
 
 
-# Default install paths (matching vm.py conventions)
+# Default install paths
 _VM_DIR = Path(os.environ.get("LTVM_VM_DIR", "/opt/qemu-vms"))
 DEFAULT_KERNEL_DIR = _VM_DIR / "kernel"
 DEFAULT_IMAGE_DIR = _VM_DIR / "images"
@@ -427,7 +427,7 @@ def install_target(
     image_dir: str | Path | None = None,
     arch: str = "x86_64",
 ) -> dict[str, str]:
-    """Install kernel + image to system paths for vm.py.
+    """Install kernel + image to system paths.
 
     kernel: kernel name under kernels/; auto-detected if None.
     arch: target architecture (appended to filenames when non-default).

@@ -34,7 +34,6 @@ ltvm_pkg/                   Python package (CLI + all implementation)
   host_setup.py             Host setup, verify, WSL2 helpers
   download.py               Robust file downloader
   vm_state.py               VMInfo, ClusterInfo, paths, constants
-  vm_lifecycle.py           VM create/start/stop/destroy + QEMU launch
   vm_net.py                 TAP, bridge, DNS, SSH registry
   vm_commands.py            Single-VM CLI handlers
   vm_cluster.py             Multi-node cluster management
@@ -54,13 +53,10 @@ output/                     Build artifacts (gitignored)
 ## Quick Start
 
 ```bash
-ltvm init rocky9 --lustre-tree /path/to/lustre-release
-ltvm status
+ltvm install
+ltvm fetch rocky9
+ltvm build-status
 ```
-
-`init` builds all three artifacts (container, kernel,
-image) in sequence. Each is independently cacheable --
-rebuilds only happen when inputs change.
 
 ## Artifacts
 
@@ -128,11 +124,12 @@ Requires root (mount, losetup). The image includes:
 
 No kernel in image -- QEMU passes it via `-kernel`.
 
-### Status and Staleness
+### Build Status and Staleness
 
 ```bash
-ltvm status
-ltvm update rocky9   # rebuild stale artifacts only
+ltvm build-status
+ltvm build-all rocky9              # rebuild stale artifacts
+ltvm build-all rocky9 --force      # rebuild everything
 ```
 
 Each artifact tracks an input hash in `meta.json`.
@@ -143,24 +140,28 @@ inputs skip.
 
 ## VM Management
 
-These commands subsume the older `vm.sh` interface.
-
 ```bash
 # Create / ensure a VM
-ltvm vm create co1-single \
-    --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
-ltvm vm ensure co1-single \
-    --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
+ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
+ltvm ensure co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 
 # Deploy Lustre and mount (--build defaults to cwd)
-ltvm deploy co1-single --mount
-ltvm deploy co1-single --build ~/lustre-release --mount
+ltvm deploy-lustre co1-single --mount
+ltvm deploy-lustre co1-single --build ~/lustre-release --mount
 
 # Execute commands in VM
 ltvm exec co1-single 'lctl dl'
 
+# Observe
+ltvm console-log co1-single
+ltvm dmesg co1-single
+
+# Crash / kdump
+ltvm nmi co1-single              # inject NMI -> panic + kdump
+ltvm crash-collect co1-single --mod-dir $CO/1
+
 # Destroy
-ltvm vm destroy co1-single
+ltvm destroy co1-single
 ```
 
 ### Clusters
@@ -234,23 +235,19 @@ translate RHEL package names to the target's names.
 1. Create `targets/<name>/` with:
    - `target.conf` -- OS metadata
    - `kernel.conf` -- Lustre target + config overrides
-   - `container.Dockerfile` -- build environment
-   - `image.Dockerfile` -- VM root filesystem
+   - `container.Dockerfile` -- build environment (copy from `targets/rocky9/`)
+   - `image.Dockerfile` -- VM root filesystem (copy from `targets/rocky9/`)
 2. Add `packages-os.txt` for OS-specific packages
 3. Add `package-map.txt` if non-RHEL (translates
    common package names to distro-specific names)
-4. Test: `ltvm init <name> --lustre-tree <path>`
-
-The config parser (`lib/config.py`) auto-discovers
-targets by scanning for directories containing
-`target.conf`.
+4. Test: `ltvm build-all <name> --lustre-tree <path>`
 
 ## Development
 
 ### Interactive Container Shell
 
 ```bash
-ltvm shell rocky9
+ltvm build-shell rocky9
 ```
 
 Opens a shell in the build container with the Lustre
@@ -315,7 +312,7 @@ When reviewing or auditing this codebase, watch for:
 ## Rebuilding Pre-built QEMU Binaries
 
 Rocky Linux ships QEMU without microvm support, so we publish
-pre-built binaries to GitHub. `ltvm setup` downloads these
+pre-built binaries to GitHub. `ltvm install` downloads these
 automatically. To rebuild:
 
 ```bash
