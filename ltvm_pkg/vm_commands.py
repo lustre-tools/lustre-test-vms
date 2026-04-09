@@ -45,6 +45,61 @@ from .vm_net import (
 from .qemu_run import die, is_running, kill_qemu, launch_qemu, run
 
 
+def _seed_kdump_boot(vm: VMInfo) -> None:
+    """Copy vmlinuz into /boot inside the VM and regenerate the kdump initramfs.
+
+    QEMU passes the kernel externally via -kernel, so the VM image has no
+    /boot/vmlinuz or initramfs.  kexec-tools (kdump) needs both to load the
+    crash kernel after a panic.  This runs once after VM creation.
+    """
+    if not vm.kernel:
+        return
+
+    kver = vm.kver
+    if not kver:
+        r = run_ssh(vm.ip, "uname -r", timeout=10)
+        if r.returncode != 0:
+            die("could not determine kernel version for kdump boot seeding")
+        kver = r.stdout.strip()
+
+    # Prefer the bzImage for kdump; fall back to vmlinux if that's all we have.
+    kernel_host = Path(vm.kernel)
+    if kernel_host.name == "vmlinux":
+        vmlinuz = kernel_host.parent / "vmlinuz"
+        if vmlinuz.exists():
+            kernel_host = vmlinuz
+
+    print(f"seeding /boot/vmlinuz-{kver} for kdump...")
+    r = run(
+        [
+            "sshpass", "-p", ROOT_PASSWORD,
+            "scp",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "LogLevel=ERROR",
+            str(kernel_host),
+            f"root@{vm.ip}:/boot/vmlinuz-{kver}",
+        ],
+        capture_output=True,
+        timeout=30,
+    )
+    if r.returncode != 0:
+        die(f"failed to copy vmlinuz into VM /boot: {r.stderr.strip()}")
+
+    print("generating kdump initramfs (dracut)...")
+    r = run_ssh(
+        vm.ip,
+        f"dracut --kver {kver} --force /boot/initramfs-{kver}.img {kver}",
+        timeout=120,
+    )
+    if r.returncode != 0:
+        die(f"dracut failed for kdump initramfs: {r.stderr.strip()}")
+
+    r = run_ssh(vm.ip, "systemctl restart kdump", timeout=30)
+    if r.returncode != 0:
+        die(f"kdump service failed to start: {r.stderr.strip()}")
+
+
 def _fmt_epoch(epoch: int) -> str:
     """Format epoch seconds as a human-readable timestamp, or '-' if 0."""
     if not epoch:
@@ -168,6 +223,7 @@ def cmd_create(args: argparse.Namespace) -> None:
             f" -- check: sudo ltvm vm log {name} 50")
     register_ssh_name(vm.name, vm.ip)
     deploy_ssh_key(vm.ip)
+    _seed_kdump_boot(vm)
 
     if not getattr(args, "_quiet", False):
         print(
@@ -438,52 +494,6 @@ def cmd_ssh(args: argparse.Namespace) -> None:
     os.execvp("sshpass", ssh_args)
 
 
-def cmd_cp_to(args: argparse.Namespace) -> None:
-    vm = VMInfo.load(args.name)
-    r = run(
-        [
-            "sshpass",
-            "-p",
-            ROOT_PASSWORD,
-            "scp",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "LogLevel=ERROR",
-            "-r",
-            args.src,
-            f"root@{vm.ip}:{args.dest}",
-        ],
-        capture_output=False,
-    )
-    sys.exit(r.returncode)
-
-
-def cmd_cp_from(args: argparse.Namespace) -> None:
-    vm = VMInfo.load(args.name)
-    r = run(
-        [
-            "sshpass",
-            "-p",
-            ROOT_PASSWORD,
-            "scp",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "LogLevel=ERROR",
-            "-r",
-            f"root@{vm.ip}:{args.src}",
-            args.dest,
-        ],
-        capture_output=False,
-    )
-    sys.exit(r.returncode)
-
-
 # ── info + observability ─────────────────────────────────
 
 
@@ -669,7 +679,7 @@ def cmd_status(args: argparse.Namespace) -> None:
             print(f"{'kver:':<14} {vm.kver}")
 
 
-def cmd_log(args: argparse.Namespace) -> None:
+def cmd_console_log(args: argparse.Namespace) -> None:
     vm = VMInfo.load(args.name)
     if not vm.log_path.exists():
         die(f"no log for VM '{args.name}'")
@@ -693,24 +703,40 @@ def cmd_dmesg(args: argparse.Namespace) -> None:
         die(f"timeout reading dmesg from '{args.name}'", EXIT_TIMEOUT)
 
 
-def cmd_lustre_log(args: argparse.Namespace) -> None:
+# ── nmi ──────────────────────────────────────────────────
+
+
+def _qmp_nmi(qmp_path: Path) -> None:
+    """Send inject-nmi via QMP Unix socket."""
+    import socket as _socket
+
+    with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as s:
+        s.connect(str(qmp_path))
+        s.settimeout(5)
+        # Drain the greeting
+        data = b""
+        while b"QMP" not in data:
+            data += s.recv(4096)
+        # Negotiate capabilities
+        s.sendall(json.dumps({"execute": "qmp_capabilities"}).encode())
+        s.recv(4096)
+        # Inject NMI
+        s.sendall(json.dumps({"execute": "inject-nmi"}).encode())
+        resp = s.recv(4096)
+    result = json.loads(resp)
+    if "error" in result:
+        raise RuntimeError(result["error"].get("desc", str(result["error"])))
+
+
+def cmd_nmi(args: argparse.Namespace) -> None:
     vm = VMInfo.load(args.name)
     if not is_running(vm):
         die(f"VM '{args.name}' not running", EXIT_UNREACHABLE)
     try:
-        r = run_ssh(
-            vm.ip,
-            'lctl dk 2>/dev/null || echo "lctl not available"',
-            timeout=10,
-        )
-        if r.stdout:
-            print(r.stdout, end="")
-        sys.exit(r.returncode)
-    except subprocess.TimeoutExpired:
-        die(
-            f"timeout reading lustre log from '{args.name}'",
-            EXIT_TIMEOUT,
-        )
+        _qmp_nmi(vm.socket_path)
+    except Exception as e:
+        die(f"failed to inject NMI into '{args.name}': {e}")
+    print(f"NMI injected into '{args.name}' (expect panic + kdump reboot)")
 
 
 # ── crash-collect ────────────────────────────────────────
