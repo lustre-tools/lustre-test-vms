@@ -166,9 +166,24 @@ def download_srpm(srpm_name: str, cache_dir: str | Path, base_url: str) -> Path:
     url = f"{base_url}/{srpm_name}"
     log.info("Downloading SRPM: %s", url)
 
-    subprocess.run(
-        ["curl", "-fSL", "--progress-bar", "-o", str(cached), url], check=True
-    )
+    # Download to a temp file in the same directory and rename on
+    # success.  A previous interrupted curl could otherwise leave a
+    # truncated `cached` file that the next run silently re-uses,
+    # causing rpm2cpio to fail with an opaque error inside the
+    # container build.
+    tmp = cache_dir / f".{srpm_name}.partial"
+    try:
+        subprocess.run(
+            ["curl", "-fSL", "--progress-bar", "-o", str(tmp), url],
+            check=True,
+        )
+        tmp.rename(cached)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
     return cached
 

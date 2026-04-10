@@ -108,7 +108,28 @@ class TargetConfig:
         raw = targets[name]
         # Merge defaults under target fields
         self._data: dict[str, Any] = {**defaults, **raw}
-        self._kernels: dict[str, Any] = self._data.get("kernels", {})
+
+        # Schema validation: catch type errors in targets.yaml early
+        # so we don't get confusing downstream behavior (e.g. server:
+        # "yes" silently truthy, missing kernels block raising
+        # KeyError mid-build).
+        if not isinstance(self._data.get("server"), bool):
+            raise ValueError(
+                f"target {name!r}: 'server' must be a YAML boolean "
+                f"(true/false), got {self._data.get('server')!r}"
+            )
+        if "kernels" not in self._data or not isinstance(
+            self._data["kernels"], dict
+        ):
+            raise ValueError(
+                f"target {name!r}: missing or non-dict 'kernels' "
+                f"block in targets.yaml"
+            )
+        self._kernels: dict[str, Any] = self._data["kernels"]
+        if "default" not in self._kernels:
+            raise ValueError(
+                f"target {name!r}: 'kernels.default' is required"
+            )
 
         # Resolve effective arch: CLI override > target > defaults
         default_arch = str(self._data["arch"])

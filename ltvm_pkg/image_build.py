@@ -338,8 +338,20 @@ def build_image(target_config: TargetConfig, force: bool = False) -> Path:
             shutil.rmtree(str(inject_dir), ignore_errors=True)
 
     # ── Step 2: Export to ext4 ──
+    # If the export fails, the injected image (when we built one)
+    # would otherwise leak as a podman layer on every retry.  Wrap
+    # so we can rmi it on failure.  We don't rmi on success because
+    # the next build pass benefits from layer caching.
     log.info("Exporting container to ext4 ...")
-    image_path = _export_to_ext4(final_tag, image_path)
+    try:
+        image_path = _export_to_ext4(final_tag, image_path)
+    except BaseException:
+        if final_tag != tag:
+            subprocess.run(
+                ["podman", "rmi", "-f", final_tag],
+                capture_output=True,
+            )
+        raise
 
     elapsed = time.monotonic() - t0
 

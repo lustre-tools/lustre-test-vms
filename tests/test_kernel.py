@@ -191,24 +191,50 @@ class TestDownloadSrpm:
         assert result == cached
         mock_run.assert_not_called()
 
+    @staticmethod
+    def _curl_mock(content: bytes = b"fake srpm") -> "MagicMock":
+        """A subprocess.run mock that creates the curl -o output file.
+
+        download_srpm now writes to a .partial tempfile and renames
+        on success, so plain mock_run.return_value won't suffice --
+        we need the side_effect to actually create the partial file
+        so the rename works.
+        """
+        def side_effect(cmd, *args, **kwargs):
+            if cmd and cmd[0] == "curl" and "-o" in cmd:
+                out_idx = cmd.index("-o") + 1
+                Path(cmd[out_idx]).write_bytes(content)
+            r = MagicMock()
+            r.returncode = 0
+            return r
+        mock = MagicMock(side_effect=side_effect)
+        return mock
+
     def test_missing_file_calls_curl(self, tmp_path: Path) -> None:
         srpm = "kernel-5.14.0-503.26.1.el9_7.src.rpm"
         cache_dir = tmp_path / "cache"
 
-        with patch("ltvm_pkg.kernel_build.subprocess.run") as mock_run:
+        with patch(
+            "ltvm_pkg.kernel_build.subprocess.run", new=self._curl_mock(),
+        ) as mock_run:
             result = download_srpm(srpm, cache_dir, _ROCKY9_SRPM_URL)
 
         assert result == cache_dir / srpm
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
         assert cmd[0] == "curl"
-        assert str(cache_dir / srpm) in cmd
+        # curl writes to a .partial tmpfile that gets renamed to the
+        # final cached path on success.
+        out_idx = cmd.index("-o") + 1
+        assert cmd[out_idx].endswith(".partial")
 
     def test_cache_dir_created(self, tmp_path: Path) -> None:
         srpm = "kernel-5.14.0-503.26.1.el9_7.src.rpm"
         cache_dir = tmp_path / "cache" / "nested"
 
-        with patch("ltvm_pkg.kernel_build.subprocess.run"):
+        with patch(
+            "ltvm_pkg.kernel_build.subprocess.run", new=self._curl_mock(),
+        ):
             download_srpm(srpm, cache_dir, _ROCKY9_SRPM_URL)
 
         assert cache_dir.exists()
@@ -217,7 +243,9 @@ class TestDownloadSrpm:
         srpm = "kernel-5.14.0-503.26.1.el9_7.src.rpm"
         cache_dir = tmp_path / "cache"
 
-        with patch("ltvm_pkg.kernel_build.subprocess.run") as mock_run:
+        with patch(
+            "ltvm_pkg.kernel_build.subprocess.run", new=self._curl_mock(),
+        ) as mock_run:
             download_srpm(srpm, cache_dir, _ROCKY9_SRPM_URL)
 
         cmd = mock_run.call_args[0][0]

@@ -267,7 +267,10 @@ class VMInfo:
         return OVERLAYS / f"{self.name}-disk{n}.img"
 
     def save(self) -> None:
-        self.info_path.write_text(
+        # Atomic write via tempfile + rename so a SIGKILL mid-save
+        # cannot leave a half-written .info file (which would parse
+        # back as a VM with empty IP/PID/etc).
+        text = (
             f"NAME={self.name}\n"
             f"IP={self.ip}\n"
             f"PID={self.pid}\n"
@@ -289,6 +292,22 @@ class VMInfo:
             f"OS_ID={self.os_id}\n"
             f"ARCH={self.arch}\n"
         )
+        self.info_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_str = tempfile.mkstemp(
+            dir=str(self.info_path.parent),
+            prefix=f".{self.info_path.name}.",
+        )
+        tmp = Path(tmp_str)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+            tmp.rename(self.info_path)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
 
     def _update_fields(self, fields: dict) -> None:
         """Update multiple fields in the info file atomically (single write).

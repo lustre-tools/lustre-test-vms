@@ -209,13 +209,56 @@ def _parse_disk_size(value: str | int | None) -> int:
 # ── lifecycle ────────────────────────────────────────────
 
 
+_VM_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _validate_vm_name(name: str) -> None:
+    """Reject VM names with characters that break /etc/hosts, SSH
+    config, hostnames, shell quoting, or QEMU's fc_name= cmdline arg.
+
+    Allowed: ASCII alnum, dot, underscore, hyphen.  Must start with
+    alnum (no leading hyphen so it doesn't look like a CLI flag).
+    """
+    if not name:
+        die("VM name is empty")
+    if len(name) > 63:
+        # /etc/hosts hostname limit + DNS label limit
+        die(f"VM name too long ({len(name)} > 63): {name!r}")
+    if not _VM_NAME_RE.match(name):
+        die(
+            f"invalid VM name {name!r}: only ASCII letters, digits, "
+            f"'.', '_', '-' are allowed (must start with alnum)"
+        )
+
+
 def cmd_create(args: argparse.Namespace) -> None:
     name = args.name
     if not name:
         name = f"qemu-{int(time.time()) % 100000000}"
+    _validate_vm_name(name)
 
     if (SOCKETS / f"{name}.info").exists():
         die(f"VM '{name}' already exists")
+
+    # Validate vCPU and memory bounds.  argparse accepts any int (and
+    # 0/negative values would crash QEMU AFTER vm.save() committed
+    # the .info file -- leaving a half-created VM that requires
+    # manual destroy).
+    if args.vcpus is not None and args.vcpus <= 0:
+        die(f"--vcpus must be > 0 (got {args.vcpus})")
+    if args.mem is not None and args.mem <= 0:
+        die(f"--mem must be > 0 (got {args.mem})")
+
+    # Disk count bounds: vda is the rootfs, leaving vdb..vdz for
+    # MDT+OST.  Past 25 letters we'd write /dev/vd{ etc. into the
+    # test framework's cfg/local.sh.
+    total_data_disks = (args.mdt_disks or 0) + (args.ost_disks or 0)
+    if total_data_disks > 25:
+        die(
+            f"too many data disks ({total_data_disks}) -- "
+            f"max 25 (vdb..vdz); got mdt={args.mdt_disks} "
+            f"ost={args.ost_disks}"
+        )
 
     tap = tap_for_name(name)
     mac = mac_for_name(name)
@@ -307,11 +350,39 @@ def cmd_create(args: argparse.Namespace) -> None:
 
         vm.save()
     # Lock released; IP is now committed.
-    launch_qemu(vm)
-    wait_for_ssh(vm.ip, SSH_TIMEOUT)
-    register_ssh_name(vm.name, vm.ip)
-    deploy_ssh_key(vm.ip)
-    _seed_kdump_boot(vm)
+    #
+    # If anything from launch_qemu through _seed_kdump_boot raises or
+    # die()s, we want to leave the user with a clean slate (no
+    # half-created VM, no leaked overlay/.info/IP/TAP).  Wrap the
+    # remaining steps and unwind via _destroy_vm_artifacts on failure.
+    #
+    # NOTE: deploy_ssh_key and _seed_kdump_boot run on a live VM, so
+    # cmd_start can recover them later -- but if they die() we'd leave
+    # the VM running with no obvious indication.  Catch SystemExit too
+    # so we can re-raise after cleanup.
+    try:
+        launch_qemu(vm)
+        wait_for_ssh(vm.ip, SSH_TIMEOUT)
+        register_ssh_name(vm.name, vm.ip)
+        deploy_ssh_key(vm.ip)
+        _seed_kdump_boot(vm)
+    except BaseException:
+        # Best-effort cleanup of overlay/disks/.info/TAP.  If any
+        # individual cleanup step fails, swallow it -- the original
+        # exception is what we want to surface to the user.
+        try:
+            kill_qemu(vm)
+        except Exception:
+            pass
+        try:
+            _destroy_vm_artifacts(vm.name)
+        except Exception:
+            pass
+        try:
+            unregister_ssh_name(vm.name)
+        except Exception:
+            pass
+        raise
 
     if not getattr(args, "_quiet", False):
         print(
@@ -347,6 +418,20 @@ def cmd_stop(args: argparse.Namespace) -> None:
         print(f"stopped {name}")
 
 
+def _destroy_vm_artifacts(name: str) -> None:
+    """Remove on-disk artifacts (overlay, disks, sockets) for a VM.
+
+    Caller is responsible for killing QEMU and unregistering DNS;
+    this only handles the filesystem cleanup so it can be reused
+    by both cmd_destroy and the cmd_create rollback path.
+    """
+    overlay = OVERLAYS / f"{name}.qcow2"
+    for f in [overlay] + list(OVERLAYS.glob(f"{name}-disk*.img")):
+        f.unlink(missing_ok=True)
+    for ext in ("qmp", "pid", "info", "log"):
+        (SOCKETS / f"{name}.{ext}").unlink(missing_ok=True)
+
+
 def cmd_destroy(args: argparse.Namespace) -> None:
     for name in args.names:
         try:
@@ -355,12 +440,7 @@ def cmd_destroy(args: argparse.Namespace) -> None:
         except VMNotFound:
             pass
 
-        overlay = OVERLAYS / f"{name}.qcow2"
-        for f in [overlay] + list(OVERLAYS.glob(f"{name}-disk*.img")):
-            f.unlink(missing_ok=True)
-        for ext in ("qmp", "pid", "info", "log"):
-            (SOCKETS / f"{name}.{ext}").unlink(missing_ok=True)
-
+        _destroy_vm_artifacts(name)
         unregister_ssh_name(name)
         print(f"destroyed {name}")
 
@@ -940,21 +1020,39 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
         print(f"stopping {vm.name} for snapshot...")
         kill_qemu(vm)
 
+    snapshot_err: str | None = None
     try:
         r = run([QEMU_IMG, "snapshot", "-c", tag, str(vm.overlay_path)])
         if r.returncode != 0:
-            die(f"snapshot failed: {r.stderr}")
-        print(f"snapshot '{tag}' created for {vm.name}")
+            snapshot_err = r.stderr or "snapshot failed"
+        else:
+            print(f"snapshot '{tag}' created for {vm.name}")
     finally:
         if was_running:
+            # Restart even if snapshot failed -- the user expects the
+            # VM to come back up either way.  We don't use die() here
+            # so the original snapshot error message survives.
             print(f"restarting {vm.name}...")
-            launch_qemu(vm)
-            wait_for_ssh(vm.ip, SSH_TIMEOUT)
-            register_ssh_name(vm.name, vm.ip)
-            # Match cmd_start: idempotent post-boot init.
-            deploy_ssh_key(vm.ip)
-            _seed_kdump_boot(vm)
-            print(f"started {vm.name}")
+            try:
+                launch_qemu(vm)
+                wait_for_ssh(vm.ip, SSH_TIMEOUT)
+                register_ssh_name(vm.name, vm.ip)
+                # Match cmd_start: idempotent post-boot init.
+                deploy_ssh_key(vm.ip)
+                _seed_kdump_boot(vm)
+                print(f"started {vm.name}")
+            except SystemExit as e:
+                # die() inside one of the restart steps -- print
+                # both errors and exit with the snapshot error if
+                # there was one, otherwise the restart error.
+                if snapshot_err:
+                    print(
+                        f"error: snapshot failed: {snapshot_err}",
+                        file=sys.stderr,
+                    )
+                raise e
+    if snapshot_err:
+        die(f"snapshot failed: {snapshot_err}")
 
 
 def cmd_restore(args: argparse.Namespace) -> None:

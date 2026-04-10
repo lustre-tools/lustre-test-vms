@@ -37,6 +37,11 @@ def parse_node_spec(spec: str) -> ClusterNode:
 
     roles_str = parts[0]
     name = parts[1]
+    # Validate the node name shares the same restrictions cmd_create
+    # enforces -- spaces or special chars would break /etc/hosts /
+    # SSH config / hostname / fc_name= cmdline.
+    from .vm_commands import _validate_vm_name
+    _validate_vm_name(name)
     disk_count = int(parts[2]) if len(parts) > 2 else 0
 
     roles = roles_str.lower().split("+")
@@ -249,7 +254,17 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
         }
         for future in as_completed(futures):
             node = futures[future]
-            name, rc, output = future.result()
+            try:
+                name, rc, output = future.result()
+            except Exception as e:
+                # Don't let one node's exception (e.g. TimeoutExpired
+                # from the inner subprocess) abandon the remaining
+                # futures.  Mark this one as failed and keep
+                # collecting -- the cleanup loop below needs an
+                # accurate `failed` list.
+                name = node.name
+                rc = -1
+                output = f"exception: {type(e).__name__}: {e}"
             if rc != 0:
                 print(f"\n--- {name}: FAILED (rc={rc}) ---\n{output}")
                 failed.append(name)
