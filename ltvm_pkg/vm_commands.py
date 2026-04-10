@@ -336,7 +336,13 @@ def cmd_start(args: argparse.Namespace) -> None:
 
 def cmd_stop(args: argparse.Namespace) -> None:
     for name in args.names:
-        vm = VMInfo.load(name)
+        try:
+            vm = VMInfo.load(name)
+        except VMNotFound:
+            # Match cmd_destroy: stopping a VM that doesn't exist is
+            # a no-op, not a traceback.
+            print(f"stop: {name} not found")
+            continue
         kill_qemu(vm)
         print(f"stopped {name}")
 

@@ -710,12 +710,11 @@ def cmd_publish(args: argparse.Namespace) -> int:
     if not use_json:
         print(f"Publishing {tarball.name}...")
 
-    # Generate tag if not provided
+    # Generate tag if not provided.  For "foo.tar.zst" / "foo.tar.gz",
+    # tarball.stem is "foo.tar", so .replace(".tar", "") is enough --
+    # the suffix is already gone by the time we look at the stem.
     if not tag:
         tag = tarball.stem.replace(".tar", "")
-        # Clean up double extensions
-        for ext in (".zst", ".gz"):
-            tag = tag.removesuffix(ext)
 
     # Create release + upload via gh CLI
     if not use_json:
@@ -723,8 +722,12 @@ def cmd_publish(args: argparse.Namespace) -> int:
         print(f"  Tarball: {tarball}")
         print(f"  Size: {tarball.stat().st_size / (1024 * 1024):.0f} MB")
 
-    # Create release (ok if it already exists)
-    subprocess.run(
+    # Create release.  An "already exists" error is fine (we'll just
+    # upload to the existing release below); any other failure is
+    # fatal -- previously the return code was completely unchecked,
+    # so an auth error would silently produce a confusing upload
+    # failure two lines down.
+    create = subprocess.run(
         [
             "gh",
             "release",
@@ -738,7 +741,16 @@ def cmd_publish(args: argparse.Namespace) -> int:
             f"Pre-built artifacts for {args.target}",
         ],
         capture_output=True,
+        text=True,
     )
+    if create.returncode != 0:
+        err = (create.stderr or "") + (create.stdout or "")
+        if "already exists" not in err:
+            return _error(
+                f"gh release create failed (rc={create.returncode}): "
+                f"{err.strip()}",
+                use_json,
+            )
 
     # Upload asset
     r = subprocess.run(
@@ -1099,15 +1111,20 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 use_json,
             )
 
-    # Resolve kernel name and target config
+    # Resolve kernel name and target config.  We require a valid target
+    # here -- a missing entry in targets.yaml would silently fall back
+    # to RHEL paths and break debian/ubuntu deploys (wrong libdir, wrong
+    # tests dir).  Better to fail loudly with a clear error.
     try:
         tc = TargetConfig(target)
-        resolved_kernel = tc.resolve_kernel(kernel)
-    except ValueError:
-        tc = None
-        resolved_kernel = kernel or "unknown"
-
-    os_family = tc.os_family if tc else "rhel"
+    except ValueError as e:
+        return _error(
+            f"Unknown target '{target}' for VM '{args.vm}': {e}",
+            use_json,
+            hint="Check `ltvm status` for valid targets.",
+        )
+    resolved_kernel = tc.resolve_kernel(kernel)
+    os_family = tc.os_family
 
     # Resolve build path:
     #   1. Explicit --build PATH wins (including --build .)
@@ -1313,13 +1330,15 @@ def cmd_cluster(args: argparse.Namespace) -> int:
             return _error(
                 "cluster create requires a name and at least one node spec",
                 use_json,
-                hint="ltvm cluster create <name> [--vcpus N] [--mem MB] "
-                "<role:vm[:disks]> ...",
+                hint="ltvm cluster create <name> [--os TARGET] [--arch ARCH] "
+                "[--vcpus N] [--mem MB] <role:vm[:disks]> ...",
             )
-        # Parse optional --vcpus / --mem flags out of cargs; remaining
-        # positionals are name + node specs.
+        # Parse optional flags out of cargs; remaining positionals are
+        # name + node specs.
         vcpus = 2
         mem = 4096
+        os_target: str | None = None
+        arch: str | None = None
         positional: list[str] = []
         i = 0
         while i < len(cargs):
@@ -1329,6 +1348,12 @@ def cmd_cluster(args: argparse.Namespace) -> int:
             elif cargs[i] == "--mem" and i + 1 < len(cargs):
                 mem = int(cargs[i + 1])
                 i += 2
+            elif cargs[i] == "--os" and i + 1 < len(cargs):
+                os_target = cargs[i + 1]
+                i += 2
+            elif cargs[i] == "--arch" and i + 1 < len(cargs):
+                arch = cargs[i + 1]
+                i += 2
             else:
                 positional.append(cargs[i])
                 i += 1
@@ -1336,8 +1361,8 @@ def cmd_cluster(args: argparse.Namespace) -> int:
             return _error(
                 "cluster create requires a name and at least one node spec",
                 use_json,
-                hint="ltvm cluster create <name> [--vcpus N] [--mem MB] "
-                "<role:vm[:disks]> ...",
+                hint="ltvm cluster create <name> [--os TARGET] [--arch ARCH] "
+                "[--vcpus N] [--mem MB] <role:vm[:disks]> ...",
             )
         return _call(
             _qc_create,
@@ -1346,6 +1371,8 @@ def cmd_cluster(args: argparse.Namespace) -> int:
                 nodes=positional[1:],
                 vcpus=vcpus,
                 mem=mem,
+                os=os_target,
+                arch=arch,
             ),
         )
 

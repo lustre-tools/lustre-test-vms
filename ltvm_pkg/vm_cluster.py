@@ -163,7 +163,11 @@ def generate_local_sh(cluster: ClusterInfo, os_family: str = "rhel") -> str:
 
 
 def _create_one_node(
-    node: ClusterNode, vcpus: int, mem: int
+    node: ClusterNode,
+    vcpus: int,
+    mem: int,
+    os_target: str | None = None,
+    arch: str | None = None,
 ) -> tuple[str, int, str]:
     """Create a single cluster VM via ltvm subprocess.
 
@@ -182,6 +186,10 @@ def _create_one_node(
         "--mem",
         str(mem),
     ]
+    if os_target:
+        cmd += ["--os", os_target]
+    if arch:
+        cmd += ["--arch", arch]
     if node.mdt_disks + mgs_disk:
         cmd += ["--mdt-disks", str(node.mdt_disks + mgs_disk)]
     if node.ost_disks:
@@ -215,14 +223,20 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
 
     vcpus = args.vcpus
     mem = args.mem
+    os_target = getattr(args, "os", None)
+    arch = getattr(args, "arch", None)
 
     print(f"=== Creating cluster '{cluster_name}' ===")
+    if os_target:
+        print(f"    Target: {os_target}{(' arch=' + arch) if arch else ''}")
     print(f"    Creating {len(node_specs)} nodes in parallel...")
 
     failed = []
     with ThreadPoolExecutor(max_workers=len(node_specs)) as executor:
         futures = {
-            executor.submit(_create_one_node, node, vcpus, mem): node
+            executor.submit(
+                _create_one_node, node, vcpus, mem, os_target, arch,
+            ): node
             for node in node_specs
         }
         for future in as_completed(futures):
@@ -355,16 +369,22 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     _validate_lustre_source(src)
     build = str(src)
 
-    # Derive os_family and target from the first node's metadata (all
-    # nodes in a cluster share the same target).
+    # Derive os_family and target+kernel from the first node's metadata
+    # (all nodes in a cluster share the same target).  We also pull the
+    # kernel name off the VM so build-lustre uses the right kernel
+    # tree -- not just the target's default kernel.
     os_family = "rhel"
     target = DEFAULT_TARGET
+    kernel_name: str | None = None
     try:
         first_vm = VMInfo.load(nodes[0].name)
         if first_vm.os_id:
             from .target_config import TargetConfig
             target = first_vm.os_id
             os_family = TargetConfig(target).os_family
+        if first_vm.kernel:
+            # vm.kernel points at .../kernels/<name>/vmlinuz; extract <name>
+            kernel_name = Path(first_vm.kernel).parent.name
     except (VMNotFound, ValueError, IndexError):
         pass
 
@@ -372,9 +392,11 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     print(f"    Build: {build}")
 
     # Build Lustre from source before deploying.  All nodes share the
-    # same target, so we run build-lustre once and every node rsyncs
-    # from the same staging dir.
+    # same target+kernel, so we run build-lustre once and every node
+    # rsyncs from the same staging dir.
     build_cmd = ["ltvm", "build-lustre", target, "--lustre-tree", build]
+    if kernel_name:
+        build_cmd += ["--kernel", kernel_name]
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
         build_cmd = ["sudo", "-u", sudo_user] + build_cmd

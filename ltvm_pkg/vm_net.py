@@ -293,11 +293,19 @@ def run_ssh(
 def wait_for_ssh(ip: str, max_wait: int = 30) -> None:
     """Wait for SSH to become available on a VM.
 
+    `max_wait` is wall-clock seconds.  Each probe can take up to its
+    own 5s connect timeout, so we track elapsed time explicitly rather
+    than counting iterations -- the old "for _ in range(max_wait)"
+    loop could actually wait up to 6*max_wait seconds while the error
+    message claimed it gave up after `max_wait`.
+
     A FileNotFoundError here means sshpass/ssh aren't on PATH, which is
     a host-setup bug we want to surface immediately rather than masquerade
     as "SSH not ready".
     """
-    for _ in range(max_wait):
+    start = time.monotonic()
+    deadline = start + max_wait
+    while time.monotonic() < deadline:
         try:
             r = run_ssh(ip, "true", timeout=5)
             if r.returncode == 0:
@@ -308,4 +316,5 @@ def wait_for_ssh(ip: str, max_wait: int = 30) -> None:
             die(f"required command missing on host ({e}); "
                 f"is sshpass installed?")
         time.sleep(1)
-    die(f"SSH not ready after {max_wait}s on {ip}")
+    elapsed = int(time.monotonic() - start)
+    die(f"SSH not ready after {elapsed}s on {ip}")
