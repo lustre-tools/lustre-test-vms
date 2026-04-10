@@ -273,6 +273,13 @@ class TargetConfig:
         """Hash inputs for an artifact to detect staleness."""
         h = hashlib.sha256()
 
+        # Always fold in this target's slice of targets.yaml so changes
+        # to container_image, srpm_url, kernel_deb_source, configure
+        # args, etc. invalidate every artifact for this target.
+        h.update(self.name.encode())
+        h.update(self.arch.encode())
+        h.update(json.dumps(self._data, sort_keys=True).encode())
+
         if artifact == "container":
             dockerfile = self.target_dir / "container.Dockerfile"
             if dockerfile.exists():
@@ -306,6 +313,17 @@ class TargetConfig:
             )
             if arch_frag.exists():
                 h.update(arch_frag.read_bytes())
+            # The build container runs kernel-build-inner.sh (rhel) or
+            # kernel-build-inner-deb.sh (debian).  Editing either should
+            # invalidate every cached kernel for this target.
+            ltvm_pkg_dir = Path(__file__).parent
+            for inner in (
+                "kernel-build-inner.sh",
+                "kernel-build-inner-deb.sh",
+            ):
+                p = ltvm_pkg_dir / inner
+                if p.exists():
+                    h.update(p.read_bytes())
 
         elif artifact == "image":
             dockerfile = self.target_dir / "image.Dockerfile"
@@ -317,8 +335,11 @@ class TargetConfig:
                     if f.is_file():
                         h.update(f.read_bytes())
             h.update(self._hash_package_lists("base", "test", "debug").encode())
-            if self.server:
-                h.update(self._hash_package_lists("server").encode())
+            # Note: packages-server.txt is already hashed via the
+            # Dockerfile COPY scan above, so we deliberately do NOT
+            # add it again here.  The `server` field in targets.yaml
+            # affects Lustre build (--enable-server) but every image
+            # currently installs server packages unconditionally.
 
         return h.hexdigest()[:16]
 

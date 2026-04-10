@@ -105,9 +105,8 @@ class TestNeedsReconfigure:
 
     def test_force_returns_true(self, tmp_path: Path) -> None:
         lustre, kernel = self._full_tree(tmp_path)
-        kpath = Path("/kernel")
         assert (
-            _needs_reconfigure(lustre, kernel, force=True, container_path=kpath, target=self.TARGET)
+            _needs_reconfigure(lustre, kernel, force=True, target=self.TARGET)
             is True
         )
 
@@ -116,10 +115,9 @@ class TestNeedsReconfigure:
     ) -> None:
         lustre, kernel = self._tree(tmp_path)
         (lustre / "config.status").write_text("# status\n")
-        kpath = Path("/kernel")
         assert (
             _needs_reconfigure(
-                lustre, kernel, force=False, container_path=kpath, target=self.TARGET,
+                lustre, kernel, force=False, target=self.TARGET,
             )
             is True
         )
@@ -127,10 +125,9 @@ class TestNeedsReconfigure:
     def test_missing_config_status_returns_true(self, tmp_path: Path) -> None:
         lustre, kernel = self._tree(tmp_path)
         (lustre / "configure").write_text("#!/bin/sh\n")
-        kpath = Path("/kernel")
         assert (
             _needs_reconfigure(
-                lustre, kernel, force=False, container_path=kpath, target=self.TARGET,
+                lustre, kernel, force=False, target=self.TARGET,
             )
             is True
         )
@@ -144,24 +141,14 @@ class TestNeedsReconfigure:
         release_dir.mkdir(parents=True, exist_ok=True)
         (release_dir / "kernel.release").write_text("5.14.0-new\n")
         result = _needs_reconfigure(
-            lustre, kernel, force=False, container_path=Path("/kernel"),
-            target=self.TARGET,
-        )
-        assert result is True
-
-    def test_different_kernel_path_returns_true(self, tmp_path: Path) -> None:
-        lustre, kernel = self._full_tree(tmp_path)
-        result = _needs_reconfigure(
-            lustre, kernel, force=False, container_path=Path("/other"),
-            target=self.TARGET,
+            lustre, kernel, force=False, target=self.TARGET,
         )
         assert result is True
 
     def test_everything_matches_returns_false(self, tmp_path: Path) -> None:
         lustre, kernel = self._full_tree(tmp_path, kver="5.14.0")
         result = _needs_reconfigure(
-            lustre, kernel, force=False, container_path=Path("/kernel"),
-            target=self.TARGET,
+            lustre, kernel, force=False, target=self.TARGET,
         )
         assert result is False
 
@@ -173,8 +160,7 @@ class TestNeedsReconfigure:
         (lustre / "configure").write_text("#!/bin/sh\n")
         (lustre / "config.status").write_text("# status\n")
         result = _needs_reconfigure(
-            lustre, kernel, force=False, container_path=Path("/kernel"),
-            target=self.TARGET,
+            lustre, kernel, force=False, target=self.TARGET,
         )
         assert result is True
 

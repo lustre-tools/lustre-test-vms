@@ -136,9 +136,13 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
         )
         if r.returncode != 0:
             die(f"update-initramfs failed: {r.stdout.strip()}")
-        r = run_ssh(vm.ip, "kdump-config load 2>/dev/null; systemctl restart kdump-tools", timeout=30)
+        r = run_ssh(
+            vm.ip,
+            "kdump-config load 2>&1; systemctl restart kdump-tools 2>&1",
+            timeout=30,
+        )
         if r.returncode != 0:
-            print("warning: kdump-tools restart failed (non-fatal)")
+            die(f"kdump-tools service failed to start: {r.stdout.strip()}")
     else:
         print("generating kdump initramfs (dracut)...")
         r = run_ssh(
@@ -322,6 +326,11 @@ def cmd_start(args: argparse.Namespace) -> None:
         launch_qemu(vm)
         wait_for_ssh(vm.ip, SSH_TIMEOUT)
         register_ssh_name(vm.name, vm.ip)
+        # Both of these are idempotent and cheap on a re-start, but
+        # they're necessary for fresh VMs whose create was interrupted
+        # before they ran (so cmd_start recovers a half-set-up VM).
+        deploy_ssh_key(vm.ip)
+        _seed_kdump_boot(vm)
         print(f"started {name}")
 
 
@@ -837,9 +846,16 @@ def cmd_crash_collect(args: argparse.Namespace) -> None:
             vmlinux = neighbor
 
     if vmlinux is None:
-        print("warning: no vmlinux found; triage skipped")
+        # Without vmlinux the dump is unusable for symbol-aware triage,
+        # so this should not be a silent success.  Print where the dump
+        # lives so the user can run triage manually after fetching the
+        # right vmlinux, then exit non-zero.
+        print(
+            "warning: no vmlinux found; triage skipped",
+            file=sys.stderr,
+        )
         print(f"vmcore dir: {local_dir}")
-        return
+        sys.exit(EXIT_NOT_FOUND)
 
     if args.mod_dir:
         print("running lustre triage...")
@@ -870,7 +886,7 @@ def cmd_crash_collect(args: argparse.Namespace) -> None:
         python_cmd = ["python3"]
         if sudo_user:
             python_cmd = ["sudo", "-u", sudo_user, "python3"]
-        run(
+        triage_r = run(
             python_cmd + [
                 str(triage_script),
                 "--vmcore",
@@ -884,6 +900,11 @@ def cmd_crash_collect(args: argparse.Namespace) -> None:
             capture_output=False,
             timeout=120,
         )
+        if triage_r.returncode != 0:
+            print(
+                f"warning: triage script failed (rc={triage_r.returncode})",
+                file=sys.stderr,
+            )
         print(f"\nvmcore dir: {local_dir}")
     else:
         print(f"vmcore dir: {local_dir}")

@@ -169,7 +169,29 @@ def resolve_os_artifacts(os_name: str, arch: str = "x86_64") -> OSArtifacts:
 OVERLAYS = VM_DIR / "overlays"
 SOCKETS = VM_DIR / "sockets"
 BRIDGE = "fcbr0"
-SUBNET = "192.168.100"
+
+
+def _read_subnet() -> str:
+    """Return the persisted subnet, or the default.
+
+    `ltvm setup --subnet X` writes the chosen subnet to VM_DIR/subnet
+    so that vm_net.alloc_ip() (which runs in a separate process from
+    setup) sees the same value as the host bridge config.  Without this
+    file, --subnet would only configure the host side and VMs would
+    silently get IPs from the wrong range.
+    """
+    env = os.environ.get("LTVM_SUBNET")
+    if env:
+        return env
+    f = VM_DIR / "subnet"
+    if f.is_file():
+        v = f.read_text().strip()
+        if v:
+            return v
+    return "192.168.100"
+
+
+SUBNET = _read_subnet()
 GATEWAY = f"{SUBNET}.1"
 MARKER = "# qemu-vm"
 ROOT_PASSWORD = "initial0"

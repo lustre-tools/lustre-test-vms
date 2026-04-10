@@ -69,15 +69,10 @@ def _needs_reconfigure(
     lustre_tree: Path,
     build_tree: Path,
     force: bool,
-    container_path: Path,
     target: str = DEFAULT_TARGET,
     enable_server: bool = True,
 ) -> bool:
-    """Return True if configure needs to be re-run.
-
-    container_path is the path to the kernel build-tree as
-    seen inside the container (may differ from host path).
-    """
+    """Return True if configure needs to be re-run."""
     if force:
         return True
 
@@ -92,11 +87,10 @@ def _needs_reconfigure(
     if not config_status.exists():
         return True
 
-    # Check if previous configure used a different kernel, path, or
-    # server flag.  Stamps are per-target so switching targets forces
+    # Check if previous configure used a different kernel or server
+    # flag.  Stamps are per-target so switching targets forces
     # reconfigure even when the source tree is shared.
     stamp = lustre_tree / f".ltvm-kernel-{target}"
-    stamp_path = lustre_tree / f".ltvm-kernel-path-{target}"
     stamp_server = lustre_tree / f".ltvm-server-{target}"
     if stamp.exists():
         prev = stamp.read_text().strip()
@@ -106,13 +100,6 @@ def _needs_reconfigure(
             return True
     else:
         return True  # no stamp = never built for this target
-    if stamp_path.exists():
-        prev_path = stamp_path.read_text().strip()
-        if prev_path != str(container_path):
-            print("  Kernel path changed, reconfiguring")
-            return True
-    else:
-        return True  # no path stamp = never built for this target
     if stamp_server.exists():
         prev_server = stamp_server.read_text().strip()
         if prev_server != str(enable_server):
@@ -222,9 +209,8 @@ def _build_in_container(
     print(f"  Kernel:    {build_tree}")
     print(f"  Version:   {kver}")
 
-    container_kernel = Path("/kernel")
     need_reconf = _needs_reconfigure(
-        lustre_tree, build_tree, force, container_kernel,
+        lustre_tree, build_tree, force,
         target=target, enable_server=enable_server,
     )
 
@@ -371,8 +357,13 @@ fi""")
 
     # Record per-target stamps on the host filesystem
     (lustre_tree / f".ltvm-kernel-{target}").write_text(kver + "\n")
-    (lustre_tree / f".ltvm-kernel-path-{target}").write_text(str(container_kernel) + "\n")
     (lustre_tree / f".ltvm-server-{target}").write_text(str(enable_server) + "\n")
+    # Best-effort: clean up the legacy .ltvm-kernel-path-* stamp left
+    # by older builds; the value was always "/kernel" so the check it
+    # protected was a no-op.
+    legacy = lustre_tree / f".ltvm-kernel-path-{target}"
+    if legacy.exists():
+        legacy.unlink()
 
     ko_files = list(host_staging.rglob("*.ko"))
     print(f"--- Build complete: {len(ko_files)} kernel modules")

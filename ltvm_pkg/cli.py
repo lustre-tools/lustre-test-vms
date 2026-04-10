@@ -765,10 +765,15 @@ def cmd_publish(args: argparse.Namespace) -> int:
         print(f"  Published: {url}")
 
     # Record the release tag locally so subsequent `ltvm fetch` knows
-    # the artifacts already on disk match this release.
+    # the artifacts already on disk match this release.  cmd_fetch
+    # reads from OUTPUT_DIR/<target>/.ltvm-release-tag* (always at the
+    # target root, not the arch subdir), so write it there too --
+    # otherwise aarch64 publish writes to output/<t>/aarch64/... and
+    # fetch never finds it.
+    from ltvm_pkg.target_config import OUTPUT_DIR
     arch = getattr(args, "arch", None) or "x86_64"
     arch_suffix = f"-{arch}" if arch != "x86_64" else ""
-    tag_file = tc.output_dir / f".ltvm-release-tag{arch_suffix}"
+    tag_file = OUTPUT_DIR / args.target / f".ltvm-release-tag{arch_suffix}"
     tag_file.parent.mkdir(parents=True, exist_ok=True)
     tag_file.write_text(tag + "\n")
 
@@ -1461,7 +1466,6 @@ def cmd_setup(args: argparse.Namespace) -> int:
             steps=steps,
             subnet=args.subnet,
             force=getattr(args, "force", False),
-            json_output=use_json,
         )
     except RuntimeError as e:
         return _error(str(e), use_json)

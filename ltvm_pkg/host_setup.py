@@ -578,6 +578,13 @@ def setup_network(host: HostInfo, subnet: str = DEFAULT_SUBNET) -> None:
     """Configure fcbr0 bridge, dnsmasq, and NAT."""
     log.info("Configuring network bridge (fcbr0) on %s.0/24", subnet)
 
+    # Persist the chosen subnet so vm_state.SUBNET (read at import time
+    # from this file in vm_net's process) matches the host bridge.
+    # Without this, --subnet would only configure the host side and
+    # vm_net.alloc_ip would still hand out 192.168.100.x addresses.
+    VM_DIR.mkdir(parents=True, exist_ok=True)
+    (VM_DIR / "subnet").write_text(subnet + "\n")
+
     # WSL2: ensure iptables-legacy is used.
     # iptables-nft can misbehave in WSL2 kernels lacking full nftables support.
     if is_wsl2():
@@ -880,7 +887,6 @@ def run_setup(
     steps: list[str] | None = None,
     subnet: str = DEFAULT_SUBNET,
     force: bool = False,
-    json_output: bool = False,
 ) -> None:
     """Run host setup.
 
@@ -936,5 +942,5 @@ def run_setup(
         log.info("")
         log.info("Next:")
         log.info("  ltvm fetch rocky9")
-        log.info("  sudo ltvm vm create co1-test --vcpus 2 --mem 2048 --mdt-disks 1 --ost-disks 2")
+        log.info("  sudo ltvm create co1-test --os rocky9 --vcpus 2 --mdt-disks 1 --ost-disks 2")
         log.info("  sudo ltvm deploy co1-test --mount")
