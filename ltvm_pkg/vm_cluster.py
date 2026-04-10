@@ -356,7 +356,7 @@ def _validate_lustre_source(path: Path) -> None:
     cloned tree (no .ko files yet) is valid input.
     """
     if not path.is_dir():
-        die(f"--lustre-source: '{path}' is not a directory")
+        die(f"--build:'{path}' is not a directory")
 
     missing = [
         name
@@ -365,7 +365,7 @@ def _validate_lustre_source(path: Path) -> None:
     ]
     if missing:
         die(
-            f"--lustre-source: '{path}' does not look like a Lustre "
+            f"--build:'{path}' does not look like a Lustre "
             f"source tree (missing: {', '.join(missing)})"
         )
 
@@ -439,6 +439,18 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
 
     if failed:
         die(f"deploy failed for: {', '.join(failed)}")
+
+    # Record successful deploys on each VMInfo so `ltvm list` shows
+    # last_deploy/build_path/kver -- single-node cmd_deploy does this
+    # at the end of its flow; cluster deploy was missing it.
+    import time as _time
+    _now = int(_time.time())
+    for node in nodes:
+        try:
+            vm = VMInfo.load(node.name)
+            vm.update_deploy(_now, build, vm.kver)
+        except VMNotFound:
+            pass
 
     # Overwrite single-node local.sh with the cluster topology config.
     local_sh = generate_local_sh(cluster, os_family=os_family)

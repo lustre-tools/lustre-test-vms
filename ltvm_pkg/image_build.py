@@ -239,12 +239,11 @@ def build_image(target_config: TargetConfig, force: bool = False) -> Path:
     )
 
     # ── Step 1b: Add kernel modules + Lustre via a second Dockerfile stage ──
+    # resolve_kernel never raises -- it returns the short name if no
+    # built directory exists yet.  The actual "no kernel built yet"
+    # case is detected below by checking has_modules / has_lustre.
     final_tag = tag
-    try:
-        kernel_name = target_config.resolve_kernel(None)
-    except (ValueError, FileNotFoundError):
-        log.info("No kernel built yet -- skipping kernel module injection")
-        kernel_name = None
+    kernel_name = target_config.resolve_kernel(None)
 
     if kernel_name is not None:
         kdir = target_config.output_dir / "kernels" / kernel_name

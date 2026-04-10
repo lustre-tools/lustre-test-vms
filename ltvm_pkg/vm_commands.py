@@ -390,6 +390,11 @@ def cmd_ensure(args: argparse.Namespace) -> None:
         launch_qemu(vm)
         wait_for_ssh(vm.ip, SSH_TIMEOUT)
         register_ssh_name(vm.name, vm.ip)
+        # Match cmd_start: re-deploy the user's SSH key and re-seed
+        # /boot for kdump.  Both are idempotent and necessary if the
+        # original create was interrupted before they ran.
+        deploy_ssh_key(vm.ip)
+        _seed_kdump_boot(vm)
         if args.json:
             print(
                 json.dumps(

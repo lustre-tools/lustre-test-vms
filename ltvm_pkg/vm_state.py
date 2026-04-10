@@ -419,13 +419,6 @@ class ClusterNode:
     def is_client(self) -> bool:
         return "client" in self.roles
 
-    @property
-    def total_disks(self) -> int:
-        n = self.mdt_disks + self.ost_disks
-        if self.is_mgs and not self.is_mds:
-            n += 1
-        return n
-
 
 @dataclass
 class ClusterInfo:

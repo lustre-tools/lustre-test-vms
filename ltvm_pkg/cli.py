@@ -33,8 +33,12 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_NOT_FOUND = 2
 
-# GitHub repo for release downloads
-GITHUB_REPO = "lustre-tools/lustre-test-vms-v2"
+# GitHub repo for release downloads.  Override with LTVM_GITHUB_REPO
+# so a fork can use `ltvm fetch` / `ltvm publish` without editing
+# source.
+GITHUB_REPO = os.environ.get(
+    "LTVM_GITHUB_REPO", "lustre-tools/lustre-test-vms-v2"
+)
 
 
 # ------------------------------------------------------------------

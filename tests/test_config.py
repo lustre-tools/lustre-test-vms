@@ -264,21 +264,43 @@ class TestInputHash:
             h2 = tc.input_hash("image")
         assert h1 != h2
 
-    def test_image_hash_excludes_server_for_non_server(
+    def test_image_hash_includes_server_packages_even_for_non_server(
         self, tmp_targets: Path
     ) -> None:
-        """Image hash for non-server target ignores server packages."""
+        """Image hash includes server packages regardless of `server`.
+
+        The image Dockerfile COPYs packages-server.txt unconditionally,
+        so a change to that file invalidates the image hash via the
+        Dockerfile COPY scan even when targets.yaml says server=false.
+        The `server` field only controls Lustre build's --enable-server.
+
+        (Older behavior was 'exclude server pkgs from non-server image',
+        but that was never actually implemented in any Dockerfile and
+        the test that asserted it was passing vacuously due to a
+        _make_config patch-scope bug.)
+        """
+        import ltvm_pkg.target_config as cfg
+
         data = yaml.safe_load(
             (tmp_targets / "targets" / "targets.yaml").read_text()
         )
         data["targets"]["rocky9"]["server"] = False
         _write_targets_yaml(tmp_targets / "targets", data)
-        tc = _make_config(tmp_targets)
-        h1 = tc.input_hash("image")
-        pkg = tmp_targets / "targets" / "common" / "packages-server.txt"
-        pkg.write_text("nfs-utils\nextra-server-pkg\n")
-        h2 = tc.input_hash("image")
-        assert h1 == h2
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            tc = cfg.TargetConfig("rocky9")
+            h1 = tc.input_hash("image")
+            pkg = tmp_targets / "targets" / "common" / "packages-server.txt"
+            pkg.write_text("nfs-utils\nextra-server-pkg\n")
+            h2 = tc.input_hash("image")
+        assert h1 != h2
 
 
 class TestStaleness:
