@@ -80,6 +80,11 @@ Tests marked `(C)` are client-only targets only.
 | 11.3 | CLI Errors | `destroy` on non-existent VM exits 0 | A | | PASS | PASS | PASS |
 | 11.4 | CLI Errors | `nmi` on stopped VM exits non-zero + clear error | A | | PASS | PASS | PASS |
 | 11.5 | CLI Errors | `doctor --fix` cleans up orphan overlays | A | | PASS | PASS | PASS |
+| 12.1 | Custom Build | `build-lustre` from clean tree produces .ko + staging | A | PASS | | | |
+| 12.2 | Custom Build | Edit source, rebuild: new `.ko` has different md5 | A | PASS | | | |
+| 12.3 | Custom Build | Edited string reaches VM kernel log after deploy | A | PASS | | | |
+| 12.4 | Custom Build | Second deploy with no changes skips rebuild | A | PASS | | | |
+| 12.5 | Custom Build | `--force` triggers rebuild even when staging is fresh | A | PASS | | | |
 
 ---
 
