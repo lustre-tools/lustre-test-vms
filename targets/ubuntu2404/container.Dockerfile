@@ -40,7 +40,7 @@ RUN apt-get update \
 # Whamcloud-patched e2fsprogs (needed for Lustre userspace tools).
 # Pinned via build-e2fsprogs.sh's DEFAULT_E2FS_TAG.
 COPY common/build-e2fsprogs.sh /tmp/build-e2fsprogs.sh
-RUN apt-get update && apt-get install -y git \
+RUN apt-get update && apt-get install -y git ca-certificates \
     && bash /tmp/build-e2fsprogs.sh \
     && rm -f /tmp/build-e2fsprogs.sh \
     && rm -rf /var/lib/apt/lists/*

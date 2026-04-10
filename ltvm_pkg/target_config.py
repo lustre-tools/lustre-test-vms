@@ -25,16 +25,6 @@ _DEFAULTS = {
     "server": True,
 }
 
-# Architecture mapping tables
-# Keys are the canonical arch name used in targets.yaml (x86_64, aarch64).
-_ARCH_TO_SRPM_CONFIG = {"x86_64": "x86_64", "aarch64": "aarch64"}
-
-
-def arch_srpm_config_name(arch: str) -> str:
-    """Return the arch string used in SRPM kernel config filenames."""
-    return _ARCH_TO_SRPM_CONFIG.get(arch, arch)
-
-
 _COPY_RE = re.compile(r"^\s*COPY\s+(\S+)", re.MULTILINE)
 
 
@@ -174,10 +164,9 @@ class TargetConfig:
         v = self._data.get("configure_args", [])
         return list(v)
 
-    # ROOT_PASSWORD and SSH_TIMEOUT live in vm_state.py and are the
-    # single source of truth for these values at runtime.  The matching
-    # keys in targets.yaml (root_password, ssh_timeout) are no longer
-    # consumed by the runtime; targets.yaml documents the defaults.
+    # ROOT_PASSWORD and SSH_TIMEOUT are hardcoded constants in vm_state.py.
+    # If we ever want to make them per-target, add a property here AND
+    # have vm_state read it via TargetConfig -- right now neither happens.
 
     # ------------------------------------------------------------------
     # Kernel metadata
@@ -309,6 +298,14 @@ class TargetConfig:
             common_frag = TARGETS_DIR / "common" / "kernel-config.fragment"
             if common_frag.exists():
                 h.update(common_frag.read_bytes())
+            # The arch-specific fragment is also consumed by
+            # kernel_build._build_config_fragment, so it must contribute
+            # to the staleness hash too.
+            arch_frag = (
+                TARGETS_DIR / "common" / f"kernel-config-{self.arch}.fragment"
+            )
+            if arch_frag.exists():
+                h.update(arch_frag.read_bytes())
 
         elif artifact == "image":
             dockerfile = self.target_dir / "image.Dockerfile"

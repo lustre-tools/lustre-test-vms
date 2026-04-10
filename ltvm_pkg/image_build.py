@@ -88,14 +88,17 @@ def _prebuild_tools_native(
     the cross-compiler natively. The output goes to *output_dir* and
     is injected into the emulated image build via COPY.
     """
-    # Use the existing (native) build container for this target
-    build_tag = f"ltvm-build-{target_config.name}"
+    # We deliberately want the NATIVE (host-arch) build container, not
+    # the cross-compile one.  The native tag has no arch suffix; the
+    # cross-compile tag does.  We hardcode the unsuffixed form rather
+    # than calling kernel_build._ensure_container_image (which would
+    # arch-qualify based on target_config.arch).
     arch = target_config.arch
+    build_tag = f"ltvm-build-{target_config.name}"
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Ensure the native build container exists (may need to build it
-    # if we're running as root but the container was built as a user)
+    # Ensure the native build container exists (build it if missing).
     r = subprocess.run(
         ["podman", "image", "exists", build_tag], capture_output=True
     )

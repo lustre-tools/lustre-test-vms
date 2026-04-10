@@ -175,36 +175,14 @@ def _qemu_ns(**kwargs: Any) -> argparse.Namespace:
 
 
 def _do_build_container(target_config: TargetConfig) -> str:
-    """Run podman build for the build container and write meta."""
-    tag = _build_container_tag(target_config)
-    dockerfile = target_config.target_dir / "container.Dockerfile"
-    if not dockerfile.exists():
-        raise FileNotFoundError(
-            f"No container.Dockerfile for target {target_config.name}"
-        )
+    """Run podman build for the build container and write meta.
 
-    from ltvm_pkg.target_config import TARGETS_DIR
+    Delegates to kernel_build._ensure_container_image so the podman
+    invocation lives in exactly one place.
+    """
+    from ltvm_pkg.kernel_build import _ensure_container_image
 
-    # Map target arch to podman platform string to avoid pulling the
-    # wrong base image (e.g. arm64 ubuntu on an x86_64 host).
-    _arch_to_platform = {"x86_64": "linux/amd64", "aarch64": "linux/arm64"}
-    platform = _arch_to_platform.get(target_config.arch, "linux/amd64")
-
-    build_args = [
-        "--build-arg", f"BASE_IMAGE={target_config.container_image}",
-    ]
-    if target_config.kernel_deb_source:
-        build_args += [
-            "--build-arg",
-            f"KERNEL_DEB_SOURCE={target_config.kernel_deb_source}",
-        ]
-    subprocess.run(
-        ["podman", "build", "--platform", platform,
-         *build_args,
-         "-t", tag, "-f", str(dockerfile), str(TARGETS_DIR)],
-        check=True,
-    )
-
+    tag = _ensure_container_image(target_config)
     target_config.write_meta("container", image_tag=tag)
     return tag
 
@@ -1128,16 +1106,23 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
     # Resolve build path:
     #   1. Explicit --build PATH wins (including --build .)
-    #   2. Otherwise, prefer the bundled Lustre snapshot from `ltvm fetch`
+    #   2. Otherwise, if a bundled snapshot from `ltvm fetch` exists,
+    #      copy it into staging and use it directly (no source rebuild)
     #   3. Otherwise, fall back to cwd
     build_arg = getattr(args, "build", None)
+    bundled_snapshot: Path | None = None
     if build_arg is not None:
         build_path = Path(build_arg).resolve()
     else:
         packaged = (
             ltvm_root / "output" / target / "kernels" / resolved_kernel / "lustre"
         )
-        if packaged.is_dir():
+        # A bundled snapshot is identified by the .ltvm-snapshot.json marker
+        # written by snapshot_lustre.  It already has DESTDIR layout
+        # (usr/, lib/modules/), so we can deploy it directly without
+        # going through build-lustre.
+        if packaged.is_dir() and (packaged / ".ltvm-snapshot.json").exists():
+            bundled_snapshot = packaged
             build_path = packaged
             if not use_json:
                 print(f"  Using bundled Lustre (from ltvm fetch)")
@@ -1152,6 +1137,26 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     # Staging lives in the ltvm output dir, not the source tree.
     from ltvm_pkg.lustre_build import staging_path as _staging_path
     staging = _staging_path(target)
+
+    # If we picked up a bundled snapshot and there's no local staging,
+    # mirror the snapshot into the staging dir so deploy_to_vm can use
+    # it the same way it uses a freshly built tree.
+    if bundled_snapshot is not None and not (
+        staging.is_dir() and any(staging.rglob("*.ko"))
+    ):
+        if not use_json:
+            print(f"  Mirroring bundled snapshot into staging: {staging}")
+        staging.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run(
+            ["rsync", "-a", "--delete",
+             str(bundled_snapshot) + "/", str(staging) + "/"],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            return _error(
+                f"Failed to mirror bundled snapshot: {r.stderr.strip()}",
+                use_json,
+            )
 
     def _staging_is_fresh(staging: Path, src: Path) -> bool:
         """Check if the staging dir is newer than all source files."""

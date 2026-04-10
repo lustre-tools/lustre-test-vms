@@ -228,7 +228,10 @@ def cmd_create(args: argparse.Namespace) -> None:
     os_arts = resolve_os_artifacts(os_target, arch=arch)
     image = explicit_image or str(os_arts.image)
     kernel = explicit_kernel or str(os_arts.kernel)
-    if args.mem == 2048 and os_arts.default_mem > 2048:
+    # If the user didn't pass --mem, fall back to the target's default
+    # (rocky10 needs 4096; others use 2048).  argparse default is None
+    # so we can distinguish "user said 2048" from "user said nothing".
+    if args.mem is None:
         args.mem = os_arts.default_mem
 
     base_name = Path(image).name

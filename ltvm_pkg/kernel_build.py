@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
-from .target_config import TARGETS_DIR, arch_srpm_config_name
+from .target_config import TARGETS_DIR
 
 if TYPE_CHECKING:
     from .target_config import TargetConfig
@@ -116,10 +116,9 @@ def resolve_lustre_files(
     lt = Path(lustre_tree)
     kp = lt / "lustre/kernel_patches"
 
-    # Kernel config -- use arch-specific config name
-    srpm_arch = arch_srpm_config_name(arch)
+    # Kernel config -- arch-specific name (Lustre uses x86_64 / aarch64).
     config_glob = (
-        f"kernel-{target_info['lnxmaj']}-{lustre_target}-{srpm_arch}.config"
+        f"kernel-{target_info['lnxmaj']}-{lustre_target}-{arch}.config"
     )
     _config = kp / "kernel_configs" / config_glob
     # No Lustre-provided config -- will extract from SRPM at build time

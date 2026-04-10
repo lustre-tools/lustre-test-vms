@@ -118,16 +118,18 @@ def snapshot_lustre(
     output_dir: str | Path,
     kernel: str | None = None,
 ) -> Path:
-    """Copy the deployable subset of a built Lustre tree
-    into output/<target>/kernels/<kernel>/lustre/.
+    """Snapshot the Lustre staging tree for shipping in a fetch tarball.
 
-    Includes everything deploy needs: .ko files,
-    libraries, binaries, test scripts, config.  Excludes
-    .git, .o files, and kernel_patches (large, not needed
-    for deploy).
+    The staging tree at output/<target>/lustre/staging/ has the DESTDIR
+    install layout (usr/, lib/modules/, sbin/) that `ltvm deploy` streams
+    into a VM.  We rsync it under kernels/<kernel>/lustre/ so the tarball
+    pairs each kernel with its matching pre-built Lustre.
 
-    kernel must be provided or resolvable via auto-detection.
-    Raises ValueError if kernel is None and cannot be auto-detected.
+    `lustre_tree` is informational (used for the .ltvm-snapshot.json
+    commit hash); the actual content comes from the staging directory.
+
+    Raises ValueError if no staging dir exists for the target -- the
+    caller is expected to run `ltvm build-lustre` first.
 
     Returns the output lustre directory path.
     """
@@ -136,17 +138,21 @@ def snapshot_lustre(
 
     kernel_name, kernel_dir = _resolve_kernel(output_dir, kernel)
 
-    dest = kernel_dir / "lustre"
+    staging_src = output_dir / "lustre" / "staging"
+    if not staging_src.is_dir():
+        raise ValueError(
+            f"No staging directory at {staging_src} -- "
+            f"run `ltvm build-lustre <target>` first"
+        )
 
-    # Verify the tree looks built
-    ko_files = [
-        f for f in lustre_tree.rglob("*.ko")
-        if "kconftest" not in str(f) and ".staging" not in str(f)
-    ]
+    ko_files = list(staging_src.rglob("*.ko"))
     if not ko_files:
-        raise ValueError(f"No .ko files in {lustre_tree} -- build Lustre first")
+        raise ValueError(
+            f"Staging dir {staging_src} has no .ko files -- "
+            f"`ltvm build-lustre` may have failed"
+        )
 
-    # Verify the .ko files match the target kernel
+    # Verify the staging modules match the target kernel
     meta_file = kernel_dir / "meta.json"
     if meta_file.exists():
         meta = json.loads(meta_file.read_text())
@@ -163,27 +169,23 @@ def snapshot_lustre(
                 raise ValueError(
                     f"Lustre modules built for {actual_kver} but target "
                     f"kernel is {expected_kver}\n"
-                    f"  Rebuild: ltvm build-lustre <target> --lustre-tree {lustre_tree} --force"
+                    f"  Rebuild: ltvm build-lustre <target> --force"
                 )
 
-    print(f"  Snapshotting Lustre tree to {dest}")
-    print(f"    Source: {lustre_tree}")
-    print(f"    Kernel: {kernel_name}")
+    dest = kernel_dir / "lustre"
+    print(f"  Snapshotting Lustre staging tree to {dest}")
+    print(f"    Staging: {staging_src}")
+    print(f"    Source:  {lustre_tree}")
+    print(f"    Kernel:  {kernel_name}")
     print(f"    Modules: {len(ko_files)} .ko files")
 
-    # rsync the tree, excluding large unnecessary items
+    # rsync the staging dir; --delete so a stale dest is replaced cleanly.
     subprocess.run(
         [
             "rsync",
             "-a",
             "--delete",
-            "--exclude=.git",
-            "--exclude=*.o",
-            "--exclude=*.cmd",
-            "--exclude=.tmp_*",
-            "--exclude=lustre/kernel_patches",
-            "--exclude=libcfs/libcfs/util/.libs/*.o",
-            str(lustre_tree) + "/",
+            str(staging_src) + "/",
             str(dest) + "/",
         ],
         check=True,

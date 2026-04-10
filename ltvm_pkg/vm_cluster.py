@@ -95,9 +95,12 @@ def generate_local_sh(cluster: ClusterInfo, os_family: str = "rhel") -> str:
 
         mdt_idx = 1
         for mds_node in mds_list:
+            # MDS disks always start at /dev/vdb on the MDS node.  If
+            # MGS+MDS share a node (`combined`), no separate MGS disk
+            # exists.  If they don't share, the MGS disk lives on the
+            # MGS node, not on this MDS node, so no offset is needed
+            # here either.
             disk_offset = 1
-            if mds_node.is_mgs and not combined:
-                disk_offset = 2
 
             for d in range(mds_node.mdt_disks):
                 letter = chr(ord("a") + disk_offset + d)

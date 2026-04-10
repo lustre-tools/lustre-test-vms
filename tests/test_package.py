@@ -177,22 +177,10 @@ class TestDirSizeMb:
 # ---------------------------------------------------------------------------
 
 
-def _setup_lustre_tree(
-    tmp_path: Path,
-    with_ko: bool = True,
-    with_kconftest: bool = False,
-) -> Path:
-    """Create a minimal fake Lustre source tree."""
+def _setup_lustre_tree(tmp_path: Path) -> Path:
+    """Create a minimal fake Lustre source tree (used only for metadata)."""
     tree = tmp_path / "lustre-tree"
     tree.mkdir()
-    if with_ko:
-        ko_dir = tree / "lustre" / "llite"
-        ko_dir.mkdir(parents=True)
-        (ko_dir / "lustre.ko").write_text("fake ko")
-    if with_kconftest:
-        kc_dir = tree / "kconftest"
-        kc_dir.mkdir()
-        (kc_dir / "kconftest.ko").write_text("fake kconftest")
     return tree
 
 
@@ -212,29 +200,47 @@ def _make_rsync_mock(dest_dir: Path) -> MagicMock:
 
 
 class TestSnapshotLustre:
-    def _setup(
-        self,
-        tmp_path: Path,
-        with_ko: bool = True,
-        with_kconftest: bool = False,
-    ):
-        tree = _setup_lustre_tree(
-            tmp_path, with_ko=with_ko, with_kconftest=with_kconftest
-        )
+    def _setup(self, tmp_path: Path, with_staging_ko: bool = True):
+        """Create a fake target output_dir with kernel + staging dir.
+
+        snapshot_lustre now sources from output_dir/lustre/staging/, not
+        from the lustre source tree.  The lustre_tree argument is only
+        used for the .ltvm-snapshot.json metadata.
+        """
+        tree = _setup_lustre_tree(tmp_path)
         output_dir = tmp_path / "output"
         kdir = output_dir / "kernels" / "test-kernel"
         kdir.mkdir(parents=True)
         (kdir / "vmlinux").touch()
+        staging = output_dir / "lustre" / "staging"
+        if with_staging_ko:
+            ko_dir = staging / "lib" / "modules" / "fake-kver" / "extra"
+            ko_dir.mkdir(parents=True)
+            (ko_dir / "lustre.ko").write_text("fake ko")
+        else:
+            staging.mkdir(parents=True)
         dest = kdir / "lustre"
         return tree, output_dir, kdir, dest
 
-    def test_no_ko_files_raises(self, tmp_path: Path) -> None:
-        tree, output_dir, kdir, dest = self._setup(tmp_path, with_ko=False)
-        with pytest.raises(ValueError, match="build Lustre first"):
+    def test_missing_staging_raises(self, tmp_path: Path) -> None:
+        tree = _setup_lustre_tree(tmp_path)
+        output_dir = tmp_path / "output"
+        kdir = output_dir / "kernels" / "test-kernel"
+        kdir.mkdir(parents=True)
+        (kdir / "vmlinux").touch()
+        with pytest.raises(ValueError, match="No staging directory"):
             snapshot_lustre(tree, output_dir, kernel="test-kernel")
 
-    def test_with_ko_files_calls_rsync(self, tmp_path: Path) -> None:
+    def test_empty_staging_raises(self, tmp_path: Path) -> None:
+        tree, output_dir, kdir, dest = self._setup(
+            tmp_path, with_staging_ko=False
+        )
+        with pytest.raises(ValueError, match="no .ko files"):
+            snapshot_lustre(tree, output_dir, kernel="test-kernel")
+
+    def test_with_staging_calls_rsync(self, tmp_path: Path) -> None:
         tree, output_dir, kdir, dest = self._setup(tmp_path)
+        staging_src = output_dir / "lustre" / "staging"
 
         with (
             patch(
@@ -245,11 +251,14 @@ class TestSnapshotLustre:
         ):
             result = snapshot_lustre(tree, output_dir, kernel="test-kernel")
 
-        # rsync was called (subprocess.run also called for git rev-parse)
-        assert mock_run.call_count >= 1
-        args = mock_run.call_args_list[0][0][0]
-        assert args[0] == "rsync"
-        assert str(tree.resolve()) + "/" in args
+        # rsync was called (plus possibly git rev-parse)
+        rsync_calls = [
+            c for c in mock_run.call_args_list
+            if c[0][0][0] == "rsync"
+        ]
+        assert len(rsync_calls) == 1
+        args = rsync_calls[0][0][0]
+        assert str(staging_src) + "/" in args
         assert str(kdir / "lustre") + "/" in args
 
         assert result == kdir / "lustre"
@@ -272,32 +281,6 @@ class TestSnapshotLustre:
         assert meta["source"] == str(tree.resolve())
         assert meta["kernel"] == "test-kernel"
         assert meta["ko_count"] == 1
-
-    def test_kconftest_excluded_from_count(self) -> None:
-        # Use tempfile.TemporaryDirectory so pytest does not name the path
-        # after this test -- package.py filters .ko files by full path
-        # string, so a path containing "kconftest" would incorrectly
-        # exclude real .ko files.
-        import tempfile
-
-        with tempfile.TemporaryDirectory(prefix="ltvm-test-") as td:
-            base = Path(td)
-            tree, output_dir, kdir, dest = self._setup(
-                base, with_kconftest=True
-            )
-
-            with (
-                patch(
-                    "subprocess.run",
-                    side_effect=_make_rsync_mock(dest),
-                ),
-                patch("ltvm_pkg.release_package._dir_size_mb", return_value=10.0),
-            ):
-                result = snapshot_lustre(tree, output_dir, kernel="test-kernel")
-
-            meta = json.loads((result / ".ltvm-snapshot.json").read_text())
-            # kconftest.ko must not be counted
-            assert meta["ko_count"] == 1
 
 
 # ---------------------------------------------------------------------------

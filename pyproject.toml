@@ -40,7 +40,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "--cov=ltvm_pkg --cov-report=term-missing --ignore=tests/e2e"
 markers = [
-    "e2e: end-to-end tests that require a real VM environment (KVM, vm.py, built images)",
+    "e2e: end-to-end tests that require a real VM environment (KVM, ltvm, built images)",
 ]
 
 [tool.coverage.run]

@@ -36,6 +36,7 @@ class BuildResult(TypedDict):
     kernel_version: str
     ko_count: int
     container: str | None
+    staging: str
 
 
 class StatusResult(TypedDict):
@@ -117,6 +118,8 @@ def _needs_reconfigure(
         if prev_server != str(enable_server):
             print(f"  Server flag changed ({prev_server} -> {enable_server}), reconfiguring")
             return True
+    else:
+        return True  # no server stamp = never built for this target
 
     return False
 

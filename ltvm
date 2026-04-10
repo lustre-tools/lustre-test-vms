@@ -70,14 +70,20 @@ class _HideSuppressedSubcommands(argparse.HelpFormatter):
     def _metavar_formatter(self, action: argparse.Action, default_metavar: str):
         # For subparser actions, strip suppressed choices from the metavar.
         if hasattr(action, "_name_parser_map"):
-            visible = [
-                name
-                for name, sp in action._name_parser_map.items()
-                if sp.description != argparse.SUPPRESS
-                and getattr(sp, "_defaults", {}).get("func") is not None
-                # Filter aliases: only keep if it's the canonical name
-                and name not in getattr(action, "_aliases_map", {})
-            ]
+            # Aliases point to the same parser instance as the canonical
+            # name, so dedupe by id() to keep only the first (canonical)
+            # entry per parser.
+            seen: set[int] = set()
+            visible: list[str] = []
+            for name, sp in action._name_parser_map.items():
+                if sp.description == argparse.SUPPRESS:
+                    continue
+                if getattr(sp, "_defaults", {}).get("func") is None:
+                    continue
+                if id(sp) in seen:
+                    continue
+                seen.add(id(sp))
+                visible.append(name)
 
             def fmt(tuple_size: int):
                 if tuple_size != 1:
@@ -341,8 +347,10 @@ def build_parser() -> argparse.ArgumentParser:
     _vm_create_args = argparse.ArgumentParser(add_help=False)
     _vm_create_args.add_argument("--vcpus", type=int, default=2,
                                  help="vCPU count (default: 2)")
-    _vm_create_args.add_argument("--mem", type=int, default=2048,
-                                 help="Memory in MB (default: 2048)")
+    _vm_create_args.add_argument("--mem", type=int, default=None,
+                                 help="Memory in MB (default: target's "
+                                      "default_mem from targets.yaml, "
+                                      "else 2048)")
     _vm_create_args.add_argument("--ip", default=None, help="Static IP address")
     _vm_create_args.add_argument("--rootfs", default=None,
                                  help="Explicit rootfs image path")
