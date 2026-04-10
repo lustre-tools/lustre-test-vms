@@ -156,15 +156,25 @@ def launch_qemu(vm: VMInfo) -> None:
             f"id=disk{n},file={disk},format=raw,if=none",
         ]
 
-    with open(vm.log_path, "a") as log:
-        r = subprocess.run(qemu_args, stdout=log, stderr=log)
-    if r.returncode != 0:
-        die(
-            f"QEMU failed to start for '{vm.name}' "
-            f"(rc={r.returncode}); see {vm.log_path}"
-        )
+    try:
+        with open(vm.log_path, "a") as log:
+            r = subprocess.run(qemu_args, stdout=log, stderr=log)
+        if r.returncode != 0:
+            die(
+                f"QEMU failed to start for '{vm.name}' "
+                f"(rc={r.returncode}); see {vm.log_path}"
+            )
+        pid = int(vm.pid_path.read_text().strip())
+    except BaseException:
+        # TAP was created above; tear it down so we don't leak the device.
+        # cmd_create has its own broader rollback, but cmd_start, cmd_ensure
+        # and cmd_cluster_* call launch_qemu directly with no rollback path,
+        # so the TAP would otherwise leak until the next restart of this VM.
+        # BaseException catches SystemExit raised by die() so cleanup runs
+        # before the process exits.
+        run(["ip", "link", "del", vm.tap], capture_output=True)
+        raise
 
-    pid = int(vm.pid_path.read_text().strip())
     vm.update_pid(pid)
     vm.update_last_boot(int(time.time()))
 

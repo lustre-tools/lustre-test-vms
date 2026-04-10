@@ -166,12 +166,19 @@ def download_srpm(srpm_name: str, cache_dir: str | Path, base_url: str) -> Path:
     url = f"{base_url}/{srpm_name}"
     log.info("Downloading SRPM: %s", url)
 
-    # Download to a temp file in the same directory and rename on
+    # Download to a per-pid temp file in the same directory and rename on
     # success.  A previous interrupted curl could otherwise leave a
     # truncated `cached` file that the next run silently re-uses,
     # causing rpm2cpio to fail with an opaque error inside the
-    # container build.
-    tmp = cache_dir / f".{srpm_name}.partial"
+    # container build.  Using a unique tempfile name (not f".{srpm_name}.partial")
+    # also keeps two concurrent build-kernel runs from clobbering each other's
+    # download.
+    import tempfile
+    fd, tmp_str = tempfile.mkstemp(
+        dir=str(cache_dir), prefix=f".{srpm_name}.", suffix=".partial"
+    )
+    os.close(fd)
+    tmp = Path(tmp_str)
     try:
         subprocess.run(
             ["curl", "-fSL", "--progress-bar", "-o", str(tmp), url],

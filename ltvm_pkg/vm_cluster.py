@@ -272,18 +272,22 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                 print(f"  {name}: up")
 
     if failed:
-        # Clean up any nodes that did start
+        # Clean up ALL nodes, including the failed ones.  A failed
+        # `ltvm create` may have already created the TAP, overlay,
+        # and .info file before erroring out (e.g. SSH wait timed out
+        # so the rollback in cmd_create couldn't run).  `ltvm destroy`
+        # is idempotent on missing VMs, so it's safe to call on every
+        # node and necessary to avoid leaking partial state.
         for node in node_specs:
-            if node.name not in failed:
-                r = subprocess.run(
-                    ["sudo", "ltvm", "destroy", node.name],
-                    capture_output=True,
+            r = subprocess.run(
+                ["sudo", "ltvm", "destroy", node.name],
+                capture_output=True,
+            )
+            if r.returncode != 0:
+                print(
+                    f"warning: failed to destroy VM '{node.name}' during cleanup",
+                    file=sys.stderr,
                 )
-                if r.returncode != 0:
-                    print(
-                        f"warning: failed to destroy VM '{node.name}' during cleanup",
-                        file=sys.stderr,
-                    )
         die(f"vm create failed for: {', '.join(failed)}")
 
     # Load IPs now that all VMs are running

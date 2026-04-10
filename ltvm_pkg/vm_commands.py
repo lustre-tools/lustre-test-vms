@@ -315,38 +315,55 @@ def cmd_create(args: argparse.Namespace) -> None:
             arch=os_arts.arch,
         )
 
-        # Create overlay
-        run(
-            [
-                QEMU_IMG,
-                "create",
-                "-f",
-                "qcow2",
-                "-b",
-                image,
-                "-F",
-                "raw",
-                str(vm.overlay_path),
-            ],
-            capture_output=True,
-            check=True,
-        )
-
-        # Grow the qcow2 virtual disk so the VM has room for Lustre modules,
-        # logs, etc.  The ext4 filesystem is resized on first boot (rc.local).
-        run(
-            [QEMU_IMG, "resize", str(vm.overlay_path), "8G"],
-            capture_output=True,
-            check=True,
-        )
-
-        # Create backing disks
-        total = vm.mdt_disks + vm.ost_disks
-        for n in range(1, total + 1):
+        # Create overlay + backing disks.  If any step fails partway,
+        # unlink everything we already created so we don't leave orphan
+        # files behind for the next `ltvm create <same name>` to trip on.
+        # The .info file isn't written yet so cmd_doctor can't see these
+        # orphans either, which makes manual recovery awkward.
+        try:
             run(
-                ["truncate", "-s", str(vm.disk_size), str(vm.disk_path(n))],
+                [
+                    QEMU_IMG,
+                    "create",
+                    "-f",
+                    "qcow2",
+                    "-b",
+                    image,
+                    "-F",
+                    "raw",
+                    str(vm.overlay_path),
+                ],
+                capture_output=True,
                 check=True,
             )
+
+            # Grow the qcow2 virtual disk so the VM has room for Lustre
+            # modules, logs, etc.  The ext4 filesystem is resized on first
+            # boot (rc.local).
+            run(
+                [QEMU_IMG, "resize", str(vm.overlay_path), "8G"],
+                capture_output=True,
+                check=True,
+            )
+
+            # Create backing disks
+            total = vm.mdt_disks + vm.ost_disks
+            for n in range(1, total + 1):
+                run(
+                    ["truncate", "-s", str(vm.disk_size), str(vm.disk_path(n))],
+                    check=True,
+                )
+        except BaseException:
+            try:
+                vm.overlay_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            for n in range(1, vm.mdt_disks + vm.ost_disks + 1):
+                try:
+                    vm.disk_path(n).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
 
         vm.save()
     # Lock released; IP is now committed.
@@ -430,6 +447,8 @@ def _destroy_vm_artifacts(name: str) -> None:
         f.unlink(missing_ok=True)
     for ext in ("qmp", "pid", "info", "log"):
         (SOCKETS / f"{name}.{ext}").unlink(missing_ok=True)
+    # Per-VM info lock file (created by VMInfo._info_lock).
+    (SOCKETS / f".{name}.info.lock").unlink(missing_ok=True)
 
 
 def cmd_destroy(args: argparse.Namespace) -> None:

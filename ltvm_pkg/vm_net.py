@@ -16,6 +16,7 @@ from .vm_state import MARKER, ROOT_PASSWORD, SUBNET, VM_DIR, VMInfo, VMNotFound
 from .qemu_run import die, run
 
 _IP_LOCK_PATH = VM_DIR / ".ip-alloc.lock"
+_HOSTS_LOCK_PATH = VM_DIR / ".hosts.lock"
 
 
 @contextmanager
@@ -23,6 +24,23 @@ def _ip_alloc_lock():
     """Exclusive file lock serialising IP allocation across concurrent creates."""
     _IP_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(_IP_LOCK_PATH, "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+@contextmanager
+def _hosts_lock():
+    """Exclusive file lock serialising /etc/hosts and ~/.ssh/config edits.
+
+    `cmd_cluster_create` spawns N parallel `sudo ltvm create` subprocesses,
+    each of which calls register_ssh_name(); without this lock the unsynchronised
+    read-modify-write on /etc/hosts silently drops entries.
+    """
+    _HOSTS_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(_HOSTS_LOCK_PATH, "w") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
             yield
@@ -137,14 +155,18 @@ def _real_user_ssh_dir() -> tuple[str, Path]:
 
 def register_ssh_name(name: str, ip: str) -> None:
     """Add /etc/hosts and ~/.ssh/config entries for a VM."""
+    with _hosts_lock():
+        _register_ssh_name_locked(name, ip)
+
+
+def _register_ssh_name_locked(name: str, ip: str) -> None:
     hosts = Path("/etc/hosts")
     marker_line = f"{MARKER}:{name}"
 
     # /etc/hosts — always replace any existing entry for this name so the
-    # write is idempotent.  Reading the current content and writing a new
-    # version via _atomic_write is still a read-modify-write, but making it
-    # idempotent means a duplicate race at worst writes the same content
-    # twice; the final rename wins and /etc/hosts stays correct.
+    # write is idempotent.  The _hosts_lock above serialises read-modify-write
+    # against concurrent register/unregister calls (notably from parallel
+    # `sudo ltvm create` subprocesses spawned by `ltvm cluster create`).
     hosts_text = hosts.read_text() if hosts.exists() else ""
     new_entry = f"{ip}\t{name} {marker_line}\n"
     # Strip any existing lines that reference this hostname marker.
@@ -204,6 +226,11 @@ def register_ssh_name(name: str, ip: str) -> None:
 
 def unregister_ssh_name(name: str) -> None:
     """Remove /etc/hosts and ~/.ssh/config entries for a VM."""
+    with _hosts_lock():
+        _unregister_ssh_name_locked(name)
+
+
+def _unregister_ssh_name_locked(name: str) -> None:
     marker = f"{MARKER}:{name}"
 
     # /etc/hosts (atomic write to avoid races with parallel destroys)

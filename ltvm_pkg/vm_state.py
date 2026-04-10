@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -309,37 +311,58 @@ class VMInfo:
                 pass
             raise
 
+    @property
+    def _lock_path(self) -> Path:
+        return SOCKETS / f".{self.name}.info.lock"
+
+    @contextmanager
+    def _info_lock(self):
+        """Per-VM exclusive lock for read-modify-write of the .info file.
+
+        Two processes can call e.g. update_pid() and update_deploy() concurrently
+        on the same VM (cluster deploy + a manual `ltvm start`).  Without this
+        lock, both read the same text, both rename, the second write wins and
+        the first update is silently lost.
+        """
+        SOCKETS.mkdir(parents=True, exist_ok=True)
+        with open(self._lock_path, "w") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+
     def _update_fields(self, fields: dict) -> None:
         """Update multiple fields in the info file atomically (single write).
 
-        Written atomically via rename to avoid corruption under concurrent
-        updates (e.g. two cluster nodes deploying in parallel).
+        Held under a per-VM flock so concurrent updaters can't lose writes.
         """
-        if not self.info_path.exists():
-            return
-        text = self.info_path.read_text()
-        for key, value in fields.items():
-            pattern = rf"^{key}=.*$"
-            replacement = f"{key}={value}"
-            if re.search(pattern, text, flags=re.MULTILINE):
-                text = re.sub(pattern, replacement, text, flags=re.MULTILINE)
-            else:
-                text = text.rstrip("\n") + f"\n{replacement}\n"
-        fd, tmp_str = tempfile.mkstemp(
-            dir=str(self.info_path.parent),
-            prefix=f".{self.info_path.name}.",
-        )
-        tmp = Path(tmp_str)
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(text)
-            tmp.rename(self.info_path)
-        except BaseException:
+        with self._info_lock():
+            if not self.info_path.exists():
+                return
+            text = self.info_path.read_text()
+            for key, value in fields.items():
+                pattern = rf"^{key}=.*$"
+                replacement = f"{key}={value}"
+                if re.search(pattern, text, flags=re.MULTILINE):
+                    text = re.sub(pattern, replacement, text, flags=re.MULTILINE)
+                else:
+                    text = text.rstrip("\n") + f"\n{replacement}\n"
+            fd, tmp_str = tempfile.mkstemp(
+                dir=str(self.info_path.parent),
+                prefix=f".{self.info_path.name}.",
+            )
+            tmp = Path(tmp_str)
             try:
-                tmp.unlink()
-            except OSError:
-                pass
-            raise
+                with os.fdopen(fd, "w") as f:
+                    f.write(text)
+                tmp.rename(self.info_path)
+            except BaseException:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                raise
 
     def _update_field(self, key: str, value: str | int) -> None:
         """Update a single field in the info file (add if missing)."""
@@ -449,8 +472,27 @@ class ClusterInfo:
         return SOCKETS / f"{self.name}.cluster"
 
     def save(self) -> None:
+        # Atomic write via tempfile + rename so a SIGKILL or disk-full
+        # mid-write cannot leave a half-written .cluster file (which
+        # would fail JSON parse on the next load).
         data = {"name": self.name, "nodes": self.nodes}
-        self.path.write_text(json.dumps(data, indent=2) + "\n")
+        text = json.dumps(data, indent=2) + "\n"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_str = tempfile.mkstemp(
+            dir=str(self.path.parent),
+            prefix=f".{self.path.name}.",
+        )
+        tmp = Path(tmp_str)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+            tmp.rename(self.path)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
 
     @staticmethod
     def load(name: str) -> ClusterInfo:
