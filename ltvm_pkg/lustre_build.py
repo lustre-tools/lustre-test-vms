@@ -304,6 +304,16 @@ def _build_in_container(
             "rm -rf conftest conftest.c conftest.dir _lpb"
             " kconftest.dir conftest.err 2>/dev/null || true"
         )
+        # Remove stale config/compile lock dirs (*.d directories).
+        # When a previous configure was killed mid-compile, it leaves
+        # behind empty .d lock dirs that the next configure spins forever
+        # trying to acquire (the mkdir-based lock loop has no timeout).
+        # Use rmdir so legitimate non-empty .d dirs (e.g. kbuild dependency
+        # tracking) are preserved -- only empty leftovers get cleaned.
+        script_parts.append(
+            "find . -maxdepth 3 -name '*.d' -type d"
+            " -not -path '*/.git/*' -exec rmdir {} + 2>/dev/null || true"
+        )
 
     # Run autogen.sh + configure only when needed.
     #
@@ -376,6 +386,13 @@ fi""")
         "--rm",
         "--security-opt",
         "label=disable",
+        # 10 minute ceiling: a clean rocky9 build runs in ~5 minutes,
+        # double that catches stuck builds without false-positive killing
+        # slow-but-progressing ones.  Without this, a hung autoconf or
+        # mkdir lock loop blocks the entire `ltvm build-lustre` invocation
+        # forever instead of failing cleanly.
+        "--timeout",
+        "600",
         "-v",
         f"{lustre_tree}:/lustre",
         "-v",
