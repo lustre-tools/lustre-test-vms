@@ -446,8 +446,10 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     build_cmd = ["ltvm", "build-lustre", target, "--lustre-tree", build]
     if kernel_name:
         build_cmd += ["--kernel", kernel_name]
-    if arch != "x86_64":
-        build_cmd += ["--arch", arch]
+    # Forward --arch unconditionally.  Comparing against the literal
+    # "x86_64" is wrong for a target whose default arch is something
+    # else -- see the matching cmd_deploy comment.
+    build_cmd += ["--arch", arch]
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
         build_cmd = ["sudo", "-u", sudo_user] + build_cmd

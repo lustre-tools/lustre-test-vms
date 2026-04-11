@@ -169,11 +169,15 @@ def _register_ssh_name_locked(name: str, ip: str) -> None:
     # `sudo ltvm create` subprocesses spawned by `ltvm cluster create`).
     hosts_text = hosts.read_text() if hosts.exists() else ""
     new_entry = f"{ip}\t{name} {marker_line}\n"
-    # Strip any existing lines that reference this hostname marker.
+    # Strip only lines whose marker matches EXACTLY (anchored to
+    # end-of-line).  A plain substring check would strip lines for
+    # sibling-named VMs: "# qemu-vm:co1" is a substring of
+    # "# qemu-vm:co1-single", so registering/unregistering co1 would
+    # silently corrupt the co1-single entry.
     filtered = [
         ln
         for ln in hosts_text.splitlines(keepends=True)
-        if marker_line not in ln
+        if not ln.rstrip("\n").endswith(marker_line)
     ]
     _atomic_write(hosts, "".join(filtered) + new_entry)
     reload_dns()
@@ -233,13 +237,15 @@ def unregister_ssh_name(name: str) -> None:
 def _unregister_ssh_name_locked(name: str) -> None:
     marker = f"{MARKER}:{name}"
 
-    # /etc/hosts (atomic write to avoid races with parallel destroys)
+    # /etc/hosts (atomic write to avoid races with parallel destroys).
+    # Anchor the marker match to end-of-line: see the prefix-collision
+    # comment in _register_ssh_name_locked above.
     hosts = Path("/etc/hosts")
     if hosts.exists():
         lines = [
             line
             for line in hosts.read_text().splitlines()
-            if marker not in line
+            if not line.endswith(marker)
         ]
         _atomic_write(hosts, "\n".join(lines) + "\n")
         reload_dns()

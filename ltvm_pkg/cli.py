@@ -1262,12 +1262,16 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     from ltvm_pkg.lustre_build import staging_path as _staging_path
     staging = _staging_path(target, arch=vm_arch)
 
-    # If we picked up a bundled snapshot and there's no local staging,
-    # mirror the snapshot into the staging dir so deploy_to_vm can use
-    # it the same way it uses a freshly built tree.
-    if bundled_snapshot is not None and not (
-        staging.is_dir() and any(staging.rglob("*.ko"))
-    ):
+    # If we picked up a bundled snapshot, mirror it into staging
+    # unconditionally.  Previously we skipped the mirror whenever
+    # staging already contained .ko files, but that silently shipped
+    # stale modules from an earlier `ltvm build-lustre` run under the
+    # "Using bundled Lustre" banner -- the user thought they were
+    # deploying what they fetched but actually got what was last built
+    # locally.  rsync --delete is the right tool here: the bundled
+    # snapshot is the declared source of truth when bundled_snapshot
+    # is not None.
+    if bundled_snapshot is not None:
         if not use_json:
             print(f"  Mirroring bundled snapshot into staging: {staging}")
         staging.mkdir(parents=True, exist_ok=True)
@@ -1367,10 +1371,15 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 kernel_name = Path(vm.kernel).parent.name
                 if kernel_name:
                     build_cmd += ["--kernel", kernel_name]
-            # Forward the VM's arch so cross-arch builds end up in the
-            # right staging dir and link against the right toolchain.
-            if vm_arch != "x86_64":
-                build_cmd += ["--arch", vm_arch]
+            # Forward the VM's arch unconditionally so cross-arch builds
+            # end up in the right staging dir and link against the right
+            # toolchain.  Comparing against the literal "x86_64" was
+            # wrong for a target whose default arch is something else:
+            # an x86_64 VM built against an aarch64-default target would
+            # then NOT forward --arch, and the inner build-lustre would
+            # default to aarch64 and deploy the wrong modules.  Idempotent
+            # for x86_64-default targets too, so just always forward.
+            build_cmd += ["--arch", vm_arch]
             sudo_user = os.environ.get("SUDO_USER")
             if sudo_user:
                 build_cmd = ["sudo", "-u", sudo_user] + build_cmd
@@ -1393,10 +1402,24 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     except RuntimeError as e:
         return _error(str(e), use_json)
 
-    # Record successful deploy
+    # Record successful deploy.  Swallow VMNotFound: the deploy itself
+    # already succeeded, so a concurrent `ltvm destroy` racing with the
+    # final .info write shouldn't turn the whole command into a
+    # traceback.  Round 17 made _update_fields raise instead of silently
+    # no-op'ing, so we now explicitly handle the race here -- cmd_deploy
+    # is dispatched directly (not through _vm_call), so without this
+    # catch the exception leaks as a Python traceback to the user.
     import time as _time
     kver = vm.kver  # already set on boot; keep existing value
-    vm.update_deploy(int(_time.time()), str(build_path), kver)
+    try:
+        vm.update_deploy(int(_time.time()), str(build_path), kver)
+    except VMNotFound:
+        if not use_json:
+            print(
+                f"  Warning: VM '{args.vm}' was destroyed mid-deploy; "
+                f"metadata not recorded",
+                file=sys.stderr,
+            )
 
     if not use_json:
         print(f"  Deployed Lustre to {args.vm}")
