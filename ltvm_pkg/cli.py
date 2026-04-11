@@ -532,10 +532,15 @@ def _gh_api(endpoint: str) -> dict | list:
 
     while url:
         # -D - dumps headers to stdout, then \r\n\r\n separates headers from body.
-        r = subprocess.run(
-            ["curl", "-fsSL", "--max-time", "30", "-D", "-", url],
-            capture_output=True, text=True, timeout=35,
-        )
+        try:
+            r = subprocess.run(
+                ["curl", "-fsSL", "--max-time", "30", "-D", "-", url],
+                capture_output=True, text=True, timeout=35,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"GitHub API timed out after {e.timeout}s: {url}"
+            )
         if r.returncode != 0:
             raise RuntimeError(
                 f"GitHub API failed (rc={r.returncode}): {url}\n  {r.stderr.strip()}"

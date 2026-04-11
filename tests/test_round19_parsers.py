@@ -200,6 +200,18 @@ class TestGhApiSplit:
             with pytest.raises(RuntimeError, match="non-JSON"):
                 _gh_api("releases")
 
+    def test_timeout_raises_clean_error(self) -> None:
+        """TimeoutExpired should surface as a clean RuntimeError with
+        the URL, not an uncaught traceback out of the CLI."""
+        import subprocess as sp
+
+        def _raise_timeout(*args: object, **kwargs: object) -> None:
+            raise sp.TimeoutExpired(cmd=["curl"], timeout=35)
+
+        with patch.object(cli.subprocess, "run", side_effect=_raise_timeout):
+            with pytest.raises(RuntimeError, match="timed out after 35s"):
+                _gh_api("releases")
+
 
 # ── _artifact_label tristate ─────────────────────────────
 
