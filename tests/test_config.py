@@ -401,6 +401,52 @@ class TestDeclaredKernels:
         assert "6.1-rhel9.7" in result
 
 
+class TestOutputDirEnvOverride:
+    def test_env_var_overrides_default(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import importlib
+
+        import ltvm_pkg.target_config as cfg
+
+        monkeypatch.setenv("LTVM_OUTPUT_DIR", str(tmp_path))
+        importlib.reload(cfg)
+        try:
+            assert cfg.OUTPUT_DIR == tmp_path
+        finally:
+            monkeypatch.delenv("LTVM_OUTPUT_DIR", raising=False)
+            importlib.reload(cfg)
+
+    def test_default_when_env_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import importlib
+
+        import ltvm_pkg.target_config as cfg
+
+        monkeypatch.delenv("LTVM_OUTPUT_DIR", raising=False)
+        importlib.reload(cfg)
+        try:
+            assert cfg.OUTPUT_DIR == cfg.REPO_ROOT / "output"
+        finally:
+            importlib.reload(cfg)
+
+    def test_env_var_resolves_to_path_object(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import importlib
+
+        import ltvm_pkg.target_config as cfg
+
+        monkeypatch.setenv("LTVM_OUTPUT_DIR", str(tmp_path))
+        importlib.reload(cfg)
+        try:
+            assert isinstance(cfg.OUTPUT_DIR, Path)
+        finally:
+            monkeypatch.delenv("LTVM_OUTPUT_DIR", raising=False)
+            importlib.reload(cfg)
+
+
 class TestListTargets:
     def test_finds_targets(self, tmp_targets: Path) -> None:
         import ltvm_pkg.target_config as cfg
