@@ -12,6 +12,7 @@ from ltvm_pkg.release_package import (
     _dir_size_mb,
     _find_artifacts,
     _resolve_kernel,
+    export_build_container,
     install_target,
     package_target,
     snapshot_lustre,
@@ -76,6 +77,8 @@ def _setup_artifacts(
     kdir.mkdir(parents=True)
     idir = tmp_path / "image"
     idir.mkdir(parents=True)
+    cdir = tmp_path / "container"
+    cdir.mkdir(parents=True)
 
     artifacts = {
         "vmlinux": kdir / "vmlinux",
@@ -83,6 +86,7 @@ def _setup_artifacts(
         "build-tree": kdir / "build-tree",
         "modules": kdir / "modules",
         "image": idir / "base.ext4",
+        "container": cdir / "image.tar",
     }
 
     for name, path in artifacts.items():
@@ -173,6 +177,69 @@ class TestDirSizeMb:
 
 
 # ---------------------------------------------------------------------------
+# export_build_container
+# ---------------------------------------------------------------------------
+
+
+class TestExportBuildContainer:
+    def test_missing_image_raises(self, tmp_path: Path) -> None:
+        """No build container in podman storage -> clean error pointing
+        the user at `ltvm build-container`."""
+        check_result = MagicMock()
+        check_result.returncode = 1  # `podman image exists` -> not found
+
+        with patch("subprocess.run", return_value=check_result):
+            with pytest.raises(RuntimeError, match="Run: ltvm build-container"):
+                export_build_container("my-target", tmp_path)
+
+    def test_podman_missing_raises(self, tmp_path: Path) -> None:
+        """podman binary not installed -> clean error."""
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            with pytest.raises(RuntimeError, match="podman not found"):
+                export_build_container("my-target", tmp_path)
+
+    def test_save_failure_raises(self, tmp_path: Path) -> None:
+        """podman save fails -> clean error with rc + stderr."""
+        call_count = [0]
+
+        def mock_run(cmd, *args, **kwargs):
+            call_count[0] += 1
+            r = MagicMock()
+            if call_count[0] == 1:
+                # `podman image exists` succeeds
+                r.returncode = 0
+            else:
+                # `podman save` fails
+                r.returncode = 7
+                r.stderr = "no space left on device"
+            return r
+
+        with patch("subprocess.run", side_effect=mock_run):
+            with pytest.raises(RuntimeError, match="podman save failed"):
+                export_build_container("my-target", tmp_path)
+
+    def test_success_writes_file_and_returns_path(
+        self, tmp_path: Path
+    ) -> None:
+        """Happy path: image.tar lands at output/<target>/container/."""
+        def mock_run(cmd, *args, **kwargs):
+            r = MagicMock()
+            r.returncode = 0
+            # If this is the save call, create the output file so
+            # .stat().st_size works
+            if "save" in cmd:
+                out_idx = cmd.index("-o") + 1
+                Path(cmd[out_idx]).write_bytes(b"x" * 1024)
+            return r
+
+        with patch("subprocess.run", side_effect=mock_run):
+            path = export_build_container("my-target", tmp_path)
+
+        assert path == tmp_path / "container" / "image.tar"
+        assert path.exists()
+
+
+# ---------------------------------------------------------------------------
 # snapshot_lustre
 # ---------------------------------------------------------------------------
 
@@ -228,6 +295,8 @@ class TestSnapshotLustre:
         kdir = output_dir / "kernels" / "test-kernel"
         kdir.mkdir(parents=True)
         (kdir / "vmlinux").touch()
+        # snapshot_lustre doesn't touch container/, so we don't need to
+        # set it up here -- the call only validates the staging dir.
         with pytest.raises(ValueError, match="No staging directory"):
             snapshot_lustre(tree, output_dir, kernel="test-kernel")
 
@@ -305,6 +374,9 @@ def _setup_package_artifacts(
     idir = output_dir / "image"
     idir.mkdir()
     (idir / "base.ext4").touch()
+    cdir = output_dir / "container"
+    cdir.mkdir()
+    (cdir / "image.tar").touch()
 
     if kernel_version is not None:
         meta = {"kernel_version": kernel_version}
@@ -317,6 +389,22 @@ def _setup_package_artifacts(
 
 
 class TestPackageTarget:
+    @pytest.fixture(autouse=True)
+    def _stub_container_export(self):
+        """Stub out the podman save call.
+
+        package_target now exports the build container before tarballing,
+        which would otherwise call out to real podman in unit tests.  The
+        test fixtures already pre-create the container/image.tar file via
+        _setup_package_artifacts so the subsequent _find_artifacts check
+        passes; this stub just bypasses the podman save itself.
+        """
+        with patch(
+            "ltvm_pkg.release_package.export_build_container"
+        ) as m:
+            m.return_value = Path("/fake/container/image.tar")
+            yield m
+
     def _make_mock_run(self, fail_zstd: bool = False):
         """Return a subprocess.run mock; first call fails if fail_zstd."""
         call_count = [0]
@@ -558,6 +646,9 @@ class TestInstallTarget:
         idir = output_dir / "image"
         idir.mkdir()
         (idir / "base.ext4").touch()
+        cdir = output_dir / "container"
+        cdir.mkdir()
+        (cdir / "image.tar").touch()
         if with_lustre:
             (kdir / "lustre-artifacts").mkdir()
         return output_dir

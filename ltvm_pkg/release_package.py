@@ -76,7 +76,20 @@ def _find_artifacts(
     """Verify required artifacts exist in output_dir.
 
     Returns dict of paths or raises ValueError.
-    Lustre is optional -- included if present.
+
+    Required:
+      vmlinux, vmlinuz, build-tree, modules, image, container
+
+    The container/image.tar file is a `podman save` of the build
+    container (e.g. ltvm-build-rocky9) and is mandatory: a fetched
+    target without it would fail at the next `ltvm build-lustre`
+    step with a confusing missing-container error.  We require it at
+    package time so the failure surfaces at the publisher, not the
+    consumer.
+
+    Optional:
+      lustre-artifacts: prebuilt Lustre install tree, included if
+      `ltvm build-lustre` was run before packaging.
 
     If kernel is None, auto-detects by scanning output_dir/kernels/
     for a subdirectory containing vmlinux.
@@ -86,12 +99,14 @@ def _find_artifacts(
     kernel_name, kernel_dir = _resolve_kernel(output_dir, kernel)
 
     image_dir = output_dir / "image"
+    container_dir = output_dir / "container"
 
     required: dict[str, Path] = {
         "vmlinux": kernel_dir / "vmlinux",
         "vmlinuz": kernel_dir / "vmlinuz",
         "build-tree": kernel_dir / "build-tree",
         "modules": kernel_dir / "modules",
+        "container": container_dir / "image.tar",
     }
 
     # Image can be .ext4 or .img
@@ -108,10 +123,21 @@ def _find_artifacts(
         missing.append("image (*.ext4 or *.img)")
 
     if missing:
+        hints = []
+        if "container" in missing:
+            hints.append(
+                "  Container image: run `ltvm build-container <target>`"
+                " (package_target will export it automatically)"
+            )
+        if any(
+            m in missing
+            for m in ("vmlinux", "vmlinuz", "build-tree", "modules", "image")
+        ):
+            hints.append("  Build artifacts: run `ltvm build-all <target>`")
+        hint_text = "\n" + "\n".join(hints) if hints else ""
         raise ValueError(
             f"Missing artifacts in {output_dir} (kernel={kernel_name}): "
-            f"{', '.join(missing)}\n"
-            f"Run 'ltvm build-all <target>' to build them"
+            f"{', '.join(missing)}{hint_text}"
         )
 
     # Prebuilt Lustre is optional -- lives under the kernel directory
@@ -238,6 +264,57 @@ def _dir_size_mb(path: str | Path) -> float:
     return 0.0
 
 
+def export_build_container(target_name: str, output_dir: str | Path) -> Path:
+    """Export the build container image to output/<target>/container/image.tar.
+
+    Uses `podman save` to write a tarball that can later be loaded
+    via `podman load -i` on a fetcher's host.  Build containers are
+    mandatory in fetched packages, so package_target calls this
+    automatically before packaging.
+
+    Raises RuntimeError if the container image doesn't exist (the
+    publisher must have built it via `ltvm build-container <target>`)
+    or if podman is missing/fails.
+    """
+    output_dir = Path(output_dir)
+    container_tag = f"ltvm-build-{target_name}"
+    container_dir = output_dir / "container"
+    container_dir.mkdir(parents=True, exist_ok=True)
+    image_tar = container_dir / "image.tar"
+
+    # Check the image exists in podman storage before attempting save --
+    # `podman save` on a missing image gives a less obvious error.
+    try:
+        check = subprocess.run(
+            ["podman", "image", "exists", container_tag],
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "podman not found -- install podman to package targets"
+        )
+    if check.returncode != 0:
+        raise RuntimeError(
+            f"Build container '{container_tag}' not found in podman storage.\n"
+            f"  Run: ltvm build-container {target_name}"
+        )
+
+    print(f"  Exporting build container '{container_tag}' -> {image_tar}")
+    r = subprocess.run(
+        ["podman", "save", "-o", str(image_tar), container_tag],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"podman save failed (rc={r.returncode}) for {container_tag}: "
+            f"{r.stderr.strip()}"
+        )
+
+    size_mb = image_tar.stat().st_size / (1024 * 1024)
+    print(f"    Container image: {size_mb:.0f} MB")
+    return image_tar
+
+
 def package_target(
     target_name: str,
     output_dir: str | Path,
@@ -252,12 +329,22 @@ def package_target(
           Non-x86_64 arches get an -<arch> suffix in the tarball name.
     Returns the path to the created tarball.
 
+    Always exports the build container into the output dir before
+    packaging, since the container is a mandatory artifact.
+
     The tarball always extracts to <target_name>/ at the extraction
     base, regardless of arch.  For non-default arches the output_dir
     is a subdirectory (output/<target>/<arch>/), and tar --transform
     strips the arch prefix so paths land at <target_name>/kernels/...
     """
     output_dir = Path(output_dir)
+
+    # Export the build container before _find_artifacts checks for it.
+    # This is unconditional: every published package must include its
+    # build container so the consumer can run `ltvm build-lustre` after
+    # `ltvm fetch`.
+    export_build_container(target_name, output_dir)
+
     artifacts = _find_artifacts(output_dir, kernel=kernel)
 
     # dest_dir: for non-default arch keep tarballs in the main output parent
@@ -311,10 +398,10 @@ def package_target(
     image_rel = artifacts["image"].parent.relative_to(tar_base)
     tar_paths.append(str(kernel_rel))
     tar_paths.append(str(image_rel))
-    # Include container meta if present (lives at base_output_dir level)
-    container_meta = base_output_dir / "container" / "meta.json"
-    if container_meta.exists():
-        tar_paths.append(str(container_meta.relative_to(tar_base)))
+    # Include the entire container/ directory: image.tar (mandatory,
+    # exported above) plus meta.json if the build flow wrote one.
+    container_dir = base_output_dir / "container"
+    tar_paths.append(str(container_dir.relative_to(tar_base)))
 
     # Try zstd first (smaller + faster), fall back to gzip
     tarball_zst = dest_dir / f"{base_name}.tar.zst"
@@ -448,11 +535,43 @@ def fetch_target(
             f"Expected {target_dir} after extraction but not found"
         )
 
-    # Verify the artifacts are there (auto-detect kernel)
+    # Verify the artifacts are there (auto-detect kernel).  This will
+    # raise ValueError if container/image.tar is missing -- the only
+    # way that happens with a properly published tarball is if someone
+    # uploaded a stale package built before container packaging was
+    # mandatory.  Refusing to proceed is correct: a fetched target
+    # without a build container is half-broken (no `ltvm build-lustre`).
     artifacts = _find_artifacts(target_dir)
     print(f"    Artifacts verified in {target_dir}")
     if "lustre-artifacts" in artifacts:
         print("    Includes prebuilt Lustre")
+
+    # Load the build container into podman storage so subsequent
+    # `ltvm build-lustre <target>` finds it.  We use `podman load`
+    # which preserves the original tag (ltvm-build-<target>).
+    container_image = artifacts["container"]
+    print(f"    Loading build container from {container_image}")
+    try:
+        r = subprocess.run(
+            ["podman", "load", "-i", str(container_image)],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "podman not found -- install podman to load fetched build container"
+        )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"podman load failed (rc={r.returncode}) for {container_image}: "
+            f"{r.stderr.strip()}"
+        )
+    # podman load prints "Loaded image: <repo>:<tag>" on success
+    loaded_line = next(
+        (ln for ln in r.stdout.splitlines() if ln.startswith("Loaded image")),
+        r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "",
+    )
+    if loaded_line:
+        print(f"    {loaded_line}")
 
     return target_dir
 

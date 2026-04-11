@@ -440,6 +440,25 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
 
     container_tag = _build_container_tag(tc)
 
+    # Pre-flight: check the container exists in podman storage and give a
+    # clean, distinctive error if not.  build_lustre would otherwise raise
+    # the same condition wrapped in "Lustre build failed: ...", which buries
+    # the actionable hint.  This is the most common first-run error path,
+    # so it gets first-class treatment.
+    container_check = subprocess.run(
+        ["podman", "image", "exists", container_tag],
+        capture_output=True,
+    )
+    if container_check.returncode != 0:
+        return _error(
+            f"Build container '{container_tag}' not found in podman storage",
+            use_json,
+            hint=(
+                f"Run: ltvm build-container {args.target}\n"
+                f"  Or fetch a published target: ltvm fetch {args.target}"
+            ),
+        )
+
     try:
         meta = build_lustre(
             lustre_tree,
