@@ -176,6 +176,67 @@ def _require_root(use_json: bool, hint: str = "") -> int | None:
     return None
 
 
+def _warn_if_root(use_json: bool) -> int | None:
+    """Warn the user when a build/package/fetch command is invoked with sudo.
+
+    Build commands write into podman storage, ccache volumes, and the
+    ltvm output/ tree.  When run as root, those land under root's
+    /root/.local/share/containers/ rather than the regular user's home,
+    silently splitting the build state across two podman storages.
+    The next non-sudo invocation can't see the root-built artifacts and
+    a re-run rebuilds everything from scratch -- or worse, mixes them
+    and produces "permission denied" errors deep inside the kernel
+    build that take an hour to chase down.
+
+    None of these commands actually need root.  Refusing outright is
+    too aggressive (someone may genuinely want to build under sudo for
+    a reason we don't anticipate), but a warning + confirmation
+    prompt prevents the foot-gun in the common case.
+
+    Behaviour:
+      - Not root: no-op, return None
+      - Root + interactive stdin + not --json: prompt y/N, abort on N
+      - Root + non-interactive (script, CI) + not --json: warn loudly
+        but proceed -- can't prompt without a tty, blocking would break
+        automation
+      - Root + --json: silent no-op (machine-driven; assume the caller
+        knew what they were doing)
+    """
+    if os.getuid() != 0:
+        return None
+    if use_json:
+        return None
+    sudo_user = os.environ.get("SUDO_USER", "")
+    via_sudo = f" (via sudo as {sudo_user})" if sudo_user else ""
+    msg = (
+        f"WARNING: build commands should not be run as root{via_sudo}.\n"
+        "  Build artifacts (podman images, ccache volumes, output/) end "
+        "up in /root/.local/\n"
+        "  rather than your normal user's home, splitting the build "
+        "state across two podman\n"
+        "  storages.  Subsequent non-sudo invocations will fail to see "
+        "the root-owned\n"
+        "  artifacts and either rebuild from scratch or hit cryptic "
+        "permission errors.\n"
+    )
+    print(msg, file=sys.stderr)
+    if not sys.stdin.isatty():
+        print(
+            "  (non-interactive: proceeding anyway; pass `ltvm` "
+            "without sudo to fix)",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        ans = input("Continue anyway? [y/N]: ")
+    except EOFError:
+        ans = ""
+    if ans.strip().lower() not in ("y", "yes"):
+        print("Aborting.", file=sys.stderr)
+        return EXIT_ERROR
+    return None
+
+
 def _qemu_ns(**kwargs: Any) -> argparse.Namespace:
     """Build a minimal argparse.Namespace for qemu command functions."""
     return argparse.Namespace(**kwargs)
@@ -206,6 +267,9 @@ def cmd_build_all(args: argparse.Namespace) -> int:
     against the freshly built kernel.
     """
     use_json = args.json
+    err = _warn_if_root(use_json)
+    if err is not None:
+        return err
     tc, err = _load_target(
         args.target, use_json, arch=getattr(args, "arch", None)
     )
@@ -298,6 +362,9 @@ def cmd_build_all(args: argparse.Namespace) -> int:
 
 def cmd_build_container(args: argparse.Namespace) -> int:
     use_json = args.json
+    err = _warn_if_root(use_json)
+    if err is not None:
+        return err
     tc, err = _load_target(
         args.target, use_json, arch=getattr(args, "arch", None)
     )
@@ -325,6 +392,9 @@ def cmd_build_container(args: argparse.Namespace) -> int:
 
 def cmd_build_kernel(args: argparse.Namespace) -> int:
     use_json = args.json
+    err = _warn_if_root(use_json)
+    if err is not None:
+        return err
     tc, err = _load_target(
         args.target, use_json, arch=getattr(args, "arch", None)
     )
@@ -372,6 +442,9 @@ def cmd_build_kernel(args: argparse.Namespace) -> int:
 
 def cmd_build_image(args: argparse.Namespace) -> int:
     use_json = args.json
+    err = _warn_if_root(use_json)
+    if err is not None:
+        return err
     tc, err = _load_target(
         args.target, use_json, arch=getattr(args, "arch", None)
     )
@@ -399,6 +472,9 @@ def cmd_build_image(args: argparse.Namespace) -> int:
 
 def cmd_build_lustre(args: argparse.Namespace) -> int:
     use_json = args.json
+    err = _warn_if_root(use_json)
+    if err is not None:
+        return err
     tc, err = _load_target(
         args.target, use_json, arch=getattr(args, "arch", None)
     )
@@ -493,6 +569,9 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
 
 def cmd_package(args: argparse.Namespace) -> int:
     use_json = args.json
+    err = _warn_if_root(use_json)
+    if err is not None:
+        return err
     tc, err = _load_target(
         args.target, use_json, arch=getattr(args, "arch", None)
     )
@@ -719,6 +798,14 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     target = getattr(args, "target", None)
     filt = getattr(args, "filter", None)
     arch = getattr(args, "arch", None) or "x86_64"
+
+    # --list is read-only; everything else writes to ltvm output/ +
+    # podman storage and should warn on sudo for the same reason as
+    # the build commands.
+    if not getattr(args, "list", False):
+        err = _warn_if_root(use_json)
+        if err is not None:
+            return err
 
     # --list: show available releases
     if getattr(args, "list", False):
