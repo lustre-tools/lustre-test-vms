@@ -190,25 +190,39 @@ class TestImageStalenessUpstream:
             "modules into the final image"
         )
 
-    def test_staging_stamp_change_invalidates_image_hash(
+    def test_staging_stamp_does_not_invalidate_image_hash(
         self, tmp_path: Path
     ) -> None:
+        """The Lustre staging stamp used to be folded into the image
+        staleness hash because image_build.py auto-injected Lustre from
+        a global staging dir.  That auto-inject was removed when staging
+        moved per-tree (under <lustre_tree>/.ltvm-staging/), so the
+        staging stamp no longer affects the image hash and a Lustre
+        rebuild does not invalidate the image cache.
+
+        This test pins the new behavior so we don't accidentally
+        re-introduce the global staging coupling: if you ever want
+        Lustre baked into the image again, do it via lustre-artifacts/
+        in `ltvm package`, not via image_build's hash.
+        """
         tc = self._stub_target_config(tmp_path)
+        # Drop a kernel meta.json so the image hash isn't trivially zero
+        kdir = tc.output_dir / "kernels" / tc.resolve_kernel()
+        kdir.mkdir(parents=True)
+        (kdir / "meta.json").write_text(
+            json.dumps({"input_hash": "aaaaaaaaaaaaaaaa"}) + "\n"
+        )
         h0 = tc.input_hash("image")
 
+        # Old layout: simulating an old-style global staging stamp
         staging = tc.output_dir / "lustre" / "staging"
         staging.mkdir(parents=True)
-        stamp = staging / ".ltvm-staging-stamp"
-        stamp.write_text("5.14.0-v1\n")
+        (staging / ".ltvm-staging-stamp").write_text("5.14.0-v1\n")
         h1 = tc.input_hash("image")
 
-        stamp.write_text("5.14.0-v2\n")
-        h2 = tc.input_hash("image")
-
-        assert h0 != h1, "adding staging stamp should change image hash"
-        assert h1 != h2, (
-            "a Lustre rebuild (new staging stamp contents) must "
-            "invalidate the image cache"
+        assert h0 == h1, (
+            "the legacy staging stamp must not affect image hash anymore "
+            "-- staging is per-tree and image_build no longer reads it"
         )
 
     def test_kernel_meta_with_non_string_hash_is_tolerated(

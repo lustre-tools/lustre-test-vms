@@ -46,7 +46,6 @@ from ltvm_pkg.cli import (  # noqa: E402, I001
     _not_found,
     _output,
     _resolve_lustre_tree,
-    _warn_if_root,
     cmd_status,
 )
 
@@ -228,102 +227,6 @@ class TestErrorHelpers:
         _not_found("missing", use_json=True)
         payload = json.loads(capsys.readouterr().err)
         assert "error" in payload
-
-
-# ---------------------------------------------------------------------------
-# _warn_if_root: warn-on-sudo guard for build/package/fetch commands
-# ---------------------------------------------------------------------------
-
-
-class TestWarnIfRoot:
-    def test_non_root_returns_none(self) -> None:
-        """Non-root users always proceed without warning."""
-        with patch("os.getuid", return_value=1000):
-            assert _warn_if_root(use_json=False) is None
-            assert _warn_if_root(use_json=True) is None
-
-    def test_root_with_json_silent(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """--json mode skips the prompt entirely (machine-driven)."""
-        with patch("os.getuid", return_value=0):
-            assert _warn_if_root(use_json=True) is None
-        # Nothing printed
-        out = capsys.readouterr()
-        assert out.out == ""
-        assert out.err == ""
-
-    def test_root_non_interactive_warns_and_proceeds(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """No tty -> warn loudly, proceed (don't break automation)."""
-        with (
-            patch("os.getuid", return_value=0),
-            patch("sys.stdin.isatty", return_value=False),
-        ):
-            assert _warn_if_root(use_json=False) is None
-        err = capsys.readouterr().err
-        assert "WARNING" in err
-        assert "non-interactive" in err
-
-    def test_root_interactive_yes_proceeds(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Interactive prompt: 'y' answer proceeds."""
-        with (
-            patch("os.getuid", return_value=0),
-            patch("sys.stdin.isatty", return_value=True),
-            patch("builtins.input", return_value="y"),
-        ):
-            assert _warn_if_root(use_json=False) is None
-        assert "WARNING" in capsys.readouterr().err
-
-    def test_root_interactive_no_aborts(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Interactive prompt: 'N' (or anything else) returns EXIT_ERROR."""
-        with (
-            patch("os.getuid", return_value=0),
-            patch("sys.stdin.isatty", return_value=True),
-            patch("builtins.input", return_value="n"),
-        ):
-            assert _warn_if_root(use_json=False) == EXIT_ERROR
-        err = capsys.readouterr().err
-        assert "Aborting" in err
-
-    def test_root_interactive_default_aborts(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Bare Enter (empty answer) -> abort.  Confirms the [y/N]
-        default is no, not yes."""
-        with (
-            patch("os.getuid", return_value=0),
-            patch("sys.stdin.isatty", return_value=True),
-            patch("builtins.input", return_value=""),
-        ):
-            assert _warn_if_root(use_json=False) == EXIT_ERROR
-
-    def test_root_interactive_eof_aborts(self) -> None:
-        """EOFError on input (e.g. piped empty stdin with isatty mocked
-        to True) is treated as 'no' rather than crashing."""
-        with (
-            patch("os.getuid", return_value=0),
-            patch("sys.stdin.isatty", return_value=True),
-            patch("builtins.input", side_effect=EOFError),
-        ):
-            assert _warn_if_root(use_json=False) == EXIT_ERROR
-
-    def test_warning_mentions_sudo_user(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """When SUDO_USER is set, the warning identifies who invoked sudo."""
-        with (
-            patch("os.getuid", return_value=0),
-            patch("sys.stdin.isatty", return_value=False),
-            patch.dict("os.environ", {"SUDO_USER": "alice"}, clear=False),
-        ):
-            _warn_if_root(use_json=False)
-        assert "alice" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -600,8 +503,10 @@ class TestCmdDeployBuildGating:
         build_path = tmp_path / "lustre-release"
         build_path.mkdir()
 
-        # Create staging dir (in output tree) with NO .ko files
-        staging = tmp_path / "output" / "rocky9" / "lustre" / "staging"
+        # Create staging dir (in-tree, the new layout) with NO .ko files.
+        # build_path is the lustre tree; staging lives at
+        # <build_path>/.ltvm-staging/<target>/<arch>/.
+        staging = build_path / ".ltvm-staging" / "rocky9" / "x86_64"
         staging.mkdir(parents=True)
         (staging / "some-file.txt").write_text("not a kernel module")
 
@@ -620,7 +525,6 @@ class TestCmdDeployBuildGating:
                 patch("ltvm_pkg.cli._require_root", return_value=None),
                 patch("ltvm_pkg.vm_state.VMInfo.load", return_value=vm),
                 patch("ltvm_pkg.cli.TargetConfig") as mock_tc,
-                patch("ltvm_pkg.lustre_build.OUTPUT_DIR", tmp_path / "output"),
                 patch("subprocess.run", return_value=ok_result),
             ):
                 mock_tc.return_value.os_family = "rhel"

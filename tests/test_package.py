@@ -266,19 +266,21 @@ def _make_rsync_mock(dest_dir: Path) -> MagicMock:
 
 
 class TestSnapshotLustre:
-    def _setup(self, tmp_path: Path, with_staging_ko: bool = True):
-        """Create a fake target output_dir with kernel + staging dir.
+    TARGET = "test-target"
 
-        snapshot_lustre now sources from output_dir/lustre/staging/, not
-        from the lustre source tree.  The lustre_tree argument is only
-        used for the .ltvm-snapshot.json metadata.
+    def _setup(self, tmp_path: Path, with_staging_ko: bool = True):
+        """Create a fake target output_dir with kernel + per-tree staging.
+
+        snapshot_lustre sources from <lustre_tree>/.ltvm-staging/<target>/,
+        not from a global output dir.  The lustre_tree is both the source
+        of staging content AND the metadata input for .ltvm-snapshot.json.
         """
         tree = _setup_lustre_tree(tmp_path)
         output_dir = tmp_path / "output"
         kdir = output_dir / "kernels" / "test-kernel"
         kdir.mkdir(parents=True)
         (kdir / "vmlinux").touch()
-        staging = output_dir / "lustre" / "staging"
+        staging = tree / ".ltvm-staging" / self.TARGET / "x86_64"
         if with_staging_ko:
             ko_dir = staging / "lib" / "modules" / "fake-kver" / "extra"
             ko_dir.mkdir(parents=True)
@@ -294,21 +296,24 @@ class TestSnapshotLustre:
         kdir = output_dir / "kernels" / "test-kernel"
         kdir.mkdir(parents=True)
         (kdir / "vmlinux").touch()
-        # snapshot_lustre doesn't touch container/, so we don't need to
-        # set it up here -- the call only validates the staging dir.
+        # No .ltvm-staging dir under tree -- snapshot_lustre should raise.
         with pytest.raises(ValueError, match="No staging directory"):
-            snapshot_lustre(tree, output_dir, kernel="test-kernel")
+            snapshot_lustre(
+                tree, output_dir, target=self.TARGET, kernel="test-kernel"
+            )
 
     def test_empty_staging_raises(self, tmp_path: Path) -> None:
         tree, output_dir, kdir, dest = self._setup(
             tmp_path, with_staging_ko=False
         )
         with pytest.raises(ValueError, match="no .ko files"):
-            snapshot_lustre(tree, output_dir, kernel="test-kernel")
+            snapshot_lustre(
+                tree, output_dir, target=self.TARGET, kernel="test-kernel"
+            )
 
     def test_with_staging_calls_rsync(self, tmp_path: Path) -> None:
         tree, output_dir, kdir, dest = self._setup(tmp_path)
-        staging_src = output_dir / "lustre" / "staging"
+        staging_src = tree / ".ltvm-staging" / self.TARGET / "x86_64"
 
         with (
             patch(
@@ -317,7 +322,9 @@ class TestSnapshotLustre:
             ) as mock_run,
             patch("ltvm_pkg.release_package._dir_size_mb", return_value=10.0),
         ):
-            result = snapshot_lustre(tree, output_dir, kernel="test-kernel")
+            result = snapshot_lustre(
+                tree, output_dir, target=self.TARGET, kernel="test-kernel"
+            )
 
         # rsync was called (plus possibly git rev-parse)
         rsync_calls = [
@@ -340,7 +347,9 @@ class TestSnapshotLustre:
             ),
             patch("ltvm_pkg.release_package._dir_size_mb", return_value=10.0),
         ):
-            result = snapshot_lustre(tree, output_dir, kernel="test-kernel")
+            result = snapshot_lustre(
+                tree, output_dir, target=self.TARGET, kernel="test-kernel"
+            )
 
         meta_file = result / ".ltvm-snapshot.json"
         assert meta_file.exists()

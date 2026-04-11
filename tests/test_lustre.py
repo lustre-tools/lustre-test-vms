@@ -199,50 +199,48 @@ class TestLustreStatus:
         (release_dir / "kernel.release").write_text(kver + "\n")
         return kt
 
+    def _staging(self, lt: Path) -> Path:
+        """Per-tree staging dir, mirroring lustre_build.staging_path."""
+        d = lt / ".ltvm-staging" / self.TARGET / "x86_64"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     def test_stale_true_when_no_stamp(self, tmp_path: Path) -> None:
         lt = self._make_lustre(tmp_path)
         kt = self._make_kernel(tmp_path)
-        with patch("ltvm_pkg.lustre_build.OUTPUT_DIR", tmp_path / "output"):
-            status = lustre_status(lt, kt, target=self.TARGET)
+        status = lustre_status(lt, kt, target=self.TARGET)
         assert status["stale"] is True
 
     def test_stale_true_when_versions_differ(self, tmp_path: Path) -> None:
         lt = self._make_lustre(tmp_path)
         kt = self._make_kernel(tmp_path, "5.14.0-new")
         (lt / f".ltvm-kernel-{self.TARGET}").write_text("5.14.0-old\n")
-        with patch("ltvm_pkg.lustre_build.OUTPUT_DIR", tmp_path / "output"):
-            status = lustre_status(lt, kt, target=self.TARGET)
+        status = lustre_status(lt, kt, target=self.TARGET)
         assert status["stale"] is True
 
     def test_stale_false_when_versions_match(self, tmp_path: Path) -> None:
         lt = self._make_lustre(tmp_path)
         kt = self._make_kernel(tmp_path, "5.14.0")
         (lt / f".ltvm-kernel-{self.TARGET}").write_text("5.14.0\n")
-        with patch("ltvm_pkg.lustre_build.OUTPUT_DIR", tmp_path / "output"):
-            status = lustre_status(lt, kt, target=self.TARGET)
+        status = lustre_status(lt, kt, target=self.TARGET)
         assert status["stale"] is False
 
     def test_ko_count_counts_ko_files(self, tmp_path: Path) -> None:
         lt = self._make_lustre(tmp_path)
         kt = self._make_kernel(tmp_path)
-        # ko files now live in output/<target>/lustre/staging/
-        staging = tmp_path / "output" / self.TARGET / "lustre" / "staging"
-        staging.mkdir(parents=True)
+        # ko files now live in <lustre_tree>/.ltvm-staging/<target>/
+        staging = self._staging(lt)
         (staging / "foo.ko").write_text("")
         (staging / "bar.ko").write_text("")
-        with patch("ltvm_pkg.lustre_build.OUTPUT_DIR", tmp_path / "output"):
-            status = lustre_status(lt, kt, target=self.TARGET)
+        status = lustre_status(lt, kt, target=self.TARGET)
         assert status["ko_count"] == 2
 
     def test_ko_count_excludes_kconftest(self, tmp_path: Path) -> None:
         lt = self._make_lustre(tmp_path)
         kt = self._make_kernel(tmp_path)
-        # ko files in staging -- kconftest dirs no longer in staging
-        staging = tmp_path / "output" / self.TARGET / "lustre" / "staging"
-        staging.mkdir(parents=True)
+        staging = self._staging(lt)
         (staging / "real.ko").write_text("")
-        with patch("ltvm_pkg.lustre_build.OUTPUT_DIR", tmp_path / "output"):
-            status = lustre_status(lt, kt, target=self.TARGET)
+        status = lustre_status(lt, kt, target=self.TARGET)
         assert status["ko_count"] == 1
 
     def test_configured_true_when_config_status_exists(
@@ -251,8 +249,7 @@ class TestLustreStatus:
         lt = self._make_lustre(tmp_path)
         kt = self._make_kernel(tmp_path)
         (lt / "config.status").write_text("# generated\n")
-        with patch("ltvm_pkg.lustre_build.OUTPUT_DIR", tmp_path / "output"):
-            status = lustre_status(lt, kt, target=self.TARGET)
+        status = lustre_status(lt, kt, target=self.TARGET)
         assert status["configured"] is True
 
     def test_configured_false_when_config_status_missing(
@@ -260,23 +257,20 @@ class TestLustreStatus:
     ) -> None:
         lt = self._make_lustre(tmp_path)
         kt = self._make_kernel(tmp_path)
-        with patch("ltvm_pkg.lustre_build.OUTPUT_DIR", tmp_path / "output"):
-            status = lustre_status(lt, kt, target=self.TARGET)
+        status = lustre_status(lt, kt, target=self.TARGET)
         assert status["configured"] is False
 
     def test_built_against_from_stamp(self, tmp_path: Path) -> None:
         lt = self._make_lustre(tmp_path)
         kt = self._make_kernel(tmp_path, "5.14.0-427.el9")
         (lt / f".ltvm-kernel-{self.TARGET}").write_text("5.14.0-427.el9\n")
-        with patch("ltvm_pkg.lustre_build.OUTPUT_DIR", tmp_path / "output"):
-            status = lustre_status(lt, kt, target=self.TARGET)
+        status = lustre_status(lt, kt, target=self.TARGET)
         assert status["built_against"] == "5.14.0-427.el9"
 
     def test_built_against_none_when_no_stamp(self, tmp_path: Path) -> None:
         lt = self._make_lustre(tmp_path)
         kt = self._make_kernel(tmp_path)
-        with patch("ltvm_pkg.lustre_build.OUTPUT_DIR", tmp_path / "output"):
-            status = lustre_status(lt, kt, target=self.TARGET)
+        status = lustre_status(lt, kt, target=self.TARGET)
         assert status["built_against"] is None
 
     def test_current_kernel_from_build_tree(self, tmp_path: Path) -> None:

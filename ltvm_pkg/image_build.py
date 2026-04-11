@@ -277,17 +277,17 @@ def build_image(target_config: TargetConfig, force: bool = False) -> Path:
             kdir / "build-tree" / "include" / "config" / "kernel.release"
         )
         kver = kver_file.read_text().strip() if kver_file.exists() else None
-        from ltvm_pkg.lustre_build import staging_path as _staging_path
-
-        staging_dir = _staging_path(target_config.name, arch=target_config.arch)
+        # Lustre staging now lives per-tree under <lustre_tree>/.ltvm-staging,
+        # so build_image can no longer auto-inject Lustre from a global
+        # location it owns.  Maintainers who want to bake Lustre into the
+        # image should run `ltvm build-lustre` then deploy via
+        # `ltvm deploy --build`, or rely on `ltvm fetch` which carries
+        # prebuilt Lustre in the package via lustre-artifacts/.  We keep
+        # injecting kernel modules because those live deterministically
+        # next to the kernel build output, not in a per-user tree.
         has_modules = (modules_dir / "lib" / "modules").is_dir()
-        # Staging dir may exist but be empty (pre-Lustre build).  Require
-        # actual content (usr/ or lib/modules/) before trying to inject.
-        has_lustre = (staging_dir / "usr").is_dir() or (
-            staging_dir / "lib" / "modules"
-        ).is_dir()
 
-        if has_modules or has_lustre:
+        if has_modules:
             # Build a context dir with the files to inject
             inject_dir = out_dir / "_inject"
             if inject_dir.exists():
@@ -306,47 +306,14 @@ def build_image(target_config: TargetConfig, force: bool = False) -> Path:
                     symlinks=False,
                     ignore=shutil.ignore_patterns("build", "source"),
                 )
-            if has_lustre:
-                log.info("Including pre-built Lustre")
-                # Copy staging subdirs that are safe (no FHS symlink clobbering)
-                for subdir in ("usr",):
-                    src = staging_dir / subdir
-                    if src.is_dir():
-                        shutil.copytree(str(src), str(inject_dir / subdir))
-                # sbin/ contents go into usr/sbin/ (FHS merge)
-                sbin_src = staging_dir / "sbin"
-                if sbin_src.is_dir():
-                    sbin_dest = inject_dir / "usr" / "sbin"
-                    sbin_dest.mkdir(parents=True, exist_ok=True)
-                    for f in sbin_src.iterdir():
-                        if f.is_file():
-                            shutil.copy2(str(f), str(sbin_dest / f.name))
-                # lib/modules/ from staging (Lustre .ko files)
-                staging_mods = staging_dir / "lib" / "modules"
-                if staging_mods.is_dir():
-                    # Merge into the modules dir we already copied
-                    mod_dest = inject_dir / "modules"
-                    if not mod_dest.exists():
-                        mod_dest.mkdir()
-                    subprocess.run(
-                        [
-                            "cp",
-                            "-a",
-                            str(staging_mods) + "/.",
-                            str(mod_dest) + "/",
-                        ],
-                        check=True,
-                    )
-                # Only emit COPY usr/ when we actually populated it.
-                # has_lustre is True when staging has usr/ OR lib/modules,
-                # so a modules-only staging would otherwise emit a COPY
-                # of a non-existent directory and fail the podman build.
-                if (inject_dir / "usr").is_dir():
-                    lines.append("COPY usr/ /usr/")
-            # Emit COPY modules/ unconditionally if we ended up with any
-            # modules to inject -- previously this was gated on has_modules,
-            # so a Lustre-only inject (has_lustre but no kernel modules dir)
-            # silently dropped the staged .ko files.
+            # Lustre auto-inject was here.  It looked at a global
+            # staging dir and silently baked whatever was there into the
+            # image.  That doesn't work in the multi-user model where
+            # staging is per-tree, and was foot-gunny in single-user mode
+            # too (a stale build_lustre run would silently leak into
+            # every subsequent build_image).  Maintainers who need
+            # baked-in Lustre should snapshot it via `ltvm package`,
+            # which puts it in lustre-artifacts/ for the fetcher to use.
             if (inject_dir / "modules").is_dir() and any(
                 (inject_dir / "modules").iterdir()
             ):
@@ -368,7 +335,7 @@ def build_image(target_config: TargetConfig, force: bool = False) -> Path:
             inject_dockerfile.write_text("\n".join(lines) + "\n")
 
             final_tag = f"{tag}-final"
-            log.info("Building final image with kernel modules + Lustre...")
+            log.info("Building final image with kernel modules...")
             _run(
                 [
                     "podman",

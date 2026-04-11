@@ -385,17 +385,17 @@ class TargetConfig:
             # affects Lustre build (--enable-server) but every image
             # currently installs server packages unconditionally.
             #
-            # image_build.py deliberately bakes kernel modules and
-            # Lustre staging INTO the final image (a second-stage
-            # podman build COPYs `kernels/<k>/modules/` and the
-            # `lustre/staging/` tree).  Without folding those into the
-            # staleness hash, rebuilding the kernel or Lustre and then
-            # running `ltvm build-image` would early-return at the
-            # is_stale check and silently ship the previous contents.
-            # We hash the kernel meta.json's own input_hash (a stable
-            # 16-char digest) and the Lustre staging stamp file so the
-            # image is invalidated whenever either upstream artifact
-            # changes.
+            # image_build.py bakes kernel modules into the final image
+            # (a second-stage podman build COPYs `kernels/<k>/modules/`).
+            # Fold the kernel meta.json's input_hash into the image
+            # staleness hash so a rebuilt kernel invalidates the image.
+            #
+            # The Lustre staging stamp used to be folded in here too,
+            # back when image_build also auto-injected Lustre from a
+            # global staging dir.  That auto-inject was removed when
+            # staging moved per-tree under <lustre_tree>/.ltvm-staging,
+            # and the maintainer is expected to bundle Lustre via
+            # `ltvm package`'s lustre-artifacts/ instead.
             kernel_meta = (
                 self.output_dir
                 / "kernels"
@@ -408,12 +408,6 @@ class TargetConfig:
                 if isinstance(kh, str) and kh:
                     h.update(b"kernel:")
                     h.update(kh.encode())
-            staging_stamp = (
-                self.output_dir / "lustre" / "staging" / ".ltvm-staging-stamp"
-            )
-            if staging_stamp.exists():
-                h.update(b"lustre:")
-                h.update(staging_stamp.read_bytes())
 
         if extra:
             h.update(extra)

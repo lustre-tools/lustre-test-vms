@@ -152,33 +152,39 @@ def _find_artifacts(
 def snapshot_lustre(
     lustre_tree: str | Path,
     output_dir: str | Path,
+    target: str,
     kernel: str | None = None,
+    arch: str = "x86_64",
 ) -> Path:
     """Snapshot the Lustre staging tree for shipping in a fetch tarball.
 
-    The staging tree at output/<target>/lustre/staging/ has the DESTDIR
-    install layout (usr/, lib/modules/, sbin/) that `ltvm deploy` streams
-    into a VM.  We rsync it under kernels/<kernel>/lustre-artifacts/ so the
-    tarball pairs each kernel with its matching prebuilt Lustre.
+    Sources from the per-tree staging dir written by `ltvm build-lustre`
+    (``<lustre_tree>/.ltvm-staging/<target>[/<arch>]/``).  rsyncs the
+    DESTDIR install layout (usr/, lib/modules/, sbin/) into
+    ``kernels/<kernel>/lustre-artifacts/`` under the canonical
+    output dir so the resulting tarball pairs each kernel with its
+    matching prebuilt Lustre.
 
-    `lustre_tree` is informational (used for the .ltvm-snapshot.json
-    commit hash); the actual content comes from the staging directory.
+    Raises ValueError if no staging dir exists for the tree+target --
+    the caller is expected to run `ltvm build-lustre` first.
 
-    Raises ValueError if no staging dir exists for the target -- the
-    caller is expected to run `ltvm build-lustre` first.
-
-    Returns the output lustre directory path.
+    Returns the output lustre-artifacts directory path.
     """
+    # Lazy import to avoid circular dependency: lustre_build imports
+    # from vm_state, which release_package also imports from indirectly.
+    from .lustre_build import staging_path
+
     lustre_tree = Path(lustre_tree).resolve()
     output_dir = Path(output_dir)
 
     kernel_name, kernel_dir = _resolve_kernel(output_dir, kernel)
 
-    staging_src = output_dir / "lustre" / "staging"
+    staging_src = staging_path(lustre_tree, target, arch=arch)
     if not staging_src.is_dir():
         raise ValueError(
             f"No staging directory at {staging_src} -- "
-            f"run `ltvm build-lustre <target>` first"
+            f"run `ltvm build-lustre {target} --lustre-tree "
+            f"{lustre_tree}` first"
         )
 
     ko_files = list(staging_src.rglob("*.ko"))

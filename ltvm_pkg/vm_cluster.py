@@ -345,11 +345,16 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
 
 
 def _deploy_one_node(
-    node_name: str, os_family: str = "rhel"
+    node_name: str,
+    lustre_tree: str | Path,
+    os_family: str = "rhel",
 ) -> tuple[str, int, str]:
     """Deploy Lustre to one cluster node.
 
     Returns (node_name, returncode, output_message).
+
+    `lustre_tree` is the source tree the cluster's `--build` was
+    pointed at; it determines where the per-tree staging dir lives.
     """
     from ltvm_pkg.deploy import deploy_to_vm
     from ltvm_pkg.lustre_build import staging_path as _staging_path
@@ -357,7 +362,7 @@ def _deploy_one_node(
     vm = VMInfo.load(node_name)
     target = vm.os_id or DEFAULT_TARGET
     # Pass vm.arch so the staging dir matches what build-lustre wrote.
-    staging = _staging_path(target, arch=vm.arch or "x86_64")
+    staging = _staging_path(lustre_tree, target, arch=vm.arch or "x86_64")
     try:
         deploy_to_vm(vm, staging, os_family=os_family)
         return node_name, 0, "ok"
@@ -500,7 +505,7 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     failed = []
     with ThreadPoolExecutor(max_workers=len(nodes)) as executor:
         futures = {
-            executor.submit(_deploy_one_node, node.name, os_family): node
+            executor.submit(_deploy_one_node, node.name, build, os_family): node
             for node in nodes
         }
         for future in as_completed(futures):

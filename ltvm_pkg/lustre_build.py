@@ -22,23 +22,39 @@ import subprocess
 from pathlib import Path
 from typing import TypedDict
 
-from .target_config import OUTPUT_DIR
 from .vm_state import DEFAULT_TARGET
 
 
-def staging_path(target: str, arch: str = "x86_64") -> Path:
-    """Return the host-side staging directory for a target.
+def staging_path(
+    lustre_tree: str | Path,
+    target: str,
+    arch: str = "x86_64",
+) -> Path:
+    """Return the host-side Lustre build staging directory.
 
-    The arch is folded into the path for non-default architectures so a
-    cross-arch build can't clobber the native staging dir (and vice
-    versa).  Without this, two parallel `ltvm build-lustre rocky9` runs
-    -- one default, one --arch aarch64 -- would fight over the same
-    `output/rocky9/lustre/staging`, silently producing a tarball with
-    one arch's `.ko` files atop the other's.
+    Lives **inside the user's lustre tree** at
+    ``<tree>/.ltvm-staging/<target>/<arch>/`` rather than under the
+    shared ltvm output dir.  This is the only sane layout for a
+    multi-user host: alice's `~alice/lustre-release/.ltvm-staging/`
+    cannot collide with bob's `~bob/lustre-release/.ltvm-staging/`,
+    each user owns their own staging tree, and `rm -rf <tree>` cleans
+    up the staging along with the source.
+
+    The previous layout (`output/<target>/lustre/staging`) was a
+    single shared dir keyed only by target and was a clean foot-gun
+    on any host with more than one user: a second `ltvm build-lustre`
+    would `make install DESTDIR=/staging` over the first one's modules,
+    and a subsequent `ltvm deploy` would silently ship whoever ran
+    last.
+
+    The arch is always a path component (no x86_64 special case) so
+    a switch from `--arch x86_64` to `--arch aarch64` cannot leave
+    one arch's staging nested inside the other's.  An older "flat"
+    layout where x86_64 omitted the arch dir would mean
+    `rm -rf <x86_64 staging>` also nukes the aarch64 staging, and
+    `rglob '*.ko'` from x86_64 would include the aarch64 modules.
     """
-    if arch and arch != "x86_64":
-        return OUTPUT_DIR / target / arch / "lustre" / "staging"
-    return OUTPUT_DIR / target / "lustre" / "staging"
+    return Path(lustre_tree) / ".ltvm-staging" / target / arch
 
 
 class BuildResult(TypedDict):
@@ -366,8 +382,11 @@ fi""")
     if cross_compiling:
         make_cross = " ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-"
     script_parts.append(f"make{make_cross} -j{jobs}")
-    # Install into /staging (bind-mounted from output/<target>/lustre/staging/)
-    # so build artifacts stay out of the source tree.
+    # Install into /staging (bind-mounted from
+    # <lustre_tree>/.ltvm-staging/<target>[/<arch>]/) so build artifacts
+    # stay outside the autotools tree but still inside the user's lustre
+    # tree -- which means they're naturally per-user on a multi-user
+    # host with no extra namespacing.
     script_parts.append("rm -rf /staging/*")
     script_parts.append(f"make{make_cross} install DESTDIR=/staging -j{jobs}")
     script = "\n".join(script_parts)
@@ -375,8 +394,37 @@ fi""")
     # Ensure the staging directory exists on the host before mounting.
     # arch is folded into the path so cross-arch builds for the same
     # target don't clobber each other's .ko files.
-    host_staging = staging_path(target, arch=arch)
+    host_staging = staging_path(lustre_tree, target, arch=arch)
     host_staging.mkdir(parents=True, exist_ok=True)
+    # When invoked via sudo, chown the staging dir to the real user so
+    # the user can read their own modules and `rm -rf` their tree
+    # without sudo.  The container side runs as root inside the
+    # container and writes to the bind mount, but the host-side dir
+    # we just created is owned by whoever ran ltvm.
+    sudo_user_env = os.environ.get("SUDO_USER")
+    if sudo_user_env and os.getuid() == 0:
+        try:
+            import pwd
+
+            pw = pwd.getpwnam(sudo_user_env)
+            os.chown(host_staging, pw.pw_uid, pw.pw_gid)
+            # Also chown all parent dirs we may have just created up to
+            # (but not including) the lustre tree root.
+            tree_root = Path(lustre_tree).resolve()
+            cur = host_staging.parent
+            while cur != tree_root and cur != cur.parent:
+                try:
+                    st = cur.stat()
+                    if st.st_uid == 0:
+                        os.chown(cur, pw.pw_uid, pw.pw_gid)
+                except OSError:
+                    break
+                cur = cur.parent
+        except (KeyError, OSError):
+            # SUDO_USER not in passwd or chown failed -- leave the dir
+            # root-owned; the user can fix it manually if needed.  Don't
+            # block the build over chown.
+            pass
 
     # Use a persistent ccache volume so incremental container
     # builds benefit from cached compilations across runs
@@ -464,7 +512,7 @@ def lustre_status(
 
     stamp = lustre_tree / f".ltvm-kernel-{_stamp_suffix(target, arch)}"
     config_status = lustre_tree / "config.status"
-    host_staging = staging_path(target, arch=arch)
+    host_staging = staging_path(lustre_tree, target, arch=arch)
     ko_count = (
         len(list(host_staging.rglob("*.ko"))) if host_staging.is_dir() else 0
     )
