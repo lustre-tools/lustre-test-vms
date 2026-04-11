@@ -454,16 +454,56 @@ fi""")
         script,
     ]
 
-    # Drop to SUDO_USER when running as root so that files created in the
-    # bind-mounted source tree are owned by the real user, not root.
-    sudo_user = os.environ.get("SUDO_USER")
-    if sudo_user and os.getuid() == 0:
-        cmd = ["sudo", "-u", sudo_user] + cmd
-
+    # Run podman as whoever ltvm itself runs as: do NOT drop privileges
+    # to SUDO_USER here.
+    #
+    # Earlier versions did `sudo -u $SUDO_USER podman run ...` so the
+    # files left in the bind-mounted source tree were owned by the real
+    # user.  That worked in the single-user model where each user had
+    # their own rootless podman storage holding the build container,
+    # but it breaks the multi-user model: when ltvm is invoked via
+    # sudo the build container lives in root's podman storage (placed
+    # there by `sudo ltvm fetch`).  Dropping to admin would point
+    # podman at admin's empty storage, the container would not be
+    # found, and podman would attempt a short-name pull from a remote
+    # registry and die with "short-name resolution enforced but cannot
+    # prompt".
+    #
+    # The trade-off is that autotools writes (Makefile, config.status,
+    # .deps/, *.ko in the source tree under ldiskfs/, lnet/, lustre/)
+    # land owned by root on the host because the container's root maps
+    # to host root in rootful podman.  We chown the whole tree back to
+    # SUDO_USER after the build so the user can git pull, edit, and
+    # rerun the build without sudo if they want.
     print(f"--- Building in container (j{jobs})...")
     r = subprocess.run(cmd)
     if r.returncode != 0:
         raise RuntimeError(f"Container build failed (rc={r.returncode})")
+
+    # Chown the lustre tree back to the real user after the build.
+    # The container's root mapped to host root in the bind mount, so
+    # autotools left a trail of root-owned files (Makefile,
+    # config.status, .deps/, intermediate .o/.ko, etc.) inside the
+    # tree.  Without this fix the user can't `git pull`, can't edit,
+    # and can't even `rm -rf` their own checkout.  Best-effort: if
+    # SUDO_USER isn't set or chown fails for any reason, we leave the
+    # tree as-is rather than failing the build.
+    if sudo_user_env and os.getuid() == 0:
+        try:
+            import pwd
+
+            pw = pwd.getpwnam(sudo_user_env)
+            subprocess.run(
+                [
+                    "chown",
+                    "-R",
+                    f"{pw.pw_uid}:{pw.pw_gid}",
+                    str(lustre_tree),
+                ],
+                check=False,
+            )
+        except (KeyError, OSError):
+            pass
 
     # Record per-(target, arch) stamps on the host filesystem so a
     # subsequent build for the OTHER arch sees them as missing and
