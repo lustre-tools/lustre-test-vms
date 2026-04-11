@@ -944,6 +944,19 @@ def run_setup(
         link.symlink_to(ltvm_script)
         log.info("ltvm installed to %s", link)
 
+        # Some distros (Rocky 9, RHEL) ship sudoers with secure_path that
+        # excludes /usr/local/bin, so `sudo ltvm` would fail with "command
+        # not found".  Drop in a sudoers fragment to extend secure_path.
+        sudoers_d = Path("/etc/sudoers.d")
+        if sudoers_d.is_dir():
+            sudoers_drop = sudoers_d / "ltvm"
+            sudoers_drop.write_text(
+                'Defaults secure_path="/sbin:/bin:/usr/sbin:/usr/bin:'
+                '/usr/local/sbin:/usr/local/bin"\n'
+            )
+            sudoers_drop.chmod(0o440)
+            log.info("sudo secure_path extended via %s", sudoers_drop)
+
     # Install bash tab completion
     comp_src = REPO_ROOT / "ltvm_pkg" / "ltvm-completion.bash"
     comp_dir = Path("/etc/bash_completion.d")

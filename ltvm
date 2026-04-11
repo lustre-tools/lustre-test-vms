@@ -10,13 +10,29 @@ argparse setup and dispatch only.
 
 from __future__ import annotations
 
-import argparse
-import logging
+import os
 import sys
 from pathlib import Path
 
+# Self-bootstrap into the project venv when invoked via system Python
+# (e.g. `sudo ltvm`, which strips PATH and bypasses any active venv).
+# We resolve symlinks so /usr/local/bin/ltvm -> /path/to/repo/ltvm works.
+_REPO_ROOT = Path(__file__).resolve().parent
+_VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python"
+if _VENV_PY.exists() and Path(sys.executable).resolve() != _VENV_PY.resolve():
+    try:
+        import yaml  # noqa: F401
+    except ImportError:
+        os.execv(
+            str(_VENV_PY),
+            [str(_VENV_PY), str(Path(__file__).resolve()), *sys.argv[1:]],
+        )
+
+import argparse
+import logging
+
 # Ensure repo root is importable
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(_REPO_ROOT))
 
 from ltvm_pkg.cli import (
     EXIT_ERROR,
