@@ -19,7 +19,7 @@ from .paths import find_ltvm_root
 
 REPO_ROOT = find_ltvm_root()
 TARGETS_DIR = REPO_ROOT / "targets"
-OUTPUT_DIR = REPO_ROOT / "output"
+OUTPUT_DIR = Path(os.environ["LTVM_OUTPUT_DIR"]) if "LTVM_OUTPUT_DIR" in os.environ else REPO_ROOT / "output"
 TARGETS_YAML = TARGETS_DIR / "targets.yaml"
 
 _DEFAULTS = {
