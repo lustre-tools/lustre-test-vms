@@ -14,9 +14,14 @@ the next refactor can't quietly break either one.
 
 from __future__ import annotations
 
+import json
+from types import SimpleNamespace
+from unittest.mock import patch
+
 import pytest
 
-from ltvm_pkg.cli import _gh_next_link, _artifact_label
+from ltvm_pkg import cli
+from ltvm_pkg.cli import _gh_next_link, _artifact_label, _gh_api
 from ltvm_pkg.vm_commands import _parse_snapshot_tags
 
 
@@ -130,6 +135,70 @@ class TestGhNextLink:
             'link: <https://api.github.com/x?page=2>; rel="next"\n'
         )
         assert _gh_next_link(headers) == "https://api.github.com/x?page=2"
+
+
+# ── _gh_api header/body split ────────────────────────────
+
+
+def _fake_curl(stdout: str) -> SimpleNamespace:
+    return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+
+class TestGhApiSplit:
+    """Regression: subprocess text=True runs universal-newline
+    decoding, translating \\r\\n to \\n.  The header/body separator
+    in curl -D - output is therefore \\n\\n, not \\r\\n\\r\\n.  The
+    original code split on \\r\\n\\r\\n, which silently failed and
+    left the entire response (headers included) in `body`, producing
+    a JSONDecodeError on the leading `HTTP/2 200` line.
+    """
+
+    def test_parses_body_after_single_header_block(self) -> None:
+        body = json.dumps([{"tag_name": "v1"}])
+        stdout = (
+            "HTTP/2 200\n"
+            "content-type: application/json\n"
+            "\n"
+            f"{body}"
+        )
+        with patch.object(cli.subprocess, "run", return_value=_fake_curl(stdout)):
+            result = _gh_api("releases")
+        assert result == [{"tag_name": "v1"}]
+
+    def test_parses_body_after_redirect_header_blocks(self) -> None:
+        """curl -L emits each response's headers before the body; we
+        must split on the LAST blank line so redirected-to responses
+        (e.g. the rename redirect from /repos/old-name to /repos/new-name)
+        parse correctly."""
+        body = json.dumps([{"tag_name": "v2"}])
+        stdout = (
+            "HTTP/2 301\n"
+            "location: https://api.github.com/repos/new-name/releases\n"
+            "\n"
+            "HTTP/2 200\n"
+            "content-type: application/json\n"
+            "\n"
+            f"{body}"
+        )
+        with patch.object(cli.subprocess, "run", return_value=_fake_curl(stdout)):
+            result = _gh_api("releases")
+        assert result == [{"tag_name": "v2"}]
+
+    def test_dict_endpoint_returns_as_is(self) -> None:
+        """Non-list responses (e.g. a single release) don't paginate."""
+        body = json.dumps({"tag_name": "v1", "id": 42})
+        stdout = f"HTTP/2 200\ncontent-type: application/json\n\n{body}"
+        with patch.object(cli.subprocess, "run", return_value=_fake_curl(stdout)):
+            result = _gh_api("releases/42")
+        assert result == {"tag_name": "v1", "id": 42}
+
+    def test_malformed_body_raises_with_snippet(self) -> None:
+        """When the body genuinely isn't JSON, the error surfaces the
+        first 200 chars so the caller can debug."""
+        stdout = "HTTP/2 500\ncontent-type: text/html\n\n<html>boom</html>"
+        with patch.object(cli.subprocess, "run", return_value=_fake_curl(stdout)):
+            with pytest.raises(RuntimeError, match="non-JSON"):
+                _gh_api("releases")
 
 
 # ── _artifact_label tristate ─────────────────────────────

@@ -540,11 +540,14 @@ def _gh_api(endpoint: str) -> dict | list:
             raise RuntimeError(
                 f"GitHub API failed (rc={r.returncode}): {url}\n  {r.stderr.strip()}"
             )
-        # Split on the first blank line: headers above, body below.
-        # curl -D - prints all headers (including any redirects) before
-        # the body, separated by \r\n\r\n; rsplit takes the LAST split
-        # so we keep the final response only.
-        headers, _, body = r.stdout.rpartition("\r\n\r\n")
+        # Split on the last blank line: headers above, body below.
+        # curl -D - prints all header blocks (including any redirects)
+        # before the body.  Although HTTP uses \r\n\r\n as the separator
+        # on the wire, subprocess text=True mode runs universal-newline
+        # decoding, which translates \r\n to \n -- so in r.stdout the
+        # separator is \n\n.  rpartition takes the LAST match so we keep
+        # only the final response when curl followed redirects.
+        headers, _, body = r.stdout.rpartition("\n\n")
         try:
             data = json.loads(body)
         except json.JSONDecodeError as e:
