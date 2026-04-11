@@ -331,7 +331,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("target")
     sp.add_argument(
         "--lustre-tree",
-        help="Include a built Lustre tree in the package",
+        help=(
+            "Path to the Lustre source tree to bundle (default: cwd, "
+            "or wherever ltvm finds a tree).  Lustre is bundled by "
+            "default; pass --no-lustre to opt out."
+        ),
+    )
+    sp.add_argument(
+        "--no-lustre",
+        action="store_true",
+        default=False,
+        help=(
+            "Publish a kernel-only package without bundled Lustre.  "
+            "Consumers will need to build Lustre themselves on first "
+            "deploy.  Only use this for interim kernel-test releases."
+        ),
     )
     sp.add_argument(
         "--output",

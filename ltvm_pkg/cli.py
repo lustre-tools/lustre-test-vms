@@ -502,15 +502,29 @@ def cmd_package(args: argparse.Namespace) -> int:
 
     kernel = getattr(args, "kernel", None)
 
-    # Snapshot Lustre tree if --lustre-tree provided
-    lustre_tree_arg = getattr(args, "lustre_tree", None)
-    if lustre_tree_arg:
+    # Bundling Lustre is mandatory by default.  The publisher's whole
+    # job is to ship something a fetcher can immediately deploy from --
+    # a "kernel-only" package without Lustre forces every consumer to
+    # build it themselves on first deploy, which defeats the whole
+    # point of the fetch flow.  --no-lustre is the explicit opt-out
+    # for the "I just want a kernel package" case (e.g. publishing
+    # an interim kernel for testing without rebuilding Lustre).
+    no_lustre = getattr(args, "no_lustre", False)
+    if not no_lustre:
+        lustre_tree_arg = getattr(args, "lustre_tree", None)
         lustre_path, err_msg = _resolve_lustre_tree(lustre_tree_arg)
         if err_msg:
-            return _error(err_msg, use_json)
+            return _error(
+                err_msg,
+                use_json,
+                hint=(
+                    "Run from a Lustre tree, pass --lustre-tree, or "
+                    "use --no-lustre to publish a kernel-only package"
+                ),
+            )
         assert lustre_path is not None
         if not use_json:
-            print("Snapshotting Lustre tree...")
+            print(f"Snapshotting Lustre tree from {lustre_path}...")
         try:
             snapshot_lustre(
                 lustre_path,
