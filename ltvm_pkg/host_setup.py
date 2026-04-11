@@ -632,6 +632,22 @@ def setup_network(host: HostInfo, subnet: str = DEFAULT_SUBNET) -> None:
     Path("/etc/dnsmasq.d").mkdir(exist_ok=True)
     Path("/etc/dnsmasq.d/qemu-vms.conf").write_text(dns_text)
 
+    # Some distros (e.g. Rocky 9) ship /etc/dnsmasq.conf with bind-interfaces
+    # set, which conflicts with bind-dynamic in our drop-in config.  Comment it
+    # out so dnsmasq can start.
+    system_dnsmasq = Path("/etc/dnsmasq.conf")
+    if system_dnsmasq.exists():
+        content = system_dnsmasq.read_text()
+        if "\nbind-interfaces\n" in content:
+            system_dnsmasq.write_text(
+                content.replace(
+                    "\nbind-interfaces\n", "\n# bind-interfaces  # disabled by ltvm\n"
+                )
+            )
+            log.info(
+                "Commented out bind-interfaces in /etc/dnsmasq.conf"
+                " (conflicts with bind-dynamic)"
+            )
 
     _run(["systemctl", "daemon-reload"])
     _run(["systemctl", "enable", "--now", "qemu-bridge"])
