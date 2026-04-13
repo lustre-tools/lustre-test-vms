@@ -1342,3 +1342,92 @@ class TestCmdDeployBuildGating:
         assert bash_calls == [], (
             "tar/ssh deploy must not be called after build failure"
         )
+
+
+# ---------------------------------------------------------------------------
+# --kernel argparse propagation for build-image and build-all
+# ---------------------------------------------------------------------------
+
+
+class TestKernelArgPropagation:
+    """Verify --kernel is forwarded to the underlying build functions."""
+
+    def _tc(self, tmp_targets: Path) -> Any:
+        import ltvm_pkg.target_config as cfg
+
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            return cfg.TargetConfig("rocky9")
+
+    def test_build_image_kernel_forwarded(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+    ) -> None:
+        from ltvm_pkg import cli as cli_mod
+
+        tc = self._tc(tmp_targets)
+        with (
+            patch.object(cli_mod, "TargetConfig", return_value=tc),
+            patch.object(cli_mod, "build_image") as mock_bi,
+        ):
+            mock_bi.return_value = Path("/fake/base.ext4")
+            rc = _run_main(
+                ["build-image", "rocky9", "--kernel", "5.14-rhel9.5"],
+                capsys,
+            )
+
+        assert rc == EXIT_OK
+        mock_bi.assert_called_once()
+        _, kwargs = mock_bi.call_args
+        assert kwargs.get("kernel") == "5.14-rhel9.5"
+
+    def test_build_all_kernel_reaches_image_builder(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+        lustre_tree: Path,
+    ) -> None:
+        from ltvm_pkg import cli as cli_mod
+        from ltvm_pkg.lustre_compat import ValidationResult
+
+        tc = self._tc(tmp_targets)
+        vr = ValidationResult(
+            status="ok",
+            mode=None,
+            kernel_version=None,
+            matched_in=None,
+            message="stub",
+        )
+        with (
+            patch.object(cli_mod, "TargetConfig", return_value=tc),
+            patch.object(cli_mod, "validate_target", return_value=vr),
+            patch.object(cli_mod, "_do_build_container"),
+            patch.object(
+                cli_mod, "build_kernel", return_value={"ok": True}
+            ),
+            patch.object(cli_mod, "build_image") as mock_bi,
+        ):
+            rc = _run_main(
+                [
+                    "build-all",
+                    "rocky9",
+                    "--kernel",
+                    "5.14-rhel9.5",
+                    "--lustre-tree",
+                    str(lustre_tree),
+                ],
+                capsys,
+            )
+
+        assert rc == EXIT_OK
+        mock_bi.assert_called_once()
+        _, kwargs = mock_bi.call_args
+        assert kwargs.get("kernel") == "5.14-rhel9.5"

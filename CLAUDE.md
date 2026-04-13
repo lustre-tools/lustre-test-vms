@@ -223,8 +223,8 @@ ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 ltvm ensure co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 
 # Deploy Lustre and mount (--build defaults to cwd)
-ltvm deploy-lustre co1-single --mount
-ltvm deploy-lustre co1-single --build ~/lustre-release --mount
+ltvm deploy co1-single --mount
+ltvm deploy co1-single --build ~/lustre-release --mount
 
 # Execute commands in VM
 ltvm exec co1-single 'lctl dl'

@@ -39,7 +39,9 @@ def _write_targets_yaml(targets_dir: Path, data: dict | None = None) -> None:
     )
 
 
-def _make_config(tmp_targets: Path) -> TargetConfig:
+def _make_config(
+    tmp_targets: Path, arch: str | None = None
+) -> TargetConfig:
     """Instantiate a TargetConfig with patched paths."""
     import ltvm_pkg.target_config as cfg
 
@@ -52,7 +54,7 @@ def _make_config(tmp_targets: Path) -> TargetConfig:
             tmp_targets / "targets" / "targets.yaml",
         ),
     ):
-        return cfg.TargetConfig("rocky9")
+        return cfg.TargetConfig("rocky9", arch=arch)
 
 
 @pytest.fixture

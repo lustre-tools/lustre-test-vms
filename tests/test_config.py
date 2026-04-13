@@ -226,6 +226,24 @@ class TestOutputDirs:
             "5.14-rhel9.5"
         )
 
+    def test_image_output_dir_under_arch_subdir(
+        self, tmp_targets: Path
+    ) -> None:
+        """Cross-arch build routes per-kernel images under the arch dir."""
+        tc = _make_config(tmp_targets, arch="aarch64")
+        assert tc.image_output_dir("5.14-rhel9.7") == (
+            tmp_targets
+            / "output"
+            / "rocky9"
+            / "aarch64"
+            / "images"
+            / "5.14-rhel9.7"
+        )
+        # Still distinct per-kernel under the arch subdir.
+        assert tc.image_output_dir("5.14-rhel9.7") != tc.image_output_dir(
+            "5.14-rhel9.5"
+        )
+
     def test_container_output_dir(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
         assert tc.container_output_dir() == (

@@ -771,3 +771,91 @@ class TestInstallTarget:
             )
 
         assert "lustre-artifacts" not in result
+
+
+# ---------------------------------------------------------------------------
+# Tarball layout: image must appear under <target>/images/<kernel>/
+# ---------------------------------------------------------------------------
+
+
+def _setup_per_kernel_image_artifacts(
+    tmp_path: Path,
+    kernel: str = "test-kernel",
+    kernel_version: str = "5.14.0",
+) -> Path:
+    """Minimal output dir with the new per-kernel image layout."""
+    output_dir = tmp_path / "output" / "my-target"
+    kdir = output_dir / "kernels" / kernel
+    kdir.mkdir(parents=True)
+    (kdir / "vmlinux").touch()
+    (kdir / "vmlinuz").touch()
+    (kdir / "build-tree").mkdir()
+    (kdir / "modules").mkdir()
+    (kdir / "meta.json").write_text(json.dumps({"kernel_version": kernel_version}))
+    idir = output_dir / "images" / kernel
+    idir.mkdir(parents=True)
+    (idir / "base.ext4").touch()
+    cdir = output_dir / "container"
+    cdir.mkdir()
+    (cdir / "image.tar").touch()
+    return output_dir
+
+
+class TestTarballLayout:
+    """Verify the tar paths passed to the tar command reflect the new layout.
+
+    We intercept subprocess.run and inspect the path arguments so the test
+    stays hermetic (no real tar/zstd required) while still catching
+    regressions in path construction.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _stub_container_export(self):
+        with patch("ltvm_pkg.release_package.export_build_container") as m:
+            m.return_value = Path("/fake/container/image.tar")
+            yield m
+
+    def test_image_under_images_kernel_subdir(self, tmp_path: Path) -> None:
+        output_dir = _setup_per_kernel_image_artifacts(
+            tmp_path, kernel="5.14-rhel9.5", kernel_version="5.14.0"
+        )
+        dest_dir = tmp_path / "dest"
+        dest_dir.mkdir()
+
+        captured_tar_args: list[list[str]] = []
+
+        def mock_run(cmd, *args, **kwargs):
+            result = MagicMock()
+            if "tar" in cmd[0]:
+                captured_tar_args.append(cmd)
+                result.returncode = 0
+                for arg in cmd:
+                    if ".tar." in arg:
+                        Path(arg).write_bytes(b"x" * 16)
+            else:
+                result.returncode = 0
+            return result
+
+        with patch("subprocess.run", side_effect=mock_run):
+            package_target(
+                "my-target",
+                output_dir,
+                kernel="5.14-rhel9.5",
+                dest_dir=dest_dir,
+            )
+
+        assert captured_tar_args, "tar was never called"
+        tar_cmd = captured_tar_args[0]
+        # The path list follows -C <tar_base> in the command.
+        c_idx = tar_cmd.index("-C")
+        tar_paths = tar_cmd[c_idx + 2 :]
+        image_path = next(
+            (p for p in tar_paths if "image" in p), None
+        )
+        assert image_path is not None, f"no image path in tar args: {tar_paths}"
+        assert "images" in image_path, (
+            f"image should be under images/<kernel>/, got: {image_path}"
+        )
+        assert "5.14-rhel9.5" in image_path, (
+            f"kernel name missing from image path: {image_path}"
+        )
