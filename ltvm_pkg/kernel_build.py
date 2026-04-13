@@ -395,7 +395,7 @@ def build_kernel(
         target_config: TargetConfig instance
         lustre_tree: Path to a Lustre source tree (not needed for deb targets)
         force: Build even if inputs haven't changed
-        kernel: Lustre target name to build (defaults to target_config.lustre_target)
+        kernel: Lustre target name to build (defaults to target_config.default_kernel)
 
     Returns:
         dict with build metadata
@@ -423,7 +423,7 @@ def _build_kernel_deb(
     No Lustre kernel patches or .target file needed -- this is for
     client-only targets where we build against the stock distro kernel.
     """
-    lustre_target = kernel or target_config.lustre_target
+    lustre_target = kernel or target_config.default_kernel
     deb_source = target_config.kernel_deb_source
     assert deb_source is not None
 
@@ -547,7 +547,7 @@ def _build_kernel_srpm(
     This is the original RHEL/SLES build path.
     """
     lustre_tree = Path(lustre_tree)
-    lustre_target = kernel or target_config.lustre_target
+    lustre_target = kernel or target_config.default_kernel
 
     # Resolve Lustre patches/config FIRST so we can fold them into the
     # staleness check.  Without this, editing a patch in place doesn't
@@ -719,7 +719,7 @@ def kernel_status(
 
     Args:
         target_config: TargetConfig instance
-        kernel: Lustre target name to query (defaults to target_config.lustre_target)
+        kernel: Lustre target name to query (defaults to target_config.default_kernel)
         extra_hash: Lustre-inputs hash from kernel_build's caller, when
             available.  ``cmd_status`` doesn't have a Lustre tree on hand
             so it can't recompute the Lustre-inputs portion of the
@@ -731,7 +731,7 @@ def kernel_status(
 
     Returns dict with version, build date, staleness, etc.
     """
-    resolved = kernel or target_config.lustre_target
+    resolved = kernel or target_config.default_kernel
     meta_file = target_config.kernel_output_dir(kernel=resolved) / "meta.json"
     meta = load_meta_safe(meta_file)
     if meta is None:

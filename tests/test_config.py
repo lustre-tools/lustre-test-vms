@@ -37,13 +37,9 @@ class TestTargetConfigProperties:
         tc = _make_config(tmp_targets)
         assert tc.container_image == "rockylinux:9.7"
 
-    def test_lustre_target(self, tmp_targets: Path) -> None:
-        tc = _make_config(tmp_targets)
-        assert tc.lustre_target == "5.14-rhel9.7"
-
     def test_default_kernel(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
-        assert tc.default_kernel == tc.lustre_target
+        assert tc.default_kernel == "5.14-rhel9.7"
 
     def test_kernel_config_overrides(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)

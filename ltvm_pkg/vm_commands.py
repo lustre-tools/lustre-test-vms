@@ -101,11 +101,33 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
         timeout=10,
     )
     if probe.returncode != 0:
-        die(
-            f"kdump boot artifacts missing from image for kernel {kver}: "
-            f"/boot/vmlinuz-{kver} or {initrd_path} not found. "
-            f"Rebuild the image with `ltvm build-image`."
+        # Image predates baked-in kdump artifacts (or they got wiped).
+        # Fall back to seeding from the host's kernel dir: scp vmlinuz
+        # to /boot/, then regenerate initramfs inside the VM so it has
+        # matching module dependencies for the kernel actually running.
+        kernel_dir = Path(vm.kernel).parent if vm.kernel else None
+        vmlinuz = kernel_dir / "vmlinuz" if kernel_dir else None
+        if not vmlinuz or not vmlinuz.exists():
+            die(
+                f"no vmlinuz next to {vm.kernel!r} to seed to VM; "
+                f"rebuild the image with `ltvm build-image` "
+                f"or restore the kernel output dir."
+            )
+        run(
+            [
+                "scp",
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null",
+                str(vmlinuz),
+                f"root@{vm.ip}:/boot/vmlinuz-{kver}",
+            ],
+            check=True,
         )
+        if os_family == "debian":
+            regen_cmd = f"update-initramfs -c -k {kver}"
+        else:
+            regen_cmd = f"dracut --kver {kver} --force {initrd_path}"
+        run_ssh(vm.ip, regen_cmd, timeout=120)
     run_ssh(vm.ip, reload_cmd, timeout=30)
 
 
@@ -128,13 +150,22 @@ _MIN_DISK_BYTES = 64 * (1 << 20)  # 64 MiB
 _MAX_DISK_BYTES = 100 * (1 << 30)  # 100 GiB
 
 
-def _parse_disk_size(value: str | None) -> int:
-    """Parse a disk size string (e.g. '500M', '10G') to bytes.
+def _parse_disk_size(value: str | int | None) -> int:
+    """Parse a disk size to bytes.
 
-    Suffix must be M or G.  Raises SystemExit on invalid input.
+    Accepts:
+      * None or "" -> default
+      * str like "500M", "10G" (suffix required, M or G)
+      * int bytes -- returned as-is if >= the minimum, otherwise default
+        (this path exists for callers that already hold a byte count and
+        just want it normalized against the same floor the CLI enforces).
+
+    Raises SystemExit on invalid string input.
     """
-    if not value:
+    if value is None or value == "":
         return DISK_SIZE_BYTES
+    if isinstance(value, int):
+        return value if value >= _MIN_DISK_BYTES else DISK_SIZE_BYTES
     s = value.strip().upper()
     if not s:
         return DISK_SIZE_BYTES
