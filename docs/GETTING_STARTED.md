@@ -128,12 +128,12 @@ compilation.
 ### 3. Build the VM base image
 
 ```bash
-sudo ltvm build-image rocky9
+ltvm build-image rocky9
 ```
 
-Requires root (uses mount/losetup). Builds a container
-image with all packages, exports it to a raw ext4
-filesystem. Takes ~10 minutes.
+Builds a container image with all packages, exports it
+to a raw ext4 filesystem via `mke2fs -d` under fakeroot
+(no loop-mount, no root).  Takes ~10 minutes.
 
 ### 4. Build Lustre
 
