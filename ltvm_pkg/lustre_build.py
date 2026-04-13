@@ -264,6 +264,26 @@ def build_lustre(
     )
 
 
+def _kernel_changed(
+    lustre_tree: Path,
+    build_tree: Path,
+    target: str = DEFAULT_TARGET,
+    arch: str = "x86_64",
+) -> bool:
+    """Return True iff a previous build stamp exists and its kernel differs.
+
+    Used to distinguish "kernel changed" from "never built" so that only
+    the former forces distclean (the latter has nothing to clean).
+    """
+    suffix = _stamp_suffix(target, arch)
+    stamp = lustre_tree / f".ltvm-kernel-{suffix}"
+    if not stamp.exists():
+        return False
+    prev = stamp.read_text().strip()
+    cur = _kernel_release(build_tree)
+    return prev != cur
+
+
 def _build_in_container(
     lustre_tree: Path,
     build_tree: Path,
@@ -296,6 +316,17 @@ def _build_in_container(
         enable_server=enable_server,
         arch=arch,
     )
+
+    # Kernel change invalidates autoconf header-probe cache: old probes
+    # for e.g. struct mnt_idmap produce wrong answers against the new
+    # headers.  Treat it like --force so the tree starts clean.
+    kernel_changed = (
+        not force
+        and need_reconf
+        and _kernel_changed(lustre_tree, build_tree, target=target, arch=arch)
+    )
+    if kernel_changed:
+        force = True
 
     # Detect cross-compilation
     import platform

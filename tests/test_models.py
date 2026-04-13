@@ -346,16 +346,3 @@ class TestResolveOsArtifactsPerKernel:
             with pytest.raises(FileNotFoundError, match="build-image"):
                 vm_state.resolve_os_artifacts("rocky9", kernel="6.1-rhel9.7")
 
-    def test_kernel_as_path_still_works(self, tmp_path: Path) -> None:
-        """Back-compat: passing a vmlinuz PATH still resolves the paired image."""
-        from ltvm_pkg import vm_state
-
-        root = self._setup(tmp_path)
-        vmlinuz = root / "output" / "rocky9" / "kernels" / "6.1-rhel9.7" / "vmlinuz"
-        with (
-            patch.object(vm_state, "_LTVM_ROOT", root),
-            patch.object(vm_state, "TARGETS_YAML", root / "targets" / "targets.yaml"),
-        ):
-            arts = vm_state.resolve_os_artifacts("rocky9", kernel=str(vmlinuz))
-        assert arts.kernel == vmlinuz
-        assert arts.image.parent.name == "6.1-rhel9.7"

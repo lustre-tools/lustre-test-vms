@@ -100,12 +100,12 @@ def resolve_os_artifacts(
 
     ``kernel`` may be:
       - None: use the target's default kernel and its paired image.
-      - a path to a kernel file (vmlinuz/vmlinux): the basename of its
-        parent directory identifies the kernel, and we pair it with
-        output/<os>/images/<that-name>/base.ext4.
       - a kernel name (short or full, e.g. ``5.14-rhel9.7`` or
         ``5.14-rhel9.7-5.14.0-611.13.1.el9_7_lustre``): resolved to the
         matching kernel dir under output/<os>/kernels/.
+
+    To use an out-of-tree vmlinuz, symlink or copy it into
+    output/<os>/kernels/<name>/vmlinuz and pass the name.
     """
     # Read targets.yaml for kernel suffix and defaults
     kernel_suffix = ""
@@ -140,44 +140,37 @@ def resolve_os_artifacts(
 
     # ── Step 1: Resolve the kernel directory name we should use. ──
     #
-    # --kernel accepts either a path (e.g. a literal vmlinuz) or a name
-    # (short or full lustre-target).  Paths win by existence check: if
-    # the value names a real file, trust it verbatim and derive the
-    # kernel-name from the parent directory.  Otherwise treat it as a
-    # name and resolve it against the kernels dir.
+    # --kernel takes a name (short or full lustre-target, e.g.
+    # ``5.14-rhel9.7`` or ``5.14-rhel9.7-5.14.0-503.40.1.el9_5``).
+    # Exact match first, then prefix match against kernels/.
     kern: Path | None = None
     kernel_dirname: str | None = None
     kernels_root = output_dir / "kernels"
 
     if kernel:
-        maybe_path = Path(kernel)
-        if maybe_path.is_file():
-            kern = maybe_path
-            kernel_dirname = maybe_path.parent.name
+        # Exact match first, then prefix match.
+        cand = kernels_root / kernel
+        if cand.is_dir():
+            kernel_dirname = kernel
         else:
-            # Treat as a name.  Exact match first, then prefix match.
-            cand = kernels_root / kernel
-            if cand.is_dir():
-                kernel_dirname = kernel
+            prefix = kernel + "-"
+            matches = sorted(
+                d.name
+                for d in kernels_root.iterdir()
+                if kernels_root.is_dir()
+                and d.is_dir()
+                and d.name.startswith(prefix)
+            ) if kernels_root.is_dir() else []
+            if matches:
+                kernel_dirname = matches[-1]
             else:
-                prefix = kernel + "-"
-                matches = sorted(
-                    d.name
-                    for d in kernels_root.iterdir()
-                    if kernels_root.is_dir()
-                    and d.is_dir()
-                    and d.name.startswith(prefix)
-                ) if kernels_root.is_dir() else []
-                if matches:
-                    kernel_dirname = matches[-1]
-                else:
-                    raise FileNotFoundError(
-                        f"No kernel matching {kernel!r} for '{os_name}' "
-                        f"(arch={effective_arch})\n"
-                        f"Run: ltvm build-kernel {os_name} "
-                        f"--kernel {kernel}{arch_hint}  "
-                        f"(or: ltvm fetch {os_name}{arch_hint})"
-                    )
+                raise FileNotFoundError(
+                    f"No kernel matching {kernel!r} for '{os_name}' "
+                    f"(arch={effective_arch})\n"
+                    f"Run: ltvm build-kernel {os_name} "
+                    f"--kernel {kernel}{arch_hint}  "
+                    f"(or: ltvm fetch {os_name}{arch_hint})"
+                )
     else:
         # No override: use default kernel suffix, falling back to
         # lex-latest built kernel dir if the default is not present.

@@ -362,7 +362,7 @@ class TestEnsureToCreateNamespaceContract:
         "mdt_disks": 3,
         "ost_disks": 5,
         "image": "/custom/base.ext4",
-        "kernel": "/custom/vmlinuz",
+        "kernel": "5.14-rhel9.5",
         "os": "ubuntu2404",
         "arch": "aarch64",
         "disk_size": 1024 * 1024 * 1024,  # 1 GiB
@@ -484,10 +484,11 @@ class TestEnsureToCreateNamespaceContract:
                 f"image: expected '{self._FIELD_SENTINELS['image']}', "
                 f"got '{vm.image}'"
             )
-        # explicit kernel: when args.kernel is set, cmd_create uses it directly
-        if vm.kernel != self._FIELD_SENTINELS["kernel"]:
+        # kernel name: args.kernel is a name forwarded to resolve_os_artifacts;
+        # vm.kernel holds the resolved path from os_arts.kernel.
+        if vm.kernel != "/resolved/vmlinuz":
             failures.append(
-                f"kernel: expected '{self._FIELD_SENTINELS['kernel']}', "
+                f"kernel: expected '/resolved/vmlinuz' (resolved from name), "
                 f"got '{vm.kernel}'"
             )
 

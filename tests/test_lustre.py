@@ -8,6 +8,7 @@ from ltvm_pkg.lustre_build import (
     _container_exists,
     _kernel_release,
     _needs_reconfigure,
+    build_lustre,
     lustre_status,
     read_staging_meta,
     staging_path,
@@ -357,6 +358,71 @@ class TestStagingCoexistence:
         # The two staging roots are disjoint leaf dirs -- neither is a
         # parent of the other.
         assert sa not in sb.parents and sb not in sa.parents
+
+
+class TestKernelChangeDistclean:
+    """Kernel change triggers distclean, not just reconfigure."""
+
+    TARGET = "rocky9"
+
+    def _full_tree(self, tmp_path: Path, old_kver: str, new_kver: str):
+        lustre = tmp_path / "lustre"
+        kernel = tmp_path / "kernel"
+        lustre.mkdir()
+        kernel.mkdir()
+        (lustre / "lustre" / "kernel_patches").mkdir(parents=True)
+        (lustre / "configure").write_text("#!/bin/sh\n")
+        (lustre / "config.status").write_text("# status\n")
+        (lustre / "Makefile").write_text("# stub\n")
+        release_dir = kernel / "include" / "config"
+        release_dir.mkdir(parents=True)
+        (release_dir / "kernel.release").write_text(new_kver + "\n")
+        (kernel / "Module.symvers").write_text("")
+        t = self.TARGET
+        (lustre / f".ltvm-kernel-{t}").write_text(old_kver + "\n")
+        (lustre / f".ltvm-server-{t}").write_text("True\n")
+        return lustre, kernel
+
+    def test_kernel_change_invokes_distclean(self, tmp_path: Path) -> None:
+        lustre, kernel = self._full_tree(
+            tmp_path, "5.14.0-old", "5.14.0-new"
+        )
+        captured_scripts = []
+
+        def mock_run(cmd, *args, **kwargs):
+            if "podman" in cmd[0]:
+                captured_scripts.append(cmd[-1])
+                r = MagicMock()
+                r.returncode = 0
+                return r
+            r = MagicMock()
+            r.returncode = 0
+            return r
+
+        with (
+            patch("ltvm_pkg.lustre_build.subprocess.run", side_effect=mock_run),
+            patch(
+                "ltvm_pkg.lustre_build._container_exists", return_value=True
+            ),
+            patch(
+                "ltvm_pkg.target_config.TargetConfig"
+            ) as mock_tc,
+        ):
+            mock_tc.return_value.resolve_kernel.return_value = "5.14-rhel9.7"
+            try:
+                build_lustre(
+                    lustre,
+                    kernel,
+                    container_tag="ltvm-build-rocky9",
+                    target=self.TARGET,
+                    force=False,
+                )
+            except Exception:
+                pass
+
+        assert captured_scripts, "podman run was not called"
+        script = captured_scripts[0]
+        assert "distclean" in script
 
 
 class TestIncrementalRebuildGuard:

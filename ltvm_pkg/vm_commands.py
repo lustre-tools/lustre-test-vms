@@ -329,10 +329,8 @@ def cmd_create(args: argparse.Namespace) -> None:
     defaulted_target = not os_target
     if defaulted_target:
         os_target = DEFAULT_TARGET
-    # Pass explicit_kernel through: resolve_os_artifacts accepts either
-    # a kernel path or a kernel name (short/full) and will pair the
-    # right per-kernel image with it.  If explicit_kernel is falsy this
-    # is equivalent to the old default behaviour.
+    # Pass explicit_kernel (a name, not a path) through to resolve_os_artifacts
+    # which will find the right kernel dir and pair the correct image with it.
     os_arts = resolve_os_artifacts(
         os_target, arch=arch, kernel=explicit_kernel or None
     )
@@ -342,15 +340,7 @@ def cmd_create(args: argparse.Namespace) -> None:
             f"(kernel: {os_arts.kernel.parent.name})"
         )
     image = explicit_image or str(os_arts.image)
-    # When the caller hands us a literal kernel PATH on disk, use it
-    # verbatim: this preserves "--kernel /tmp/my-vmlinuz" without
-    # requiring a matching image under output/<os>/images/.  When the
-    # caller passes a kernel NAME (short or full), resolve_os_artifacts
-    # already turned that into a real vmlinuz path -- use that.
-    if explicit_kernel and Path(explicit_kernel).is_file():
-        kernel = explicit_kernel
-    else:
-        kernel = str(os_arts.kernel)
+    kernel = str(os_arts.kernel)
     # If the user didn't pass --mem, fall back to the target's default
     # (rocky10 needs 4096; others use 2048).  argparse default is None
     # so we can distinguish "user said 2048" from "user said nothing".
