@@ -228,7 +228,12 @@ def _lustre_inject_lines(
     # -- DESTDIR install is OS-agnostic; the only OS-specific bit is
     # whether /usr/lib or /usr/lib64 gets populated, which the COPY
     # transplants faithfully either way.
-    for rel in ("usr", "etc"):
+    # sbin/ holds mount.lustre (the mount(8) helper that registers the
+    # Lustre filesystem type).  Without it, `mount -t lustre` fails
+    # with "unknown filesystem type 'lustre'" even though the modules
+    # loaded fine.  DESTDIR installs it to the top-level sbin/, not
+    # usr/sbin/.
+    for rel in ("usr", "etc", "sbin"):
         src = staging / rel
         if src.is_dir():
             dest = inject_dir / f"lustre-userland-{rel}"

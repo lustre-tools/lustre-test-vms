@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .deploy import configure_test_disks
 from .paths import load_meta_safe
 from .qemu_run import die, is_running, kill_qemu, launch_qemu, run
 from .vm_net import (
@@ -760,6 +761,19 @@ def cmd_llmount(args: argparse.Namespace) -> None:
             " && lustre_rmmod"
         )
     else:
+        # Image-baked Lustre doesn't know the VM's virtio-disk topology,
+        # so point MDSDEV*/OSTDEV* at the real block devices before the
+        # test harness falls back to loopback files in /tmp.
+        try:
+            configure_test_disks(
+                vm.ip,
+                vm.mdt_disks,
+                vm.ost_disks,
+                disk_size_bytes=vm.disk_size,
+            )
+        except RuntimeError as e:
+            print(f"error: {e}", file=sys.stderr)
+            sys.exit(EXIT_ERROR)
         command = (
             "dmsetup remove_all;"
             f" cd {libdir}/tests && LUSTRE={libdir} bash llmount.sh"

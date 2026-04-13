@@ -619,15 +619,58 @@ class TestCmdLlmount:
         r.stderr = ""
         with (
             patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.configure_test_disks"),
             patch("ltvm_pkg.vm_commands.run_ssh", return_value=r) as mock_ssh,
             pytest.raises(SystemExit) as exc,
         ):
             vm_commands.cmd_llmount(args)
         assert exc.value.code == 0
         mock_ssh.assert_called_once()
-        _, call_kwargs = mock_ssh.call_args
         cmd_sent = mock_ssh.call_args[0][1]
         assert cmd_sent == _MOUNT_CMD
+
+    def test_configure_test_disks_called_with_vm_topology(
+        self, tmp_vmdir: Path
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "live", mdt=1, ost=3)
+        args = argparse.Namespace(name="live", timeout=300, cleanup=False)
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = ""
+        r.stderr = ""
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch(
+                "ltvm_pkg.vm_commands.configure_test_disks"
+            ) as mock_configure,
+            patch("ltvm_pkg.vm_commands.run_ssh", return_value=r),
+            pytest.raises(SystemExit),
+        ):
+            vm_commands.cmd_llmount(args)
+        mock_configure.assert_called_once()
+        args_passed, kwargs_passed = mock_configure.call_args
+        assert args_passed[1] == 1  # mdt_disks
+        assert args_passed[2] == 3  # ost_disks
+
+    def test_configure_test_disks_skipped_on_cleanup(
+        self, tmp_vmdir: Path
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "live")
+        args = argparse.Namespace(name="live", timeout=300, cleanup=True)
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = ""
+        r.stderr = ""
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch(
+                "ltvm_pkg.vm_commands.configure_test_disks"
+            ) as mock_configure,
+            patch("ltvm_pkg.vm_commands.run_ssh", return_value=r),
+            pytest.raises(SystemExit),
+        ):
+            vm_commands.cmd_llmount(args)
+        mock_configure.assert_not_called()
 
     def test_cleanup_command(self, tmp_vmdir: Path) -> None:
         _seed_vm_files(tmp_vmdir, "live")
@@ -668,6 +711,7 @@ class TestCmdLlmount:
         args = argparse.Namespace(name="slow", timeout=42, cleanup=False)
         with (
             patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.configure_test_disks"),
             patch(
                 "ltvm_pkg.vm_commands.run_ssh",
                 side_effect=_sp.TimeoutExpired(cmd="ssh", timeout=42),
@@ -686,6 +730,7 @@ class TestCmdLlmount:
         r.stderr = ""
         with (
             patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.configure_test_disks"),
             patch("ltvm_pkg.vm_commands.run_ssh", return_value=r) as mock_ssh,
             pytest.raises(SystemExit),
         ):
