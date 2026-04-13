@@ -226,6 +226,10 @@ ltvm ensure co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 ltvm deploy co1-single --mount
 ltvm deploy co1-single --build ~/lustre-release --mount
 
+# Mount / unmount Lustre manually (clears stale dm targets first)
+ltvm llmount co1-single            # dmsetup remove_all + llmount.sh
+ltvm llmount co1-single --cleanup  # llmountcleanup.sh + lustre_rmmod
+
 # Execute commands in VM
 ltvm exec co1-single 'lctl dl'
 

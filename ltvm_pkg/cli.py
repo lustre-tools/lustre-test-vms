@@ -1792,6 +1792,29 @@ def cmd_exec(args: argparse.Namespace) -> int:
         return int(e.code) if e.code is not None else EXIT_ERROR
 
 
+def cmd_llmount(args: argparse.Namespace) -> int:
+    use_json = getattr(args, "json", False)
+    err = _require_root(use_json)
+    if err is not None:
+        return err
+
+    from ltvm_pkg.vm_commands import cmd_llmount as _qllmount
+
+    timeout = getattr(args, "timeout", 300)
+    cleanup = getattr(args, "cleanup", False)
+    try:
+        _qllmount(
+            _qemu_ns(
+                name=args.vm,
+                timeout=timeout,
+                cleanup=cleanup,
+            )
+        )
+        return EXIT_OK
+    except SystemExit as e:
+        return int(e.code) if e.code is not None else EXIT_ERROR
+
+
 def cmd_cluster(args: argparse.Namespace) -> int:
     use_json = args.json
     action = args.action

@@ -64,6 +64,7 @@ from ltvm_pkg.cli import (  # noqa: E402
     cmd_exec,
     cmd_fetch,
     cmd_list,
+    cmd_llmount,
     cmd_nmi,
     cmd_package,
     cmd_publish,
@@ -733,6 +734,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("cmd", nargs=argparse.REMAINDER, help="Command to run")
     sp.set_defaults(func=cmd_exec)
+
+    # -- llmount --
+    sp = sub.add_parser(
+        "llmount", parents=[common], help="Mount (or unmount) Lustre inside a VM"
+    )
+    sp.add_argument("vm", help="VM name")
+    sp.add_argument(
+        "--cleanup",
+        action="store_true",
+        default=False,
+        help="Unmount: run llmountcleanup.sh && lustre_rmmod",
+    )
+    sp.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        help="Command timeout in seconds (default: 300)",
+    )
+    sp.set_defaults(func=cmd_llmount)
 
     # -- cluster --
     sp = sub.add_parser(

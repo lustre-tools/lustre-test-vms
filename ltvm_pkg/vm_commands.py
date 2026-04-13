@@ -295,11 +295,9 @@ def cmd_create(args: argparse.Namespace) -> None:
     explicit_image = getattr(args, "image", "") or args.rootfs
     explicit_kernel = getattr(args, "kernel", "")
     arch = getattr(args, "arch", None) or "x86_64"
-    if not os_target:
-        # Only print default-target notice when no explicit image was given
+    defaulted_target = not os_target
+    if defaulted_target:
         os_target = DEFAULT_TARGET
-        if not explicit_image and not explicit_kernel:
-            print(f"using default target: {os_target}")
     # Pass explicit_kernel through: resolve_os_artifacts accepts either
     # a kernel path or a kernel name (short/full) and will pair the
     # right per-kernel image with it.  If explicit_kernel is falsy this
@@ -307,6 +305,11 @@ def cmd_create(args: argparse.Namespace) -> None:
     os_arts = resolve_os_artifacts(
         os_target, arch=arch, kernel=explicit_kernel or None
     )
+    if defaulted_target and not explicit_image and not explicit_kernel:
+        print(
+            f"using default target: {os_target} "
+            f"(kernel: {os_arts.kernel.parent.name})"
+        )
     image = explicit_image or str(os_arts.image)
     # When the caller hands us a literal kernel path (the old semantic),
     # use it verbatim: this preserves "--kernel /tmp/my-vmlinuz" without
@@ -701,6 +704,49 @@ def cmd_exec(args: argparse.Namespace) -> None:
             print(stdout, end="")
         if stderr:
             print(stderr, end="", file=sys.stderr)
+    sys.exit(r.returncode)
+
+
+def cmd_llmount(args: argparse.Namespace) -> None:
+    name = args.name
+    timeout = getattr(args, "timeout", 300)
+    cleanup = getattr(args, "cleanup", False)
+
+    try:
+        vm = VMInfo.load(name)
+    except VMNotFound:
+        print(f"error: VM '{name}' not found", file=sys.stderr)
+        sys.exit(EXIT_NOT_FOUND)
+
+    if not is_running(vm):
+        print(f"error: VM '{name}' not running", file=sys.stderr)
+        sys.exit(EXIT_UNREACHABLE)
+
+    libdir = "/usr/lib64/lustre"
+
+    if cleanup:
+        command = (
+            f"cd {libdir}/tests && LUSTRE={libdir} bash llmountcleanup.sh"
+            " && lustre_rmmod"
+        )
+    else:
+        command = (
+            "dmsetup remove_all;"
+            f" cd {libdir}/tests && LUSTRE={libdir} bash llmount.sh"
+        )
+
+    try:
+        r = run_ssh(vm.ip, command, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f"error: timeout after {timeout}s", file=sys.stderr)
+        sys.exit(EXIT_TIMEOUT)
+
+    stdout = r.stdout or ""
+    stderr = r.stderr or ""
+    if stdout:
+        print(stdout, end="")
+    if stderr:
+        print(stderr, end="", file=sys.stderr)
     sys.exit(r.returncode)
 
 

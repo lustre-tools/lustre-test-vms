@@ -579,3 +579,116 @@ class TestCmdConsoleLog:
         args = argparse.Namespace(name="nolog", lines=10)
         with pytest.raises(SystemExit):
             vm_commands.cmd_console_log(args)
+
+
+# ── cmd_llmount ──────────────────────────────────────────
+
+
+LIBDIR = "/usr/lib64/lustre"
+_MOUNT_CMD = f"dmsetup remove_all; cd {LIBDIR}/tests && LUSTRE={LIBDIR} bash llmount.sh"
+_CLEANUP_CMD = (
+    f"cd {LIBDIR}/tests && LUSTRE={LIBDIR} bash llmountcleanup.sh && lustre_rmmod"
+)
+
+
+class TestCmdLlmount:
+    """cmd_llmount runs the correct remote commands and forwards exit codes."""
+
+    def test_missing_vm_dies(self, tmp_vmdir: Path) -> None:
+        args = argparse.Namespace(name="ghost", timeout=300, cleanup=False)
+        with pytest.raises(SystemExit) as exc:
+            vm_commands.cmd_llmount(args)
+        assert exc.value.code == 2  # EXIT_NOT_FOUND
+
+    def test_not_running_dies(self, tmp_vmdir: Path) -> None:
+        _seed_vm_files(tmp_vmdir, "stopped")
+        args = argparse.Namespace(name="stopped", timeout=300, cleanup=False)
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=False),
+            pytest.raises(SystemExit) as exc,
+        ):
+            vm_commands.cmd_llmount(args)
+        assert exc.value.code == 4  # EXIT_UNREACHABLE
+
+    def test_default_mount_command(self, tmp_vmdir: Path) -> None:
+        _seed_vm_files(tmp_vmdir, "live")
+        args = argparse.Namespace(name="live", timeout=300, cleanup=False)
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = ""
+        r.stderr = ""
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.run_ssh", return_value=r) as mock_ssh,
+            pytest.raises(SystemExit) as exc,
+        ):
+            vm_commands.cmd_llmount(args)
+        assert exc.value.code == 0
+        mock_ssh.assert_called_once()
+        _, call_kwargs = mock_ssh.call_args
+        cmd_sent = mock_ssh.call_args[0][1]
+        assert cmd_sent == _MOUNT_CMD
+
+    def test_cleanup_command(self, tmp_vmdir: Path) -> None:
+        _seed_vm_files(tmp_vmdir, "live")
+        args = argparse.Namespace(name="live", timeout=300, cleanup=True)
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = ""
+        r.stderr = ""
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.run_ssh", return_value=r) as mock_ssh,
+            pytest.raises(SystemExit) as exc,
+        ):
+            vm_commands.cmd_llmount(args)
+        assert exc.value.code == 0
+        cmd_sent = mock_ssh.call_args[0][1]
+        assert cmd_sent == _CLEANUP_CMD
+
+    def test_nonzero_exit_forwarded(self, tmp_vmdir: Path) -> None:
+        _seed_vm_files(tmp_vmdir, "live")
+        args = argparse.Namespace(name="live", timeout=300, cleanup=False)
+        r = MagicMock()
+        r.returncode = 1
+        r.stdout = "mkfs.lustre FATAL: Unable to build fs\n"
+        r.stderr = ""
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.run_ssh", return_value=r),
+            pytest.raises(SystemExit) as exc,
+        ):
+            vm_commands.cmd_llmount(args)
+        assert exc.value.code == 1
+
+    def test_timeout_plumbed_through(self, tmp_vmdir: Path) -> None:
+        import subprocess as _sp
+
+        _seed_vm_files(tmp_vmdir, "slow")
+        args = argparse.Namespace(name="slow", timeout=42, cleanup=False)
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch(
+                "ltvm_pkg.vm_commands.run_ssh",
+                side_effect=_sp.TimeoutExpired(cmd="ssh", timeout=42),
+            ),
+            pytest.raises(SystemExit) as exc,
+        ):
+            vm_commands.cmd_llmount(args)
+        assert exc.value.code == 3  # EXIT_TIMEOUT
+
+    def test_timeout_passed_to_run_ssh(self, tmp_vmdir: Path) -> None:
+        _seed_vm_files(tmp_vmdir, "live")
+        args = argparse.Namespace(name="live", timeout=99, cleanup=False)
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = ""
+        r.stderr = ""
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.run_ssh", return_value=r) as mock_ssh,
+            pytest.raises(SystemExit),
+        ):
+            vm_commands.cmd_llmount(args)
+        _, call_kwargs = mock_ssh.call_args
+        assert call_kwargs.get("timeout") == 99

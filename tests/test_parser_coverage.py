@@ -181,6 +181,7 @@ _VM_SUBCOMMAND_PARSE_ARGS: dict[str, list[str]] = {
     "snapshot": ["co1-test"],
     "restore": ["co1-test"],
     "doctor": [],
+    "llmount": ["co1-single"],
 }
 
 
