@@ -1387,15 +1387,6 @@ def cmd_list(args: argparse.Namespace) -> int:
     return _vm_call(_list, _qemu_ns(json=use_json), use_json)
 
 
-def cmd_vm_ssh(args: argparse.Namespace) -> int:
-    use_json = args.json
-    from ltvm_pkg.vm_commands import cmd_ssh as _ssh
-
-    return _vm_call(
-        _ssh, _qemu_ns(name=args.name, command=args.command), use_json
-    )
-
-
 def cmd_console_log(args: argparse.Namespace) -> int:
     use_json = args.json
     from ltvm_pkg.vm_commands import cmd_console_log as _log
@@ -1842,29 +1833,6 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             print(f"  Lustre mounted on {args.vm}")
 
     return EXIT_OK
-
-
-def cmd_exec(args: argparse.Namespace) -> int:
-    use_json = args.json
-    if not args.cmd:
-        return _error("exec requires a command", use_json)
-
-    from ltvm_pkg.vm_commands import cmd_exec as _qexec
-
-    cmd_str = " ".join(args.cmd)
-    timeout = getattr(args, "timeout", 120)
-    try:
-        _qexec(
-            _qemu_ns(
-                name=args.vm,
-                command=[cmd_str],
-                timeout=timeout,
-                json=use_json,
-            )
-        )
-        return EXIT_OK
-    except SystemExit as e:
-        return int(e.code) if e.code is not None else EXIT_ERROR
 
 
 def cmd_llmount(args: argparse.Namespace) -> int:

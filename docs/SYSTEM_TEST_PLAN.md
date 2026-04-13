@@ -75,8 +75,6 @@ Tests marked `(C)` are client-only targets only.
 | 10.1 | Correctness | Write file, read back, md5sum matches | S | | N/A | N/A | N/A |
 | 10.2 | Correctness | `lfs setstripe -c 2` uses 2 OSTs on 4-OST VM | S | | N/A | N/A | N/A |
 | 10.3 | Correctness | Extended attributes round-trip | S | | N/A | N/A | N/A |
-| 11.1 | CLI Errors | `exec` on stopped VM exits `EXIT_UNREACHABLE` | A | | PASS | PASS | PASS |
-| 11.2 | CLI Errors | `exec` timeout exits `EXIT_TIMEOUT` | A | | PASS | PASS | PASS |
 | 11.3 | CLI Errors | `destroy` on non-existent VM exits 0 | A | | PASS | PASS | PASS |
 | 11.4 | CLI Errors | `nmi` on stopped VM exits non-zero + clear error | A | | PASS | PASS | PASS |
 | 11.5 | CLI Errors | `doctor --fix` cleans up orphan overlays | A | | PASS | PASS | PASS |
@@ -122,7 +120,7 @@ sudo ltvm list --json   # verify: vcpus=2, mem=2048, mdt_disks=1, ost_disks=2, d
 # 1.2: ensure on running VM
 sudo ltvm ensure co1-default   # should print "already running", exit 0
 # 1.6: root fs size
-sudo ltvm exec co1-default 'df -h /'
+ssh co1-default 'df -h /'
 sudo ltvm destroy co1-default
 ```
 
@@ -135,7 +133,7 @@ sudo ltvm ensure co1-t4 --mdt-disks 2 --ost-disks 2
 sudo ltvm ensure co1-t5 --mdt-disks 0 --ost-disks 0
 
 for vm in co1-t1 co1-t3 co1-t4 co1-t5; do
-    echo "=== $vm ===" && sudo ltvm exec $vm 'lsblk'
+    echo "=== $vm ===" && ssh $vm 'lsblk'
 done
 
 sudo ltvm destroy co1-t1 co1-t3 co1-t4 co1-t5
@@ -146,12 +144,12 @@ sudo ltvm destroy co1-t1 co1-t3 co1-t4 co1-t5
 ```bash
 sudo ltvm ensure co1-single
 sudo ltvm deploy co1-single --build ~/lustre-release --mount
-sudo ltvm exec co1-single 'lctl dl'
-sudo ltvm exec co1-single 'lctl get_param osd-*.*.mntdev'
-sudo ltvm exec co1-single 'lfs df /mnt/lustre'
-sudo ltvm exec co1-single 'lsblk'
-sudo ltvm exec co1-single 'lsmod | grep -E "lustre|ldiskfs|lnet"'
-sudo ltvm exec co1-single 'ls /proc/fs/lustre/'
+ssh co1-single 'lctl dl'
+ssh co1-single 'lctl get_param osd-*.*.mntdev'
+ssh co1-single 'lfs df /mnt/lustre'
+ssh co1-single 'lsblk'
+ssh co1-single 'lsmod | grep -E "lustre|ldiskfs|lnet"'
+ssh co1-single 'ls /proc/fs/lustre/'
 ```
 
 ### Phase 4: Deployment Variations
@@ -160,24 +158,24 @@ sudo ltvm exec co1-single 'ls /proc/fs/lustre/'
 # 4.1. Fresh deploy on new VM
 sudo ltvm ensure co1-deploy
 sudo ltvm deploy co1-deploy --build ~/lustre-release --mount
-sudo ltvm exec co1-deploy 'lctl dl'
-sudo ltvm exec co1-deploy 'lfs df /mnt/lustre'
+ssh co1-deploy 'lctl dl'
+ssh co1-deploy 'lfs df /mnt/lustre'
 
 # 4.2. Idempotency: re-deploy to same VM
 sudo ltvm deploy co1-deploy --build ~/lustre-release --mount
-sudo ltvm exec co1-deploy 'lctl dl'
+ssh co1-deploy 'lctl dl'
 
 # 4.3. 4-OST VM
 sudo ltvm ensure co1-4ost --ost-disks 4
 sudo ltvm deploy co1-4ost --build ~/lustre-release --mount
-sudo ltvm exec co1-4ost 'lfs df /mnt/lustre'
+ssh co1-4ost 'lfs df /mnt/lustre'
 
 # 4.4. Deploy without --mount, then mount manually
 sudo ltvm ensure co1-nomount
 sudo ltvm deploy co1-nomount --build ~/lustre-release
-sudo ltvm exec co1-nomount 'lctl dl | grep -c UP'
-sudo ltvm exec co1-nomount 'bash lustre/tests/llmount.sh'
-sudo ltvm exec co1-nomount 'lctl dl'
+ssh co1-nomount 'lctl dl | grep -c UP'
+ssh co1-nomount 'bash lustre/tests/llmount.sh'
+ssh co1-nomount 'lctl dl'
 
 sudo ltvm destroy co1-deploy co1-4ost co1-nomount
 ```
@@ -185,11 +183,11 @@ sudo ltvm destroy co1-deploy co1-4ost co1-nomount
 ### Phase 5: Sanity Tests
 
 ```bash
-sudo ltvm exec --timeout 300 co1-single \
+timeout 300 ssh co1-single \
     'sudo -E ONLY="1 2 4 17 36" bash /usr/lib64/lustre/tests/sanity.sh'
 sudo ltvm dmesg co1-single | grep -iE 'BUG|Oops|assert'
-sudo ltvm exec co1-single 'lctl get_param *.*.assertion_failed 2>/dev/null'
-sudo ltvm exec co1-single 'cat /proc/fs/lustre/llite/*/stats | grep -v " 0 samples"'
+ssh co1-single 'lctl get_param *.*.assertion_failed 2>/dev/null'
+ssh co1-single 'cat /proc/fs/lustre/llite/*/stats | grep -v " 0 samples"'
 ```
 
 ### Phase 6: Crash / kdump
@@ -199,7 +197,7 @@ sudo ltvm nmi co1-single
 # Wait ~30s for reboot
 sudo ltvm crash-collect co1-single --mod-dir ~/lustre-release
 # Verify kdump re-armed
-sudo ltvm exec co1-single 'systemctl is-active kdump'
+ssh co1-single 'systemctl is-active kdump'
 ```
 
 ### Phase 7: Multi-node Cluster (optional)
@@ -227,11 +225,11 @@ SERVER_IP=$(sudo ltvm list --json | python3 -c \
 # Client VM (target OS, no disks)
 sudo ltvm ensure co1-client --os <target> --mdt-disks 0 --ost-disks 0
 # Deploy client-only modules and mount
-sudo ltvm exec co1-client "mount -t lustre ${SERVER_IP}@tcp:/lustre /mnt/lustre"
-sudo ltvm exec co1-client 'lsmod | grep -E "lustre|lnet"'
-sudo ltvm exec co1-client 'lsmod | grep -E "ldiskfs|obdfilter"'  # should be absent
-sudo ltvm exec co1-client 'lfs df /mnt/lustre'
-sudo ltvm exec co1-client \
+ssh co1-client "mount -t lustre ${SERVER_IP}@tcp:/lustre /mnt/lustre"
+ssh co1-client 'lsmod | grep -E "lustre|lnet"'
+ssh co1-client 'lsmod | grep -E "ldiskfs|obdfilter"'  # should be absent
+ssh co1-client 'lfs df /mnt/lustre'
+ssh co1-client \
     'dd if=/dev/urandom of=/mnt/lustre/test.dat bs=1M count=10 && \
      md5sum /mnt/lustre/test.dat | tee /tmp/orig.md5 && \
      md5sum /mnt/lustre/test.dat && diff /tmp/orig.md5 -'
@@ -243,9 +241,9 @@ sudo ltvm destroy co1-server co1-client
 
 ```bash
 sudo ltvm snapshot co1-single before-test
-sudo ltvm exec co1-single 'sudo bash lustre/tests/llmountcleanup.sh && sudo lustre_rmmod'
+ssh co1-single 'sudo bash lustre/tests/llmountcleanup.sh && sudo lustre_rmmod'
 sudo ltvm restore co1-single before-test
-sudo ltvm exec co1-single 'lctl dl'
+ssh co1-single 'lctl dl'
 # Error path
 sudo ltvm restore co1-single no-such-tag   # expect non-zero exit
 ```
@@ -253,16 +251,16 @@ sudo ltvm restore co1-single no-such-tag   # expect non-zero exit
 ### Phase 10: Correctness
 
 ```bash
-sudo ltvm exec co1-single \
+ssh co1-single \
     'dd if=/dev/urandom of=/mnt/lustre/test.dat bs=1M count=50 && \
      md5sum /mnt/lustre/test.dat | tee /tmp/orig.md5 && \
      md5sum /mnt/lustre/test.dat && diff /tmp/orig.md5 -'
-sudo ltvm exec co1-single \
+ssh co1-single \
     'touch /mnt/lustre/xattr-test && \
      setfattr -n user.foo -v bar /mnt/lustre/xattr-test && \
      getfattr -n user.foo /mnt/lustre/xattr-test | grep bar'
 # Striping (4-OST VM)
-sudo ltvm exec co1-4ost \
+ssh co1-4ost \
     'lfs setstripe -c 2 /mnt/lustre/striped.dat && \
      dd if=/dev/zero of=/mnt/lustre/striped.dat bs=1M count=10 && \
      lfs getstripe /mnt/lustre/striped.dat'
@@ -271,12 +269,8 @@ sudo ltvm exec co1-4ost \
 ### Phase 11: CLI Error Paths
 
 ```bash
-sudo ltvm stop co1-single
-sudo ltvm exec co1-single 'echo hi'         # expect EXIT_UNREACHABLE
-sudo ltvm nmi co1-single                    # expect non-zero + clear error
+sudo ltvm nmi co1-stopped                   # expect non-zero + clear error
 sudo ltvm destroy co1-nonexistent           # expect exit 0
-sudo ltvm start co1-single
-sudo ltvm exec --timeout 2 co1-single 'sleep 30'   # expect EXIT_TIMEOUT
 ```
 
 ---

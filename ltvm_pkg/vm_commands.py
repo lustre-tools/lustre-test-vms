@@ -609,124 +609,6 @@ def cmd_destroy(args: argparse.Namespace) -> None:
             print(f"destroy: {name} not found")
 
 
-# ── execution ────────────────────────────────────────────
-
-
-def cmd_exec(args: argparse.Namespace) -> None:
-    name = args.name
-    try:
-        vm = VMInfo.load(name)
-    except VMNotFound:
-        if args.json:
-            print(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "exit_code": EXIT_NOT_FOUND,
-                        "error": "VM not found",
-                    }
-                )
-            )
-        else:
-            print(f"error: VM '{name}' not found", file=sys.stderr)
-        sys.exit(EXIT_NOT_FOUND)
-
-    if not is_running(vm):
-        if args.json:
-            print(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "exit_code": EXIT_UNREACHABLE,
-                        "error": "VM not running",
-                    }
-                )
-            )
-        else:
-            print(f"error: VM '{name}' not running", file=sys.stderr)
-        sys.exit(EXIT_UNREACHABLE)
-
-    command = " ".join(args.command)
-    if not command:
-        if args.json:
-            print(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "exit_code": EXIT_ERROR,
-                        "error": "no command given",
-                    }
-                )
-            )
-        else:
-            print("error: no command given", file=sys.stderr)
-        sys.exit(EXIT_ERROR)
-
-    try:
-        r = run_ssh(vm.ip, command, timeout=args.timeout)
-    except subprocess.TimeoutExpired:
-        if args.json:
-            print(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "exit_code": EXIT_TIMEOUT,
-                        "error": f"timeout after {args.timeout}s",
-                    }
-                )
-            )
-        else:
-            print(
-                f"error: timeout after {args.timeout}s",
-                file=sys.stderr,
-            )
-        sys.exit(EXIT_TIMEOUT)
-
-    stdout = r.stdout or ""
-    stderr = r.stderr or ""
-    # JSON callers consumed a single "output" field historically; preserve
-    # that by combining the streams there.  Human callers get them on the
-    # right file descriptors so stderr stays visible separately.
-    combined = stdout + stderr
-
-    if r.returncode == 255:
-        if args.json:
-            print(
-                json.dumps(
-                    {
-                        "ok": False,
-                        "exit_code": EXIT_UNREACHABLE,
-                        "error": "unreachable",
-                        "output": combined,
-                    }
-                )
-            )
-        else:
-            print("error: unreachable", file=sys.stderr)
-            if stdout:
-                print(stdout, end="")
-            if stderr:
-                print(stderr, end="", file=sys.stderr)
-        sys.exit(EXIT_UNREACHABLE)
-
-    if args.json:
-        print(
-            json.dumps(
-                {
-                    "ok": r.returncode == 0,
-                    "exit_code": r.returncode,
-                    "output": combined,
-                }
-            )
-        )
-    else:
-        if stdout:
-            print(stdout, end="")
-        if stderr:
-            print(stderr, end="", file=sys.stderr)
-    sys.exit(r.returncode)
-
-
 def cmd_llmount(args: argparse.Namespace) -> None:
     name = args.name
     timeout = getattr(args, "timeout", 300)
@@ -796,24 +678,6 @@ def cmd_llmount(args: argparse.Namespace) -> None:
     if stderr:
         print(stderr, end="", file=sys.stderr)
     sys.exit(r.returncode)
-
-
-def cmd_ssh(args: argparse.Namespace) -> None:
-    vm = VMInfo.load(args.name)
-    ssh_args = [
-        "sshpass",
-        "-p",
-        ROOT_PASSWORD,
-        "ssh",
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-o",
-        "LogLevel=ERROR",
-        f"root@{vm.ip}",
-    ] + args.command
-    os.execvp("sshpass", ssh_args)
 
 
 # ── info + observability ─────────────────────────────────
@@ -1344,6 +1208,36 @@ def cmd_restore(args: argparse.Namespace) -> None:
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     issues = 0
+
+    # Socket + overlay dir perms: non-root `ltvm list`/`deploy`/`llmount`
+    # need read access, so these are owned root:root but should be 0755.
+    # .info files should be 0644 so non-root callers can read VM state.
+    for d in (SOCKETS, OVERLAYS):
+        if d.exists():
+            mode = d.stat().st_mode & 0o777
+            if mode != 0o755:
+                print(f"tight perms: {d} is {oct(mode)} (want 0o755)")
+                issues += 1
+                if args.fix:
+                    try:
+                        d.chmod(0o755)
+                        print("  fixed: chmod 0755")
+                    except OSError as e:
+                        print(f"  could not chmod: {e}")
+    for info in sorted(SOCKETS.glob("*.info")):
+        try:
+            mode = info.stat().st_mode & 0o777
+        except OSError:
+            continue
+        if mode != 0o644:
+            print(f"tight perms: {info.name} is {oct(mode)} (want 0o644)")
+            issues += 1
+            if args.fix:
+                try:
+                    info.chmod(0o644)
+                    print("  fixed: chmod 0644")
+                except OSError as e:
+                    print(f"  could not chmod: {e}")
 
     for name in VMInfo.all_names():
         try:

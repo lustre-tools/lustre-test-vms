@@ -243,8 +243,8 @@ ltvm deploy co1-single --build ~/lustre-release --mount
 ltvm llmount co1-single            # dmsetup remove_all + llmount.sh
 ltvm llmount co1-single --cleanup  # llmountcleanup.sh + lustre_rmmod
 
-# Execute commands in VM
-ltvm exec co1-single 'lctl dl'
+# Execute commands in VM (passwordless root ssh is set up at image build time)
+ssh co1-single 'lctl dl'
 
 # Observe
 ltvm console-log co1-single
@@ -398,10 +398,10 @@ When reviewing or auditing this codebase, watch for:
   that touch host networking or QEMU launch (create,
   destroy, start, stop, restart, snapshot,
   restore, nmi, doctor, cluster create, cluster destroy)
-  require root. Read/observe/SSH commands (exec, ssh,
-  console-log, dmesg, deploy, llmount, crash-collect,
-  cluster deploy, cluster exec, cluster status, list)
-  do not. Build commands do not need root.
+  require root. Read/observe commands (console-log,
+  dmesg, deploy, llmount, crash-collect, cluster deploy,
+  cluster exec, cluster status, list) do not. Build
+  commands do not need root.
 
 - **Compat gate bypass.** `--force-compat` silences
   refusals but not hard errors. Use only when you know

@@ -60,7 +60,6 @@ from ltvm_pkg.cli import (  # noqa: E402
     cmd_destroy,
     cmd_dmesg,
     cmd_doctor,
-    cmd_exec,
     cmd_fetch,
     cmd_list,
     cmd_llmount,
@@ -74,7 +73,6 @@ from ltvm_pkg.cli import (  # noqa: E402
     cmd_targets,
     cmd_update,
     cmd_validate,
-    cmd_vm_ssh,
     cmd_vm_start,
     cmd_vm_stop,
 )
@@ -575,18 +573,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.set_defaults(func=cmd_list)
 
-    # -- VM access: ssh --
-    sp = sub.add_parser(
-        "ssh",
-        parents=[common],
-        help="SSH into a VM (replaces shell with ssh session)",
-    )
-    sp.add_argument("name", help="VM name")
-    sp.add_argument(
-        "command", nargs=argparse.REMAINDER, help="Optional command to run"
-    )
-    sp.set_defaults(func=cmd_vm_ssh)
-
     # -- VM observability: console-log --
     sp = sub.add_parser(
         "console-log",
@@ -734,20 +720,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override a Lustre-tree compatibility refusal (not errors)",
     )
     sp.set_defaults(func=cmd_deploy)
-
-    # -- exec --
-    sp = sub.add_parser(
-        "exec", parents=[common], help="Execute a command in a VM"
-    )
-    sp.add_argument("vm", help="VM name")
-    sp.add_argument(
-        "--timeout",
-        type=int,
-        default=120,
-        help="Command timeout in seconds (default: 120)",
-    )
-    sp.add_argument("cmd", nargs=argparse.REMAINDER, help="Command to run")
-    sp.set_defaults(func=cmd_exec)
 
     # -- llmount --
     sp = sub.add_parser(

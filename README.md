@@ -115,7 +115,6 @@ ltvm fetch <target> --url URL   Download pre-built package
 ltvm install <target>           Install kernel + image to system paths
 
 ltvm deploy <vm>                Deploy Lustre to a VM
-ltvm exec <vm> <cmd>            Execute command in a VM
 ltvm vm <action> [args]         VM lifecycle (create/destroy/etc.)
 ltvm cluster <action> [args]    Cluster management
 

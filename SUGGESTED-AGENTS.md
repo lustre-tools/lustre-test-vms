@@ -37,7 +37,7 @@ sudo ltvm create co1-single \
 ltvm llmount co1-single
 
 # Verify
-ltvm exec co1-single 'mount | grep lustre; lfs df -h /mnt/lustre'
+ssh co1-single 'mount | grep lustre; lfs df -h /mnt/lustre'
 ```
 
 No building required.  Four commands from download to
@@ -115,8 +115,8 @@ ltvm list
 ltvm console-log co1-single
 ltvm dmesg co1-single
 
-# Execute commands inside
-ltvm exec --timeout 30 co1-single 'lctl dl'
+# Execute commands inside (plain ssh — VMs are set up for passwordless root)
+ssh co1-single 'lctl dl'
 
 # Lifecycle
 sudo ltvm start|stop|restart|destroy co1-single
@@ -195,7 +195,7 @@ Lustre uses an in-kernel ring buffer (per-CPU, default
 ~5 MB/CPU).  All CDEBUG/CERROR output lands there.
 
 ```bash
-ltvm exec co1-single '
+ssh co1-single '
     lctl set_param debug=-1
     lctl set_param debug_mb=10000
     lctl clear
@@ -236,7 +236,6 @@ ltvm create <name>              Create / idempotent-create
 ltvm start|stop|restart <name>  Power control
 ltvm destroy <name>             Remove VM and its overlay
 ltvm list                       Running + stopped VMs
-ltvm ssh|exec <name> [cmd]      Shell / run command
 ltvm console-log|dmesg <name>   Observe
 ltvm snapshot|restore <name>    Overlay snapshots
 ltvm nmi <name>                 Inject NMI (panic + kdump)

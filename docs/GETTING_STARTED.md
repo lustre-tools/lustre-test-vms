@@ -77,7 +77,7 @@ only changed files recompile.
 ### 5. Run a test
 
 ```bash
-sudo ltvm exec co1-single \
+ssh co1-single \
     'sudo -E ONLY=42a bash /usr/lib64/lustre/tests/sanity.sh'
 ```
 

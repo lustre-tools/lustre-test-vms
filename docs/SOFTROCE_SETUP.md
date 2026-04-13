@@ -42,8 +42,8 @@ going further.
 ### 2. Install perftest and verbs utilities (both VMs)
 
 ```bash
-sudo ltvm exec co<N>-rdma-a 'dnf install -y perftest libibverbs-utils'
-sudo ltvm exec co<N>-rdma-b 'dnf install -y perftest libibverbs-utils'
+ssh co<N>-rdma-a 'dnf install -y perftest libibverbs-utils'
+ssh co<N>-rdma-b 'dnf install -y perftest libibverbs-utils'
 ```
 
 `rdma-core` (which provides the `rdma` link tool) is already installed
@@ -52,9 +52,9 @@ in the Rocky 9 base image.
 ### 3. Load `rdma_rxe` and create the RXE link (both VMs)
 
 ```bash
-sudo ltvm exec co<N>-rdma-a 'modprobe rdma_rxe && \
+ssh co<N>-rdma-a 'modprobe rdma_rxe && \
     rdma link add rxe0 type rxe netdev eth0 && rdma link'
-sudo ltvm exec co<N>-rdma-b 'modprobe rdma_rxe && \
+ssh co<N>-rdma-b 'modprobe rdma_rxe && \
     rdma link add rxe0 type rxe netdev eth0 && rdma link'
 ```
 
@@ -67,7 +67,7 @@ link rxe0/1 state ACTIVE physical_state LINK_UP netdev eth0
 Verify userspace can see it:
 
 ```bash
-sudo ltvm exec co<N>-rdma-a 'ibv_devices; ibv_devinfo -d rxe0'
+ssh co<N>-rdma-a 'ibv_devices; ibv_devinfo -d rxe0'
 ```
 
 You should see `rxe0` listed, port state `PORT_ACTIVE`, link_layer
@@ -76,16 +76,16 @@ You should see `rxe0` listed, port state `PORT_ACTIVE`, link_layer
 ### 4. Smoke-test with perftest
 
 Server on B, client on A. Each test needs the server backgrounded
-because `ltvm exec` is synchronous.
+because `ssh` is synchronous.
 
 ```bash
 # Server (VM-B) — note `true;` prefix avoids pkill nonzero exit
 # propagating; nohup + & detaches; -F skips CPU-frequency check
-sudo ltvm exec co<N>-rdma-b 'true; \
+ssh co<N>-rdma-b 'true; \
     nohup ib_write_bw -d rxe0 -F -D 5 > /tmp/ib.log 2>&1 & echo started'
 
 # Client (VM-A)
-sudo ltvm exec co<N>-rdma-a 'ib_write_bw -d rxe0 -F -D 5 <VM-B-IP>'
+ssh co<N>-rdma-a 'ib_write_bw -d rxe0 -F -D 5 <VM-B-IP>'
 ```
 
 Repeat for `ib_read_bw` and `ib_send_bw`. Typical result on default
@@ -96,14 +96,14 @@ overhead, not the wire.
 ### 5. (Optional) Bigger MTU for less-bad numbers
 
 ```bash
-sudo ltvm exec co<N>-rdma-a 'ip link set eth0 mtu 9000'
-sudo ltvm exec co<N>-rdma-b 'ip link set eth0 mtu 9000'
+ssh co<N>-rdma-a 'ip link set eth0 mtu 9000'
+ssh co<N>-rdma-b 'ip link set eth0 mtu 9000'
 ```
 
 Then re-create the rxe link to pick up the new MTU:
 
 ```bash
-sudo ltvm exec co<N>-rdma-a 'rdma link delete rxe0 && \
+ssh co<N>-rdma-a 'rdma link delete rxe0 && \
     rdma link add rxe0 type rxe netdev eth0'
 ```
 
@@ -112,11 +112,11 @@ to support the larger MTU end-to-end; if pings stop working, revert.
 
 ## Gotchas
 
-- **`ltvm exec` propagates the last command's exit code.** A trailing
-  `pkill -f foo` that finds no match returns 1 and the whole exec
-  fails with `unreachable`. Prefix with `true;` or append `|| true`.
-- **Background jobs need `nohup ... &`**. Plain `&` under `ltvm exec`
-  may get reaped when the exec session closes.
+- **`ssh` propagates the last command's exit code.** A trailing
+  `pkill -f foo` that finds no match returns 1 and the whole ssh
+  fails. Prefix with `true;` or append `|| true`.
+- **Background jobs need `nohup ... &`**. Plain `&` under `ssh`
+  may get reaped when the session closes.
 - **One RXE device per VM is enough.** Don't try to add multiple rxe
   links over the same netdev — they'll conflict.
 - **Link layer is Ethernet, not InfiniBand**, even though `ibv_devinfo`

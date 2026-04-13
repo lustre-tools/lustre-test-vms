@@ -169,11 +169,9 @@ class TestAllSubcommandsHaveFunc:
 _VM_SUBCOMMAND_PARSE_ARGS: dict[str, list[str]] = {
     "create": ["co1-test"],
     "destroy": ["co1-test"],
-    "exec": ["co1-test", "lctl dl"],
     "start": ["co1-test"],
     "stop": ["co1-test"],
     "list": [],
-    "ssh": ["co1-test"],
     "console-log": ["co1-test"],
     "dmesg": ["co1-test"],
     "nmi": ["co1-test"],
