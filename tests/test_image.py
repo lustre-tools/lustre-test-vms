@@ -405,7 +405,7 @@ class TestLustreInjectLines:
         inject.mkdir()
 
         lines = image._lustre_inject_lines(
-            staging, inject, "5.14.0-foo", "rhel"
+            staging, inject, "5.14.0-foo"
         )
         text = "\n".join(lines)
         assert "COPY lustre-extra/ /lib/modules/5.14.0-foo/extra/" in text
@@ -425,7 +425,7 @@ class TestLustreInjectLines:
         inject.mkdir()
 
         lines = image._lustre_inject_lines(
-            staging, inject, "6.1.0-deb", "debian"
+            staging, inject, "6.1.0-deb"
         )
         text = "\n".join(lines)
         assert "COPY lustre-extra/ /lib/modules/6.1.0-deb/extra/" in text
@@ -440,7 +440,7 @@ class TestLustreInjectLines:
         inject = tmp_path / "inject"
         inject.mkdir()
         lines = image._lustre_inject_lines(
-            staging, inject, "5.14.0-foo", "rhel"
+            staging, inject, "5.14.0-foo"
         )
         for line in lines:
             # Tar-in-tar-out via copytree means every COPY is a fixed
@@ -610,3 +610,51 @@ class TestGetPackageManifest:
             packages = image._get_package_manifest("ltvm-image-rocky9")
 
         assert packages == []
+
+
+class TestBuildImageChown:
+    """build_image calls chown_to_sudo_user on the image output dir
+    after writing meta.json."""
+
+    def test_chown_called_on_image_out_dir(
+        self, tmp_targets: Path
+    ) -> None:
+        import ltvm_pkg.image_build as image
+        from tests.conftest import _make_config
+
+        tc = _make_config(tmp_targets)
+
+        # image.Dockerfile must exist or build_image raises before chown.
+        (tc.target_dir / "image.Dockerfile").write_text("FROM scratch\n")
+
+        chown_calls: list[tuple] = []
+
+        def mock_chown(path: Path, *, recursive: bool = False) -> None:
+            chown_calls.append((path, recursive))
+
+        out_dir = tc.image_output_dir()
+        fake_image = out_dir / "base.ext4"
+        fake_image.parent.mkdir(parents=True, exist_ok=True)
+        fake_image.write_bytes(b"\x00" * 1024)
+
+        with (
+            patch("ltvm_pkg.image_build._check_mke2fs"),
+            patch("ltvm_pkg.image_build._run"),
+            patch(
+                "ltvm_pkg.image_build._export_to_ext4",
+                return_value=fake_image,
+            ),
+            patch(
+                "ltvm_pkg.image_build._get_package_manifest",
+                return_value=[],
+            ),
+            patch(
+                "ltvm_pkg.image_build.chown_to_sudo_user",
+                side_effect=mock_chown,
+            ),
+        ):
+            image.build_image(tc, force=True)
+
+        assert any(p == out_dir for p, _ in chown_calls), (
+            f"Expected chown on image out_dir {out_dir}, got {chown_calls}"
+        )

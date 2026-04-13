@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .paths import load_meta_safe
+from .paths import chown_to_sudo_user, load_meta_safe
 from .target_config import TARGETS_DIR
 
 if TYPE_CHECKING:
@@ -159,42 +159,23 @@ def _prebuild_tools_native(
 
 def _lustre_staging_hash_input(staging: Path) -> bytes:
     """Return bytes to fold into the image input hash when --with-lustre
-    is active.  Uses Module.symvers sha256 when present (written by
-    build_lustre) and falls back to a walk of the staging tree so the
-    hash still invalidates on rebuild even for a legacy staging dir.
+    is active.  Uses the Module.symvers sha256 written by build_lustre.
     """
     from .lustre_build import read_staging_meta
 
-    parts = [b"with-lustre:"]
     meta = read_staging_meta(staging)
-    if meta and isinstance(meta.get("module_symvers_sha256"), str):
-        parts.append(b"symvers:")
-        parts.append(meta["module_symvers_sha256"].encode())
-    else:
-        # Fallback: hash sorted (relpath, sha256) of every file under
-        # staging.  Expensive but correct -- only exercised for pre-
-        # existing staging dirs without meta.
-        import hashlib as _hash
-
-        h = _hash.sha256()
-        for f in sorted(staging.rglob("*")):
-            if not f.is_file():
-                continue
-            h.update(str(f.relative_to(staging)).encode())
-            h.update(b"\0")
-            with f.open("rb") as fp:
-                for chunk in iter(lambda: fp.read(65536), b""):
-                    h.update(chunk)
-        parts.append(b"tree:")
-        parts.append(h.hexdigest().encode())
-    return b"|".join(parts)
+    if not meta or not isinstance(meta.get("module_symvers_sha256"), str):
+        raise RuntimeError(
+            f"Lustre staging at {staging} has no module_symvers_sha256 "
+            f"in .ltvm-staging-meta.json -- rebuild with `ltvm build-lustre`"
+        )
+    return b"with-lustre:symvers:" + meta["module_symvers_sha256"].encode()
 
 
 def _lustre_inject_lines(
     staging: Path,
     inject_dir: Path,
     kver: str,
-    os_family: str,
 ) -> list[str]:
     """Stage Lustre module + userland subtrees from *staging* into
     *inject_dir* and return the Dockerfile lines that COPY them into
@@ -246,10 +227,7 @@ def _lustre_inject_lines(
     # `modprobe lustre` inside the VM fails -- the earlier depmod
     # (run after kernel modules) didn't see /lib/modules/<k>/extra/.
     lines.append(f"RUN depmod -a {kver}")
-    # Some distros' mount(8) wants mount.lustre_tgt; symlink if
-    # missing.  os_family is accepted for future per-family tweaks
-    # but currently all our targets share this invocation.
-    _ = os_family
+    # Some distros' mount(8) wants mount.lustre_tgt; symlink if missing.
     lines.append(
         "RUN ln -sf mount.lustre "
         "/usr/sbin/mount.lustre_tgt 2>/dev/null || true"
@@ -488,16 +466,15 @@ def build_image(
 
             # Write a tiny Dockerfile
             lines = [f"FROM {tag}"]
-            if has_modules:
-                log.info("Including kernel modules")
-                # Copy modules into inject context, clean symlinks
-                mod_dest = inject_dir / "modules"
-                shutil.copytree(
-                    str(modules_dir / "lib" / "modules"),
-                    str(mod_dest),
-                    symlinks=False,
-                    ignore=shutil.ignore_patterns("build", "source"),
-                )
+            log.info("Including kernel modules")
+            # Copy modules into inject context, clean symlinks
+            mod_dest = inject_dir / "modules"
+            shutil.copytree(
+                str(modules_dir / "lib" / "modules"),
+                str(mod_dest),
+                symlinks=False,
+                ignore=shutil.ignore_patterns("build", "source"),
+            )
 
             kdump_lines = _kdump_inject_lines(
                 kdir, inject_dir, kver, target_config.os_family
@@ -513,7 +490,6 @@ def build_image(
                     lustre_staging,
                     inject_dir,
                     kver,
-                    target_config.os_family,
                 )
             # Lustre auto-inject was here.  It looked at a global
             # staging dir and silently baked whatever was there into the
@@ -527,15 +503,7 @@ def build_image(
                 (inject_dir / "modules").iterdir()
             ):
                 lines.append("COPY modules/ /lib/modules/")
-            if kver:
-                lines.append(f"RUN ldconfig && depmod -a {kver}")
-            else:
-                # No kernel.release file available; fall back to whatever
-                # /lib/modules contains.  Sorted -V picks the highest.
-                lines.append(
-                    "RUN ldconfig && depmod -a "
-                    "$(ls /lib/modules/ | sort -V | tail -1)"
-                )
+            lines.append(f"RUN ldconfig && depmod -a {kver}")
             lines.append(
                 "RUN ln -sf mount.lustre /usr/sbin/mount.lustre_tgt 2>/dev/null || true"
             )
@@ -597,6 +565,8 @@ def build_image(
         packages=pkg_manifest,
         kernel_name=kernel_name,
     )
+
+    chown_to_sudo_user(out_dir, recursive=True)
 
     log.info("Image built: %s (%.0f MiB, %.0fs)", image_path, size_mb, elapsed)
     return image_path

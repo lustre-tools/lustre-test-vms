@@ -22,6 +22,44 @@ from typing import Any
 log = logging.getLogger("ltvm")
 
 
+def chown_to_sudo_user(path: Path, *, recursive: bool = False) -> None:
+    """If running under sudo, chown path to SUDO_USER:SUDO_GID.
+
+    No-op when not under sudo, SUDO_USER is unresolvable, or the
+    process is not root.  Never raises -- individual chown failures are
+    swallowed so a single un-chown-able file (e.g. a setuid binary
+    inside an ext4 image) doesn't abort the whole pass.
+    Does NOT follow symlinks.
+    """
+    if os.getuid() != 0:
+        return
+    sudo_user = os.environ.get("SUDO_USER")
+    if not sudo_user:
+        return
+    try:
+        import pwd
+        pw = pwd.getpwnam(sudo_user)
+    except (KeyError, ImportError):
+        return
+    uid, gid = pw.pw_uid, pw.pw_gid
+    if recursive:
+        for root, dirs, files in os.walk(path, followlinks=False):
+            for name in files + dirs:
+                try:
+                    os.lchown(os.path.join(root, name), uid, gid)
+                except OSError:
+                    pass
+        try:
+            os.lchown(str(path), uid, gid)
+        except OSError:
+            pass
+    else:
+        try:
+            os.lchown(str(path), uid, gid)
+        except OSError:
+            pass
+
+
 def load_meta_safe(meta_file: Path) -> dict[str, Any] | None:
     """Read and parse a meta.json file, tolerating corruption.
 

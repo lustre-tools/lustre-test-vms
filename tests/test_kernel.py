@@ -485,3 +485,64 @@ class TestKernelStatus:
         assert result["lnxmaj"] == "5.14.0"
         assert result["lnxrel"] == "503.26.1.el9_7"
         assert result["srpm"] == "kernel-5.14.0-503.26.1.el9_7.src.rpm"
+
+
+# ------------------------------------------------------------------
+# TestKernelBuildChown
+# ------------------------------------------------------------------
+
+
+class TestKernelBuildChown:
+    """_build_kernel_srpm calls chown_to_sudo_user on the kernel output
+    dir and cache dir after writing meta.json."""
+
+    def test_chown_called_on_kernel_out_and_cache(
+        self, tmp_targets: Path, lustre_tree: Path
+    ) -> None:
+        from ltvm_pkg.kernel_build import _build_kernel_srpm
+
+        cfg = _make_config(tmp_targets)
+        chown_calls: list[tuple] = []
+
+        def mock_chown(path: Path, *, recursive: bool = False) -> None:
+            chown_calls.append((path, recursive))
+
+        # Populate a minimal kernel output dir so the build's post-verify passes.
+        full_name = "5.14-rhel9.7-5.14.0-503.26.1.el9_7"
+        kernel_out = cfg.output_dir / "kernels" / full_name
+        kernel_out.mkdir(parents=True, exist_ok=True)
+        (kernel_out / "vmlinux").write_bytes(b"ELF")
+        (kernel_out / "vmlinuz").write_bytes(b"bzImage")
+        build_tree = kernel_out / "build-tree"
+        build_tree.mkdir()
+        (build_tree / "include" / "config").mkdir(parents=True)
+        (build_tree / "include" / "config" / "kernel.release").write_text(
+            "5.14.0-503.26.1.el9_7\n"
+        )
+
+        fake_srpm = tmp_targets / "fake.srpm"
+        fake_srpm.write_bytes(b"")
+        cfg._data["srpm_url"] = "https://example.com/srpms"
+
+        with (
+            patch(
+                "ltvm_pkg.kernel_build._ensure_container_image",
+                return_value="ltvm-build-rocky9",
+            ),
+            patch("ltvm_pkg.kernel_build.subprocess.run") as mock_run,
+            patch(
+                "ltvm_pkg.kernel_build.download_srpm",
+                return_value=fake_srpm,
+            ),
+            patch(
+                "ltvm_pkg.kernel_build.chown_to_sudo_user",
+                side_effect=mock_chown,
+            ),
+        ):
+            mock_run.return_value = MagicMock(returncode=0)
+            _build_kernel_srpm(cfg, lustre_tree, kernel="5.14-rhel9.7")
+
+        chowned_paths = [p for p, _ in chown_calls]
+        assert kernel_out in chowned_paths, (
+            f"Expected chown on kernel_out {kernel_out}, got {chown_calls}"
+        )

@@ -37,13 +37,9 @@ class TestTargetConfigProperties:
         tc = _make_config(tmp_targets)
         assert tc.container_image == "rockylinux:9.7"
 
-    def test_lustre_target(self, tmp_targets: Path) -> None:
-        tc = _make_config(tmp_targets)
-        assert tc.lustre_target == "5.14-rhel9.7"
-
     def test_default_kernel(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
-        assert tc.default_kernel == tc.lustre_target
+        assert tc.default_kernel == "5.14-rhel9.7"
 
     def test_kernel_config_overrides(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
@@ -644,3 +640,103 @@ class TestListTargets:
         ):
             targets = cfg.list_targets()
         assert set(targets) == {"rocky9", "ubuntu2404"}
+
+
+# ------------------------------------------------------------------
+# chown_to_sudo_user
+# ------------------------------------------------------------------
+
+
+class TestChownToSudoUser:
+    """Unit tests for ltvm_pkg.paths.chown_to_sudo_user."""
+
+    def test_noop_when_not_root(self, tmp_path: Path) -> None:
+        from ltvm_pkg.paths import chown_to_sudo_user
+
+        f = tmp_path / "file.txt"
+        f.write_text("x")
+        with (
+            patch("os.getuid", return_value=1000),
+            patch("os.lchown") as mock_lchown,
+        ):
+            chown_to_sudo_user(f)
+        mock_lchown.assert_not_called()
+
+    def test_noop_when_no_sudo_user(self, tmp_path: Path) -> None:
+        from ltvm_pkg.paths import chown_to_sudo_user
+
+        f = tmp_path / "file.txt"
+        f.write_text("x")
+        with (
+            patch("os.getuid", return_value=0),
+            patch.dict("os.environ", {}, clear=True),
+            patch("os.lchown") as mock_lchown,
+        ):
+            chown_to_sudo_user(f)
+        mock_lchown.assert_not_called()
+
+    def test_chowns_single_file(self, tmp_path: Path) -> None:
+        import pwd
+        from ltvm_pkg.paths import chown_to_sudo_user
+
+        f = tmp_path / "file.txt"
+        f.write_text("x")
+        lchown_calls: list[tuple] = []
+
+        with (
+            patch("os.getuid", return_value=0),
+            patch.dict("os.environ", {"SUDO_USER": "alice"}),
+            patch(
+                "pwd.getpwnam",
+                return_value=type("pw", (), {"pw_uid": 1001, "pw_gid": 1001})(),
+            ),
+            patch("os.lchown", side_effect=lambda p, u, g: lchown_calls.append((p, u, g))),
+        ):
+            chown_to_sudo_user(f)
+
+        assert len(lchown_calls) == 1
+        assert lchown_calls[0][1] == 1001
+        assert lchown_calls[0][2] == 1001
+
+    def test_recursive_walks_tree(self, tmp_path: Path) -> None:
+        from ltvm_pkg.paths import chown_to_sudo_user
+
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "a.txt").write_text("a")
+        (tmp_path / "b.txt").write_text("b")
+        lchown_paths: list[str] = []
+
+        with (
+            patch("os.getuid", return_value=0),
+            patch.dict("os.environ", {"SUDO_USER": "alice"}),
+            patch(
+                "pwd.getpwnam",
+                return_value=type("pw", (), {"pw_uid": 500, "pw_gid": 500})(),
+            ),
+            patch(
+                "os.lchown",
+                side_effect=lambda p, u, g: lchown_paths.append(str(p)),
+            ),
+        ):
+            chown_to_sudo_user(tmp_path, recursive=True)
+
+        assert any("a.txt" in p for p in lchown_paths)
+        assert any("b.txt" in p for p in lchown_paths)
+        assert any(str(tmp_path) == p for p in lchown_paths)
+
+    def test_oserror_on_single_file_swallowed(self, tmp_path: Path) -> None:
+        from ltvm_pkg.paths import chown_to_sudo_user
+
+        f = tmp_path / "file.txt"
+        f.write_text("x")
+
+        with (
+            patch("os.getuid", return_value=0),
+            patch.dict("os.environ", {"SUDO_USER": "alice"}),
+            patch(
+                "pwd.getpwnam",
+                return_value=type("pw", (), {"pw_uid": 500, "pw_gid": 500})(),
+            ),
+            patch("os.lchown", side_effect=OSError("eperm")),
+        ):
+            chown_to_sudo_user(f)

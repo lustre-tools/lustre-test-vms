@@ -448,3 +448,90 @@ class TestIncrementalRebuildGuard:
         s = tmp_path / "empty"
         s.mkdir()
         assert read_staging_meta(s) is None
+
+
+# ---------------------------------------------------------------------------
+# chown_to_sudo_user integration: build_lustre chowns tree after stamps
+# ---------------------------------------------------------------------------
+
+
+class TestBuildLustreChown:
+    """build_lustre calls chown_to_sudo_user on the Lustre tree after all
+    stamps are written so that stamp files don't end up root-owned."""
+
+    TARGET = "rocky9"
+
+    def _full_tree(self, tmp_path: Path) -> tuple[Path, Path]:
+        lustre = tmp_path / "lustre"
+        kernel = tmp_path / "kernel"
+        lustre.mkdir()
+        (lustre / "lustre" / "kernel_patches").mkdir(parents=True)
+        (lustre / "configure").write_text("#!/bin/sh\n")
+        (lustre / "config.status").write_text("# status\n")
+        (lustre / "Makefile").write_text("# stub\n")
+        t = self.TARGET
+        kver = "5.14.0-test"
+        (lustre / f".ltvm-kernel-{t}-x86_64").write_text(kver + "\n")
+        (lustre / f".ltvm-server-{t}-x86_64").write_text("True\n")
+        kernel.mkdir()
+        release_dir = kernel / "include" / "config"
+        release_dir.mkdir(parents=True)
+        (release_dir / "kernel.release").write_text(kver + "\n")
+        (kernel / "Module.symvers").write_text("")
+        return lustre, kernel
+
+    def test_chown_called_on_lustre_tree_after_successful_build(
+        self, tmp_path: Path
+    ) -> None:
+        lustre, kernel = self._full_tree(tmp_path)
+        chown_calls: list[Path] = []
+
+        def mock_run(cmd, *args, **kwargs):
+            r = MagicMock()
+            r.returncode = 0
+            return r
+
+        def mock_chown(path: Path, *, recursive: bool = False) -> None:
+            chown_calls.append((path, recursive))
+
+        # Populate the staging dir with the required artifacts so
+        # post-install verification passes.
+        from ltvm_pkg.lustre_build import staging_path
+
+        resolved_kernel = "5.14-rhel9.7-5.14.0-test"
+        staging = staging_path(
+            lustre, self.TARGET, arch="x86_64", kernel=resolved_kernel
+        )
+        (staging / "lib" / "modules" / "5.14.0-test" / "extra").mkdir(
+            parents=True
+        )
+        (
+            staging / "lib" / "modules" / "5.14.0-test" / "extra" / "lustre.ko"
+        ).write_text("M")
+        (staging / "usr" / "sbin").mkdir(parents=True)
+        (staging / "usr" / "sbin" / "mount.lustre").write_text("X")
+
+        with (
+            patch("ltvm_pkg.lustre_build.subprocess.run", side_effect=mock_run),
+            patch(
+                "ltvm_pkg.lustre_build._container_exists", return_value=True
+            ),
+            patch(
+                "ltvm_pkg.lustre_build.chown_to_sudo_user",
+                side_effect=mock_chown,
+            ),
+            patch("ltvm_pkg.target_config.TargetConfig") as mock_tc,
+        ):
+            mock_tc.return_value.resolve_kernel.return_value = resolved_kernel
+            build_lustre(
+                lustre,
+                kernel,
+                container_tag="ltvm-build-rocky9",
+                target=self.TARGET,
+            )
+
+        # The final recursive chown must target the lustre tree root.
+        recursive_calls = [p for p, rec in chown_calls if rec]
+        assert any(p == lustre for p in recursive_calls), (
+            f"Expected recursive chown on {lustre}, got {chown_calls}"
+        )

@@ -24,6 +24,7 @@ import subprocess
 from pathlib import Path
 from typing import TypedDict
 
+from .paths import chown_to_sudo_user
 from .vm_state import DEFAULT_TARGET
 
 
@@ -444,6 +445,9 @@ fi""")
     # host with no extra namespacing.
     script_parts.append("rm -rf /staging/*")
     script_parts.append(f"make{make_cross} install DESTDIR=/staging -j{jobs}")
+    script_parts.append(
+        "rm -rf kconftest.dir _lpb conftest.dir 2>/dev/null || true"
+    )
     script = "\n".join(script_parts)
 
     # Ensure the staging directory exists on the host before mounting.
@@ -467,35 +471,15 @@ fi""")
         lustre_tree, target, arch=arch, kernel=resolved_kernel
     )
     host_staging.mkdir(parents=True, exist_ok=True)
-    # When invoked via sudo, chown the staging dir to the real user so
-    # the user can read their own modules and `rm -rf` their tree
-    # without sudo.  The container side runs as root inside the
-    # container and writes to the bind mount, but the host-side dir
-    # we just created is owned by whoever ran ltvm.
-    sudo_user_env = os.environ.get("SUDO_USER")
-    if sudo_user_env and os.getuid() == 0:
-        try:
-            import pwd
-
-            pw = pwd.getpwnam(sudo_user_env)
-            os.chown(host_staging, pw.pw_uid, pw.pw_gid)
-            # Also chown all parent dirs we may have just created up to
-            # (but not including) the lustre tree root.
-            tree_root = Path(lustre_tree).resolve()
-            cur = host_staging.parent
-            while cur != tree_root and cur != cur.parent:
-                try:
-                    st = cur.stat()
-                    if st.st_uid == 0:
-                        os.chown(cur, pw.pw_uid, pw.pw_gid)
-                except OSError:
-                    break
-                cur = cur.parent
-        except (KeyError, OSError):
-            # SUDO_USER not in passwd or chown failed -- leave the dir
-            # root-owned; the user can fix it manually if needed.  Don't
-            # block the build over chown.
-            pass
+    # Chown the freshly-created staging parent dirs now so the
+    # container's bind-mount writes land in a user-owned subtree.
+    # The full tree chown after the build handles files written
+    # inside the staging dir itself.
+    tree_root = Path(lustre_tree).resolve()
+    cur = host_staging
+    while cur != tree_root and cur != cur.parent:
+        chown_to_sudo_user(cur)
+        cur = cur.parent
 
     # Use a persistent ccache volume so incremental container
     # builds benefit from cached compilations across runs
@@ -550,31 +534,6 @@ fi""")
     r = subprocess.run(cmd)
     if r.returncode != 0:
         raise RuntimeError(f"Container build failed (rc={r.returncode})")
-
-    # Chown the lustre tree back to the real user after the build.
-    # The container's root mapped to host root in the bind mount, so
-    # autotools left a trail of root-owned files (Makefile,
-    # config.status, .deps/, intermediate .o/.ko, etc.) inside the
-    # tree.  Without this fix the user can't `git pull`, can't edit,
-    # and can't even `rm -rf` their own checkout.  Best-effort: if
-    # SUDO_USER isn't set or chown fails for any reason, we leave the
-    # tree as-is rather than failing the build.
-    if sudo_user_env and os.getuid() == 0:
-        try:
-            import pwd
-
-            pw = pwd.getpwnam(sudo_user_env)
-            subprocess.run(
-                [
-                    "chown",
-                    "-R",
-                    f"{pw.pw_uid}:{pw.pw_gid}",
-                    str(lustre_tree),
-                ],
-                check=False,
-            )
-        except (KeyError, OSError):
-            pass
 
     # Post-install verification.  `make install` can return rc=0 even
     # when the install was partial (e.g. a failed sub-make under a
@@ -636,6 +595,12 @@ fi""")
         indent=2,
     )
     (host_staging / ".ltvm-staging-meta.json").write_text(meta_text + "\n")
+
+    # Chown the Lustre tree back to the real user.  Stamps and staging
+    # files are written above (after the container run), so they get
+    # covered here along with the autotools residue the container left
+    # behind (Makefile, config.status, .deps/, *.ko, etc.).
+    chown_to_sudo_user(lustre_tree, recursive=True)
 
     ko_files = list(host_staging.rglob("*.ko"))
     print(f"--- Build complete: {len(ko_files)} kernel modules")

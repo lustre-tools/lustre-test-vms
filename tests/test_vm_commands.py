@@ -80,12 +80,6 @@ class TestParseDiskSize:
         """500m upcases to 500M before parsing."""
         assert vm_commands._parse_disk_size("500m") == 500 * (1 << 20)
 
-    def test_int_value_returned_as_is_when_big_enough(self) -> None:
-        assert vm_commands._parse_disk_size(200 * (1 << 20)) == 200 * (1 << 20)
-
-    def test_int_below_minimum_falls_back_to_default(self) -> None:
-        assert vm_commands._parse_disk_size(1024) == DISK_SIZE_BYTES
-
     def test_invalid_suffix_dies(self) -> None:
         with pytest.raises(SystemExit):
             vm_commands._parse_disk_size("500K")
@@ -694,29 +688,21 @@ class TestSeedKdumpBoot:
         assert any("kdump-config load" in c for c in cmds)
         assert not any("update-initramfs" in c for c in cmds)
 
-    def test_fallback_path_runs_scp_and_dracut(self, tmp_path: Path) -> None:
+    def test_missing_artifacts_dies(self, tmp_path: Path) -> None:
         vm = self._vm(tmp_path)
-        scp_rc = MagicMock(returncode=0, stdout="", stderr="")
         with (
             patch(
                 "ltvm_pkg.vm_commands.run_ssh",
                 side_effect=self._ssh_results(present=False),
-            ) as mock_ssh,
-            patch(
-                "ltvm_pkg.vm_commands.run", return_value=scp_rc
-            ) as mock_run,
+            ),
+            patch("ltvm_pkg.vm_commands.run"),
             patch(
                 "ltvm_pkg.target_config.TargetConfig"
             ) as mock_tc,
         ):
             mock_tc.return_value.os_family = "rhel"
-            vm_commands._seed_kdump_boot(vm)
-
-        mock_run.assert_called()
-        scp_cmd = mock_run.call_args_list[0].args[0]
-        assert "scp" in scp_cmd
-        cmds = [c.args[1] for c in mock_ssh.call_args_list]
-        assert any("dracut --kver 5.14.0-test" in c for c in cmds)
+            with pytest.raises(SystemExit):
+                vm_commands._seed_kdump_boot(vm)
 
     def test_no_kernel_returns_early(self, tmp_path: Path) -> None:
         vm = VMInfo(name="x", ip="10.0.0.1")  # kernel=""
