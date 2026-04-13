@@ -26,6 +26,7 @@ _ROCKY9_YAML: dict = {
                 "available": ["5.14-rhel9.7", "5.14-rhel9.5"],
                 "config": {"CONFIG_XEN_PVH": "y"},
             },
+            "lustre": {"mode": "server_ldiskfs"},
         }
     },
 }

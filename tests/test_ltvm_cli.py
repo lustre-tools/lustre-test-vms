@@ -283,6 +283,11 @@ class TestCmdStatus:
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
             patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
         ):
             tc = cfg.TargetConfig("rocky9")
 
@@ -319,6 +324,11 @@ class TestCmdStatusJson:
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
             patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
         ):
             tc = cfg.TargetConfig("rocky9")
 

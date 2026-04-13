@@ -12,6 +12,8 @@ targets:
       config:
         CONFIG_XEN_PVH: y
       default: 6.12-rhel10.1
+    lustre:
+      mode: server_ldiskfs
     os_name: rocky
     os_version: '10.1'
     server: false
@@ -25,6 +27,8 @@ targets:
       config:
         CONFIG_XEN_PVH: y
       default: 4.18-rhel8.10
+    lustre:
+      mode: server_ldiskfs
     os_name: rocky
     os_version: '8.9'
     server: false
@@ -39,6 +43,8 @@ targets:
       config:
         CONFIG_XEN_PVH: y
       default: 5.14-rhel9.7
+    lustre:
+      mode: server_ldiskfs
     os_name: rocky
     os_version: '9.7'
     srpm_url: https://dl.rockylinux.org/pub/rocky/9/BaseOS/source/tree/Packages/k
@@ -54,6 +60,8 @@ targets:
       config:
         CONFIG_PVH: y
       default: 6.8-ubuntu2404
+    lustre:
+      mode: server_ldiskfs
     os_family: debian
     os_name: ubuntu
     os_version: '24.04'

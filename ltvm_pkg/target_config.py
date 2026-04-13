@@ -10,10 +10,22 @@ import hashlib
 import json
 import os
 import re
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+class LustreMode(str, Enum):
+    """Lustre build/deploy mode for a target.
+
+    Client mode is intentionally absent -- it's a separate follow-on
+    issue because client targets don't need a patched kernel build.
+    """
+
+    SERVER_LDISKFS = "server_ldiskfs"
+    SERVER_ZFS = "server_zfs"
 
 from .paths import find_ltvm_root, load_meta_safe
 
@@ -139,6 +151,27 @@ class TargetConfig:
                 f"available for use. Only 'working' and 'experimental' "
                 f"targets can be built."
             )
+
+        # REQUIRED: lustre.mode. No default, no back-compat -- targets
+        # without an explicit mode fail loudly at load time so downstream
+        # code never has to guess whether this is a server or client target.
+        lustre = self._data.get("lustre")
+        if not isinstance(lustre, dict) or "mode" not in lustre:
+            raise ValueError(
+                f"target {name!r}: missing required 'lustre.mode' in "
+                f"{TARGETS_YAML}. Add a 'lustre: {{mode: server_ldiskfs}}' "
+                f"block (valid modes: "
+                f"{', '.join(m.value for m in LustreMode)})."
+            )
+        mode_raw = lustre["mode"]
+        try:
+            self.lustre_mode = LustreMode(mode_raw)
+        except ValueError as exc:
+            valid = ", ".join(m.value for m in LustreMode)
+            raise ValueError(
+                f"target {name!r}: unknown lustre.mode {mode_raw!r} in "
+                f"{TARGETS_YAML} (valid modes: {valid})"
+            ) from exc
 
     # ------------------------------------------------------------------
     # OS metadata

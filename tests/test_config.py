@@ -99,6 +99,54 @@ class TestTargetConfigUnknown:
             cfg.TargetConfig("rocky8")
 
 
+class TestLustreMode:
+    def test_valid_mode_parsed(self, tmp_targets: Path) -> None:
+        from ltvm_pkg.target_config import LustreMode
+
+        tc = _make_config(tmp_targets)
+        assert tc.lustre_mode is LustreMode.SERVER_LDISKFS
+
+    def test_server_zfs_mode(self, tmp_targets: Path) -> None:
+        import ltvm_pkg.target_config as cfg
+
+        data = yaml.safe_load(
+            (tmp_targets / "targets" / "targets.yaml").read_text()
+        )
+        data["targets"]["rocky9"]["lustre"] = {"mode": "server_zfs"}
+        _write_targets_yaml(tmp_targets / "targets", data)
+        tc = _make_config(tmp_targets)
+        assert tc.lustre_mode is cfg.LustreMode.SERVER_ZFS
+
+    def test_missing_lustre_section_raises(self, tmp_targets: Path) -> None:
+        data = yaml.safe_load(
+            (tmp_targets / "targets" / "targets.yaml").read_text()
+        )
+        del data["targets"]["rocky9"]["lustre"]
+        _write_targets_yaml(tmp_targets / "targets", data)
+        with pytest.raises(ValueError, match="missing required 'lustre.mode'"):
+            _make_config(tmp_targets)
+
+    def test_missing_mode_key_raises(self, tmp_targets: Path) -> None:
+        data = yaml.safe_load(
+            (tmp_targets / "targets" / "targets.yaml").read_text()
+        )
+        data["targets"]["rocky9"]["lustre"] = {}
+        _write_targets_yaml(tmp_targets / "targets", data)
+        with pytest.raises(ValueError, match="missing required 'lustre.mode'"):
+            _make_config(tmp_targets)
+
+    def test_unknown_mode_raises(self, tmp_targets: Path) -> None:
+        data = yaml.safe_load(
+            (tmp_targets / "targets" / "targets.yaml").read_text()
+        )
+        data["targets"]["rocky9"]["lustre"] = {"mode": "client_only"}
+        _write_targets_yaml(tmp_targets / "targets", data)
+        with pytest.raises(
+            ValueError, match="unknown lustre.mode 'client_only'"
+        ):
+            _make_config(tmp_targets)
+
+
 class TestResolveKernel:
     def test_explicit_kernel(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
