@@ -443,6 +443,13 @@ Notes:
 
 This project uses `bd` (beads) for task tracking.
 
+**Sync model:** we do NOT use Dolt remotes. Beads state is
+shared across machines by exporting to JSONL and committing
+it to git — not by `dolt push`/`dolt pull`. If `.beads/` has
+no `issues.jsonl` after a `git pull`, the other machine
+forgot to export before pushing; ask the user rather than
+assuming the tracker is empty.
+
 ```bash
 bd prime          # session start
 bd ready          # find available work
