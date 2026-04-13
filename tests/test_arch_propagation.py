@@ -32,11 +32,12 @@ class TestStagingPathArch:
 
     TREE_A = Path("/home/alice/lustre-release")
     TREE_B = Path("/home/bob/lustre-release")
+    KERNEL = "5.14-rhel9.7"
 
     def test_lives_inside_lustre_tree(self) -> None:
         """The whole point of the in-tree refactor: staging is under the
         user's tree, not under the shared output dir."""
-        p = staging_path(self.TREE_A, "rocky9")
+        p = staging_path(self.TREE_A, "rocky9", kernel=self.KERNEL)
         assert str(p).startswith(str(self.TREE_A) + "/")
         assert ".ltvm-staging" in p.parts
 
@@ -44,46 +45,64 @@ class TestStagingPathArch:
         """x86_64 (default) gets its own arch dir under the target.
         Unlike the previous flat layout, the arch is always present so
         a `rm -rf` of one arch's staging cannot nuke the other's."""
-        p = staging_path(self.TREE_A, "rocky9")
-        assert p.parts[-3:] == (".ltvm-staging", "rocky9", "x86_64")
+        p = staging_path(self.TREE_A, "rocky9", kernel=self.KERNEL)
+        assert p.parts[-4:] == (
+            ".ltvm-staging",
+            "rocky9",
+            "x86_64",
+            self.KERNEL,
+        )
 
     def test_x86_64_explicit_matches_default(self) -> None:
         """Explicit x86_64 is the same path as the default."""
-        assert staging_path(self.TREE_A, "rocky9", arch="x86_64") == (
-            staging_path(self.TREE_A, "rocky9")
-        )
+        assert staging_path(
+            self.TREE_A, "rocky9", arch="x86_64", kernel=self.KERNEL
+        ) == staging_path(self.TREE_A, "rocky9", kernel=self.KERNEL)
 
     def test_aarch64_is_arch_qualified(self) -> None:
-        p = staging_path(self.TREE_A, "rocky9", arch="aarch64")
-        assert p.parts[-3:] == (".ltvm-staging", "rocky9", "aarch64")
+        p = staging_path(
+            self.TREE_A, "rocky9", arch="aarch64", kernel=self.KERNEL
+        )
+        assert p.parts[-4:] == (
+            ".ltvm-staging",
+            "rocky9",
+            "aarch64",
+            self.KERNEL,
+        )
 
     def test_two_arches_isolated(self) -> None:
         """Two arches must not share a staging path."""
-        x86 = staging_path(self.TREE_A, "rocky9", arch="x86_64")
-        arm = staging_path(self.TREE_A, "rocky9", arch="aarch64")
+        x86 = staging_path(
+            self.TREE_A, "rocky9", arch="x86_64", kernel=self.KERNEL
+        )
+        arm = staging_path(
+            self.TREE_A, "rocky9", arch="aarch64", kernel=self.KERNEL
+        )
         assert x86 != arm
         assert not str(arm).startswith(str(x86) + "/")
         assert not str(x86).startswith(str(arm) + "/")
 
     def test_distinct_targets_distinct_paths(self) -> None:
         """Different targets in the same tree get different paths."""
-        assert staging_path(self.TREE_A, "rocky9") != staging_path(
-            self.TREE_A, "ubuntu2404"
-        )
+        assert staging_path(
+            self.TREE_A, "rocky9", kernel=self.KERNEL
+        ) != staging_path(self.TREE_A, "ubuntu2404", kernel=self.KERNEL)
 
     def test_distinct_trees_distinct_paths(self) -> None:
         """The multi-user invariant: alice and bob building the same
         target against their own trees get fully disjoint staging."""
-        a = staging_path(self.TREE_A, "rocky9")
-        b = staging_path(self.TREE_B, "rocky9")
+        a = staging_path(self.TREE_A, "rocky9", kernel=self.KERNEL)
+        b = staging_path(self.TREE_B, "rocky9", kernel=self.KERNEL)
         assert a != b
         assert not str(a).startswith(str(b) + "/")
         assert not str(b).startswith(str(a) + "/")
 
     def test_same_target_same_arch_idempotent(self) -> None:
         """Two calls with the same args return equal paths."""
-        assert staging_path(self.TREE_A, "rocky9", arch="aarch64") == (
-            staging_path(self.TREE_A, "rocky9", arch="aarch64")
+        assert staging_path(
+            self.TREE_A, "rocky9", arch="aarch64", kernel=self.KERNEL
+        ) == staging_path(
+            self.TREE_A, "rocky9", arch="aarch64", kernel=self.KERNEL
         )
 
 
@@ -95,10 +114,9 @@ class TestStampSuffix:
     forces a fresh autogen+configure pass instead of reusing the other
     arch's config.status."""
 
-    def test_default_arch_suffix_is_target_only(self) -> None:
-        """x86_64 keeps the legacy `target` suffix for back-compat with
-        existing on-disk stamps from older builds."""
-        assert _stamp_suffix("rocky9", "x86_64") == "rocky9"
+    def test_default_arch_suffix_includes_arch(self) -> None:
+        """Every arch is suffixed -- no x86_64 special case anymore."""
+        assert _stamp_suffix("rocky9", "x86_64") == "rocky9-x86_64"
 
     def test_aarch64_suffix_includes_arch(self) -> None:
         assert _stamp_suffix("rocky9", "aarch64") == "rocky9-aarch64"

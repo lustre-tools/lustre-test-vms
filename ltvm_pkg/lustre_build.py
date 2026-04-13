@@ -54,7 +54,8 @@ def staging_path(
     lustre_tree: str | Path,
     target: str,
     arch: str = "x86_64",
-    kernel: str | None = None,
+    *,
+    kernel: str,
 ) -> Path:
     """Return the host-side Lustre build staging directory.
 
@@ -68,24 +69,15 @@ def staging_path(
     with the source.
 
     ``kernel`` is the resolved kernel directory name (as produced by
-    ``target_config.resolve_kernel``).  It must be keyed at the
-    staging root because DESTDIR layout installs userland files
+    ``target_config.resolve_kernel``).  It is keyed at the staging
+    root because DESTDIR layout installs userland files
     (``usr/sbin``, ``usr/bin``, ``etc``, etc.) into the same paths
     regardless of kver -- only ``lib/modules/<kver>/`` naturally
-    co-exists.  Two sequential `ltvm build-lustre` runs against
-    different kernels would silently clobber each other's userland
-    without a per-kernel key.  Pre-existing per-target-only staging
-    dirs are preserved as a legacy fallback so migration is gradual.
-
-    Callers that don't have a resolved kernel yet (e.g. early status
-    callers) may pass ``kernel=None``, which returns the legacy
-    per-(target,arch) path.  That path must not be used for new
-    builds: use ``build_lustre`` which resolves a kernel first.
+    co-exists.  Without per-kernel keying two sequential
+    `ltvm build-lustre` runs against different kernels would silently
+    clobber each other's userland.
     """
-    base = Path(lustre_tree) / ".ltvm-staging" / target / arch
-    if kernel is None:
-        return base
-    return base / kernel
+    return Path(lustre_tree) / ".ltvm-staging" / target / arch / kernel
 
 
 class BuildResult(TypedDict):
@@ -132,9 +124,7 @@ def _stamp_suffix(target: str, arch: str) -> str:
     configure and `make` runs against whatever `config.status` the
     other arch left behind, producing corrupt cross-arch artifacts.
     """
-    if arch and arch != "x86_64":
-        return f"{target}-{arch}"
-    return target
+    return f"{target}-{arch}"
 
 
 def _needs_reconfigure(
@@ -594,13 +584,6 @@ fi""")
     (lustre_tree / f".ltvm-server-{suffix}").write_text(
         str(enable_server) + "\n"
     )
-    # Best-effort: clean up the legacy .ltvm-kernel-path-* stamp left
-    # by older builds; the value was always "/kernel" so the check it
-    # protected was a no-op.
-    legacy = lustre_tree / f".ltvm-kernel-path-{target}"
-    if legacy.exists():
-        legacy.unlink()
-
     # Drop a build stamp at the staging root.  cmd_deploy uses it as
     # the reference mtime for the source-tree freshness check, so an
     # in-place rewrite of an existing .ko file under
@@ -649,17 +632,26 @@ def lustre_status(
 
     stamp = lustre_tree / f".ltvm-kernel-{_stamp_suffix(target, arch)}"
     config_status = lustre_tree / "config.status"
-    # Prefer the per-kernel staging when a kernel is known.  Fall back
-    # to the legacy per-(target,arch) path so status for pre-migration
-    # trees still reports a ko_count instead of silently zero.
-    host_staging = staging_path(lustre_tree, target, arch=arch, kernel=kernel)
-    if kernel is not None and not host_staging.is_dir():
-        legacy = staging_path(lustre_tree, target, arch=arch, kernel=None)
-        if legacy.is_dir():
-            host_staging = legacy
-    ko_count = (
-        len(list(host_staging.rglob("*.ko"))) if host_staging.is_dir() else 0
-    )
+    if kernel is None:
+        # No kernel known -- enumerate per-kernel staging dirs under the
+        # (target, arch) base and sum their .ko counts.  Returning the
+        # base path itself is wrong: that path no longer holds .ko files,
+        # only kernel-keyed subdirs do.
+        base = Path(lustre_tree) / ".ltvm-staging" / target / arch
+        ko_count = (
+            sum(len(list(d.rglob("*.ko"))) for d in base.iterdir() if d.is_dir())
+            if base.is_dir()
+            else 0
+        )
+    else:
+        host_staging = staging_path(
+            lustre_tree, target, arch=arch, kernel=kernel
+        )
+        ko_count = (
+            len(list(host_staging.rglob("*.ko")))
+            if host_staging.is_dir()
+            else 0
+        )
 
     built_against = stamp.read_text().strip() if stamp.exists() else None
     current_kver = _kernel_release(build_tree) if build_tree.exists() else None

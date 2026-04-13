@@ -347,7 +347,7 @@ class TestNoOrphanVmCommandFunctions:
 #     the field values match the caller's intent.
 #
 # Fields that cmd_create reads from args (via getattr or direct access):
-#   name, vcpus, mem, ip, rootfs, image, kernel, os, arch,
+#   name, vcpus, mem, ip, image, kernel, os, arch,
 #   mdt_disks, ost_disks, disk_size, _quiet
 
 

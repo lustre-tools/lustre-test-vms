@@ -1284,7 +1284,6 @@ def cmd_create(args: argparse.Namespace) -> int:
         vcpus=args.vcpus,
         mem=args.mem,
         ip=args.ip,
-        rootfs=args.rootfs or "",
         image=args.image or "",
         kernel=args.kernel or "",
         mdt_disks=args.mdt_disks,
@@ -1310,7 +1309,6 @@ def cmd_ensure(args: argparse.Namespace) -> int:
         vcpus=args.vcpus,
         mem=args.mem,
         ip=args.ip,
-        rootfs=args.rootfs or "",
         image=args.image or "",
         kernel=args.kernel or "",
         mdt_disks=args.mdt_disks,
@@ -1577,11 +1575,13 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     # with a clear hint rather than falling through to an automatic
     # `ltvm build-lustre` that might target the wrong kernel.
     if bundled_snapshot is None and not userspace_only:
-        legacy = _staging_path(
-            build_path, target, arch=vm_arch, kernel=None
+        legacy = (
+            Path(build_path).resolve() / ".ltvm-staging" / target / vm_arch
         )
-        if not staging.is_dir() and legacy.is_dir() and any(
-            legacy.rglob("*.ko")
+        if (
+            not staging.is_dir()
+            and legacy.is_dir()
+            and any(legacy.glob("*.ko"))
         ):
             return _error(
                 f"Lustre staging for kernel {deploy_kernel} is missing "

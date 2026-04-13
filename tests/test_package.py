@@ -13,7 +13,6 @@ from ltvm_pkg.release_package import (
     _find_artifacts,
     _resolve_kernel,
     export_build_container,
-    install_target,
     package_target,
     snapshot_lustre,
 )
@@ -75,7 +74,7 @@ def _setup_artifacts(
 
     kdir = tmp_path / "kernels" / kernel
     kdir.mkdir(parents=True)
-    idir = tmp_path / "image"
+    idir = tmp_path / "images" / kernel
     idir.mkdir(parents=True)
     cdir = tmp_path / "container"
     cdir.mkdir(parents=True)
@@ -141,8 +140,8 @@ class TestFindArtifacts:
     def test_img_extension(self, tmp_path: Path) -> None:
         """Image with .img extension works too."""
         out = _setup_artifacts(tmp_path, missing=["image"])
-        idir = tmp_path / "image"
-        idir.mkdir(exist_ok=True)
+        idir = tmp_path / "images" / "test-kernel"
+        idir.mkdir(parents=True, exist_ok=True)
         (idir / "base.img").touch()
         arts = _find_artifacts(out, kernel="test-kernel")
         assert "image" in arts
@@ -280,7 +279,9 @@ class TestSnapshotLustre:
         kdir = output_dir / "kernels" / "test-kernel"
         kdir.mkdir(parents=True)
         (kdir / "vmlinux").touch()
-        staging = tree / ".ltvm-staging" / self.TARGET / "x86_64"
+        staging = (
+            tree / ".ltvm-staging" / self.TARGET / "x86_64" / "test-kernel"
+        )
         if with_staging_ko:
             ko_dir = staging / "lib" / "modules" / "fake-kver" / "extra"
             ko_dir.mkdir(parents=True)
@@ -313,7 +314,9 @@ class TestSnapshotLustre:
 
     def test_with_staging_calls_rsync(self, tmp_path: Path) -> None:
         tree, output_dir, kdir, dest = self._setup(tmp_path)
-        staging_src = tree / ".ltvm-staging" / self.TARGET / "x86_64"
+        staging_src = (
+            tree / ".ltvm-staging" / self.TARGET / "x86_64" / "test-kernel"
+        )
 
         with (
             patch(
@@ -378,8 +381,8 @@ def _setup_package_artifacts(
     (kdir / "vmlinuz").touch()
     (kdir / "build-tree").mkdir()
     (kdir / "modules").mkdir()
-    idir = output_dir / "image"
-    idir.mkdir()
+    idir = output_dir / "images" / kernel
+    idir.mkdir(parents=True)
     (idir / "base.ext4").touch()
     cdir = output_dir / "container"
     cdir.mkdir()
@@ -629,148 +632,6 @@ class TestPackageTarget:
         manifest = json.loads(manifest_path.read_text())
         assert manifest["has_lustre_artifacts"] is True
         assert "lustre-artifacts" in manifest["contents"]
-
-
-# ---------------------------------------------------------------------------
-# install_target
-# ---------------------------------------------------------------------------
-
-
-class TestInstallTarget:
-    def _make_output_dir(
-        self,
-        tmp_path: Path,
-        kernel: str = "test-kernel",
-        with_lustre: bool = False,
-    ) -> Path:
-        output_dir = tmp_path / "output" / "my-target"
-        kdir = output_dir / "kernels" / kernel
-        kdir.mkdir(parents=True)
-        (kdir / "vmlinux").touch()
-        (kdir / "vmlinuz").touch()
-        (kdir / "build-tree").mkdir()
-        (kdir / "modules").mkdir()
-        idir = output_dir / "image"
-        idir.mkdir()
-        (idir / "base.ext4").touch()
-        cdir = output_dir / "container"
-        cdir.mkdir()
-        (cdir / "image.tar").touch()
-        if with_lustre:
-            (kdir / "lustre-artifacts").mkdir()
-        return output_dir
-
-    def test_returns_correct_paths(self, tmp_path: Path) -> None:
-        output_dir = self._make_output_dir(tmp_path)
-        kernel_dir = tmp_path / "kdir"
-        image_dir = tmp_path / "imgdir"
-
-        with patch("subprocess.run", return_value=MagicMock(returncode=0)):
-            result = install_target(
-                "my-target",
-                output_dir,
-                kernel="test-kernel",
-                kernel_dir=kernel_dir,
-                image_dir=image_dir,
-            )
-
-        expected_vmlinux = str(kernel_dir / "vmlinux-my-target-test-kernel")
-        expected_vmlinuz = str(kernel_dir / "vmlinuz-my-target-test-kernel")
-        expected_image = str(image_dir / "my-target-ltvm.ext4")
-
-        assert result["vmlinux"] == expected_vmlinux
-        assert result["vmlinuz"] == expected_vmlinuz
-        assert result["image"] == expected_image
-
-    def test_symlink_created_when_no_default_vmlinux(
-        self, tmp_path: Path
-    ) -> None:
-        output_dir = self._make_output_dir(tmp_path)
-        kernel_dir = tmp_path / "kdir"
-        image_dir = tmp_path / "imgdir"
-        # kernel_dir does NOT exist yet, so default_vmlinux won't exist
-
-        calls_made: list = []
-
-        def mock_run(cmd, *args, **kwargs):
-            calls_made.append(cmd)
-            return MagicMock(returncode=0)
-
-        with patch("subprocess.run", side_effect=mock_run):
-            install_target(
-                "my-target",
-                output_dir,
-                kernel="test-kernel",
-                kernel_dir=kernel_dir,
-                image_dir=image_dir,
-            )
-
-        # ln -sf must appear among the calls
-        ln_calls = [c for c in calls_made if "ln" in c]
-        assert len(ln_calls) == 1
-        assert ln_calls[0][:3] == ["sudo", "ln", "-sf"]
-
-    def test_no_symlink_when_default_vmlinux_exists(
-        self, tmp_path: Path
-    ) -> None:
-        output_dir = self._make_output_dir(tmp_path)
-        kernel_dir = tmp_path / "kdir"
-        kernel_dir.mkdir()
-        image_dir = tmp_path / "imgdir"
-        # Create a default vmlinux so the symlink branch is skipped
-        (kernel_dir / "vmlinux").touch()
-
-        calls_made: list = []
-
-        def mock_run(cmd, *args, **kwargs):
-            calls_made.append(cmd)
-            return MagicMock(returncode=0)
-
-        with patch("subprocess.run", side_effect=mock_run):
-            install_target(
-                "my-target",
-                output_dir,
-                kernel="test-kernel",
-                kernel_dir=kernel_dir,
-                image_dir=image_dir,
-            )
-
-        ln_calls = [c for c in calls_made if "ln" in c]
-        assert len(ln_calls) == 0
-
-    def test_lustre_artifacts_key_present(self, tmp_path: Path) -> None:
-        output_dir = self._make_output_dir(tmp_path, with_lustre=True)
-        kernel_dir = tmp_path / "kdir"
-        image_dir = tmp_path / "imgdir"
-
-        with patch("subprocess.run", return_value=MagicMock(returncode=0)):
-            result = install_target(
-                "my-target",
-                output_dir,
-                kernel="test-kernel",
-                kernel_dir=kernel_dir,
-                image_dir=image_dir,
-            )
-
-        assert "lustre-artifacts" in result
-
-    def test_no_lustre_artifacts_key_without_lustre_artifact(
-        self, tmp_path: Path
-    ) -> None:
-        output_dir = self._make_output_dir(tmp_path, with_lustre=False)
-        kernel_dir = tmp_path / "kdir"
-        image_dir = tmp_path / "imgdir"
-
-        with patch("subprocess.run", return_value=MagicMock(returncode=0)):
-            result = install_target(
-                "my-target",
-                output_dir,
-                kernel="test-kernel",
-                kernel_dir=kernel_dir,
-                image_dir=image_dir,
-            )
-
-        assert "lustre-artifacts" not in result
 
 
 # ---------------------------------------------------------------------------

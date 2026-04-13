@@ -494,13 +494,10 @@ class TestCmdDeployPerKernelStaging:
         import argparse as ap
 
         from ltvm_pkg import cli as cli_mod
-        from ltvm_pkg.lustre_build import staging_path
 
         build_path = tmp_path / "lustre-release"
         self._setup_lustre_tree(build_path)
-        legacy = staging_path(
-            build_path, "rocky9", arch="x86_64", kernel=None
-        )
+        legacy = build_path / ".ltvm-staging" / "rocky9" / "x86_64"
         legacy.mkdir(parents=True)
         (legacy / "old.ko").write_text("")
 

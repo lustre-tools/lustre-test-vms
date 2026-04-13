@@ -587,13 +587,6 @@ def _build_kernel_srpm(
     )
     log.info("Kernel output directory: kernels/%s", full_name)
 
-    # Migrate old short-name directory if it exists (one-time migration)
-    old_out = target_config.output_dir / "kernels" / lustre_target
-    new_out = target_config.output_dir / "kernels" / full_name
-    if old_out.exists() and not new_out.exists():
-        log.info("Migrating kernel dir: %s -> %s", old_out.name, new_out.name)
-        old_out.rename(new_out)
-
     # Download SRPM
     srpm_url = target_config.srpm_url
     if not srpm_url:

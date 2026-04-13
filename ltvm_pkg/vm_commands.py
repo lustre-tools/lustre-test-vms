@@ -323,7 +323,7 @@ def cmd_create(args: argparse.Namespace) -> None:
     mac = mac_for_name(name)
 
     os_target = getattr(args, "os", "")
-    explicit_image = getattr(args, "image", "") or args.rootfs
+    explicit_image = getattr(args, "image", "")
     explicit_kernel = getattr(args, "kernel", "")
     arch = getattr(args, "arch", None) or "x86_64"
     defaulted_target = not os_target
@@ -605,7 +605,6 @@ def cmd_ensure(args: argparse.Namespace) -> None:
         vcpus=args.vcpus,
         mem=args.mem,
         ip=None,
-        rootfs=None,
         image=getattr(args, "image", ""),
         kernel=getattr(args, "kernel", ""),
         os=getattr(args, "os", ""),

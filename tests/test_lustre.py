@@ -101,9 +101,8 @@ class TestNeedsReconfigure:
         release_dir.mkdir(parents=True)
         (release_dir / "kernel.release").write_text(kver + "\n")
         t = self.TARGET
-        (lustre / f".ltvm-kernel-{t}").write_text(kver + "\n")
-        (lustre / f".ltvm-kernel-path-{t}").write_text("/kernel\n")
-        (lustre / f".ltvm-server-{t}").write_text("True\n")
+        (lustre / f".ltvm-kernel-{t}-x86_64").write_text(kver + "\n")
+        (lustre / f".ltvm-server-{t}-x86_64").write_text("True\n")
         return lustre, kernel
 
     def test_force_returns_true(self, tmp_path: Path) -> None:
@@ -202,9 +201,9 @@ class TestLustreStatus:
         (release_dir / "kernel.release").write_text(kver + "\n")
         return kt
 
-    def _staging(self, lt: Path) -> Path:
-        """Per-tree staging dir, mirroring lustre_build.staging_path."""
-        d = lt / ".ltvm-staging" / self.TARGET / "x86_64"
+    def _staging(self, lt: Path, kernel: str = "test-kernel") -> Path:
+        """Per-tree, per-kernel staging dir mirroring staging_path."""
+        d = lt / ".ltvm-staging" / self.TARGET / "x86_64" / kernel
         d.mkdir(parents=True, exist_ok=True)
         return d
 
@@ -217,14 +216,14 @@ class TestLustreStatus:
     def test_stale_true_when_versions_differ(self, tmp_path: Path) -> None:
         lt = self._make_lustre(tmp_path)
         kt = self._make_kernel(tmp_path, "5.14.0-new")
-        (lt / f".ltvm-kernel-{self.TARGET}").write_text("5.14.0-old\n")
+        (lt / f".ltvm-kernel-{self.TARGET}-x86_64").write_text("5.14.0-old\n")
         status = lustre_status(lt, kt, target=self.TARGET)
         assert status["stale"] is True
 
     def test_stale_false_when_versions_match(self, tmp_path: Path) -> None:
         lt = self._make_lustre(tmp_path)
         kt = self._make_kernel(tmp_path, "5.14.0")
-        (lt / f".ltvm-kernel-{self.TARGET}").write_text("5.14.0\n")
+        (lt / f".ltvm-kernel-{self.TARGET}-x86_64").write_text("5.14.0\n")
         status = lustre_status(lt, kt, target=self.TARGET)
         assert status["stale"] is False
 
@@ -266,7 +265,7 @@ class TestLustreStatus:
     def test_built_against_from_stamp(self, tmp_path: Path) -> None:
         lt = self._make_lustre(tmp_path)
         kt = self._make_kernel(tmp_path, "5.14.0-427.el9")
-        (lt / f".ltvm-kernel-{self.TARGET}").write_text("5.14.0-427.el9\n")
+        (lt / f".ltvm-kernel-{self.TARGET}-x86_64").write_text("5.14.0-427.el9\n")
         status = lustre_status(lt, kt, target=self.TARGET)
         assert status["built_against"] == "5.14.0-427.el9"
 
@@ -311,10 +310,6 @@ class TestLustreStatus:
 
 
 class TestStagingPathPerKernel:
-    def test_default_is_per_target_arch(self, tmp_path: Path) -> None:
-        p = staging_path(tmp_path, "rocky9", arch="x86_64")
-        assert p == tmp_path / ".ltvm-staging" / "rocky9" / "x86_64"
-
     def test_kernel_key_appends_kernel_dir(self, tmp_path: Path) -> None:
         p = staging_path(
             tmp_path, "rocky9", arch="x86_64", kernel="5.14-rhel9.7"
@@ -379,8 +374,8 @@ class TestKernelChangeDistclean:
         (release_dir / "kernel.release").write_text(new_kver + "\n")
         (kernel / "Module.symvers").write_text("")
         t = self.TARGET
-        (lustre / f".ltvm-kernel-{t}").write_text(old_kver + "\n")
-        (lustre / f".ltvm-server-{t}").write_text("True\n")
+        (lustre / f".ltvm-kernel-{t}-x86_64").write_text(old_kver + "\n")
+        (lustre / f".ltvm-server-{t}-x86_64").write_text("True\n")
         return lustre, kernel
 
     def test_kernel_change_invokes_distclean(self, tmp_path: Path) -> None:

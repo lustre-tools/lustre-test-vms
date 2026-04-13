@@ -99,9 +99,6 @@ def _find_artifacts(
     kernel_name, kernel_dir = _resolve_kernel(output_dir, kernel)
 
     # Per-kernel image layout: output/<target>/images/<kernel>/base.*
-    # (fallback: legacy single-image layout under output/<target>/image/
-    # -- kept only so an older on-disk tree doesn't crash _find_artifacts
-    # during tests; the real build path always writes to images/<kernel>/.)
     image_dir = output_dir / "images" / kernel_name
     container_dir = output_dir / "container"
 
@@ -113,18 +110,11 @@ def _find_artifacts(
         "container": container_dir / "image.tar",
     }
 
-    # Image can be .ext4 or .img
     image_files: list[Path] = []
     if image_dir.is_dir():
         image_files = list(image_dir.glob("*.ext4")) + list(
             image_dir.glob("*.img")
         )
-    if not image_files:
-        legacy = output_dir / "image"
-        if legacy.is_dir():
-            image_files = list(legacy.glob("*.ext4")) + list(
-                legacy.glob("*.img")
-            )
     if image_files:
         required["image"] = image_files[0]
 
@@ -197,15 +187,11 @@ def snapshot_lustre(
         lustre_tree, target, arch=arch, kernel=kernel_name
     )
     if not staging_src.is_dir():
-        legacy = staging_path(lustre_tree, target, arch=arch, kernel=None)
-        if legacy.is_dir():
-            staging_src = legacy
-        else:
-            raise ValueError(
-                f"No staging directory at {staging_src} -- "
-                f"run `ltvm build-lustre {target} --kernel {kernel_name} "
-                f"--lustre-tree {lustre_tree}` first"
-            )
+        raise ValueError(
+            f"No staging directory at {staging_src} -- "
+            f"run `ltvm build-lustre {target} --kernel {kernel_name} "
+            f"--lustre-tree {lustre_tree}` first"
+        )
 
     ko_files = list(staging_src.rglob("*.ko"))
     if not ko_files:
@@ -632,85 +618,3 @@ def fetch_target(
     return target_dir
 
 
-# Default install paths
-_VM_DIR = Path(os.environ.get("LTVM_VM_DIR", "/opt/qemu-vms"))
-DEFAULT_KERNEL_DIR = _VM_DIR / "kernel"
-DEFAULT_IMAGE_DIR = _VM_DIR / "images"
-
-
-def install_target(
-    target_name: str,
-    output_dir: str | Path,
-    kernel: str | None = None,
-    *,
-    kernel_dir: str | Path | None = None,
-    image_dir: str | Path | None = None,
-    arch: str = "x86_64",
-) -> dict[str, str]:
-    """Install kernel + image to system paths.
-
-    kernel: kernel name under kernels/; auto-detected if None.
-    arch: target architecture (appended to filenames when non-default).
-    This requires sudo (writes to /opt/qemu-vms/).
-    Returns dict of installed paths.
-    """
-    output_dir = Path(output_dir)
-    artifacts = _find_artifacts(output_dir, kernel=kernel)
-
-    # Resolve kernel name for installed file naming
-    kernel_name, _ = _resolve_kernel(output_dir, kernel)
-
-    kernel_dir = Path(kernel_dir or DEFAULT_KERNEL_DIR)
-    image_dir = Path(image_dir or DEFAULT_IMAGE_DIR)
-
-    installed: dict[str, str] = {}
-
-    # Install kernel -- include kernel name (and arch if non-default) in filename
-    arch_suffix = f"-{arch}" if arch != "x86_64" else ""
-    vmlinux_dest = (
-        kernel_dir / f"vmlinux-{target_name}-{kernel_name}{arch_suffix}"
-    )
-    vmlinuz_dest = (
-        kernel_dir / f"vmlinuz-{target_name}-{kernel_name}{arch_suffix}"
-    )
-
-    print(f"  Installing kernel ({kernel_name}) to {kernel_dir}/")
-    subprocess.run(["sudo", "mkdir", "-p", str(kernel_dir)], check=True)
-    subprocess.run(
-        ["sudo", "cp", str(artifacts["vmlinux"]), str(vmlinux_dest)], check=True
-    )
-    subprocess.run(
-        ["sudo", "cp", str(artifacts["vmlinuz"]), str(vmlinuz_dest)], check=True
-    )
-
-    # Also install as the default vmlinux if none exists
-    default_vmlinux = kernel_dir / "vmlinux"
-    if not default_vmlinux.exists():
-        subprocess.run(
-            ["sudo", "ln", "-sf", str(vmlinux_dest), str(default_vmlinux)],
-            check=True,
-        )
-        print(f"    Default kernel -> vmlinux-{target_name}-{kernel_name}")
-
-    installed["vmlinux"] = str(vmlinux_dest)
-    installed["vmlinuz"] = str(vmlinuz_dest)
-
-    # Install image
-    image_src = artifacts["image"]
-    image_dest = image_dir / f"{target_name}-ltvm{arch_suffix}.ext4"
-
-    print(f"  Installing image to {image_dir}/")
-    subprocess.run(["sudo", "mkdir", "-p", str(image_dir)], check=True)
-    subprocess.run(["sudo", "cp", str(image_src), str(image_dest)], check=True)
-
-    installed["image"] = str(image_dest)
-
-    # Note prebuilt Lustre availability
-    if "lustre-artifacts" in artifacts:
-        installed["lustre-artifacts"] = str(artifacts["lustre-artifacts"])
-
-    print("  Installed:")
-    for k, v in installed.items():
-        print(f"    {k}: {v}")
-
-    return installed
