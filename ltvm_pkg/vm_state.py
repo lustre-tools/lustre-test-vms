@@ -208,8 +208,12 @@ def resolve_os_artifacts(
                 break
         if kern is None:
             raise FileNotFoundError(
-                f"No vmlinuz/vmlinux in {kdir}\n"
-                f"Run: ltvm build-kernel {os_name} "
+                f"Kernel directory exists but has no vmlinuz/vmlinux: "
+                f"{kdir}\n"
+                f"The build may be in progress, was interrupted, or "
+                f"failed partway through.\n"
+                f"Check state:   ltvm build-status\n"
+                f"Rebuild:       ltvm build-kernel {os_name} "
                 f"--kernel {kernel_dirname}{arch_hint}"
             )
 
