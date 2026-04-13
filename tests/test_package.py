@@ -137,15 +137,6 @@ class TestFindArtifacts:
         with pytest.raises(ValueError, match="vmlinux.*vmlinuz"):
             _find_artifacts(out, kernel="test-kernel")
 
-    def test_img_extension(self, tmp_path: Path) -> None:
-        """Image with .img extension works too."""
-        out = _setup_artifacts(tmp_path, missing=["image"])
-        idir = tmp_path / "images" / "test-kernel"
-        idir.mkdir(parents=True, exist_ok=True)
-        (idir / "base.img").touch()
-        arts = _find_artifacts(out, kernel="test-kernel")
-        assert "image" in arts
-
     def test_auto_detect_kernel(self, tmp_path: Path) -> None:
         out = _setup_artifacts(tmp_path)
         arts = _find_artifacts(out)

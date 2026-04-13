@@ -270,10 +270,10 @@ class TestParseTargetIn:
 
 class _FakeTC:
     """Minimal stand-in for TargetConfig -- validate_target only reads
-    .lustre_target and .lustre_mode."""
+    .default_kernel and .lustre_mode."""
 
     def __init__(self, lustre_target: str, lustre_mode: LustreMode) -> None:
-        self.lustre_target = lustre_target
+        self.default_kernel = lustre_target
         self.lustre_mode = lustre_mode
 
 

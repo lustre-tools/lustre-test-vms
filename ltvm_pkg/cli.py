@@ -486,7 +486,7 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
             f"--kernel {resolved_kernel}",
         )
 
-    # Server build follows target.conf unless overridden
+    # Server build follows targets.yaml unless overridden
     enable_server = tc.server
     if getattr(args, "disable_server", False):
         enable_server = False
@@ -1598,26 +1598,6 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     # source tree without having built Lustre for this kernel, refuse
     # with a clear hint rather than falling through to an automatic
     # `ltvm build-lustre` that might target the wrong kernel.
-    if bundled_snapshot is None and not userspace_only:
-        legacy = (
-            Path(build_path).resolve() / ".ltvm-staging" / target / vm_arch
-        )
-        if (
-            not staging.is_dir()
-            and legacy.is_dir()
-            and any(legacy.glob("*.ko"))
-        ):
-            return _error(
-                f"Lustre staging for kernel {deploy_kernel} is missing "
-                f"at {staging}, but a legacy per-target staging exists "
-                f"at {legacy}. Per-kernel staging is now required.",
-                use_json,
-                hint=(
-                    f"Run: ltvm build-lustre {target} "
-                    f"--kernel {deploy_kernel} --lustre-tree {build_path}"
-                ),
-            )
-
     # If we picked up a bundled snapshot, mirror it into staging
     # unconditionally.  Previously we skipped the mirror whenever
     # staging already contained .ko files, but that silently shipped

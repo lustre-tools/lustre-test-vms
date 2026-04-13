@@ -281,14 +281,14 @@ def _kver_matches(declared: str, target_kver: str) -> bool:
 def validate_target(tc: TargetConfig, lustre_tree: Path) -> ValidationResult:
     """Decide whether ``tc`` is supported by the given Lustre tree.
 
-    Combines tc.lustre_target + tc.lustre_mode with the tree's
+    Combines tc.default_kernel + tc.lustre_mode with the tree's
     declarative files (.target.in, which_patch, ChangeLog).  Returns
     a ValidationResult; callers use .status to gate further action.
     """
     from .target_config import LustreMode
 
     mode = tc.lustre_mode
-    series = tc.lustre_target
+    series = tc.default_kernel
 
     try:
         ti = parse_target_in(lustre_tree, series)

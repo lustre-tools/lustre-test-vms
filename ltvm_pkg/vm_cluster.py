@@ -238,6 +238,11 @@ def _create_one_node(
 
 def cmd_cluster_create(args: argparse.Namespace) -> None:
     cluster_name = args.name
+    # Cluster name flows into filesystem paths (SOCKETS/<name>.cluster)
+    # so it needs the same character whitelist as VM names.
+    from .vm_commands import _validate_vm_name
+
+    _validate_vm_name(cluster_name)
     if (SOCKETS / f"{cluster_name}.cluster").exists():
         die(f"cluster '{cluster_name}' already exists")
 
@@ -379,25 +384,6 @@ def _deploy_one_node(
     staging = _staging_path(
         lustre_tree, target, arch=vm_arch, kernel=deploy_kernel
     )
-    if not staging.is_dir():
-        legacy_base = (
-            Path(lustre_tree).resolve() / ".ltvm-staging" / target / vm_arch
-        )
-        legacy_kos = (
-            list(legacy_base.glob("*.ko")) if legacy_base.is_dir() else []
-        )
-        if legacy_kos:
-            return (
-                node_name,
-                1,
-                (
-                    f"Lustre staging for kernel {deploy_kernel} is missing "
-                    f"at {staging}, but a legacy per-target staging exists "
-                    f"at {legacy_base}. Per-kernel staging is now required.\n"
-                    f"  Run: ltvm build-lustre {target} "
-                    f"--kernel {deploy_kernel} --lustre-tree {lustre_tree}"
-                ),
-            )
     try:
         deploy_to_vm(vm, staging, os_family=os_family)
         return node_name, 0, "ok"

@@ -174,8 +174,10 @@ def resolve_os_artifacts(
                     f"(or: ltvm fetch {os_name}{arch_hint})"
                 )
     else:
-        # No override: use default kernel suffix, falling back to
-        # lex-latest built kernel dir if the default is not present.
+        # No override: use default kernel suffix. If the default
+        # isn't built, fail loudly rather than silently using
+        # some other built kernel -- the caller must opt in via
+        # --kernel to use a non-default.
         if kernel_suffix:
             cand = kernels_root / kernel_suffix
             if cand.is_dir():
@@ -196,11 +198,23 @@ def resolve_os_artifacts(
                 d.name for d in kernels_root.iterdir() if d.is_dir()
             )
             if any_built:
-                kernel_dirname = any_built[-1]
+                built_list = ", ".join(any_built)
+                raise FileNotFoundError(
+                    f"Default kernel {kernel_suffix!r} for "
+                    f"'{os_name}' (arch={effective_arch}) is not "
+                    f"built.\n"
+                    f"Built kernels: {built_list}\n"
+                    f"Run: ltvm build-kernel {os_name} "
+                    f"--kernel {kernel_suffix}{arch_hint}  "
+                    f"(to build the default), or re-run with "
+                    f"--kernel <existing> to use one of the "
+                    f"kernels already built."
+                )
 
     if kernel_dirname is None:
         raise FileNotFoundError(
-            f"No kernel for '{os_name}' (arch={effective_arch})\n"
+            f"No kernels built for '{os_name}' "
+            f"(arch={effective_arch})\n"
             f"Run: ltvm fetch {os_name}{arch_hint}  "
             f"(or: ltvm build-kernel {os_name}{arch_hint})"
         )

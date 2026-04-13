@@ -52,11 +52,8 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
 
     QEMU passes the kernel externally via -kernel, so the VM image has
     no /boot/vmlinuz or initramfs unless image_build baked them in.
-    As of the per-kernel image refactor, fresh images ship with both
-    pre-built, and this function is a fast no-op that just (re)loads
-    the kdump service.  For older images that predate the bake, or
-    custom images without kdump artifacts, we fall back to scp'ing
-    the vmlinuz and running dracut/update-initramfs at runtime.
+    Fresh images ship with both pre-built, so this is just a probe +
+    kdump service reload.
     """
     if not vm.kernel:
         return
@@ -75,8 +72,7 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
     # cases where the target config is genuinely missing/broken
     # (ValueError: unknown target / bad schema, FileNotFoundError:
     # targets.yaml gone).  A blanket `except Exception: pass` would
-    # silently fall back to "rhel" for a Debian VM and run dracut
-    # against an apt-based system.
+    # silently fall back to "rhel" for a Debian VM.
     os_family = "rhel"
     if vm.os_id:
         try:
@@ -90,9 +86,6 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
                 file=sys.stderr,
             )
 
-    # Fast path: image was built with kdump baked in.  Probe for both
-    # the kernel and the initramfs; if present, just make sure the
-    # kdump service is (re)loaded for this kernel.
     if os_family == "debian":
         initrd_path = f"/var/lib/kdump/initrd.img-{kver}"
         reload_cmd = (
@@ -107,112 +100,13 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
         f"test -f /boot/vmlinuz-{kver} && test -f {initrd_path}",
         timeout=10,
     )
-    if probe.returncode == 0:
-        run_ssh(vm.ip, reload_cmd, timeout=30)
-        return
-
-    print(
-        "warning: kdump boot artifacts missing from image; "
-        "falling back to runtime seeding"
-    )
-
-    # Prefer the bzImage for kdump; fall back to vmlinux if that's all we have.
-    kernel_host = Path(vm.kernel)
-    if kernel_host.name == "vmlinux":
-        vmlinuz = kernel_host.parent / "vmlinuz"
-        if vmlinuz.exists():
-            kernel_host = vmlinuz
-
-    print(f"seeding /boot/vmlinuz-{kver} for kdump...")
-    r = run(
-        [
-            "sshpass",
-            "-p",
-            ROOT_PASSWORD,
-            "scp",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "LogLevel=ERROR",
-            str(kernel_host),
-            f"root@{vm.ip}:/boot/vmlinuz-{kver}",
-        ],
-        capture_output=True,
-        timeout=30,
-    )
-    if r.returncode != 0:
-        die(f"failed to copy vmlinuz into VM /boot: {r.stderr.strip()}")
-
-    if os_family == "debian":
-        print("generating kdump initramfs (update-initramfs)...")
-        # Remove broken initramfs hooks (e.g. dhcpcd) that fail when the
-        # package isn't fully installed, then generate the initramfs.
-        # Ubuntu kdump-tools expects the crash initrd at /var/lib/kdump/.
-        # Copy the kernel config so kdump-tools can read it.
-        config_src = Path(vm.kernel).parent / "build-tree" / ".config"
-        if config_src.exists():
-            r_scp = run(
-                [
-                    "sshpass",
-                    "-p",
-                    ROOT_PASSWORD,
-                    "scp",
-                    "-o",
-                    "StrictHostKeyChecking=no",
-                    "-o",
-                    "UserKnownHostsFile=/dev/null",
-                    "-o",
-                    "LogLevel=ERROR",
-                    str(config_src),
-                    f"root@{vm.ip}:/boot/config-{kver}",
-                ],
-                capture_output=True,
-                timeout=10,
-            )
-            if r_scp.returncode != 0:
-                die(
-                    f"failed to copy kernel config to VM: "
-                    f"{r_scp.stderr.strip()}"
-                )
-        r = run_ssh(
-            vm.ip,
-            # Use PIPESTATUS to check update-initramfs' exit code instead
-            # of the grep that follows it (grep -v's rc would otherwise
-            # mask initramfs failures).  `grep -v ... || true` keeps grep
-            # quiet when every line is a warning, without losing the
-            # PIPESTATUS check.
-            f"rm -f /usr/share/initramfs-tools/hooks/dhcpcd && "
-            f"{{ update-initramfs -c -k {kver} 2>&1 | "
-            f"  {{ grep -v '^W:' || true; }}; "
-            f'  test "${{PIPESTATUS[0]}}" -eq 0; }} && '
-            f"mkdir -p /var/lib/kdump && "
-            f"cp /boot/initrd.img-{kver} /var/lib/kdump/initrd.img-{kver} && "
-            f"ln -sf /boot/vmlinuz-{kver} /var/lib/kdump/vmlinuz",
-            timeout=120,
+    if probe.returncode != 0:
+        die(
+            f"kdump boot artifacts missing from image for kernel {kver}: "
+            f"/boot/vmlinuz-{kver} or {initrd_path} not found. "
+            f"Rebuild the image with `ltvm build-image`."
         )
-        if r.returncode != 0:
-            die(f"update-initramfs failed: {r.stdout.strip()}")
-        r = run_ssh(
-            vm.ip,
-            "kdump-config load 2>&1; systemctl restart kdump-tools 2>&1",
-            timeout=30,
-        )
-        if r.returncode != 0:
-            die(f"kdump-tools service failed to start: {r.stdout.strip()}")
-    else:
-        print("generating kdump initramfs (dracut)...")
-        r = run_ssh(
-            vm.ip,
-            f"dracut --kver {kver} --force /boot/initramfs-{kver}.img {kver} 2>&1",
-            timeout=120,
-        )
-        if r.returncode != 0:
-            die(f"dracut failed for kdump initramfs: {r.stdout.strip()}")
-        r = run_ssh(vm.ip, "systemctl restart kdump 2>&1", timeout=30)
-        if r.returncode != 0:
-            die(f"kdump service failed to start: {r.stdout.strip()}")
+    run_ssh(vm.ip, reload_cmd, timeout=30)
 
 
 def _ago(epoch: int) -> str:
@@ -234,16 +128,13 @@ _MIN_DISK_BYTES = 64 * (1 << 20)  # 64 MiB
 _MAX_DISK_BYTES = 100 * (1 << 30)  # 100 GiB
 
 
-def _parse_disk_size(value: str | int | None) -> int:
+def _parse_disk_size(value: str | None) -> int:
     """Parse a disk size string (e.g. '500M', '10G') to bytes.
 
-    Suffix must be M or G.  An already-parsed int is returned as-is.
-    Raises SystemExit on invalid input.
+    Suffix must be M or G.  Raises SystemExit on invalid input.
     """
     if not value:
         return DISK_SIZE_BYTES
-    if isinstance(value, int):
-        return value if value >= _MIN_DISK_BYTES else DISK_SIZE_BYTES
     s = value.strip().upper()
     if not s:
         return DISK_SIZE_BYTES
@@ -293,8 +184,6 @@ def _validate_vm_name(name: str) -> None:
 
 def cmd_create(args: argparse.Namespace) -> None:
     name = args.name
-    if not name:
-        name = f"qemu-{int(time.time()) % 100000000}"
     _validate_vm_name(name)
 
     info_path = SOCKETS / f"{name}.info"
@@ -551,8 +440,12 @@ def cmd_start(args: argparse.Namespace) -> None:
     for name in args.names:
         vm = VMInfo.load(name)
         launch_qemu(vm)
-        wait_for_ssh(vm.ip, SSH_TIMEOUT)
+        # Register /etc/hosts BEFORE waiting for SSH so a wait_for_ssh
+        # timeout doesn't leave a zombie VM running with no DNS entry.
+        # The user can then `ssh root@<name>` to diagnose why boot
+        # stalled instead of having to hunt down the IP by hand.
         register_ssh_name(vm.name, vm.ip)
+        wait_for_ssh(vm.ip, SSH_TIMEOUT)
         # Both of these are idempotent and cheap on a re-start, but
         # they're necessary for fresh VMs whose create was interrupted
         # before they ran (so cmd_start recovers a half-set-up VM).
@@ -599,8 +492,14 @@ def cmd_destroy(args: argparse.Namespace) -> None:
         except VMNotFound:
             pass
 
-        _destroy_vm_artifacts(name)
-        unregister_ssh_name(name)
+        # Wrap artifact teardown in try/finally so a SIGINT (Ctrl-C)
+        # between artifact cleanup and DNS cleanup still removes the
+        # /etc/hosts entry -- otherwise the next `ltvm create <name>`
+        # sees a stale host mapping.
+        try:
+            _destroy_vm_artifacts(name)
+        finally:
+            unregister_ssh_name(name)
         # Match cmd_stop's "{name} not found" wording so a typo like
         # `ltvm destroy co1-signle` doesn't silently claim success.
         if existed:
@@ -1089,6 +988,45 @@ def cmd_crash_collect(args: argparse.Namespace) -> None:
 
 def cmd_snapshot(args: argparse.Namespace) -> None:
     vm = VMInfo.load(args.name)
+
+    # --delete: remove a named snapshot from the overlay.  Kept small
+    # on purpose: no VM restart dance since qemu-img snapshot -d works
+    # on a stopped-or-running overlay the same way snapshot -c does.
+    delete_tag = getattr(args, "delete", None)
+    if delete_tag:
+        # Stop the VM before touching the overlay: qemu-img refuses to
+        # operate on an image that's currently open by another qemu
+        # process, and even if it didn't, mutating overlay metadata out
+        # from under a running guest risks corruption.  Mirror the
+        # stop/restart dance from the create path.
+        was_running = is_running(vm)
+        if was_running:
+            print(f"stopping {vm.name} to delete snapshot...")
+            kill_qemu(vm)
+        delete_err: str | None = None
+        try:
+            r = run(
+                [QEMU_IMG, "snapshot", "-d", delete_tag, str(vm.overlay_path)]
+            )
+            if r.returncode != 0:
+                delete_err = (r.stderr or "qemu-img failed").strip()
+            else:
+                print(
+                    f"snapshot '{delete_tag}' deleted from {vm.name}"
+                )
+        finally:
+            if was_running:
+                print(f"restarting {vm.name}...")
+                launch_qemu(vm)
+                register_ssh_name(vm.name, vm.ip)
+                wait_for_ssh(vm.ip, SSH_TIMEOUT)
+                deploy_ssh_key(vm.ip)
+                _seed_kdump_boot(vm)
+                print(f"started {vm.name}")
+        if delete_err:
+            die(f"snapshot delete failed: {delete_err}")
+        return
+
     tag = args.tag or f"snap-{time.strftime('%Y%m%d-%H%M%S')}"
 
     was_running = is_running(vm)

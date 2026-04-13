@@ -359,7 +359,8 @@ class TestCmdCreateIdempotence:
         "kernel": "5.14-rhel9.5",
         "os": "ubuntu2404",
         "arch": "aarch64",
-        "disk_size": 1024 * 1024 * 1024,
+        "disk_size": "1G",
+        "disk_size_bytes": 1024 * 1024 * 1024,
     }
 
     def _make_create_args(self) -> argparse.Namespace:
@@ -451,9 +452,9 @@ class TestCmdCreateIdempotence:
                 f"ost_disks: expected {self._FIELD_SENTINELS['ost_disks']}, "
                 f"got {vm.ost_disks}"
             )
-        if vm.disk_size != self._FIELD_SENTINELS["disk_size"]:
+        if vm.disk_size != self._FIELD_SENTINELS["disk_size_bytes"]:
             failures.append(
-                f"disk_size: expected {self._FIELD_SENTINELS['disk_size']}, "
+                f"disk_size: expected {self._FIELD_SENTINELS['disk_size_bytes']}, "
                 f"got {vm.disk_size}"
             )
         if vm.os_id != self._FIELD_SENTINELS["os"]:

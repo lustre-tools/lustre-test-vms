@@ -20,6 +20,7 @@ _ROCKY9_YAML: dict = {
             "os_name": "rocky",
             "os_version": "9.7",
             "container_image": "rockylinux:9.7",
+            "srpm_url": "https://dl.rockylinux.org/pub/rocky/9/BaseOS/source/tree/Packages/k",
             "status": "working",
             "kernels": {
                 "default": "5.14-rhel9.7",

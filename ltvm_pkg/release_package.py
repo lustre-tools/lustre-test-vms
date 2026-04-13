@@ -112,9 +112,7 @@ def _find_artifacts(
 
     image_files: list[Path] = []
     if image_dir.is_dir():
-        image_files = list(image_dir.glob("*.ext4")) + list(
-            image_dir.glob("*.img")
-        )
+        image_files = list(image_dir.glob("*.ext4"))
     if image_files:
         required["image"] = image_files[0]
 
@@ -124,7 +122,7 @@ def _find_artifacts(
             missing.append(name)
 
     if "image" not in required:
-        missing.append("image (*.ext4 or *.img)")
+        missing.append("image (*.ext4)")
 
     if missing:
         hints = []
@@ -564,10 +562,12 @@ def fetch_target(
             for ln in load.stdout.splitlines()
             if ln.startswith("Loaded image")
         ),
-        load.stdout.strip().splitlines()[-1] if load.stdout.strip() else "",
+        "",
     )
     if loaded_line:
         print(f"    {loaded_line}")
+    elif load.stdout.strip():
+        print(f"    podman load output:\n{load.stdout.strip()}")
 
     return target_dir
 

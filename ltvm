@@ -147,7 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
     kernel_arg.add_argument(
         "--kernel",
         default=None,
-        help="Kernel version (default: from kernel.conf)",
+        help="Kernel version (default: from targets.yaml)",
     )
 
     p = argparse.ArgumentParser(
@@ -168,7 +168,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser(
         "install",
         parents=[common],
-        aliases=["setup"],
         help="Install ltvm: QEMU, network, scripts, SSH, ltvm to PATH",
     )
     sp.add_argument(
@@ -329,7 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--enable-server",
         action="store_true",
         default=False,
-        help="Force --enable-server (default: per target.conf)",
+        help="Force --enable-server (default: per targets.yaml)",
     )
     sp.add_argument(
         "--disable-server",
@@ -656,6 +655,12 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default=None,
         help="Snapshot tag (default: auto-generated timestamp)",
+    )
+    sp.add_argument(
+        "--delete",
+        metavar="TAG",
+        default=None,
+        help="Delete the named snapshot instead of creating one",
     )
     sp.set_defaults(func=cmd_snapshot)
 

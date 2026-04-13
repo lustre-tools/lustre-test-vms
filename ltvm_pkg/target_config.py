@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -228,11 +229,6 @@ class TargetConfig:
     def default_kernel(self) -> str:
         """Default lustre target name (short form, e.g. 5.14-rhel9.7)."""
         return str(self._kernels["default"])
-
-    @property
-    def lustre_target(self) -> str:
-        """Alias for default_kernel (backward compat)."""
-        return self.default_kernel
 
     def declared_kernels(self) -> list[str]:
         """Lustre target names declared as available in targets.yaml."""
@@ -519,7 +515,27 @@ class TargetConfig:
             ),
             **extra,
         }
-        (out_dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+        # Atomic write via tempfile + rename so a concurrent reader
+        # (load_meta_safe) can't see a half-written JSON blob -- which
+        # would fail to parse, return None, and trigger a spurious
+        # rebuild.
+        meta_path = out_dir / "meta.json"
+        text = json.dumps(meta, indent=2) + "\n"
+        fd, tmp_str = tempfile.mkstemp(
+            dir=str(out_dir), prefix=f".{meta_path.name}."
+        )
+        tmp = Path(tmp_str)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+            os.chmod(tmp, 0o644)
+            tmp.rename(meta_path)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
 
     def _hash_package_lists(self, *roles: str) -> str:
         parts = []

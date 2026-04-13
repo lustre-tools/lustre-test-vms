@@ -61,9 +61,8 @@ targets/
     packages-debug.txt      # debug/profiling tools
     kernel-config.fragment  # config overrides for all kernels
     rc.local                # VM first-boot setup
+  targets.yaml              # all target metadata + kernel defaults
   rocky9/
-    target.conf             # OS metadata, capabilities
-    kernel.conf             # default kernel version + config overrides
     container.Dockerfile    # build container (GCC, e2fsprogs-wc)
     image.Dockerfile        # VM rootfs image
     packages-os.txt         # OS-specific packages
