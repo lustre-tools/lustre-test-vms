@@ -747,6 +747,15 @@ def install_scripts(host: HostInfo) -> None:
         p.mkdir(parents=True, exist_ok=True)
         p.chmod(0o755)
 
+    # Heal existing .info files from installs predating the 0644 default
+    # (non-root `ltvm list` would PermissionError otherwise).
+    sockets = VM_DIR / "sockets"
+    for info in sockets.glob("*.info"):
+        try:
+            info.chmod(0o644)
+        except OSError:
+            pass
+
     # dk-filter
     dk = PKG_DIR / "dk-filter"
     if dk.exists():

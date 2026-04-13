@@ -540,8 +540,10 @@ def cmd_create(args: argparse.Namespace) -> None:
         )
     elif not getattr(args, "_quiet", False):
         print(
-            f"name={vm.name} ip={vm.ip} pid={vm.pid} "
-            f"mdt_disks={vm.mdt_disks} ost_disks={vm.ost_disks}"
+            f"VM created: {vm.name}\n"
+            f"  ip:    {vm.ip}\n"
+            f"  pid:   {vm.pid}\n"
+            f"  disks: {vm.mdt_disks} MDT + {vm.ost_disks} OST"
         )
 
 
