@@ -56,7 +56,7 @@ ltvm build-all rocky9 --lustre-tree ~/lustre-release
 # for older minors.
 ltvm build-kernel rocky9 --kernel 5.14-rhel9.5 \
     --lustre-tree ~/lustre-release
-sudo ltvm build-image rocky9 --kernel 5.14-rhel9.5
+ltvm build-image rocky9 --kernel 5.14-rhel9.5
 
 # Build Lustre against a specific kernel (staging lives at
 # <tree>/.ltvm-staging/<target>/<arch>/).

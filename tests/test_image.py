@@ -610,3 +610,37 @@ class TestGetPackageManifest:
             packages = image._get_package_manifest("ltvm-image-rocky9")
 
         assert packages == []
+
+
+class TestComputeImageSizeFromTar:
+    def test_small_tar_hits_floor(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_build as image
+
+        tarball = tmp_path / "r.tar"
+        tarball.write_bytes(b"\0" * 1024)
+        assert image._compute_image_size_mb_from_tar(tarball) == image._IMAGE_SIZE_FLOOR_MB
+
+    def test_large_tar_scales_with_fudge(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_build as image
+
+        tarball = tmp_path / "r.tar"
+        # 2 GiB tar -> at least 2 GiB * 1.2 + headroom, safely above floor
+        size = 2 * 1024 * 1024 * 1024
+        with tarball.open("wb") as fp:
+            fp.truncate(size)
+        mb = image._compute_image_size_mb_from_tar(tarball)
+        expected = int(size * image._IMAGE_SIZE_FUDGE / (1024 * 1024)) + image._IMAGE_SIZE_HEADROOM_MB
+        assert mb == expected
+        assert mb > image._IMAGE_SIZE_FLOOR_MB
+
+
+class TestBuildImageNotRootGated:
+    def test_cli_cmd_build_image_has_no_require_root_call(self) -> None:
+        """build-image and build-all must not be gated by _require_root."""
+        import inspect
+        from ltvm_pkg import cli
+
+        src_image = inspect.getsource(cli.cmd_build_image)
+        src_all = inspect.getsource(cli.cmd_build_all)
+        assert "_require_root" not in src_image
+        assert "_require_root" not in src_all

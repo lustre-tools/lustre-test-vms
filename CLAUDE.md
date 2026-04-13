@@ -183,7 +183,8 @@ ltvm build-image rocky9                         # default kernel
 ltvm build-image rocky9 --kernel 5.14-rhel9.5  # specific kernel
 ```
 
-Requires root (mount, losetup). The image includes:
+Runs as the invoking user (mke2fs -d under fakeroot --
+no loop-mount). The image includes:
 - All packages from `packages-{base,test,debug,server}.txt`
   plus OS-specific `packages-os.txt`
 - Source-built tools: IOR, mdtest, iozone, pjdfstest,
@@ -371,7 +372,7 @@ to the Lustre source tree as usual.
 - `ltvm_pkg/image_build.py` -- `build_image()`: builds
   the container image via podman, exports to raw ext4.
   Output path is `output/<target>/<arch>/images/<kernel>/`.
-  Requires root.
+  Runs rootless via `mke2fs -d` under fakeroot.
 
 - `ltvm_pkg/kernel-build-inner.sh` -- runs inside the
   build container. Extracts SRPM, applies patches,

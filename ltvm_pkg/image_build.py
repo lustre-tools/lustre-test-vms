@@ -27,12 +27,14 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# Image sizing:
-#   _IMAGE_SIZE_MB: initial mke2fs allocation (must fit all packages + build outputs).
-#   After building, the image is shrunk to minimum with resize2fs -M.
-#   The qcow2 overlay is resized to 8G at VM creation, and rc.local runs
-#   resize2fs on boot to expand the ext4 to fill the overlay.
-_IMAGE_SIZE_MB = 8192
+# Image sizing: computed dynamically from the extracted rootfs tree.
+# We measure actual bytes used (du -sb) and add a 20% fudge plus a
+# 128 MiB floor so ext4 metadata (inode tables, journal, group descs)
+# always fits.  resize2fs -M then shrinks to minimum; the qcow2 overlay
+# is resized to 8G at VM creation and rc.local expands ext4 to fill.
+_IMAGE_SIZE_FUDGE = 1.2
+_IMAGE_SIZE_FLOOR_MB = 512
+_IMAGE_SIZE_HEADROOM_MB = 128
 
 
 def _run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -602,18 +604,42 @@ def build_image(
     return image_path
 
 
+def _compute_image_size_mb_from_tar(tarball: Path) -> int:
+    """Return the ext4 image size (MiB) needed to hold *tarball*.
+
+    The uncompressed tar payload is a tight upper bound on rootfs
+    bytes.  We add a 20% fudge for ext4 metadata (inode tables,
+    journal, group descriptors), tack on a 128 MiB headroom for small
+    trees, and clamp up to a 512 MiB floor.  resize2fs -M then shrinks
+    whatever we over-allocate back to minimum.
+    """
+    tar_bytes = tarball.stat().st_size
+    mb = (
+        int(tar_bytes * _IMAGE_SIZE_FUDGE / (1024 * 1024))
+        + _IMAGE_SIZE_HEADROOM_MB
+    )
+    return max(mb, _IMAGE_SIZE_FLOOR_MB)
+
+
 def _export_to_ext4(
     container_tag: str,
     image_path: Path,
 ) -> Path:
-    """Export a container image to a raw ext4 file.
+    """Export a container image to a raw ext4 file, rootless.
 
-    1. podman create + podman export | fakeroot tar + mke2fs
-    2. resize2fs -M to shrink
+    1. podman create + podman export to a tarball
+    2. fakeroot tar -x into a tmpdir (preserves uid=0 on-disk)
+    3. fakeroot mke2fs -d <tmpdir> -E root_owner=0:0 into a sized image
+    4. e2fsck + resize2fs -M to shrink
+
+    Runs entirely as the invoking user -- no mount/losetup needed.
+    fakeroot wraps tar+mke2fs so the extracted tree records uid=0 (via
+    LD_PRELOAD) and mke2fs -d reads those faked stats when populating
+    the image; -E root_owner=0:0 additionally pins the root inode.
     """
-    tmpdir = None
-    tmpfile = None
-    container_id = None
+    container_id: str | None = None
+    tmpdir: str | None = None
+    tmpfile: str | None = None
 
     try:
         result = _run(["podman", "create", container_tag])
@@ -621,46 +647,52 @@ def _export_to_ext4(
         log.info("Container: %s", container_id[:12])
 
         tmpdir = tempfile.mkdtemp(prefix="ltvm-rootfs-")
+        rootfs = Path(tmpdir) / "rootfs"
+        rootfs.mkdir()
+        tarball = Path(tmpdir) / "rootfs.tar"
+
         tmp_f = tempfile.NamedTemporaryFile(
             suffix=".ext4", prefix="ltvm-image-", delete=False
         )
         tmpfile = tmp_f.name
         tmp_f.close()
 
-        qcid = shlex.quote(container_id)
-        qtmp = shlex.quote(tmpdir)
+        log.info("Exporting container filesystem to tarball...")
+        with tarball.open("wb") as fp:
+            subprocess.run(
+                ["podman", "export", container_id],
+                stdout=fp,
+                check=True,
+            )
 
-        log.info("Exporting to ext4...")
-        # set -o pipefail so a `podman export` failure (stale container,
-        # missing image) propagates out of the pipeline instead of being
-        # masked by a successful downstream `mke2fs` against an empty tar
-        # stream -- which would silently produce a tiny rootfs image.
-        _run(
-            [
-                "bash",
-                "-o",
-                "pipefail",
-                "-c",
-                f"podman export {qcid} "
-                f"| fakeroot bash -c '"
-                f"tar -C {qtmp} -xf - --exclude=dev/* "
-                f"&& mkdir -p {qtmp}/dev/pts {qtmp}/dev/shm {qtmp}/dev/mqueue "
-                f"&& find {qtmp} ! -readable -exec chmod u+r {{}} + 2>/dev/null; "
-                f"mke2fs -t ext4 -d {qtmp} -b 4096 "
-                f"-L rootfs {shlex.quote(tmpfile)} {_IMAGE_SIZE_MB}M'",
-            ],
-            capture_output=False,
+        log.info("Extracting rootfs tarball...")
+        # tar --exclude=dev/* skips device nodes we can't mknod as user;
+        # we recreate the pseudo-fs mountpoints dev/{pts,shm,mqueue}.
+        # `find ! -readable chmod u+r` heals unreadable files left by
+        # container post-install scripts so mke2fs -d can ingest them.
+        # A single fakeroot session spans tar-x and mke2fs -d so the
+        # uid/gid LD_PRELOAD state is consistent across both reads
+        # (mke2fs statting the tree) and writes (tar setting 0:0).
+        extract_script = (
+            f"set -e; "
+            f"tar -C {shlex.quote(str(rootfs))} -xpf "
+            f"{shlex.quote(str(tarball))} --exclude=dev/*; "
+            f"mkdir -p {shlex.quote(str(rootfs))}/dev/pts "
+            f"{shlex.quote(str(rootfs))}/dev/shm "
+            f"{shlex.quote(str(rootfs))}/dev/mqueue; "
+            f"find {shlex.quote(str(rootfs))} ! -readable "
+            f"-exec chmod u+r {{}} + 2>/dev/null || true; "
+            f"mke2fs -t ext4 -b 4096 -L rootfs -E root_owner=0:0 "
+            f"-d {shlex.quote(str(rootfs))} "
+            f"{shlex.quote(tmpfile)} {_compute_image_size_mb_from_tar(tarball)}M"
         )
+        _run(["fakeroot", "bash", "-c", extract_script], capture_output=False)
 
-        # Remove the podman container before shrinking.
         subprocess.run(
             ["podman", "rm", "-f", container_id], capture_output=True
         )
         container_id = None
 
-        # Shrink to minimum. The qcow2 overlay is resized to 8G at VM
-        # creation, and rc.local runs resize2fs on first boot to expand
-        # the ext4 to fill the overlay — no headroom needed here.
         r_fsck = subprocess.run(["e2fsck", "-fy", tmpfile], capture_output=True)
         # e2fsck exit codes: 0 = clean, 1 = errors corrected (both OK),
         # 2+ = errors remain or operational failure.
@@ -671,7 +703,6 @@ def _export_to_ext4(
             )
         _run(["resize2fs", "-M", tmpfile])
 
-        # Move to final location atomically
         os.rename(tmpfile, str(image_path))
         tmpfile = None
 
