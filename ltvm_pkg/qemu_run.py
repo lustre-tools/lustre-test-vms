@@ -278,6 +278,13 @@ def launch_qemu(vm: VMInfo) -> None:
                 break
             time.sleep(0.1)
         pid = int(vm.pid_path.read_text().strip())
+        # QMP socket is created by QEMU (running as root) as 0600.  Any
+        # user who can read the VM state files should be able to send NMI
+        # and other QMP commands without sudo.
+        try:
+            os.chmod(vm.socket_path, 0o666)
+        except OSError:
+            pass
     except BaseException:
         # TAP was created above; tear it down so we don't leak the device.
         # cmd_create has its own broader rollback, but cmd_start, cmd_ensure

@@ -611,8 +611,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("name", help="VM name")
     sp.add_argument(
         "--outdir",
-        default="/tmp/crashes",
-        help="Local directory for crash dumps (default: /tmp/crashes)",
+        default=None,
+        help="Local directory for crash dumps (default: ~/ltvm-crashes)",
     )
     sp.add_argument(
         "--trigger",

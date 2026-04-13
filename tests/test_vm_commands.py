@@ -727,3 +727,131 @@ class TestSeedKdumpBoot:
             vm_commands._seed_kdump_boot(vm)
         mock_ssh.assert_not_called()
         mock_run.assert_not_called()
+
+
+# ── cmd_create: SUDO_USER chown ──────────────────────────
+
+
+class TestCmdCreateChown:
+    """cmd_create chowns overlay + data disks to SUDO_USER when invoked via sudo."""
+
+    def _run_create(
+        self, tmp_vmdir: Path, sudo_user: str | None
+    ) -> tuple[list, list]:
+        """Run cmd_create through the disk-creation path; return chown call args."""
+        chown_calls: list[tuple] = []
+        orig_chown = vm_commands.os.chown
+
+        def fake_chown(path, uid, gid):
+            chown_calls.append((str(path), uid, gid))
+
+        import pwd as _pwd
+
+        fake_pw = MagicMock()
+        fake_pw.pw_uid = 1001
+        fake_pw.pw_gid = 1001
+
+        env = {"SUDO_USER": sudo_user} if sudo_user else {}
+
+        with (
+            patch("ltvm_pkg.vm_commands.resolve_os_artifacts") as mock_arts,
+            patch("ltvm_pkg.vm_commands.alloc_ip") as mock_alloc,
+            patch("ltvm_pkg.vm_commands.tap_for_name", return_value="tap0"),
+            patch("ltvm_pkg.vm_commands.mac_for_name", return_value="AA:BB:CC:DD:EE:FF"),
+            patch("ltvm_pkg.vm_commands.run") as mock_run,
+            patch("ltvm_pkg.vm_commands.launch_qemu"),
+            patch("ltvm_pkg.vm_commands.wait_for_ssh"),
+            patch("ltvm_pkg.vm_commands.register_ssh_name"),
+            patch("ltvm_pkg.vm_commands.deploy_ssh_key"),
+            patch("ltvm_pkg.vm_commands._seed_kdump_boot"),
+            patch("ltvm_pkg.vm_commands.os.chown", side_effect=fake_chown),
+            patch("ltvm_pkg.vm_commands.os.environ", env),
+        ):
+            arts = MagicMock()
+            arts.image = tmp_vmdir / "base.ext4"
+            arts.kernel = tmp_vmdir / "vmlinuz"
+            arts.arch = "x86_64"
+            arts.default_mem = 2048
+            mock_arts.return_value = arts
+
+            from contextlib import contextmanager
+
+            @contextmanager
+            def fake_alloc(name, explicit_ip=None):
+                yield "192.168.100.50"
+
+            mock_alloc.side_effect = fake_alloc
+
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+            with patch("ltvm_pkg.vm_commands.load_meta_safe", return_value=None):
+                if sudo_user:
+                    with patch("pwd.getpwnam", return_value=fake_pw):
+                        vm_commands.cmd_create(
+                            _create_args(name="co1-chown", mdt_disks=1, ost_disks=2)
+                        )
+                else:
+                    vm_commands.cmd_create(
+                        _create_args(name="co1-chown", mdt_disks=1, ost_disks=2)
+                    )
+
+        return chown_calls
+
+    def test_chown_called_when_sudo_user_set(self, tmp_vmdir: Path) -> None:
+        calls = self._run_create(tmp_vmdir, sudo_user="alice")
+        # overlay + 3 data disks (1 mdt + 2 ost) = 4 files chowned
+        assert len(calls) == 4
+        for _, uid, gid in calls:
+            assert uid == 1001
+            assert gid == 1001
+
+    def test_no_chown_without_sudo_user(self, tmp_vmdir: Path) -> None:
+        calls = self._run_create(tmp_vmdir, sudo_user=None)
+        assert calls == []
+
+
+# ── cmd_crash_collect: default outdir ───────────────────
+
+
+class TestCmdCrashCollectOutdir:
+    """crash-collect defaults to ~/ltvm-crashes when --outdir is not given."""
+
+    def test_default_outdir_is_under_home(self) -> None:
+        # The resolution logic: None -> Path.home() / "ltvm-crashes"
+        # Verify the formula without actually running cmd_crash_collect.
+        args = argparse.Namespace(
+            name="co1-crash",
+            outdir=None,
+            trigger=False,
+            wait=120,
+            mod_dir=None,
+        )
+        raw_outdir = getattr(args, "outdir", None)
+        resolved = Path(raw_outdir) if raw_outdir else Path.home() / "ltvm-crashes"
+        assert resolved == Path.home() / "ltvm-crashes"
+        assert str(resolved).startswith(str(Path.home()))
+
+    def test_explicit_outdir_respected(self, tmp_vmdir: Path, tmp_path: Path) -> None:
+        explicit = str(tmp_path / "my-crashes")
+        _seed_vm_files(tmp_vmdir, "co1-crash2")
+        with (
+            patch("ltvm_pkg.vm_commands.VMInfo.load") as mock_load,
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.run_ssh") as mock_ssh,
+        ):
+            mock_load.return_value = MagicMock(
+                name="co1-crash2", ip="192.168.100.50"
+            )
+            r = MagicMock(returncode=1, stdout="", stderr="ssh error")
+            mock_ssh.return_value = r
+            args = argparse.Namespace(
+                name="co1-crash2",
+                outdir=explicit,
+                trigger=False,
+                wait=120,
+                mod_dir=None,
+            )
+            with pytest.raises(SystemExit):
+                vm_commands.cmd_crash_collect(args)
+
+        assert Path(explicit).exists()

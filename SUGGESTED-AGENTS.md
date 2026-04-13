@@ -120,8 +120,8 @@ ssh co1-single 'lctl dl'
 
 # Lifecycle
 sudo ltvm start|stop|restart|destroy co1-single
-sudo ltvm snapshot co1-single before-test
-sudo ltvm restore co1-single before-test
+ltvm snapshot co1-single before-test
+ltvm restore co1-single before-test
 
 # Host-level infrastructure health check
 sudo ltvm doctor            # or doctor --fix
@@ -177,7 +177,7 @@ reboots (~15 s).
 
 ```bash
 # Trigger a panic
-sudo ltvm nmi co1-single
+ltvm nmi co1-single
 # or from inside the VM: echo c > /proc/sysrq-trigger
 
 # Collect vmcore from the VM and run the lustre crash recipe

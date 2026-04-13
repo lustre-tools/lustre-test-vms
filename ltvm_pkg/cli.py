@@ -1487,9 +1487,6 @@ def cmd_crash_collect(args: argparse.Namespace) -> int:
 
 def cmd_nmi(args: argparse.Namespace) -> int:
     use_json = args.json
-    err = _require_root(use_json)
-    if err is not None:
-        return err
     from ltvm_pkg.vm_commands import cmd_nmi as _nmi
 
     return _vm_call(_nmi, _qemu_ns(name=args.name), use_json)
@@ -1497,9 +1494,6 @@ def cmd_nmi(args: argparse.Namespace) -> int:
 
 def cmd_snapshot(args: argparse.Namespace) -> int:
     use_json = args.json
-    err = _require_root(use_json)
-    if err is not None:
-        return err
     from ltvm_pkg.vm_commands import cmd_snapshot as _snapshot
 
     return _vm_call(
@@ -1515,9 +1509,6 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
 
 def cmd_restore(args: argparse.Namespace) -> int:
     use_json = args.json
-    err = _require_root(use_json)
-    if err is not None:
-        return err
     from ltvm_pkg.vm_commands import cmd_restore as _restore
 
     return _vm_call(_restore, _qemu_ns(name=args.name, tag=args.tag), use_json)

@@ -368,6 +368,24 @@ def cmd_create(args: argparse.Namespace) -> None:
                     pass
             raise
 
+        # When invoked via sudo, hand ownership of the disk images to the
+        # real user so snapshot/restore (which run qemu-img) work without root.
+        sudo_user = os.environ.get("SUDO_USER")
+        if sudo_user:
+            import pwd as _pwd
+            try:
+                pw = _pwd.getpwnam(sudo_user)
+                files_to_chown = [vm.overlay_path]
+                for n in range(1, vm.mdt_disks + vm.ost_disks + 1):
+                    files_to_chown.append(vm.disk_path(n))
+                for f in files_to_chown:
+                    try:
+                        os.chown(f, pw.pw_uid, pw.pw_gid)
+                    except OSError:
+                        pass
+            except KeyError:
+                pass
+
         vm.save()
     # Lock released; IP is now committed.
     #
@@ -795,7 +813,8 @@ def cmd_nmi(args: argparse.Namespace) -> None:
 
 def cmd_crash_collect(args: argparse.Namespace) -> None:
     vm = VMInfo.load(args.name)
-    outdir = Path(args.outdir)
+    raw_outdir = getattr(args, "outdir", None)
+    outdir = Path(raw_outdir) if raw_outdir else Path.home() / "ltvm-crashes"
     outdir.mkdir(parents=True, exist_ok=True)
 
     if args.trigger:

@@ -641,3 +641,46 @@ class TestKillQemu:
         assert _signal.SIGKILL not in sent
         # PID still gets reset to 0 because we want to clear stale state
         mock_update.assert_called_once_with(0)
+
+
+# ── launch_qemu: QMP socket permissions ──────────────────
+
+
+class TestLaunchQemuSocketPerms:
+    """launch_qemu chmods the QMP socket to 0o666 after the pidfile appears."""
+
+    def test_socket_chmoded_to_0o666_after_launch(
+        self, tmp_vmdir: Path
+    ) -> None:
+        vm = _make_vm(tmp_vmdir)
+        vm.pid_path.write_text("12345\n")
+
+        chmod_calls: list[tuple] = []
+
+        def fake_chmod(path, mode):
+            chmod_calls.append((str(path), mode))
+
+        h = _LaunchHarness()
+        with (
+            patch("ltvm_pkg.qemu_run.run", side_effect=h.run),
+            patch(
+                "ltvm_pkg.qemu_run.subprocess.run",
+                side_effect=h.subprocess_run,
+            ),
+            patch("ltvm_pkg.qemu_run.is_running", return_value=False),
+            patch("ltvm_pkg.qemu_run._check_memory_for_launch"),
+            patch("ltvm_pkg.qemu_run.time.time", return_value=1700000000),
+            patch.object(VMInfo, "update_pid"),
+            patch.object(VMInfo, "update_last_boot"),
+            patch("ltvm_pkg.qemu_run.os.chmod", side_effect=fake_chmod),
+        ):
+            qemu_run.launch_qemu(vm)
+
+        socket_str = str(vm.socket_path)
+        chmod_for_socket = [
+            (p, m) for p, m in chmod_calls if p == socket_str
+        ]
+        assert chmod_for_socket, (
+            f"expected os.chmod({socket_str!r}, 0o666); got {chmod_calls}"
+        )
+        assert chmod_for_socket[0][1] == 0o666
