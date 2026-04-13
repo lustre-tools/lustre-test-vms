@@ -4,8 +4,10 @@ FROM ${BASE_IMAGE}
 # Rocky 8 build container for kernel and Lustre builds.
 # GCC 8 matches the EL8 4.18.0 kernel build environment.
 
-# Enable PowerTools + EPEL repos (PowerTools = CRB on EL8)
-RUN dnf -y install dnf-plugins-core epel-release \
+# Enable PowerTools + EPEL repos (PowerTools = CRB on EL8).
+# findutils is not in the minimal rocky:8.9 image but the bulk
+# package-install below uses xargs, so pull it in up front.
+RUN dnf -y install dnf-plugins-core epel-release findutils \
     && dnf config-manager --set-enabled powertools
 
 # Install build packages from the canonical shared list.
