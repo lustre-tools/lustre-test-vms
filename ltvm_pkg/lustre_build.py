@@ -576,6 +576,37 @@ fi""")
         except (KeyError, OSError):
             pass
 
+    # Post-install verification.  `make install` can return rc=0 even
+    # when the install was partial (e.g. a failed sub-make under a
+    # trap, or a missing DESTDIR component silently skipped).  If we
+    # stamp a half-populated staging dir, `ltvm deploy` will happily
+    # rsync near-empty trees into the VM and fail mysteriously at
+    # mount time.  Assert the baseline artifacts exist before stamping.
+    # RHEL/Rocky DESTDIR installs lay modules under extra/; Debian/Ubuntu
+    # puts them directly under net/ and fs/.  Accept either layout.
+    ko_probe = list((host_staging / "lib" / "modules").rglob("*.ko"))
+    mount_lustre = None
+    for candidate in (
+        host_staging / "sbin" / "mount.lustre",
+        host_staging / "usr" / "sbin" / "mount.lustre",
+    ):
+        if candidate.exists():
+            mount_lustre = candidate
+            break
+    if not ko_probe:
+        raise RuntimeError(
+            f"Lustre install verification failed: no .ko files under "
+            f"{host_staging}/lib/modules/ -- `make install` may have "
+            f"silently partial-failed.  Not writing stamps."
+        )
+    if mount_lustre is None:
+        raise RuntimeError(
+            f"Lustre install verification failed: mount.lustre not "
+            f"found under {host_staging}/sbin or usr/sbin -- "
+            f"`make install` may have silently partial-failed.  "
+            f"Not writing stamps."
+        )
+
     # Record per-(target, arch) stamps on the host filesystem so a
     # subsequent build for the OTHER arch sees them as missing and
     # forces a fresh autogen+configure pass.
