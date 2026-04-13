@@ -284,6 +284,103 @@ class TestCheckMke2fs:
             assert args[0] == ["mke2fs", "-V"]
 
 
+class TestKdumpInjectLines:
+    """_kdump_inject_lines bakes vmlinuz + initramfs into the image."""
+
+    def _setup_kdir(
+        self, tmp_path: Path, with_vmlinuz: bool = True,
+        with_kconfig: bool = False, with_vmlinux: bool = False,
+    ) -> tuple[Path, Path]:
+        kdir = tmp_path / "kernel"
+        kdir.mkdir()
+        if with_vmlinuz:
+            (kdir / "vmlinuz").write_bytes(b"bzImage")
+        if with_vmlinux:
+            (kdir / "vmlinux").write_bytes(b"ELF")
+        if with_kconfig:
+            (kdir / "build-tree").mkdir()
+            (kdir / "build-tree" / ".config").write_text("CONFIG_X=y\n")
+        inject = tmp_path / "inject"
+        inject.mkdir()
+        return kdir, inject
+
+    def test_rhel_emits_copy_and_dracut(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_build as image
+
+        kdir, inject = self._setup_kdir(tmp_path)
+        lines = image._kdump_inject_lines(
+            kdir, inject, "5.14.0-foo", "rhel"
+        )
+
+        text = "\n".join(lines)
+        assert "COPY vmlinuz /boot/vmlinuz-5.14.0-foo" in text
+        assert "dracut --kver 5.14.0-foo" in text
+        assert "/boot/initramfs-5.14.0-foo.img" in text
+        assert (inject / "vmlinuz").exists()
+
+    def test_debian_emits_update_initramfs(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_build as image
+
+        kdir, inject = self._setup_kdir(
+            tmp_path, with_kconfig=True
+        )
+        lines = image._kdump_inject_lines(
+            kdir, inject, "5.14.0-foo", "debian"
+        )
+
+        text = "\n".join(lines)
+        assert "COPY vmlinuz /boot/vmlinuz-5.14.0-foo" in text
+        assert "COPY kconfig /boot/config-5.14.0-foo" in text
+        assert "update-initramfs -c -k 5.14.0-foo" in text
+        assert "/var/lib/kdump/initrd.img-5.14.0-foo" in text
+        assert "dracut" not in text
+        assert (inject / "kconfig").exists()
+
+    def test_debian_without_kconfig_skips_config_copy(
+        self, tmp_path: Path
+    ) -> None:
+        import ltvm_pkg.image_build as image
+
+        kdir, inject = self._setup_kdir(tmp_path)
+        lines = image._kdump_inject_lines(
+            kdir, inject, "5.14.0-foo", "debian"
+        )
+        text = "\n".join(lines)
+        assert "COPY kconfig" not in text
+        assert "update-initramfs" in text
+
+    def test_no_kver_returns_empty(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_build as image
+
+        kdir, inject = self._setup_kdir(tmp_path)
+        assert image._kdump_inject_lines(kdir, inject, None, "rhel") == []
+        assert image._kdump_inject_lines(kdir, inject, "", "rhel") == []
+
+    def test_vmlinux_fallback_no_dracut(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_build as image
+
+        kdir, inject = self._setup_kdir(
+            tmp_path, with_vmlinuz=False, with_vmlinux=True
+        )
+        lines = image._kdump_inject_lines(
+            kdir, inject, "5.14.0-foo", "rhel"
+        )
+        text = "\n".join(lines)
+        assert "COPY vmlinuz /boot/vmlinuz-5.14.0-foo" in text
+        assert "dracut" not in text
+        assert "update-initramfs" not in text
+        assert (inject / "vmlinuz").exists()
+
+    def test_no_kernel_images_returns_empty(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_build as image
+
+        kdir, inject = self._setup_kdir(tmp_path, with_vmlinuz=False)
+        assert (
+            image._kdump_inject_lines(kdir, inject, "5.14.0-foo", "rhel")
+            == []
+        )
+
+
 class TestGetPackageManifest:
     def test_returns_sorted_package_list(self) -> None:
         import ltvm_pkg.image_build as image

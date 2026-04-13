@@ -692,3 +692,116 @@ class TestCmdLlmount:
             vm_commands.cmd_llmount(args)
         _, call_kwargs = mock_ssh.call_args
         assert call_kwargs.get("timeout") == 99
+
+
+# ── _seed_kdump_boot ─────────────────────────────────────
+
+
+class TestSeedKdumpBoot:
+    """Fast path: image has baked-in kdump artifacts, only reload kdump.
+    Fallback path: artifacts missing, scp + dracut/update-initramfs."""
+
+    def _vm(self, tmp_path: Path, os_id: str = "rocky9") -> VMInfo:
+        kdir = tmp_path / "kernels" / "5.14"
+        kdir.mkdir(parents=True)
+        (kdir / "vmlinux").write_bytes(b"ELF")
+        (kdir / "vmlinuz").write_bytes(b"bz")
+        return VMInfo(
+            name="co1-test",
+            ip="10.0.0.99",
+            kernel=str(kdir / "vmlinux"),
+            kver="5.14.0-test",
+            os_id=os_id,
+        )
+
+    def _ssh_results(self, present: bool):
+        """Return a side_effect fn where only the `test -f` probe
+        varies with *present*; every other command succeeds."""
+        def _fn(ip, cmd, **kw):
+            r = MagicMock()
+            if cmd.startswith("test -f"):
+                r.returncode = 0 if present else 1
+            else:
+                r.returncode = 0
+            r.stdout = ""
+            r.stderr = ""
+            return r
+        return _fn
+
+    def test_fast_path_no_scp_no_dracut(self, tmp_path: Path) -> None:
+        vm = self._vm(tmp_path)
+        with (
+            patch(
+                "ltvm_pkg.vm_commands.run_ssh",
+                side_effect=self._ssh_results(present=True),
+            ) as mock_ssh,
+            patch("ltvm_pkg.vm_commands.run") as mock_run,
+            patch(
+                "ltvm_pkg.target_config.TargetConfig"
+            ) as mock_tc,
+        ):
+            mock_tc.return_value.os_family = "rhel"
+            vm_commands._seed_kdump_boot(vm)
+
+        mock_run.assert_not_called()
+        cmds = [c.args[1] for c in mock_ssh.call_args_list]
+        assert any("test -f /boot/vmlinuz-" in c for c in cmds)
+        assert any("systemctl restart kdump" in c for c in cmds)
+        assert not any("dracut" in c for c in cmds)
+
+    def test_fast_path_debian_uses_kdump_config(self, tmp_path: Path) -> None:
+        vm = self._vm(tmp_path, os_id="ubuntu24")
+        with (
+            patch(
+                "ltvm_pkg.vm_commands.run_ssh",
+                side_effect=self._ssh_results(present=True),
+            ) as mock_ssh,
+            patch("ltvm_pkg.vm_commands.run") as mock_run,
+            patch(
+                "ltvm_pkg.target_config.TargetConfig"
+            ) as mock_tc,
+        ):
+            mock_tc.return_value.os_family = "debian"
+            vm_commands._seed_kdump_boot(vm)
+
+        mock_run.assert_not_called()
+        cmds = [c.args[1] for c in mock_ssh.call_args_list]
+        assert any(
+            "test -f /var/lib/kdump/initrd.img-" in c for c in cmds
+        )
+        assert any("kdump-config load" in c for c in cmds)
+        assert not any("update-initramfs" in c for c in cmds)
+
+    def test_fallback_path_runs_scp_and_dracut(self, tmp_path: Path) -> None:
+        vm = self._vm(tmp_path)
+        scp_rc = MagicMock(returncode=0, stdout="", stderr="")
+        with (
+            patch(
+                "ltvm_pkg.vm_commands.run_ssh",
+                side_effect=self._ssh_results(present=False),
+            ) as mock_ssh,
+            patch(
+                "ltvm_pkg.vm_commands.run", return_value=scp_rc
+            ) as mock_run,
+            patch(
+                "ltvm_pkg.target_config.TargetConfig"
+            ) as mock_tc,
+        ):
+            mock_tc.return_value.os_family = "rhel"
+            vm_commands._seed_kdump_boot(vm)
+
+        mock_run.assert_called()
+        scp_cmd = mock_run.call_args_list[0].args[0]
+        assert "scp" in scp_cmd
+        cmds = [c.args[1] for c in mock_ssh.call_args_list]
+        assert any("dracut --kver 5.14.0-test" in c for c in cmds)
+
+    def test_no_kernel_returns_early(self, tmp_path: Path) -> None:
+        vm = VMInfo(name="x", ip="10.0.0.1")  # kernel=""
+        with (
+            patch("ltvm_pkg.vm_commands.run_ssh") as mock_ssh,
+            patch("ltvm_pkg.vm_commands.run") as mock_run,
+        ):
+            vm_commands._seed_kdump_boot(vm)
+        mock_ssh.assert_not_called()
+        mock_run.assert_not_called()

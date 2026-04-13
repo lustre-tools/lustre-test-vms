@@ -157,6 +157,61 @@ def _prebuild_tools_native(
     log.info("Pre-built tools at %s", output_dir)
 
 
+def _kdump_inject_lines(
+    kdir: Path,
+    inject_dir: Path,
+    kver: str | None,
+    os_family: str,
+) -> list[str]:
+    """Return the Dockerfile lines that bake kdump boot artifacts into
+    the image, copying the needed source files into *inject_dir*.
+
+    Baking vmlinuz + initramfs at image-build time means VM boot can
+    skip the per-boot scp + dracut that used to run in
+    _seed_kdump_boot (~10-20s savings).  If only vmlinux is available
+    (no bzImage), copy it as /boot/vmlinuz-<kver> and let the runtime
+    fallback build the initramfs.
+    """
+    if not kver:
+        return []
+
+    vmlinuz_src = kdir / "vmlinuz"
+    if vmlinuz_src.exists():
+        shutil.copy2(str(vmlinuz_src), str(inject_dir / "vmlinuz"))
+        lines = [f"COPY vmlinuz /boot/vmlinuz-{kver}"]
+        if os_family == "debian":
+            kconfig_src = kdir / "build-tree" / ".config"
+            if kconfig_src.exists():
+                shutil.copy2(str(kconfig_src), str(inject_dir / "kconfig"))
+                lines.append(f"COPY kconfig /boot/config-{kver}")
+            lines.append(
+                "RUN rm -f /usr/share/initramfs-tools/hooks/dhcpcd && "
+                f"update-initramfs -c -k {kver} && "
+                "mkdir -p /var/lib/kdump && "
+                f"cp /boot/initrd.img-{kver} "
+                f"/var/lib/kdump/initrd.img-{kver} && "
+                f"ln -sf /boot/vmlinuz-{kver} /var/lib/kdump/vmlinuz"
+            )
+        else:
+            lines.append(
+                f"RUN dracut --kver {kver} --force "
+                f"/boot/initramfs-{kver}.img {kver}"
+            )
+        return lines
+
+    vmlinux_src = kdir / "vmlinux"
+    if vmlinux_src.exists():
+        shutil.copy2(str(vmlinux_src), str(inject_dir / "vmlinuz"))
+        log.warning(
+            "No vmlinuz for %s; skipping baked kdump initramfs -- "
+            "runtime fallback will handle it",
+            kver,
+        )
+        return [f"COPY vmlinuz /boot/vmlinuz-{kver}"]
+
+    return []
+
+
 def build_image(
     target_config: TargetConfig,
     force: bool = False,
@@ -314,6 +369,10 @@ def build_image(
                     symlinks=False,
                     ignore=shutil.ignore_patterns("build", "source"),
                 )
+
+            kdump_lines = _kdump_inject_lines(
+                kdir, inject_dir, kver, target_config.os_family
+            )
             # Lustre auto-inject was here.  It looked at a global
             # staging dir and silently baked whatever was there into the
             # image.  That doesn't work in the multi-user model where
@@ -338,6 +397,7 @@ def build_image(
             lines.append(
                 "RUN ln -sf mount.lustre /usr/sbin/mount.lustre_tgt 2>/dev/null || true"
             )
+            lines.extend(kdump_lines)
 
             inject_dockerfile = inject_dir / "Dockerfile"
             inject_dockerfile.write_text("\n".join(lines) + "\n")
