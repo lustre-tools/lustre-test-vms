@@ -160,7 +160,7 @@ class TestResolveKernel:
         self, tmp_targets: Path
     ) -> None:
         tc = _make_config(tmp_targets)
-        kernels = tmp_targets / "output" / "rocky9" / "kernels"
+        kernels = tmp_targets / "output" / "rocky9" / "x86_64" / "kernels"
         full = "5.14-rhel9.7-5.14.0-611.13.1.el9_7_lustre"
         (kernels / full).mkdir(parents=True)
         assert tc.resolve_kernel("5.14-rhel9.7") == full
@@ -170,13 +170,13 @@ class TestKernelOutputDir:
     def test_default_path(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
         expected = (
-            tmp_targets / "output" / "rocky9" / "kernels" / "5.14-rhel9.7"
+            tmp_targets / "output" / "rocky9" / "x86_64" / "kernels" / "5.14-rhel9.7"
         )
         assert tc.kernel_output_dir() == expected
 
     def test_custom_kernel_path(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
-        expected = tmp_targets / "output" / "rocky9" / "kernels" / "custom"
+        expected = tmp_targets / "output" / "rocky9" / "x86_64" / "kernels" / "custom"
         assert tc.kernel_output_dir("custom") == expected
 
 
@@ -187,7 +187,7 @@ class TestAvailableKernels:
 
     def test_with_kernels(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
-        kernels = tmp_targets / "output" / "rocky9" / "kernels"
+        kernels = tmp_targets / "output" / "rocky9" / "x86_64" / "kernels"
         (kernels / "5.14-rhel9.7").mkdir(parents=True)
         (kernels / "5.14-rhel9.6").mkdir(parents=True)
         result = tc.available_kernels()
@@ -195,7 +195,7 @@ class TestAvailableKernels:
 
     def test_ignores_files(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
-        kernels = tmp_targets / "output" / "rocky9" / "kernels"
+        kernels = tmp_targets / "output" / "rocky9" / "x86_64" / "kernels"
         kernels.mkdir(parents=True)
         (kernels / "stray-file.txt").write_text("ignore me")
         (kernels / "real-kernel").mkdir()
@@ -208,14 +208,14 @@ class TestOutputDirs:
         # Default: paired with the target's default kernel.
         assert (
             tc.image_output_dir()
-            == tmp_targets / "output" / "rocky9" / "images" / "5.14-rhel9.7"
+            == tmp_targets / "output" / "rocky9" / "x86_64" / "images" / "5.14-rhel9.7"
         )
 
     def test_image_output_dir_explicit_kernel(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
         assert (
             tc.image_output_dir("5.14-rhel9.5")
-            == tmp_targets / "output" / "rocky9" / "images" / "5.14-rhel9.5"
+            == tmp_targets / "output" / "rocky9" / "x86_64" / "images" / "5.14-rhel9.5"
         )
 
     def test_image_output_dir_distinct_per_kernel(
@@ -247,7 +247,7 @@ class TestOutputDirs:
     def test_container_output_dir(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
         assert tc.container_output_dir() == (
-            tmp_targets / "output" / "rocky9" / "container"
+            tmp_targets / "output" / "rocky9" / "x86_64" / "container"
         )
 
 
@@ -436,7 +436,7 @@ class TestWriteMeta:
         tc = _make_config(tmp_targets)
         tc.write_meta("container", build_date="2024-01-01")
         meta_path = (
-            tmp_targets / "output" / "rocky9" / "container" / "meta.json"
+            tmp_targets / "output" / "rocky9" / "x86_64" / "container" / "meta.json"
         )
         assert meta_path.exists()
         data = json.loads(meta_path.read_text())
@@ -451,6 +451,7 @@ class TestWriteMeta:
             tmp_targets
             / "output"
             / "rocky9"
+            / "x86_64"
             / "kernels"
             / "5.14-rhel9.7"
             / "meta.json"
@@ -466,6 +467,7 @@ class TestWriteMeta:
             tmp_targets
             / "output"
             / "rocky9"
+            / "x86_64"
             / "images"
             / "5.14-rhel9.7"
             / "meta.json"
@@ -547,7 +549,7 @@ class TestIsStaleCorruption:
         assert tc.is_stale("container") is False
         # Corrupt the file mid-flight
         meta_file = (
-            tmp_targets / "output" / "rocky9" / "container" / "meta.json"
+            tmp_targets / "output" / "rocky9" / "x86_64" / "container" / "meta.json"
         )
         meta_file.write_text("{garbage")
         # Must not raise

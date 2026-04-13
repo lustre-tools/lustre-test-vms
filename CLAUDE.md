@@ -92,16 +92,21 @@ ltvm_pkg/                 Python package (CLI + all implementation)
   vm_cluster.py           Multi-node cluster management
 output/                   Build artifacts (gitignored)
   <target>/
-    container.tag
-    kernel/
-      vmlinux             Unstripped ELF (crash/drgn + boot)
-      vmlinuz             Compressed bzImage (kdump)
-      build-tree/         For Lustre module builds
-      meta.json
-    images/
-      <kernel-full-name>/
-        base.ext4         Raw ext4 root filesystem
+    <arch>/               Always present, even for x86_64
+      container/
+        image.tar
         meta.json
+      kernels/
+        <kernel-full-name>/
+          vmlinux         Unstripped ELF (crash/drgn + boot)
+          vmlinuz         Compressed bzImage (kdump)
+          build-tree/     For Lustre module builds
+          modules/
+          meta.json
+      images/
+        <kernel-full-name>/
+          base.ext4       Raw ext4 root filesystem
+          meta.json
 ```
 
 ## Quick Start
@@ -145,7 +150,7 @@ ltvm build-kernel rocky9 --lustre-tree /path/to/lustre-release
    (`lustre/kernel_patches/targets/<target>.target`)
    for SRPM version, patch series
 3. Downloads the kernel SRPM (cached in
-   `output/<target>/cache/`); falls back to Rocky vault
+   `output/<target>/<arch>/cache/`); falls back to Rocky vault
    for older minor versions
 4. Resolves the kernel config from the Lustre tree
    (`lustre/kernel_patches/kernel_configs/`)
@@ -155,7 +160,7 @@ ltvm build-kernel rocky9 --lustre-tree /path/to/lustre-release
 6. Builds vmlinux, vmlinuz, modules, and a build tree
    inside the build container
 
-**Outputs:** `output/<target>/kernel/vmlinux`,
+**Outputs:** `output/<target>/<arch>/kernels/<kernel>/vmlinux`,
 `vmlinuz`, `build-tree/` (for Lustre module builds).
 
 To build a non-default kernel minor (e.g., for compat
@@ -171,7 +176,7 @@ ltvm build-kernel rocky9 --kernel 5.14-rhel9.5 \
 Minimal root filesystem for QEMU microvm boot.
 Built as a container image, then exported to raw ext4.
 **Images are keyed per kernel** -- each kernel version
-gets its own image under `output/<target>/images/<kernel>/`.
+gets its own image under `output/<target>/<arch>/images/<kernel>/`.
 
 ```bash
 ltvm build-image rocky9                         # default kernel
@@ -365,7 +370,7 @@ to the Lustre source tree as usual.
 
 - `ltvm_pkg/image_build.py` -- `build_image()`: builds
   the container image via podman, exports to raw ext4.
-  Output path is `output/<target>/images/<kernel>/`.
+  Output path is `output/<target>/<arch>/images/<kernel>/`.
   Requires root.
 
 - `ltvm_pkg/kernel-build-inner.sh` -- runs inside the
