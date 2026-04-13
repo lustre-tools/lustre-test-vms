@@ -193,13 +193,19 @@ def snapshot_lustre(
 
     kernel_name, kernel_dir = _resolve_kernel(output_dir, kernel)
 
-    staging_src = staging_path(lustre_tree, target, arch=arch)
+    staging_src = staging_path(
+        lustre_tree, target, arch=arch, kernel=kernel_name
+    )
     if not staging_src.is_dir():
-        raise ValueError(
-            f"No staging directory at {staging_src} -- "
-            f"run `ltvm build-lustre {target} --lustre-tree "
-            f"{lustre_tree}` first"
-        )
+        legacy = staging_path(lustre_tree, target, arch=arch, kernel=None)
+        if legacy.is_dir():
+            staging_src = legacy
+        else:
+            raise ValueError(
+                f"No staging directory at {staging_src} -- "
+                f"run `ltvm build-lustre {target} --kernel {kernel_name} "
+                f"--lustre-tree {lustre_tree}` first"
+            )
 
     ko_files = list(staging_src.rglob("*.ko"))
     if not ko_files:

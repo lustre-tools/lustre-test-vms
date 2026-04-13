@@ -287,6 +287,7 @@ def cmd_build_all(args: argparse.Namespace) -> int:
                 jobs=getattr(args, "jobs", None),
                 force=args.force,
                 arch=tc.arch,
+                kernel=resolved_kernel,
             )
             results["lustre"] = lmeta
         except Exception as e:
@@ -389,12 +390,22 @@ def cmd_build_image(args: argparse.Namespace) -> int:
 
     kernel = getattr(args, "kernel", None)
     resolved_kernel = tc.resolve_kernel(kernel)
+    with_lustre = getattr(args, "with_lustre", None)
 
     if not use_json:
-        print(f"Building image for {args.target} (kernel={resolved_kernel})...")
+        extra = f" +lustre={with_lustre}" if with_lustre else ""
+        print(
+            f"Building image for {args.target} "
+            f"(kernel={resolved_kernel}){extra}..."
+        )
 
     try:
-        path = build_image(tc, force=args.force, kernel=kernel)
+        path = build_image(
+            tc,
+            force=args.force,
+            kernel=kernel,
+            with_lustre=with_lustre,
+        )
     except Exception as e:
         return _error(f"Image build failed: {e}", use_json)
 
@@ -402,6 +413,7 @@ def cmd_build_image(args: argparse.Namespace) -> int:
         "target": args.target,
         "kernel": resolved_kernel,
         "path": str(path),
+        "with_lustre": with_lustre,
     }
     _output(result, use_json)
     return EXIT_OK
@@ -497,6 +509,7 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
             jobs=jobs,
             force=getattr(args, "force", False),
             arch=tc.arch,
+            kernel=resolved_kernel,
         )
     except Exception as e:
         return _error(f"Lustre build failed: {e}", use_json)
@@ -1520,13 +1533,45 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     userspace_only = getattr(args, "userspace_only", False)
 
     # Staging now lives inside the lustre tree at
-    # <build_path>/.ltvm-staging/<target>[/<arch>]/, not under the shared
-    # ltvm output dir.  This makes staging naturally per-user on a
-    # multi-user host: alice's staging cannot collide with bob's because
-    # they live in different lustre trees.
+    # <build_path>/.ltvm-staging/<target>/<arch>/<kernel>/, per-kernel
+    # so two kernels' userland (usr/sbin, etc.) coexist without
+    # clobbering each other.  The kernel key comes from the VM's
+    # actual kernel (falling back to the target's default) so a VM
+    # created with a non-default kernel deploys the Lustre that was
+    # built against that kernel.
     from ltvm_pkg.lustre_build import staging_path as _staging_path
 
-    staging = _staging_path(build_path, target, arch=vm_arch)
+    deploy_kernel = resolved_kernel
+    if vm.kernel:
+        vm_kernel_name = Path(vm.kernel).parent.name
+        if vm_kernel_name:
+            deploy_kernel = tc.resolve_kernel(vm_kernel_name)
+    staging = _staging_path(
+        build_path, target, arch=vm_arch, kernel=deploy_kernel
+    )
+    # If the bundled-snapshot path is involved we DON'T require a
+    # pre-existing per-kernel staging -- the snapshot rsync below
+    # populates it.  Otherwise, if the user is deploying against a
+    # source tree without having built Lustre for this kernel, refuse
+    # with a clear hint rather than falling through to an automatic
+    # `ltvm build-lustre` that might target the wrong kernel.
+    if bundled_snapshot is None and not userspace_only:
+        legacy = _staging_path(
+            build_path, target, arch=vm_arch, kernel=None
+        )
+        if not staging.is_dir() and legacy.is_dir() and any(
+            legacy.rglob("*.ko")
+        ):
+            return _error(
+                f"Lustre staging for kernel {deploy_kernel} is missing "
+                f"at {staging}, but a legacy per-target staging exists "
+                f"at {legacy}. Per-kernel staging is now required.",
+                use_json,
+                hint=(
+                    f"Run: ltvm build-lustre {target} "
+                    f"--kernel {deploy_kernel} --lustre-tree {build_path}"
+                ),
+            )
 
     # If we picked up a bundled snapshot, mirror it into staging
     # unconditionally.  Previously we skipped the mirror whenever

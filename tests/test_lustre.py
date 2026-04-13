@@ -9,6 +9,8 @@ from ltvm_pkg.lustre_build import (
     _kernel_release,
     _needs_reconfigure,
     lustre_status,
+    read_staging_meta,
+    staging_path,
 )
 
 # ---------------------------------------------------------------------------
@@ -300,3 +302,88 @@ class TestLustreStatus:
         # build_tree does not exist -> current_kernel None -> stale
         status = lustre_status(lt, tmp_path / "nonexistent")
         assert status["stale"] is True
+
+
+# ---------------------------------------------------------------------------
+# Per-kernel staging path (lustre_test_vms_v2-eh9)
+# ---------------------------------------------------------------------------
+
+
+class TestStagingPathPerKernel:
+    def test_default_is_per_target_arch(self, tmp_path: Path) -> None:
+        p = staging_path(tmp_path, "rocky9", arch="x86_64")
+        assert p == tmp_path / ".ltvm-staging" / "rocky9" / "x86_64"
+
+    def test_kernel_key_appends_kernel_dir(self, tmp_path: Path) -> None:
+        p = staging_path(
+            tmp_path, "rocky9", arch="x86_64", kernel="5.14-rhel9.7"
+        )
+        assert p == (
+            tmp_path / ".ltvm-staging" / "rocky9" / "x86_64" / "5.14-rhel9.7"
+        )
+
+    def test_two_kernels_do_not_share_path(self, tmp_path: Path) -> None:
+        a = staging_path(tmp_path, "rocky9", arch="x86_64", kernel="k-a")
+        b = staging_path(tmp_path, "rocky9", arch="x86_64", kernel="k-b")
+        assert a != b
+        assert a.parent == b.parent
+
+
+class TestStagingCoexistence:
+    """Two kernels' staging dirs coexist and userland doesn't overlap."""
+
+    def test_two_kernels_coexist(self, tmp_path: Path) -> None:
+        sa = staging_path(
+            tmp_path, "rocky9", arch="x86_64", kernel="5.14-rhel9.7"
+        )
+        sb = staging_path(
+            tmp_path, "rocky9", arch="x86_64", kernel="5.14-rhel9.5"
+        )
+        (sa / "usr" / "sbin").mkdir(parents=True)
+        (sa / "usr" / "sbin" / "mount.lustre").write_text("A")
+        (sa / "lib" / "modules" / "5.14.0-A" / "extra").mkdir(parents=True)
+        (sa / "lib" / "modules" / "5.14.0-A" / "extra" / "lustre.ko").write_text(
+            "A"
+        )
+        (sb / "usr" / "sbin").mkdir(parents=True)
+        (sb / "usr" / "sbin" / "mount.lustre").write_text("B")
+        (sb / "lib" / "modules" / "5.14.0-B" / "extra").mkdir(parents=True)
+        (sb / "lib" / "modules" / "5.14.0-B" / "extra" / "lustre.ko").write_text(
+            "B"
+        )
+        assert sa.is_dir() and sb.is_dir()
+        assert (sa / "usr" / "sbin" / "mount.lustre").read_text() == "A"
+        assert (sb / "usr" / "sbin" / "mount.lustre").read_text() == "B"
+        # The two staging roots are disjoint leaf dirs -- neither is a
+        # parent of the other.
+        assert sa not in sb.parents and sb not in sa.parents
+
+
+class TestIncrementalRebuildGuard:
+    """When per-kernel staging exists for this kernel, treat it as
+    incremental.  When it doesn't exist, build fresh."""
+
+    def test_missing_staging_means_build_fresh(self, tmp_path: Path) -> None:
+        s = staging_path(
+            tmp_path, "rocky9", arch="x86_64", kernel="5.14-rhel9.7"
+        )
+        assert not s.exists()
+
+    def test_meta_roundtrip(self, tmp_path: Path) -> None:
+        s = staging_path(
+            tmp_path, "rocky9", arch="x86_64", kernel="5.14-rhel9.7"
+        )
+        s.mkdir(parents=True)
+        (s / ".ltvm-staging-meta.json").write_text(
+            '{"kernel_version": "5.14.0-foo", '
+            '"module_symvers_sha256": "deadbeef"}'
+        )
+        meta = read_staging_meta(s)
+        assert meta is not None
+        assert meta["kernel_version"] == "5.14.0-foo"
+        assert meta["module_symvers_sha256"] == "deadbeef"
+
+    def test_meta_missing_returns_none(self, tmp_path: Path) -> None:
+        s = tmp_path / "empty"
+        s.mkdir()
+        assert read_staging_meta(s) is None

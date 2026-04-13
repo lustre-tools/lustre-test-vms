@@ -361,8 +361,22 @@ def _deploy_one_node(
 
     vm = VMInfo.load(node_name)
     target = vm.os_id or DEFAULT_TARGET
-    # Pass vm.arch so the staging dir matches what build-lustre wrote.
-    staging = _staging_path(lustre_tree, target, arch=vm.arch or "x86_64")
+    # Pass vm.arch + kernel so the staging dir matches what
+    # build-lustre wrote.  Staging is keyed per-kernel so two kernels'
+    # userland can coexist under one lustre tree.
+    vm_arch = vm.arch or "x86_64"
+    deploy_kernel: str | None = None
+    if vm.kernel:
+        vm_kernel_name = Path(vm.kernel).parent.name
+        if vm_kernel_name:
+            deploy_kernel = vm_kernel_name
+    staging = _staging_path(
+        lustre_tree, target, arch=vm_arch, kernel=deploy_kernel
+    )
+    if not staging.is_dir():
+        legacy = _staging_path(lustre_tree, target, arch=vm_arch, kernel=None)
+        if legacy.is_dir():
+            staging = legacy
     try:
         deploy_to_vm(vm, staging, os_family=os_family)
         return node_name, 0, "ok"

@@ -16,6 +16,8 @@ podman after `ltvm build-container` or `ltvm build-all`.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shlex
 import subprocess
@@ -25,36 +27,65 @@ from typing import TypedDict
 from .vm_state import DEFAULT_TARGET
 
 
+def _hash_file(path: Path) -> str | None:
+    """Return hex sha256 of a file, or None if it doesn't exist."""
+    if not path.is_file():
+        return None
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def read_staging_meta(staging: Path) -> dict | None:
+    """Load staging meta, or None if missing/unparseable."""
+    meta_file = staging / ".ltvm-staging-meta.json"
+    if not meta_file.is_file():
+        return None
+    try:
+        data = json.loads(meta_file.read_text())
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
 def staging_path(
     lustre_tree: str | Path,
     target: str,
     arch: str = "x86_64",
+    kernel: str | None = None,
 ) -> Path:
     """Return the host-side Lustre build staging directory.
 
     Lives **inside the user's lustre tree** at
-    ``<tree>/.ltvm-staging/<target>/<arch>/`` rather than under the
-    shared ltvm output dir.  This is the only sane layout for a
-    multi-user host: alice's `~alice/lustre-release/.ltvm-staging/`
-    cannot collide with bob's `~bob/lustre-release/.ltvm-staging/`,
-    each user owns their own staging tree, and `rm -rf <tree>` cleans
-    up the staging along with the source.
+    ``<tree>/.ltvm-staging/<target>/<arch>/<kernel>/`` rather than
+    under the shared ltvm output dir.  This is the only sane layout
+    for a multi-user host: alice's
+    `~alice/lustre-release/.ltvm-staging/` cannot collide with bob's
+    `~bob/lustre-release/.ltvm-staging/`, each user owns their own
+    staging tree, and `rm -rf <tree>` cleans up the staging along
+    with the source.
 
-    The previous layout (`output/<target>/lustre/staging`) was a
-    single shared dir keyed only by target and was a clean foot-gun
-    on any host with more than one user: a second `ltvm build-lustre`
-    would `make install DESTDIR=/staging` over the first one's modules,
-    and a subsequent `ltvm deploy` would silently ship whoever ran
-    last.
+    ``kernel`` is the resolved kernel directory name (as produced by
+    ``target_config.resolve_kernel``).  It must be keyed at the
+    staging root because DESTDIR layout installs userland files
+    (``usr/sbin``, ``usr/bin``, ``etc``, etc.) into the same paths
+    regardless of kver -- only ``lib/modules/<kver>/`` naturally
+    co-exists.  Two sequential `ltvm build-lustre` runs against
+    different kernels would silently clobber each other's userland
+    without a per-kernel key.  Pre-existing per-target-only staging
+    dirs are preserved as a legacy fallback so migration is gradual.
 
-    The arch is always a path component (no x86_64 special case) so
-    a switch from `--arch x86_64` to `--arch aarch64` cannot leave
-    one arch's staging nested inside the other's.  An older "flat"
-    layout where x86_64 omitted the arch dir would mean
-    `rm -rf <x86_64 staging>` also nukes the aarch64 staging, and
-    `rglob '*.ko'` from x86_64 would include the aarch64 modules.
+    Callers that don't have a resolved kernel yet (e.g. early status
+    callers) may pass ``kernel=None``, which returns the legacy
+    per-(target,arch) path.  That path must not be used for new
+    builds: use ``build_lustre`` which resolves a kernel first.
     """
-    return Path(lustre_tree) / ".ltvm-staging" / target / arch
+    base = Path(lustre_tree) / ".ltvm-staging" / target / arch
+    if kernel is None:
+        return base
+    return base / kernel
 
 
 class BuildResult(TypedDict):
@@ -167,6 +198,7 @@ def build_lustre(
     jobs: int | None = None,
     force: bool = False,
     arch: str = "x86_64",
+    kernel: str | None = None,
 ) -> BuildResult:
     """Build a Lustre source tree.
 
@@ -228,6 +260,7 @@ def build_lustre(
         force,
         arch=arch,
         target=target,
+        kernel=kernel,
     )
 
 
@@ -242,6 +275,7 @@ def _build_in_container(
     force: bool,
     arch: str = "x86_64",
     target: str = DEFAULT_TARGET,
+    kernel: str | None = None,
 ) -> BuildResult:
     """Build Lustre inside the build container.
 
@@ -392,9 +426,23 @@ fi""")
     script = "\n".join(script_parts)
 
     # Ensure the staging directory exists on the host before mounting.
-    # arch is folded into the path so cross-arch builds for the same
-    # target don't clobber each other's .ko files.
-    host_staging = staging_path(lustre_tree, target, arch=arch)
+    # arch + kernel are both folded into the path so cross-arch and
+    # cross-kernel builds for the same target don't clobber each
+    # other's .ko files OR the userland portion (usr/sbin, etc.) that
+    # has no per-kver discriminator inside the DESTDIR layout.
+    resolved_kernel = kernel
+    if resolved_kernel is None:
+        try:
+            from .target_config import TargetConfig
+
+            resolved_kernel = TargetConfig(target, arch=arch).resolve_kernel(
+                None
+            )
+        except Exception:
+            resolved_kernel = kver
+    host_staging = staging_path(
+        lustre_tree, target, arch=arch, kernel=resolved_kernel
+    )
     host_staging.mkdir(parents=True, exist_ok=True)
     # When invoked via sudo, chown the staging dir to the real user so
     # the user can read their own modules and `rm -rf` their tree
@@ -526,6 +574,21 @@ fi""")
     # lib/modules/.../extra/ (which doesn't update the staging dir's
     # own mtime) still gets a fresh "newer than this" comparison.
     (host_staging / ".ltvm-staging-stamp").write_text(kver + "\n")
+    # Per-kernel meta so build-image --with-lustre can fold the built
+    # Module.symvers hash into the image input hash and invalidate the
+    # cache when a rebuilt Lustre lands new modules.
+    symvers_hash = _hash_file(build_tree / "Module.symvers")
+    meta_text = json.dumps(
+        {
+            "kernel_version": kver,
+            "kernel_name": resolved_kernel,
+            "target": target,
+            "arch": arch,
+            "module_symvers_sha256": symvers_hash,
+        },
+        indent=2,
+    )
+    (host_staging / ".ltvm-staging-meta.json").write_text(meta_text + "\n")
 
     ko_files = list(host_staging.rglob("*.ko"))
     print(f"--- Build complete: {len(ko_files)} kernel modules")
@@ -545,6 +608,7 @@ def lustre_status(
     build_tree: str | Path,
     target: str = DEFAULT_TARGET,
     arch: str = "x86_64",
+    kernel: str | None = None,
 ) -> StatusResult:
     """Return a status dict for the Lustre build."""
     lustre_tree = Path(lustre_tree).resolve()
@@ -552,7 +616,14 @@ def lustre_status(
 
     stamp = lustre_tree / f".ltvm-kernel-{_stamp_suffix(target, arch)}"
     config_status = lustre_tree / "config.status"
-    host_staging = staging_path(lustre_tree, target, arch=arch)
+    # Prefer the per-kernel staging when a kernel is known.  Fall back
+    # to the legacy per-(target,arch) path so status for pre-migration
+    # trees still reports a ko_count instead of silently zero.
+    host_staging = staging_path(lustre_tree, target, arch=arch, kernel=kernel)
+    if kernel is not None and not host_staging.is_dir():
+        legacy = staging_path(lustre_tree, target, arch=arch, kernel=None)
+        if legacy.is_dir():
+            host_staging = legacy
     ko_count = (
         len(list(host_staging.rglob("*.ko"))) if host_staging.is_dir() else 0
     )

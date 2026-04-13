@@ -157,6 +157,101 @@ def _prebuild_tools_native(
     log.info("Pre-built tools at %s", output_dir)
 
 
+def _lustre_staging_hash_input(staging: Path) -> bytes:
+    """Return bytes to fold into the image input hash when --with-lustre
+    is active.  Uses Module.symvers sha256 when present (written by
+    build_lustre) and falls back to a walk of the staging tree so the
+    hash still invalidates on rebuild even for a legacy staging dir.
+    """
+    from .lustre_build import read_staging_meta
+
+    parts = [b"with-lustre:"]
+    meta = read_staging_meta(staging)
+    if meta and isinstance(meta.get("module_symvers_sha256"), str):
+        parts.append(b"symvers:")
+        parts.append(meta["module_symvers_sha256"].encode())
+    else:
+        # Fallback: hash sorted (relpath, sha256) of every file under
+        # staging.  Expensive but correct -- only exercised for pre-
+        # existing staging dirs without meta.
+        import hashlib as _hash
+
+        h = _hash.sha256()
+        for f in sorted(staging.rglob("*")):
+            if not f.is_file():
+                continue
+            h.update(str(f.relative_to(staging)).encode())
+            h.update(b"\0")
+            with f.open("rb") as fp:
+                for chunk in iter(lambda: fp.read(65536), b""):
+                    h.update(chunk)
+        parts.append(b"tree:")
+        parts.append(h.hexdigest().encode())
+    return b"|".join(parts)
+
+
+def _lustre_inject_lines(
+    staging: Path,
+    inject_dir: Path,
+    kver: str,
+    os_family: str,
+) -> list[str]:
+    """Stage Lustre module + userland subtrees from *staging* into
+    *inject_dir* and return the Dockerfile lines that COPY them into
+    the image.
+
+    Uses tar-in / tar-out to transplant whole subdirectories into the
+    inject context so the Dockerfile stays free of shell
+    interpolation -- each COPY source is a fixed pathname and the
+    file layout on the host decides what ends up in the image.
+
+    Layout produced in *inject_dir*:
+      lustre-extra/            -> /lib/modules/<kver>/extra/
+      lustre-userland-usr/     -> /usr/
+      lustre-userland-etc/     -> /etc/
+    Only the subtrees that actually exist in staging are copied.
+    """
+    lines: list[str] = []
+
+    modules_src = (
+        staging / "lib" / "modules" / kver / "extra"
+    )
+    if modules_src.is_dir():
+        dest = inject_dir / "lustre-extra"
+        shutil.copytree(str(modules_src), str(dest), symlinks=False)
+        lines.append(f"COPY lustre-extra/ /lib/modules/{kver}/extra/")
+
+    # Userland subtrees.  /usr/ is the usual catch-all (sbin, bin,
+    # lib64, share all live under it) so we stage it as one subtree
+    # instead of four fragile COPYs.  etc/ is separate because it
+    # sits outside /usr.  Debian's Lustre DESTDIR has the same layout
+    # -- DESTDIR install is OS-agnostic; the only OS-specific bit is
+    # whether /usr/lib or /usr/lib64 gets populated, which the COPY
+    # transplants faithfully either way.
+    for rel in ("usr", "etc"):
+        src = staging / rel
+        if src.is_dir():
+            dest = inject_dir / f"lustre-userland-{rel}"
+            shutil.copytree(str(src), str(dest), symlinks=False)
+            lines.append(
+                f"COPY lustre-userland-{rel}/ /{rel}/"
+            )
+
+    # A second depmod after Lustre modules land.  Without this,
+    # `modprobe lustre` inside the VM fails -- the earlier depmod
+    # (run after kernel modules) didn't see /lib/modules/<k>/extra/.
+    lines.append(f"RUN depmod -a {kver}")
+    # Some distros' mount(8) wants mount.lustre_tgt; symlink if
+    # missing.  os_family is accepted for future per-family tweaks
+    # but currently all our targets share this invocation.
+    _ = os_family
+    lines.append(
+        "RUN ln -sf mount.lustre "
+        "/usr/sbin/mount.lustre_tgt 2>/dev/null || true"
+    )
+    return lines
+
+
 def _kdump_inject_lines(
     kdir: Path,
     inject_dir: Path,
@@ -216,6 +311,7 @@ def build_image(
     target_config: TargetConfig,
     force: bool = False,
     kernel: str | None = None,
+    with_lustre: str | Path | None = None,
 ) -> Path:
     """Build a VM base image for the given target.
 
@@ -229,12 +325,40 @@ def build_image(
         force: rebuild even if inputs unchanged
         kernel: kernel name (short or full) whose modules to bake in;
                 defaults to the target's default kernel
+        with_lustre: optional path to a Lustre source tree whose
+                per-kernel staging should be baked into the image
+                alongside the kernel modules.  Requires a prior
+                `ltvm build-lustre <target> --kernel <k>`.
     """
     _check_mke2fs()
 
     kernel_name = target_config.resolve_kernel(kernel)
 
-    if not force and not target_config.is_stale("image", kernel=kernel):
+    lustre_staging: Path | None = None
+    lustre_hash_input: bytes = b""
+    if with_lustre is not None:
+        from .lustre_build import staging_path as _staging_path
+
+        lustre_tree = Path(with_lustre).resolve()
+        lustre_staging = _staging_path(
+            lustre_tree,
+            target_config.name,
+            arch=target_config.arch,
+            kernel=kernel_name,
+        )
+        if not lustre_staging.is_dir() or not any(
+            lustre_staging.rglob("*.ko")
+        ):
+            raise FileNotFoundError(
+                f"No Lustre staging at {lustre_staging} -- "
+                f"run: ltvm build-lustre {target_config.name} "
+                f"--kernel {kernel_name} --lustre-tree {lustre_tree}"
+            )
+        lustre_hash_input = _lustre_staging_hash_input(lustre_staging)
+
+    if not force and not target_config.is_stale(
+        "image", kernel=kernel, extra_hash=lustre_hash_input
+    ):
         log.info(
             "Image for %s (kernel=%s) is up to date, skipping (use force=True to rebuild)",
             target_config.name,
@@ -373,6 +497,19 @@ def build_image(
             kdump_lines = _kdump_inject_lines(
                 kdir, inject_dir, kver, target_config.os_family
             )
+            lustre_lines: list[str] = []
+            if lustre_staging is not None:
+                if not kver:
+                    raise RuntimeError(
+                        "--with-lustre requires a resolved kernel "
+                        "release (kernel.release missing from build-tree)"
+                    )
+                lustre_lines = _lustre_inject_lines(
+                    lustre_staging,
+                    inject_dir,
+                    kver,
+                    target_config.os_family,
+                )
             # Lustre auto-inject was here.  It looked at a global
             # staging dir and silently baked whatever was there into the
             # image.  That doesn't work in the multi-user model where
@@ -398,6 +535,7 @@ def build_image(
                 "RUN ln -sf mount.lustre /usr/sbin/mount.lustre_tgt 2>/dev/null || true"
             )
             lines.extend(kdump_lines)
+            lines.extend(lustre_lines)
 
             inject_dockerfile = inject_dir / "Dockerfile"
             inject_dockerfile.write_text("\n".join(lines) + "\n")
@@ -444,7 +582,11 @@ def build_image(
     target_config.write_meta(
         "image",
         kernel=kernel,
+        extra_hash=lustre_hash_input,
         build_date=datetime.now(timezone.utc).isoformat(),
+        with_lustre=str(Path(with_lustre).resolve())
+        if with_lustre is not None
+        else None,
         build_seconds=round(elapsed, 1),
         image_size_mb=round(size_mb, 1),
         packages=pkg_manifest,

@@ -288,6 +288,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--force", action="store_true", help="Rebuild even if inputs unchanged"
     )
+    sp.add_argument(
+        "--with-lustre",
+        default=None,
+        metavar="TREE",
+        help="Bake Lustre modules+userland from TREE's per-kernel "
+        "staging into the image. Requires a prior "
+        "`ltvm build-lustre <target> --kernel <k>`.",
+    )
     sp.set_defaults(func=cmd_build_image)
 
     # -- build-lustre --

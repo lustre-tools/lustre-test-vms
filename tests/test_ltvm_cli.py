@@ -1389,6 +1389,59 @@ class TestKernelArgPropagation:
         _, kwargs = mock_bi.call_args
         assert kwargs.get("kernel") == "5.14-rhel9.5"
 
+    def test_build_image_with_lustre_forwarded(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+        tmp_path: Path,
+    ) -> None:
+        from ltvm_pkg import cli as cli_mod
+
+        tc = self._tc(tmp_targets)
+        lt = tmp_path / "tree"
+        lt.mkdir()
+        with (
+            patch.object(cli_mod, "TargetConfig", return_value=tc),
+            patch.object(cli_mod, "build_image") as mock_bi,
+        ):
+            mock_bi.return_value = Path("/fake/base.ext4")
+            rc = _run_main(
+                [
+                    "build-image",
+                    "rocky9",
+                    "--kernel",
+                    "5.14-rhel9.7",
+                    "--with-lustre",
+                    str(lt),
+                ],
+                capsys,
+            )
+
+        assert rc == EXIT_OK
+        mock_bi.assert_called_once()
+        _, kwargs = mock_bi.call_args
+        assert kwargs.get("kernel") == "5.14-rhel9.7"
+        assert kwargs.get("with_lustre") == str(lt)
+
+    def test_build_image_without_with_lustre_is_none(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+    ) -> None:
+        from ltvm_pkg import cli as cli_mod
+
+        tc = self._tc(tmp_targets)
+        with (
+            patch.object(cli_mod, "TargetConfig", return_value=tc),
+            patch.object(cli_mod, "build_image") as mock_bi,
+        ):
+            mock_bi.return_value = Path("/fake/base.ext4")
+            rc = _run_main(["build-image", "rocky9"], capsys)
+
+        assert rc == EXIT_OK
+        _, kwargs = mock_bi.call_args
+        assert kwargs.get("with_lustre") is None
+
     def test_build_all_kernel_reaches_image_builder(
         self,
         capsys: pytest.CaptureFixture[str],

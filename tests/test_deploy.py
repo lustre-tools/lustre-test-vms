@@ -406,3 +406,131 @@ class TestLustreMountVm:
         ):
             rc = deploy.lustre_mount_vm("mount-exc", os_family="rhel")
         assert rc == EXIT_ERROR
+
+
+# --------------------------------------------------------------------------
+# cmd_deploy: per-kernel staging resolution (lustre_test_vms_v2-eh9)
+# --------------------------------------------------------------------------
+
+
+class TestCmdDeployPerKernelStaging:
+    """cmd_deploy resolves staging per-kernel and refuses when the
+    legacy per-target staging exists but the per-kernel one doesn't.
+    """
+
+    def _setup_lustre_tree(self, build_path: Path) -> None:
+        (build_path / "lustre").mkdir(parents=True)
+        (build_path / "lnet").mkdir()
+        (build_path / "configure.ac").write_text("")
+
+    def test_resolves_under_kernel_subdir(
+        self, tmp_sockets: Path, tmp_path: Path
+    ) -> None:
+        """The staging path used by cmd_deploy is keyed by kernel."""
+        import argparse as ap
+
+        from ltvm_pkg import cli as cli_mod
+
+        build_path = tmp_path / "lustre-release"
+        self._setup_lustre_tree(build_path)
+        # Seed a fresh per-kernel staging dir with a .ko so the build
+        # step is skipped and we can assert the path was used.
+        from ltvm_pkg.lustre_build import staging_path
+
+        staging = staging_path(
+            build_path, "rocky9", arch="x86_64", kernel="5.14-rhel9.7"
+        )
+        staging.mkdir(parents=True)
+        (staging / "lustre.ko").write_text("")
+        (staging / ".ltvm-staging-stamp").write_text("5.14.0-foo\n")
+
+        vm = _make_vm(name="co1-eh9", ip="192.168.100.60")
+        vm.os_id = "rocky9"
+        vm.save()
+
+        tc = MagicMock()
+        tc.os_family = "rhel"
+        tc.arch = "x86_64"
+        tc.resolve_kernel.side_effect = lambda k: k or "5.14-rhel9.7"
+
+        captured: dict = {}
+
+        def fake_deploy_to_vm(vm_arg, staging_arg, **kwargs):
+            captured["staging"] = Path(staging_arg)
+
+        with (
+            patch.object(cli_mod, "_require_root", return_value=None),
+            patch.object(cli_mod, "TargetConfig", return_value=tc),
+            patch(
+                "ltvm_pkg.cli.deploy_to_vm", side_effect=fake_deploy_to_vm
+            ),
+            patch("subprocess.run") as run_mock,
+        ):
+            # If _staging_is_fresh does get invoked it calls `find`,
+            # which we short-circuit to return "fresh" (empty stdout).
+            run_mock.return_value = MagicMock(returncode=0, stdout="")
+            args = ap.Namespace(
+                vm="co1-eh9",
+                build=str(build_path),
+                mount=False,
+                target=None,
+                kernel=None,
+                json=False,
+                userspace_only=False,
+                force_compat=False,
+            )
+            cli_mod.cmd_deploy(args)
+
+        assert "staging" in captured
+        assert captured["staging"] == staging
+        assert captured["staging"].name == "5.14-rhel9.7"
+
+    def test_legacy_staging_triggers_clear_error(
+        self, tmp_sockets: Path, tmp_path: Path
+    ) -> None:
+        """Legacy per-target staging present + per-kernel missing
+        errors with the build-lustre hint instead of silently shipping
+        the legacy modules."""
+        import argparse as ap
+
+        from ltvm_pkg import cli as cli_mod
+        from ltvm_pkg.lustre_build import staging_path
+
+        build_path = tmp_path / "lustre-release"
+        self._setup_lustre_tree(build_path)
+        legacy = staging_path(
+            build_path, "rocky9", arch="x86_64", kernel=None
+        )
+        legacy.mkdir(parents=True)
+        (legacy / "old.ko").write_text("")
+
+        vm = _make_vm(name="co1-eh9-legacy", ip="192.168.100.61")
+        vm.os_id = "rocky9"
+        vm.save()
+
+        tc = MagicMock()
+        tc.os_family = "rhel"
+        tc.arch = "x86_64"
+        tc.resolve_kernel.side_effect = lambda k: k or "5.14-rhel9.7"
+
+        with (
+            patch.object(cli_mod, "_require_root", return_value=None),
+            patch.object(cli_mod, "TargetConfig", return_value=tc),
+            patch("ltvm_pkg.cli.deploy_to_vm") as deploy_mock,
+        ):
+            args = ap.Namespace(
+                vm="co1-eh9-legacy",
+                build=str(build_path),
+                mount=False,
+                target=None,
+                kernel=None,
+                json=False,
+                userspace_only=False,
+                force_compat=False,
+            )
+            rc = cli_mod.cmd_deploy(args)
+
+        from ltvm_pkg.cli import EXIT_ERROR
+
+        assert rc == EXIT_ERROR
+        assert not deploy_mock.called

@@ -381,6 +381,162 @@ class TestKdumpInjectLines:
         )
 
 
+class TestLustreInjectLines:
+    """_lustre_inject_lines stages Lustre modules+userland into the
+    image build context."""
+
+    def _make_staging(self, tmp_path: Path, kver: str) -> Path:
+        staging = tmp_path / "staging"
+        (staging / "lib" / "modules" / kver / "extra").mkdir(parents=True)
+        (staging / "lib" / "modules" / kver / "extra" / "lustre.ko").write_text(
+            "M"
+        )
+        (staging / "usr" / "sbin").mkdir(parents=True)
+        (staging / "usr" / "sbin" / "mount.lustre").write_text("X")
+        (staging / "etc").mkdir()
+        (staging / "etc" / "ldev.conf").write_text("")
+        return staging
+
+    def test_emits_module_and_userland_copies(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_build as image
+
+        staging = self._make_staging(tmp_path, "5.14.0-foo")
+        inject = tmp_path / "inject"
+        inject.mkdir()
+
+        lines = image._lustre_inject_lines(
+            staging, inject, "5.14.0-foo", "rhel"
+        )
+        text = "\n".join(lines)
+        assert "COPY lustre-extra/ /lib/modules/5.14.0-foo/extra/" in text
+        assert "COPY lustre-userland-usr/ /usr/" in text
+        assert "COPY lustre-userland-etc/ /etc/" in text
+        assert "depmod -a 5.14.0-foo" in text
+        assert (inject / "lustre-extra" / "lustre.ko").read_text() == "M"
+        assert (
+            inject / "lustre-userland-usr" / "sbin" / "mount.lustre"
+        ).read_text() == "X"
+
+    def test_debian_same_layout(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_build as image
+
+        staging = self._make_staging(tmp_path, "6.1.0-deb")
+        inject = tmp_path / "inject"
+        inject.mkdir()
+
+        lines = image._lustre_inject_lines(
+            staging, inject, "6.1.0-deb", "debian"
+        )
+        text = "\n".join(lines)
+        assert "COPY lustre-extra/ /lib/modules/6.1.0-deb/extra/" in text
+        assert "depmod -a 6.1.0-deb" in text
+
+    def test_no_shell_interpolation_in_copy_sources(
+        self, tmp_path: Path
+    ) -> None:
+        import ltvm_pkg.image_build as image
+
+        staging = self._make_staging(tmp_path, "5.14.0-foo")
+        inject = tmp_path / "inject"
+        inject.mkdir()
+        lines = image._lustre_inject_lines(
+            staging, inject, "5.14.0-foo", "rhel"
+        )
+        for line in lines:
+            # Tar-in-tar-out via copytree means every COPY is a fixed
+            # literal path, not a shell glob/expansion.
+            assert "$(" not in line
+            assert "*" not in line
+
+
+class TestBuildImageWithLustre:
+    """--with-lustre flips the input hash and requires staging."""
+
+    def _lustre_tree_with_staging(
+        self,
+        tmp_targets: Path,
+        tmp_path: Path,
+        kernel_dir: str,
+    ) -> Path:
+        from ltvm_pkg.lustre_build import staging_path
+
+        lt = tmp_path / "tree"
+        lt.mkdir()
+        staging = staging_path(
+            lt, "rocky9", arch="x86_64", kernel=kernel_dir
+        )
+        (staging / "lib" / "modules" / "5.14.0-foo" / "extra").mkdir(
+            parents=True
+        )
+        (
+            staging
+            / "lib"
+            / "modules"
+            / "5.14.0-foo"
+            / "extra"
+            / "lustre.ko"
+        ).write_text("M")
+        (staging / "usr" / "sbin").mkdir(parents=True)
+        (staging / "usr" / "sbin" / "mount.lustre").write_text("X")
+        (staging / ".ltvm-staging-meta.json").write_text(
+            '{"module_symvers_sha256": "deadbeef"}'
+        )
+        return lt
+
+    def test_missing_staging_raises(
+        self, tmp_targets: Path, tmp_path: Path
+    ) -> None:
+        import ltvm_pkg.image_build as image
+        from tests.conftest import _make_config
+
+        tc = _make_config(tmp_targets)
+        lt = tmp_path / "empty-tree"
+        lt.mkdir()
+        with pytest.raises(FileNotFoundError, match="ltvm build-lustre"):
+            image.build_image(
+                tc, force=True, kernel="5.14-rhel9.7", with_lustre=lt
+            )
+
+    def test_presence_flips_input_hash(
+        self, tmp_targets: Path, tmp_path: Path
+    ) -> None:
+        from tests.conftest import _make_config
+
+        tc = _make_config(tmp_targets)
+        lt = self._lustre_tree_with_staging(
+            tmp_targets, tmp_path, "5.14-rhel9.7"
+        )
+        # Hash without --with-lustre
+        h0 = tc.input_hash("image", kernel="5.14-rhel9.7")
+
+        from ltvm_pkg.image_build import _lustre_staging_hash_input
+        from ltvm_pkg.lustre_build import staging_path
+
+        staging = staging_path(
+            lt, "rocky9", arch="x86_64", kernel="5.14-rhel9.7"
+        )
+        extra = _lustre_staging_hash_input(staging)
+        h1 = tc.input_hash("image", kernel="5.14-rhel9.7", extra=extra)
+        assert h0 != h1
+
+    def test_staging_hash_changes_when_symvers_changes(
+        self, tmp_path: Path
+    ) -> None:
+        from ltvm_pkg.image_build import _lustre_staging_hash_input
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / ".ltvm-staging-meta.json").write_text(
+            '{"module_symvers_sha256": "aaaa"}'
+        )
+        h0 = _lustre_staging_hash_input(staging)
+        (staging / ".ltvm-staging-meta.json").write_text(
+            '{"module_symvers_sha256": "bbbb"}'
+        )
+        h1 = _lustre_staging_hash_input(staging)
+        assert h0 != h1
+
+
 class TestGetPackageManifest:
     def test_returns_sorted_package_list(self) -> None:
         import ltvm_pkg.image_build as image
