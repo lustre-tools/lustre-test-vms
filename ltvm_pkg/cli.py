@@ -404,6 +404,11 @@ def cmd_build_image(args: argparse.Namespace) -> int:
         lustre_tree = Path(args.lustre_tree) if args.lustre_tree else Path(os.getcwd())
         candidate = staging_path(lustre_tree, args.target, arch=tc.arch, kernel=resolved_kernel)
         if candidate.exists():
+            _gate_lustre_validation(
+                tc,
+                lustre_tree,
+                force=getattr(args, "force_compat", False),
+            )
             with_lustre = str(lustre_tree)
         else:
             print(
@@ -852,7 +857,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         arch_flag = f" --arch {arch}" if arch != "x86_64" else ""
         print(
             f"  sudo ltvm create co1-test --os {target}{arch_flag} "
-            f"--vcpus 2 --mem 2048 --mdt-disks 1 --ost-disks 2"
+            f"--vcpus 2 --mdt-disks 1 --ost-disks 2"
         )
         print("  sudo ltvm deploy co1-test --mount")
 
@@ -1223,7 +1228,9 @@ def _validation_result_to_dict(r: ValidationResult) -> dict[str, Any]:
 
 def cmd_validate(args: argparse.Namespace) -> int:
     use_json = args.json
-    tc, err = _load_target(args.target, use_json)
+    tc, err = _load_target(
+        args.target, use_json, arch=getattr(args, "arch", None)
+    )
     if err is not None:
         return err
     assert tc is not None
@@ -1243,14 +1250,14 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     result = validate_target(tc, lustre_tree)
     exit_code = _VALIDATE_EXIT[result.status]
-    force = bool(getattr(args, "force", False))
+    force = bool(getattr(args, "force_compat", False))
 
     if use_json:
         print(json.dumps(_validation_result_to_dict(result), indent=2))
     else:
         tag = f"[{result.status}]"
         if result.status == "refuse" and force:
-            print(f"--force: {tag} {result.message}")
+            print(f"--force-compat: {tag} {result.message}")
         else:
             print(f"{tag} {result.message}")
 
@@ -1726,7 +1733,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     if userspace_only:
         if not staging.is_dir():
             return _error(
-                f"No staging for {target} -- run: ltvm build-lustre {target}",
+                f"No staging for {target} -- run: ltvm build-lustre "
+                f"{target} --lustre-tree {build_path}",
                 use_json,
             )
         if not use_json:
@@ -1995,6 +2003,7 @@ def cmd_cluster(args: argparse.Namespace) -> int:
         build_path = "."
         mount = False
         server_only = False
+        force_compat = False
         i = 1
         while i < len(cargs):
             if cargs[i] == "--build" and i + 1 < len(cargs):
@@ -2006,11 +2015,15 @@ def cmd_cluster(args: argparse.Namespace) -> int:
             elif cargs[i] == "--server-only":
                 server_only = True
                 i += 1
+            elif cargs[i] == "--force-compat":
+                force_compat = True
+                i += 1
             else:
                 return _error(
                     f"cluster deploy: unknown argument '{cargs[i]}'",
                     use_json,
-                    hint="valid: --build PATH, --mount, --server-only",
+                    hint="valid: --build PATH, --mount, --server-only, "
+                    "--force-compat",
                 )
         return _call(
             _qc_deploy,
@@ -2019,6 +2032,7 @@ def cmd_cluster(args: argparse.Namespace) -> int:
                 lustre_source=build_path,
                 mount=mount,
                 server_only=server_only,
+                force_compat=force_compat,
             ),
         )
 

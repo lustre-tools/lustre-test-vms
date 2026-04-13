@@ -525,6 +525,8 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     # "x86_64" is wrong for a target whose default arch is something
     # else -- see the matching cmd_deploy comment.
     build_cmd += ["--arch", arch]
+    if getattr(args, "force_compat", False):
+        build_cmd += ["--force-compat"]
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
         build_cmd = ["sudo", "-u", sudo_user] + build_cmd

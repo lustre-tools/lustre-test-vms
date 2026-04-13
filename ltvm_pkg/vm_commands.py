@@ -42,6 +42,7 @@ from .vm_state import (
     SSH_TIMEOUT,
     VMInfo,
     VMNotFound,
+    lustre_libdir,
     resolve_os_artifacts,
 )
 
@@ -398,6 +399,11 @@ def cmd_create(args: argparse.Namespace) -> None:
     # race and claim the same address.  The lock is held until vm.save()
     # commits the .info file, at which point the IP is visible to peers.
     with alloc_ip(name, explicit_ip=getattr(args, "ip", None) or None) as ip:
+        # Re-check existence under the alloc_ip lock: the earlier check
+        # at the top of the function is unsynchronized so two concurrent
+        # `ltvm create <same name>` could both pass it.
+        if info_path.exists():
+            die(f"VM '{name}' already exists")
         vm = VMInfo(
             name=name,
             ip=ip,
@@ -734,7 +740,22 @@ def cmd_llmount(args: argparse.Namespace) -> None:
         print(f"error: VM '{name}' not running", file=sys.stderr)
         sys.exit(EXIT_UNREACHABLE)
 
-    libdir = "/usr/lib64/lustre"
+    # Debian targets put Lustre under /usr/lib, RHEL under /usr/lib64.
+    # Resolve from the VM's recorded os_id; fall back to rhel with a
+    # warning if the target config is missing/broken.
+    os_family = "rhel"
+    if vm.os_id:
+        try:
+            from .target_config import TargetConfig
+
+            os_family = TargetConfig(vm.os_id).os_family
+        except (ValueError, FileNotFoundError) as e:
+            print(
+                f"warning: cannot resolve target {vm.os_id!r}, "
+                f"defaulting to rhel libdir: {e}",
+                file=sys.stderr,
+            )
+    libdir = lustre_libdir(os_family)
 
     if cleanup:
         command = (
@@ -1038,8 +1059,7 @@ def cmd_crash_collect(args: argparse.Namespace) -> None:
                 f"\nVM '{args.name}' did not come back after {args.wait + 5}s",
                 EXIT_TIMEOUT,
             )
-
-    if not is_running(vm):
+    elif not is_running(vm):
         die(f"VM '{args.name}' not running")
 
     print("finding vmcore...")

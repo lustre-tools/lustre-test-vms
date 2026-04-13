@@ -270,6 +270,13 @@ def launch_qemu(vm: VMInfo) -> None:
                 f"QEMU failed to start for '{vm.name}' "
                 f"(rc={r.returncode}); see {vm.log_path}"
             )
+        # -daemonize returns once the parent exits, but the child may not
+        # have written its pidfile yet.  Poll briefly so we don't false-
+        # positive a successful launch into a rollback.
+        for _ in range(20):
+            if vm.pid_path.exists():
+                break
+            time.sleep(0.1)
         pid = int(vm.pid_path.read_text().strip())
     except BaseException:
         # TAP was created above; tear it down so we don't leak the device.

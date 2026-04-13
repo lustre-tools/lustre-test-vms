@@ -270,7 +270,7 @@ class TestDeploySshKey:
                 return_value=("testuser", fake_ssh_dir),
             ),
             patch(
-                "ltvm_pkg.vm_net.run_ssh",
+                "ltvm_pkg.vm_net.subprocess.run",
                 side_effect=subprocess.TimeoutExpired(cmd="ssh", timeout=10),
             ),
         ):

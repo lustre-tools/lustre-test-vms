@@ -365,6 +365,37 @@ class TestLaunchQemuCommand:
         )
 
 
+    def test_pidfile_appears_late_no_rollback(self, tmp_vmdir: Path) -> None:
+        """-daemonize may return before child writes pidfile; we poll briefly."""
+        vm = _make_vm(tmp_vmdir)
+        # Pidfile is *not* present when subprocess.run returns; only after
+        # one or two poll iterations does the daemonized child create it.
+        vm.pid_path.unlink(missing_ok=True)
+        h = _LaunchHarness()
+
+        sleep_calls = {"n": 0}
+
+        def fake_sleep(_):
+            sleep_calls["n"] += 1
+            if sleep_calls["n"] == 2:
+                vm.pid_path.write_text("4242\n")
+
+        with (
+            patch("ltvm_pkg.qemu_run.run", side_effect=h.run),
+            patch(
+                "ltvm_pkg.qemu_run.subprocess.run", side_effect=h.subprocess_run
+            ),
+            patch("ltvm_pkg.qemu_run.is_running", return_value=False),
+            patch("ltvm_pkg.qemu_run._check_memory_for_launch"),
+            patch("ltvm_pkg.qemu_run.time.sleep", side_effect=fake_sleep),
+            patch("ltvm_pkg.qemu_run.time.time", return_value=1700000000),
+            patch.object(VMInfo, "update_pid"),
+            patch.object(VMInfo, "update_last_boot"),
+        ):
+            qemu_run.launch_qemu(vm)
+        assert sleep_calls["n"] >= 1
+
+
 # ── memory budget check ──────────────────────────────────
 
 

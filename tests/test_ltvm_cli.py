@@ -525,13 +525,43 @@ class TestCmdValidate:
         tc = self._tc(tmp_targets)
         with patch("ltvm_pkg.cli.TargetConfig", return_value=tc):
             rc = _run_main(
-                ["validate", "rocky9", "--lustre-tree", str(lt), "--force"],
+                ["validate", "rocky9", "--lustre-tree", str(lt), "--force-compat"],
                 capsys,
             )
         assert rc == EXIT_OK
         out = capsys.readouterr().out
-        assert "--force:" in out
+        assert "--force-compat:" in out
         assert "[refuse]" in out
+
+    def test_arch_forwarded_to_target_config(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        tmp_targets: Path,
+    ) -> None:
+        lt = self._make_lustre_tree(
+            tmp_path,
+            which_patch=self._WP_OK,
+            changelog=self._CL,
+            target_in=self._TI,
+        )
+        tc = self._tc(tmp_targets)
+        with patch("ltvm_pkg.cli.TargetConfig", return_value=tc) as mock_tc:
+            _run_main(
+                [
+                    "validate",
+                    "rocky9",
+                    "--arch",
+                    "aarch64",
+                    "--lustre-tree",
+                    str(lt),
+                ],
+                capsys,
+            )
+        # validate must forward --arch like every other build cmd does;
+        # otherwise an aarch64 validation runs against the x86_64 target.
+        _, kwargs = mock_tc.call_args
+        assert kwargs.get("arch") == "aarch64"
 
     def test_json_output(
         self,
@@ -1401,6 +1431,7 @@ class TestKernelArgPropagation:
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
             patch.object(cli_mod, "build_image") as mock_bi,
+            patch.object(cli_mod, "_gate_lustre_validation"),
         ):
             mock_bi.return_value = Path("/fake/base.ext4")
             rc = _run_main(

@@ -284,13 +284,33 @@ def deploy_ssh_key(ip: str) -> None:
         break
     if not pubkey:
         return
-    key_data = pubkey.read_text().strip().replace("'", "'\\''")
+    # Pipe the key in via stdin so weird key-file content (newlines in
+    # comment field, embedded quotes, etc.) can't break shell quoting.
+    key_data = pubkey.read_text().rstrip("\n") + "\n"
+    ssh_cmd = [
+        "sshpass",
+        "-p",
+        ROOT_PASSWORD,
+        "ssh",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "LogLevel=ERROR",
+        f"root@{ip}",
+        "mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
+        "cat >> ~/.ssh/authorized_keys && "
+        "chmod 600 ~/.ssh/authorized_keys",
+    ]
     try:
-        r = run_ssh(
-            ip,
-            f"mkdir -p ~/.ssh && chmod 700 ~/.ssh && "
-            f"echo '{key_data}' >> ~/.ssh/authorized_keys && "
-            f"chmod 600 ~/.ssh/authorized_keys",
+        r = subprocess.run(
+            ssh_cmd,
+            input=key_data,
+            capture_output=True,
+            text=True,
             timeout=10,
         )
     except subprocess.TimeoutExpired:

@@ -301,6 +301,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to Lustre source tree (default: cwd) -- used to "
         "find per-kernel Lustre staging to bake into the image",
     )
+    sp.add_argument(
+        "--force-compat",
+        action="store_true",
+        help="Override a Lustre-tree compatibility refusal (not errors)",
+    )
     sp.set_defaults(func=cmd_build_image)
 
     # -- build-lustre --
@@ -474,7 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to Lustre source tree (default: ~/lustre-release)",
     )
     sp.add_argument(
-        "--force",
+        "--force-compat",
         action="store_true",
         help="Downgrade 'refuse' exit code to 0 (message still printed)",
     )
