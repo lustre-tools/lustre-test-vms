@@ -32,7 +32,7 @@ ltvm fetch rocky9
 
 This downloads a tarball containing the kernel (vmlinux,
 vmlinuz, build-tree, modules) and VM base image (base.ext4)
-into `output/rocky9/`.
+into `output/rocky9/x86_64/`.
 
 Check what you have:
 
@@ -119,9 +119,9 @@ ltvm build-kernel rocky9 --lustre-tree ~/lustre-release
 The Lustre tree is needed because it contains the kernel
 patches, patch series, base config, and SRPM version info
 (in `lustre/kernel_patches/`). The SRPM is downloaded from
-the Rocky mirror and cached in `output/rocky9/cache/`.
+the Rocky mirror and cached in `output/rocky9/x86_64/cache/`.
 
-Output: `output/rocky9/kernels/<name>/` with vmlinux,
+Output: `output/rocky9/x86_64/kernels/<name>/` with vmlinux,
 vmlinuz, modules, and a full build-tree for Lustre module
 compilation.
 
@@ -194,7 +194,7 @@ sudo ltvm deploy co1-single --kernel 5.14-rhel9.5 --mount
 ```
 
 Each kernel gets its own directory under
-`output/rocky9/kernels/`, so they coexist without conflict.
+`output/rocky9/x86_64/kernels/`, so they coexist without conflict.
 
 
 ## Advanced Flow: Multi-Node Clusters

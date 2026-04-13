@@ -714,16 +714,15 @@ def _find_release_url(
     name and optionally contains filter_str.  Returns the first
     matching asset's download URL.
 
-    For non-x86_64 arches, the asset filename contains '-<arch>'
-    (e.g. ubuntu2404-6.8.12-aarch64.tar.gz).  x86_64 assets have
-    no arch suffix, so we exclude files ending in known arch suffixes
-    to avoid picking up an aarch64 asset for an x86_64 request.
+    Asset filenames always contain '-<arch>-' (e.g.
+    rocky9-x86_64-5.14.0_lustre.tar.zst).  We match on that substring
+    so an x86_64 fetch never picks up an aarch64 asset and vice versa.
     """
     releases = _gh_api("releases")
     if not isinstance(releases, list):
         releases = [releases]
 
-    non_default_arches = ("aarch64",)  # arches that get a suffix in asset names
+    arch_match = f"-{arch}-"
 
     for rel in releases:
         tag = rel.get("tag_name", "")
@@ -737,14 +736,8 @@ def _find_release_url(
             name = asset.get("name", "")
             if not name.endswith((".tar.zst", ".tar.gz")):
                 continue
-            # For non-default arch, require the arch suffix in the asset name
-            if arch != "x86_64":
-                if f"-{arch}." not in name:
-                    continue
-            else:
-                # For x86_64, skip assets that belong to other arches
-                if any(f"-{a}." in name for a in non_default_arches):
-                    continue
+            if arch_match not in name:
+                continue
             return str(asset["browser_download_url"])
 
     avail = [r.get("tag_name", "?") for r in releases]
@@ -823,20 +816,19 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
     # Extract release tag from URL to check if already fetched.
     # URL: .../releases/download/<tag>/<filename>
-    # For non-default arch use an arch-qualified tag file so x86_64 and
-    # aarch64 fetches don't stomp on each other.
+    # The tag file lives under the arch-qualified output dir so each
+    # arch tracks its own release independently.
     if "/releases/download/" in url:
         release_tag = url.split("/releases/download/")[1].split("/")[0]
     else:
         release_tag = ""
-    arch_suffix = f"-{arch}" if arch != "x86_64" else ""
-    tag_file = OUTPUT_DIR / target / f".ltvm-release-tag{arch_suffix}"
+    tag_file = OUTPUT_DIR / target / arch / ".ltvm-release-tag"
     if release_tag and tag_file.exists():
         existing_tag = tag_file.read_text().strip()
         if existing_tag == release_tag:
             if not use_json:
                 print(f"  Already up to date ({release_tag})")
-            result = {"target": target, "path": str(OUTPUT_DIR / target)}
+            result = {"target": target, "path": str(OUTPUT_DIR / target / arch)}
             _output(result, use_json)
             return EXIT_OK
 
@@ -895,11 +887,14 @@ def cmd_publish(args: argparse.Namespace) -> int:
                 use_json,
             )
     else:
-        # Look for existing tarball in output/
-        pattern = f"{args.target}-*.tar.*"
+        # Look for existing tarball in output/.  tc.output_dir is
+        # output/<target>/<arch>/, tarballs sit one level above the
+        # target dir (output/), hence parent.parent.parent.
+        pattern = f"{args.target}-{tc.arch}-*.tar.*"
+        tarball_root = tc.output_dir.parent.parent
         candidates = [
             c
-            for c in sorted(tc.output_dir.parent.glob(pattern))
+            for c in sorted(tarball_root.glob(pattern))
             if c.suffix in (".gz", ".zst")
             or c.name.endswith(".tar.gz")
             or c.name.endswith(".tar.zst")
@@ -998,16 +993,12 @@ def cmd_publish(args: argparse.Namespace) -> int:
         print(f"  Published: {url}")
 
     # Record the release tag locally so subsequent `ltvm fetch` knows
-    # the artifacts already on disk match this release.  cmd_fetch
-    # reads from OUTPUT_DIR/<target>/.ltvm-release-tag* (always at the
-    # target root, not the arch subdir), so write it there too --
-    # otherwise aarch64 publish writes to output/<t>/aarch64/... and
-    # fetch never finds it.
+    # the artifacts already on disk match this release.  Lives under
+    # the arch-qualified output dir.
     from ltvm_pkg.target_config import OUTPUT_DIR
 
     arch = getattr(args, "arch", None) or "x86_64"
-    arch_suffix = f"-{arch}" if arch != "x86_64" else ""
-    tag_file = OUTPUT_DIR / args.target / f".ltvm-release-tag{arch_suffix}"
+    tag_file = OUTPUT_DIR / args.target / arch / ".ltvm-release-tag"
     tag_file.parent.mkdir(parents=True, exist_ok=True)
     tag_file.write_text(tag + "\n")
 

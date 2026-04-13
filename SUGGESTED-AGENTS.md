@@ -14,7 +14,7 @@ published to GitHub releases for use on other hosts.
 
 Images are **per-kernel**: for a target with two kernels
 (e.g. rocky9 5.14-rhel9.7 and 5.14-rhel9.5), each gets its
-own `output/<target>/images/<kernel-full-name>/base.ext4`
+own `output/<target>/<arch>/images/<kernel-full-name>/base.ext4`
 with `/lib/modules/<kver>/` and kdump pre-baked.
 
 ## Quick Start (download pre-built artifacts)
@@ -185,7 +185,7 @@ ltvm crash-collect co1-single --mod-dir ~/lustre-release
 
 crash-tool recipes lustre \
     --vmcore /path/to/vmcore \
-    --vmlinux output/rocky9/kernels/<kernel-full-name>/vmlinux \
+    --vmlinux output/rocky9/x86_64/kernels/<kernel-full-name>/vmlinux \
     --mod-dir ~/lustre-release
 ```
 

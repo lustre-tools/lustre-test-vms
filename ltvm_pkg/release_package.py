@@ -343,16 +343,15 @@ def package_target(
 
     kernel: kernel name under kernels/; auto-detected if None.
     arch: architecture of the artifacts (x86_64, aarch64, etc.).
-          Non-x86_64 arches get an -<arch> suffix in the tarball name.
     Returns the path to the created tarball.
 
     Always exports the build container into the output dir before
     packaging, since the container is a mandatory artifact.
 
-    The tarball always extracts to <target_name>/ at the extraction
-    base, regardless of arch.  For non-default arches the output_dir
-    is a subdirectory (output/<target>/<arch>/), and tar --transform
-    strips the arch prefix so paths land at <target_name>/kernels/...
+    output_dir is always the arch-qualified target dir
+    (output/<target>/<arch>/).  Inside the tarball, paths are
+    <target>/<arch>/{kernels,images,container}/...  Fetch extracts
+    to OUTPUT_DIR so files land at output/<target>/<arch>/...
     """
     output_dir = Path(output_dir)
 
@@ -364,14 +363,12 @@ def package_target(
 
     artifacts = _find_artifacts(output_dir, kernel=kernel)
 
-    # dest_dir: for non-default arch keep tarballs in the main output parent
-    # (output/), not inside the arch subdir.
-    base_output_dir = output_dir
-    if arch != "x86_64" and output_dir.name == arch:
-        base_output_dir = output_dir.parent
+    # tar_base is the directory two levels above the arch dir, i.e. the
+    # OUTPUT_DIR root, so tarball entries start with <target>/<arch>/...
+    tar_base = output_dir.parent.parent
 
     if dest_dir is None:
-        dest_dir = base_output_dir.parent
+        dest_dir = tar_base
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -390,32 +387,14 @@ def package_target(
     if not version:
         raise RuntimeError(f"kernel_version missing from {kernel_meta}")
 
-    arch_suffix = f"-{arch}" if arch != "x86_64" else ""
-    base_name = f"{target_name}-{version}{arch_suffix}"
+    base_name = f"{target_name}-{arch}-{version}"
 
-    # Build tar from only the known artifacts (not the whole output dir,
-    # which may contain arch-specific sub-builds, caches, etc.).
-    #
-    # Layout inside the tarball:
-    #   x86_64:  <target>/kernels/...   <target>/image/...
-    #   aarch64: <target>/aarch64/kernels/...   <target>/aarch64/image/...
-    #
-    # This means fetch can always extract to OUTPUT_DIR and find artifacts
-    # at output/<target>/ (x86_64) or output/<target>/<arch>/ (others).
-    #
-    # We use two levels of parent for the non-default-arch case:
-    #   tar_base = output/  (so paths start with <target>/<arch>/...)
-    # and for x86_64:
-    #   tar_base = output/  (so paths start with <target>/kernels/...)
-    tar_base = base_output_dir.parent  # always output/
     tar_paths = []
     kernel_rel = kernel_dir.relative_to(tar_base)
     image_rel = artifacts["image"].parent.relative_to(tar_base)
     tar_paths.append(str(kernel_rel))
     tar_paths.append(str(image_rel))
-    # Include the entire container/ directory: image.tar (mandatory,
-    # exported above) plus meta.json if the build flow wrote one.
-    container_dir = base_output_dir / "container"
+    container_dir = output_dir / "container"
     tar_paths.append(str(container_dir.relative_to(tar_base)))
 
     # Try zstd first (smaller + faster), fall back to gzip
@@ -490,8 +469,8 @@ def fetch_target(
     url: direct URL to the tarball
     output_base: parent of output/<target>/ (usually the
                  ltvm repo root's output/ directory)
-    arch: architecture; non-x86_64 tarballs extract to
-          output/<target>/<arch>/ instead of output/<target>/
+    arch: architecture.  Tarballs always extract to
+          output/<target>/<arch>/ regardless of arch.
 
     Returns the path to the extracted target directory.
     """
@@ -559,13 +538,7 @@ def fetch_target(
     finally:
         os.unlink(tmp_path)
 
-    # x86_64 extracts to output/<target>/
-    # non-x86_64 extracts to output/<target>/<arch>/  (the tarball
-    # contains paths like <target>/<arch>/kernels/...)
-    if arch != "x86_64":
-        target_dir = output_base / target_name / arch
-    else:
-        target_dir = output_base / target_name
+    target_dir = output_base / target_name / arch
 
     if not target_dir.is_dir():
         raise RuntimeError(

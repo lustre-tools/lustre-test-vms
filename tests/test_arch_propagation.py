@@ -314,16 +314,17 @@ class TestDeployBundledSnapshotPath:
         # The key property: tc.output_dir is arch-qualified for aarch64.
         assert "aarch64" in tc.output_dir.parts
 
-    def test_x86_64_lookup_is_flat(self) -> None:
-        """Default arch keeps the flat layout."""
+    def test_x86_64_lookup_includes_arch(self) -> None:
+        """Default arch is now arch-qualified just like every other arch
+        so callers never have to special-case x86_64 vs the rest."""
         from ltvm_pkg.target_config import TargetConfig
 
         try:
             tc = TargetConfig("rocky9")  # default arch
         except (ValueError, FileNotFoundError):
             pytest.skip("rocky9 target not available in this checkout")
+        assert "x86_64" in tc.output_dir.parts
         assert "aarch64" not in tc.output_dir.parts
-        assert "x86_64" not in tc.output_dir.parts
 
 
 # ── ccache volume name distinguishes arches ──────────────

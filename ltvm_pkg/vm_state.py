@@ -127,12 +127,7 @@ def resolve_os_artifacts(
     effective_arch = arch or target_cfg.get("arch") or "x86_64"
     default_arch = "x86_64"
 
-    # Output directory: arch-qualified subdir when non-default arch
-    output_dir = _LTVM_ROOT / "output" / os_name
-    if effective_arch != default_arch:
-        arch_dir = output_dir / effective_arch
-        if arch_dir.is_dir():
-            output_dir = arch_dir
+    output_dir = _LTVM_ROOT / "output" / os_name / effective_arch
 
     arch_hint = (
         f" --arch {effective_arch}" if effective_arch != default_arch else ""

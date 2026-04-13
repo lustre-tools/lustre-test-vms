@@ -374,7 +374,7 @@ def _setup_package_artifacts(
     kernel_version: str | None = None,
 ) -> Path:
     """Create a minimal output dir ready for package_target."""
-    output_dir = tmp_path / "output" / "my-target"
+    output_dir = tmp_path / "output" / "my-target" / "x86_64"
     kdir = output_dir / "kernels" / kernel
     kdir.mkdir(parents=True)
     (kdir / "vmlinux").touch()
@@ -581,10 +581,11 @@ class TestPackageTarget:
         assert isinstance(manifest["has_lustre_artifacts"], bool)
         assert isinstance(manifest["size_bytes"], int)
 
-    def test_dest_dir_none_lands_in_output_dir_parent(
+    def test_dest_dir_none_lands_in_output_root(
         self, tmp_path: Path
     ) -> None:
-        """dest_dir=None -> tarball placed in output_dir.parent."""
+        """dest_dir=None -> tarball placed at the OUTPUT_DIR root, two
+        levels above the arch-qualified output_dir."""
         output_dir = _setup_package_artifacts(tmp_path, kernel_version="1.0")
 
         def mock_run(cmd, *args, **kwargs):
@@ -603,7 +604,7 @@ class TestPackageTarget:
                 dest_dir=None,
             )
 
-        assert tarball.parent == output_dir.parent
+        assert tarball.parent == output_dir.parent.parent
 
     def test_manifest_has_lustre_artifacts_true(self, tmp_path: Path) -> None:
         output_dir = _setup_package_artifacts(
@@ -645,7 +646,7 @@ def _setup_per_kernel_image_artifacts(
     kernel_version: str = "5.14.0",
 ) -> Path:
     """Minimal output dir with the new per-kernel image layout."""
-    output_dir = tmp_path / "output" / "my-target"
+    output_dir = tmp_path / "output" / "my-target" / "x86_64"
     kdir = output_dir / "kernels" / kernel
     kdir.mkdir(parents=True)
     (kdir / "vmlinux").touch()

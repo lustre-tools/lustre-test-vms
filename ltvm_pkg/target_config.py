@@ -89,10 +89,10 @@ class TargetConfig:
     Args:
         name: Target name from targets.yaml (e.g. rocky9).
         arch: Optional architecture override.  When given, replaces the
-              target's default arch and routes output to an
-              arch-qualified subdirectory (output/<target>/<arch>/).
-              When None (default), the target's configured arch is used
-              and output goes to output/<target>/ (backward-compatible).
+              target's default arch.  Output is always routed to
+              output/<target>/<arch>/ regardless of arch -- the layout
+              is uniform so cross-arch builds never collide and code
+              paths don't need an x86_64 special case.
     """
 
     def __init__(self, name: str, arch: str | None = None) -> None:
@@ -132,17 +132,10 @@ class TargetConfig:
             raise ValueError(f"target {name!r}: 'kernels.default' is required")
 
         # Resolve effective arch: CLI override > target > defaults
-        default_arch = str(self._data["arch"])
         if arch is not None:
             self._data["arch"] = arch
 
-        # Output directory: include arch subdirectory when an explicit
-        # override was given (so x86_64 and aarch64 artifacts coexist).
-        # When no override, keep the flat layout for backward compat.
-        if arch is not None and arch != default_arch:
-            self.output_dir = OUTPUT_DIR / name / arch
-        else:
-            self.output_dir = OUTPUT_DIR / name
+        self.output_dir = OUTPUT_DIR / name / str(self._data["arch"])
 
         status = self._data.get("status", "working")
         if status not in ("working", "experimental"):

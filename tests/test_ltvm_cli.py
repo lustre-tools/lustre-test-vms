@@ -359,8 +359,8 @@ class TestCmdStatusJson:
         """build-status enumerates one image entry per built kernel dir."""
         import ltvm_pkg.target_config as cfg
 
-        # Pre-populate two built kernel dirs under output/rocky9/kernels/
-        kernels = tmp_targets / "output" / "rocky9" / "kernels"
+        # Pre-populate two built kernel dirs under output/rocky9/x86_64/kernels/
+        kernels = tmp_targets / "output" / "rocky9" / "x86_64" / "kernels"
         (kernels / "5.14-rhel9.7-5.14.0-611.13.1").mkdir(parents=True)
         (kernels / "5.14-rhel9.5-5.14.0-503.26.1").mkdir(parents=True)
 
