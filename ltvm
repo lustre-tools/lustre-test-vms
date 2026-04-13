@@ -71,6 +71,7 @@ from ltvm_pkg.cli import (  # noqa: E402
     cmd_setup,
     cmd_snapshot,
     cmd_status,
+    cmd_targets,
     cmd_update,
     cmd_validate,
     cmd_vm_ssh,
@@ -452,6 +453,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show build status of all targets",
     )
     sp.set_defaults(func=cmd_status)
+
+    # -- targets --
+    sp = sub.add_parser(
+        "targets",
+        parents=[common],
+        help="List configured target OSes",
+    )
+    sp.set_defaults(func=cmd_targets)
 
     # -- validate --
     sp = sub.add_parser(

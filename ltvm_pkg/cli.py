@@ -1150,6 +1150,60 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 # ------------------------------------------------------------------
+# Subcommand: targets (list configured target OSes)
+# ------------------------------------------------------------------
+
+
+def cmd_targets(args: argparse.Namespace) -> int:
+    use_json = args.json
+    names = list_targets()
+
+    rows: list[dict[str, Any]] = []
+    for name in names:
+        try:
+            tc = TargetConfig(name)
+        except ValueError as e:
+            rows.append({"name": name, "status": f"error: {e}"})
+            continue
+        rows.append(
+            {
+                "name": name,
+                "status": tc.status,
+                "arch": tc.arch,
+                "server": tc.server,
+                "default_kernel": tc.default_kernel,
+                "available_kernels": tc.declared_kernels(),
+                "lustre_mode": tc.lustre_mode.value,
+            }
+        )
+
+    if use_json:
+        print(json.dumps(rows, indent=2))
+        return EXIT_OK
+
+    if not rows:
+        print("No targets configured.")
+        return EXIT_OK
+
+    hdr = (
+        f"{'Target':<12} {'Status':<12} {'Arch':<8} "
+        f"{'Mode':<16} {'Default kernel':<24} Available"
+    )
+    print(hdr)
+    print("-" * len(hdr))
+    for r in rows:
+        if "default_kernel" not in r:
+            print(f"{r['name']:<12} {r['status']}")
+            continue
+        avail = ", ".join(r["available_kernels"])
+        print(
+            f"{r['name']:<12} {r['status']:<12} {r['arch']:<8} "
+            f"{r['lustre_mode']:<16} {r['default_kernel']:<24} {avail}"
+        )
+    return EXIT_OK
+
+
+# ------------------------------------------------------------------
 # Subcommand: validate (Lustre compatibility gate)
 # ------------------------------------------------------------------
 
