@@ -21,12 +21,18 @@ import yaml
 class LustreMode(str, Enum):
     """Lustre build/deploy mode for a target.
 
-    Client mode is intentionally absent -- it's a separate follow-on
-    issue because client targets don't need a patched kernel build.
+    CLIENT targets build only client modules; no ldiskfs/OSD code
+    and no kernel patches required.  The compat gate's server-mode
+    checks (which_patch, ChangeLog server lists) don't apply.
+    Wiring CLIENT into validate_target to consult ChangeLog's
+    client_primary/client_best_effort lists is separate future work;
+    for now the gate skips deb-based (kernel_deb_source) targets,
+    which is how the common CLIENT case is handled.
     """
 
     SERVER_LDISKFS = "server_ldiskfs"
     SERVER_ZFS = "server_zfs"
+    CLIENT = "client"
 
 from .paths import find_ltvm_root, load_meta_safe
 

@@ -61,7 +61,7 @@ targets:
         CONFIG_PVH: y
       default: 6.8-ubuntu2404
     lustre:
-      mode: server_ldiskfs
+      mode: client
     os_family: debian
     os_name: ubuntu
     os_version: '24.04'
