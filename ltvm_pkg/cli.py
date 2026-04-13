@@ -1154,26 +1154,79 @@ def cmd_status(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------
 
 
+def _release_status(
+    target: str,
+    arch: str,
+    all_releases: list | None,
+) -> tuple[str, str]:
+    """Return (local_tag, remote_tag) for a target/arch, display-trimmed.
+
+    Both strip the shared ``<target>-<arch>-`` prefix so only the bit
+    that actually varies (kernel + version) shows up in the table.
+    ``-`` means "nothing"; ``?`` means "couldn't talk to GitHub".
+    """
+    from ltvm_pkg.target_config import OUTPUT_DIR
+
+    prefix = f"{target}-{arch}-"
+
+    def _trim(tag: str) -> str:
+        return tag[len(prefix):] if tag.startswith(prefix) else tag
+
+    tag_file = OUTPUT_DIR / target / arch / ".ltvm-release-tag"
+    local = _trim(tag_file.read_text().strip()) if tag_file.exists() else "-"
+
+    if all_releases is None:
+        remote = "?"
+    else:
+        arch_match = f"-{arch}-"
+        remote = "-"
+        for rel in all_releases:
+            tag = rel.get("tag_name", "")
+            if tag != target and not tag.startswith(target + "-"):
+                continue
+            if not any(
+                arch_match in a.get("name", "")
+                for a in rel.get("assets", [])
+            ):
+                continue
+            remote = _trim(tag)
+            break
+
+    return (local, remote)
+
+
 def cmd_targets(args: argparse.Namespace) -> int:
     use_json = args.json
     names = list_targets()
+
+    # One API call is enough to answer every row -- releases list is
+    # target-agnostic, we just filter client-side.  Network failure
+    # degrades to "?" in the Remote column rather than aborting.
+    all_releases: list | None
+    try:
+        resp = _gh_api("releases")
+        all_releases = resp if isinstance(resp, list) else [resp]
+    except Exception:
+        all_releases = None
 
     rows: list[dict[str, Any]] = []
     for name in names:
         try:
             tc = TargetConfig(name)
         except ValueError as e:
-            rows.append({"name": name, "status": f"error: {e}"})
+            rows.append({"name": name, "error": f"error: {e}"})
             continue
+        local, remote = _release_status(name, tc.arch, all_releases)
         rows.append(
             {
                 "name": name,
-                "status": tc.status,
                 "arch": tc.arch,
                 "server": tc.server,
                 "default_kernel": tc.default_kernel,
                 "available_kernels": tc.declared_kernels(),
                 "lustre_mode": tc.lustre_mode.value,
+                "local_release": local,
+                "remote_release": remote,
             }
         )
 
@@ -1186,19 +1239,20 @@ def cmd_targets(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     hdr = (
-        f"{'Target':<12} {'Status':<12} {'Arch':<8} "
-        f"{'Mode':<16} {'Default kernel':<24} Available"
+        f"{'Target':<12} {'Arch':<8} {'Mode':<16} "
+        f"{'Default kernel':<24} {'Local':<24} {'Remote':<24} Available"
     )
     print(hdr)
     print("-" * len(hdr))
     for r in rows:
         if "default_kernel" not in r:
-            print(f"{r['name']:<12} {r['status']}")
+            print(f"{r['name']:<12} {r.get('error', '')}")
             continue
         avail = ", ".join(r["available_kernels"])
         print(
-            f"{r['name']:<12} {r['status']:<12} {r['arch']:<8} "
-            f"{r['lustre_mode']:<16} {r['default_kernel']:<24} {avail}"
+            f"{r['name']:<12} {r['arch']:<8} {r['lustre_mode']:<16} "
+            f"{r['default_kernel']:<24} "
+            f"{r['local_release']:<24} {r['remote_release']:<24} {avail}"
         )
     return EXIT_OK
 
