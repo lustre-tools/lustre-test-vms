@@ -25,14 +25,6 @@ def is_wsl2() -> bool:
         return False
 
 
-def wsl2_has_kvm() -> bool:
-    return Path("/dev/kvm").exists()
-
-
-def wsl2_has_systemd() -> bool:
-    return Path("/run/systemd/private").exists()
-
-
 log = logging.getLogger(__name__)
 
 # Override the log format for setup output so it

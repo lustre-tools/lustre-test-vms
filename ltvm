@@ -487,9 +487,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _vm_create_args.add_argument("--ip", default=None, help="Static IP address")
     _vm_create_args.add_argument(
-        "--rootfs", default=None, help="Explicit rootfs image path"
-    )
-    _vm_create_args.add_argument(
         "--image", default=None, help="Explicit base image path"
     )
     _vm_create_args.add_argument(

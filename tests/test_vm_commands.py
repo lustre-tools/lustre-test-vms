@@ -248,7 +248,6 @@ def _create_args(**overrides) -> argparse.Namespace:
         "os": "",
         "arch": None,
         "ip": None,
-        "rootfs": None,
         "_quiet": True,
     }
     defaults.update(overrides)
