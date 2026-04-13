@@ -29,7 +29,8 @@ sudo ./ltvm install
 ltvm fetch rocky9
 
 # Create and boot a single-node VM (root needed for QEMU + tap)
-sudo ltvm ensure co1-single \
+# create is idempotent: starts if stopped, no-ops if running
+sudo ltvm create co1-single \
     --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 
 # Mount Lustre inside the VM (Lustre is baked into fetched images)
@@ -102,12 +103,12 @@ tree is current finishes in well under a second.
 ## VM Management
 
 ```bash
-# Create / ensure (ensure is idempotent)
-sudo ltvm ensure co1-single \
+# create is idempotent: starts if stopped, no-ops if running
+sudo ltvm create co1-single \
     --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 
 # Non-default kernel -- requires matching per-kernel image
-sudo ltvm ensure co1-single --kernel 5.14-rhel9.5
+sudo ltvm create co1-single --kernel 5.14-rhel9.5
 
 # Observe
 ltvm list
@@ -231,7 +232,7 @@ ltvm fetch <target>             Download latest release tarball
 ltvm publish <target>           Upload tarball to GitHub release
 
 # VM lifecycle
-ltvm create|ensure <name>       Create / idempotent-create
+ltvm create <name>              Create / idempotent-create
 ltvm start|stop|restart <name>  Power control
 ltvm destroy <name>             Remove VM and its overlay
 ltvm list                       Running + stopped VMs

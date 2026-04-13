@@ -60,7 +60,6 @@ from ltvm_pkg.cli import (  # noqa: E402
     cmd_destroy,
     cmd_dmesg,
     cmd_doctor,
-    cmd_ensure,
     cmd_exec,
     cmd_fetch,
     cmd_list,
@@ -522,19 +521,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser(
         "create",
         parents=[common, _vm_create_args],
-        help="Create a new VM",
+        help="Create a VM (idempotent: starts it if stopped, no-ops if running)",
     )
     sp.add_argument("name", help="VM name (e.g. co1-single)")
     sp.set_defaults(func=cmd_create)
-
-    # -- VM lifecycle: ensure --
-    sp = sub.add_parser(
-        "ensure",
-        parents=[common, _vm_create_args],
-        help="Create VM if it does not exist, or start it if stopped",
-    )
-    sp.add_argument("name", help="VM name (e.g. co1-single)")
-    sp.set_defaults(func=cmd_ensure)
 
     # -- VM lifecycle: destroy --
     sp = sub.add_parser(

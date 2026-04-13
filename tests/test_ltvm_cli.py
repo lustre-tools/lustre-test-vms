@@ -608,9 +608,9 @@ class TestVmSubcommands:
         args = p.parse_args(["destroy", "co1-single", "co1-other"])
         assert args.names == ["co1-single", "co1-other"]
 
-    def test_ensure_parses_name_and_vcpus(self) -> None:
+    def test_create_parses_name_and_vcpus(self) -> None:
         p = ltvm.build_parser()
-        args = p.parse_args(["ensure", "co1-single", "--vcpus", "4"])
+        args = p.parse_args(["create", "co1-single", "--vcpus", "4"])
         assert args.name == "co1-single"
         assert args.vcpus == 4
 

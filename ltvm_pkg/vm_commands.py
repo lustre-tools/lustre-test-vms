@@ -296,8 +296,43 @@ def cmd_create(args: argparse.Namespace) -> None:
         name = f"qemu-{int(time.time()) % 100000000}"
     _validate_vm_name(name)
 
-    if (SOCKETS / f"{name}.info").exists():
-        die(f"VM '{name}' already exists")
+    info_path = SOCKETS / f"{name}.info"
+    if info_path.exists():
+        vm = VMInfo.load(name)
+        if is_running(vm):
+            wait_for_ssh(vm.ip, SSH_TIMEOUT)
+            register_ssh_name(vm.name, vm.ip)
+            if args.json:
+                print(
+                    json.dumps(
+                        {
+                            "action": "none",
+                            "name": name,
+                            "status": "already running",
+                        }
+                    )
+                )
+            else:
+                print(f"{name}: already running")
+            return
+        launch_qemu(vm)
+        wait_for_ssh(vm.ip, SSH_TIMEOUT)
+        register_ssh_name(vm.name, vm.ip)
+        deploy_ssh_key(vm.ip)
+        _seed_kdump_boot(vm)
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "action": "started",
+                        "name": name,
+                        "status": "running",
+                    }
+                )
+            )
+        else:
+            print(f"{name}: started")
+        return
 
     # Validate vCPU and memory bounds.  argparse accepts any int (and
     # 0/negative values would crash QEMU AFTER vm.save() committed
@@ -487,7 +522,17 @@ def cmd_create(args: argparse.Namespace) -> None:
             pass
         raise
 
-    if not getattr(args, "_quiet", False):
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "action": "created",
+                    "name": vm.name,
+                    "status": "running",
+                }
+            )
+        )
+    elif not getattr(args, "_quiet", False):
         print(
             f"name={vm.name} ip={vm.ip} pid={vm.pid} "
             f"mdt_disks={vm.mdt_disks} ost_disks={vm.ost_disks}"
@@ -554,77 +599,6 @@ def cmd_destroy(args: argparse.Namespace) -> None:
             print(f"destroyed {name}")
         else:
             print(f"destroy: {name} not found")
-
-
-def cmd_ensure(args: argparse.Namespace) -> None:
-    name = args.name
-    info_path = SOCKETS / f"{name}.info"
-
-    if info_path.exists():
-        vm = VMInfo.load(name)
-        if is_running(vm):
-            wait_for_ssh(vm.ip, SSH_TIMEOUT)
-            register_ssh_name(vm.name, vm.ip)
-            if args.json:
-                print(
-                    json.dumps(
-                        {
-                            "action": "none",
-                            "name": name,
-                            "status": "already running",
-                        }
-                    )
-                )
-            else:
-                print(f"{name}: already running")
-            return
-        launch_qemu(vm)
-        wait_for_ssh(vm.ip, SSH_TIMEOUT)
-        register_ssh_name(vm.name, vm.ip)
-        # Match cmd_start: re-deploy the user's SSH key and re-seed
-        # /boot for kdump.  Both are idempotent and necessary if the
-        # original create was interrupted before they ran.
-        deploy_ssh_key(vm.ip)
-        _seed_kdump_boot(vm)
-        if args.json:
-            print(
-                json.dumps(
-                    {
-                        "action": "started",
-                        "name": name,
-                        "status": "running",
-                    }
-                )
-            )
-        else:
-            print(f"{name}: started")
-        return
-
-    create_args = argparse.Namespace(
-        name=name,
-        vcpus=args.vcpus,
-        mem=args.mem,
-        ip=None,
-        image=getattr(args, "image", ""),
-        kernel=getattr(args, "kernel", ""),
-        os=getattr(args, "os", ""),
-        arch=getattr(args, "arch", None),
-        mdt_disks=args.mdt_disks,
-        ost_disks=args.ost_disks,
-        disk_size=getattr(args, "disk_size", None),
-        _quiet=True,
-    )
-    cmd_create(create_args)
-    if args.json:
-        print(
-            json.dumps(
-                {
-                    "action": "created",
-                    "name": name,
-                    "status": "running",
-                }
-            )
-        )
 
 
 # ── execution ────────────────────────────────────────────

@@ -5,7 +5,8 @@ These tests catch structural failure modes:
      it (falls through to the "Unknown action" error).
   2. A cmd_* function in vm_commands.py has no corresponding parser action
      (orphan function -- unreachable from the CLI).
-  3. cmd_ensure does not carry required fields through to cmd_create.
+  3. cmd_create idempotent-convergence: existing-running, existing-stopped,
+     and missing-VM branches all behave correctly.
   4. vm list / cluster list crash on missing state files rather than
      degrading gracefully.
   5. JSON error output shape is consistent across error paths.
@@ -167,7 +168,6 @@ class TestAllSubcommandsHaveFunc:
 # without hitting errors.  These are parsed by the real parser.
 _VM_SUBCOMMAND_PARSE_ARGS: dict[str, list[str]] = {
     "create": ["co1-test"],
-    "ensure": ["co1-test"],
     "destroy": ["co1-test"],
     "exec": ["co1-test", "lctl dl"],
     "start": ["co1-test"],
@@ -332,30 +332,26 @@ class TestNoOrphanVmCommandFunctions:
 
 
 # ---------------------------------------------------------------------------
-# Test 5: Namespace completeness -- cmd_ensure carries all create fields
+# Test 5: cmd_create idempotent-convergence (existing-running,
+# existing-stopped, missing-VM branches)
 # ---------------------------------------------------------------------------
 #
-# cmd_ensure builds a Namespace and calls cmd_create when the VM does not yet
-# exist.  If it forgets to forward a field that cmd_create reads, that field
-# will silently fall back to a default regardless of what the user asked for.
+# cmd_create now owns three branches:
+#   - VM exists and is running   → re-register SSH, print "already running"
+#   - VM exists but is stopped   → launch, wait, SSH setup, print "started"
+#   - VM does not exist          → full create path (existing body)
 #
-# The test strategy:
-#   - Mock the expensive side effects (VMInfo.save, launch_qemu, wait_for_ssh,
-#     register_ssh_name, deploy_ssh_key, check_ip_collision, qemu-img run).
-#   - Call cmd_ensure with non-default values for every field cmd_create reads.
-#   - Intercept the VMInfo that gets constructed inside cmd_create and verify
-#     the field values match the caller's intent.
+# The test strategy mirrors the old ensure tests: patch heavy I/O, supply
+# non-default sentinel values, verify the right branch ran.
 #
-# Fields that cmd_create reads from args (via getattr or direct access):
+# Fields that cmd_create reads from args:
 #   name, vcpus, mem, ip, image, kernel, os, arch,
-#   mdt_disks, ost_disks, disk_size, _quiet
+#   mdt_disks, ost_disks, disk_size, json, _quiet
 
 
-class TestEnsureToCreateNamespaceContract:
-    """cmd_ensure must forward all caller-supplied fields to cmd_create."""
+class TestCmdCreateIdempotence:
+    """cmd_create converges to the desired state regardless of current state."""
 
-    # The fields that cmd_create reads from its Namespace, and what
-    # cmd_ensure should forward (non-default sentinel values used in tests).
     _FIELD_SENTINELS: dict[str, Any] = {
         "vcpus": 8,
         "mem": 8192,
@@ -365,27 +361,22 @@ class TestEnsureToCreateNamespaceContract:
         "kernel": "5.14-rhel9.5",
         "os": "ubuntu2404",
         "arch": "aarch64",
-        "disk_size": 1024 * 1024 * 1024,  # 1 GiB
+        "disk_size": 1024 * 1024 * 1024,
     }
 
-    def _make_ensure_args(self) -> argparse.Namespace:
-        """Build an args Namespace that cmd_ensure will accept."""
+    def _make_create_args(self) -> argparse.Namespace:
         return argparse.Namespace(
             name="co1-test",
             json=False,
+            ip=None,
+            _quiet=True,
             **self._FIELD_SENTINELS,
         )
 
-    def test_ensure_forwards_all_fields_to_create(self, tmp_path: Path) -> None:
-        """Every non-default field in _FIELD_SENTINELS must reach cmd_create.
-
-        Specifically the Namespace that cmd_create receives must carry each
-        field with the value the caller passed to cmd_ensure, not a default.
-        """
+    def test_create_missing_vm_honors_all_fields(self, tmp_path: Path) -> None:
+        """When VM does not exist, cmd_create uses all caller-supplied fields."""
         from ltvm_pkg import vm_commands
 
-        # Intercept the VMInfo that gets built inside cmd_create so we can
-        # inspect it.  We record the constructor call args.
         created_vms: list[Any] = []
         real_VMInfo = vm_commands.VMInfo
 
@@ -393,16 +384,14 @@ class TestEnsureToCreateNamespaceContract:
             def save(self) -> None:
                 created_vms.append(self)
 
-        args = self._make_ensure_args()
+        args = self._make_create_args()
 
-        # Patch SOCKETS so the .info path doesn't exist (triggers create path).
         fake_sockets = tmp_path / "sockets"
         fake_sockets.mkdir()
         fake_overlays = tmp_path / "overlays"
         fake_overlays.mkdir()
 
         patches = [
-            # No existing .info file in fake_sockets → create path is taken.
             patch.object(vm_commands, "SOCKETS", fake_sockets),
             patch.object(vm_commands, "OVERLAYS", fake_overlays),
             patch("ltvm_pkg.vm_commands.VMInfo", CapturingVMInfo),
@@ -438,15 +427,13 @@ class TestEnsureToCreateNamespaceContract:
         with contextlib.ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
-            vm_commands.cmd_ensure(args)
+            vm_commands.cmd_create(args)
 
         assert created_vms, (
-            "cmd_ensure (create path) never called VMInfo.save(); "
-            "the VM was never created"
+            "cmd_create (new-VM path) never called VMInfo.save()"
         )
         vm = created_vms[0]
 
-        # Check each sentinel field.
         failures = []
         if vm.vcpus != self._FIELD_SENTINELS["vcpus"]:
             failures.append(
@@ -471,42 +458,31 @@ class TestEnsureToCreateNamespaceContract:
                 f"disk_size: expected {self._FIELD_SENTINELS['disk_size']}, "
                 f"got {vm.disk_size}"
             )
-        # os field: cmd_create reads it as getattr(args, "os", ""), and uses
-        # it as os_id on the VMInfo.
         if vm.os_id != self._FIELD_SENTINELS["os"]:
             failures.append(
                 f"os (os_id): expected '{self._FIELD_SENTINELS['os']}', "
                 f"got '{vm.os_id}'"
             )
-        # explicit image: when args.image is set, cmd_create uses it directly
         if vm.image != self._FIELD_SENTINELS["image"]:
             failures.append(
                 f"image: expected '{self._FIELD_SENTINELS['image']}', "
                 f"got '{vm.image}'"
             )
-        # kernel name: args.kernel is a name forwarded to resolve_os_artifacts;
-        # vm.kernel holds the resolved path from os_arts.kernel.
         if vm.kernel != "/resolved/vmlinuz":
             failures.append(
-                f"kernel: expected '/resolved/vmlinuz' (resolved from name), "
+                f"kernel: expected '/resolved/vmlinuz' (resolved), "
                 f"got '{vm.kernel}'"
             )
 
         assert not failures, (
-            "cmd_ensure did not forward these fields to cmd_create:\n  "
+            "cmd_create dropped caller-supplied fields:\n  "
             + "\n  ".join(failures)
-            + "\n\nThis means cmd_ensure builds a Namespace that drops caller-"
-            "supplied values, causing them to be silently ignored."
         )
 
-    def test_ensure_calls_resolve_os_artifacts_with_caller_os(
+    def test_create_passes_os_to_resolve_os_artifacts(
         self, tmp_path: Path
     ) -> None:
-        """When --os is given, cmd_create must pass it to resolve_os_artifacts.
-
-        This validates that the os field actually reaches the artifact resolver,
-        not just that it ends up on the VMInfo struct.
-        """
+        """--os must reach resolve_os_artifacts on the new-VM path."""
         from ltvm_pkg import vm_commands
 
         resolve_calls: list[str] = []
@@ -527,6 +503,8 @@ class TestEnsureToCreateNamespaceContract:
         args = argparse.Namespace(
             name="co1-test",
             json=False,
+            ip=None,
+            _quiet=True,
             vcpus=2,
             mem=4096,
             mdt_disks=0,
@@ -570,20 +548,18 @@ class TestEnsureToCreateNamespaceContract:
             patch("ltvm_pkg.vm_commands._seed_kdump_boot"),
             patch("ltvm_pkg.vm_commands.run"),
         ]
-        # Patch VMInfo.save so the create path completes without writing to disk
         with contextlib.ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
             stack.enter_context(patch("ltvm_pkg.vm_commands.VMInfo.save"))
-            vm_commands.cmd_ensure(args)
+            vm_commands.cmd_create(args)
 
         assert resolve_calls, (
-            "resolve_os_artifacts was never called; did cmd_ensure skip cmd_create?"
+            "resolve_os_artifacts was never called on the new-VM path"
         )
         assert "ubuntu2404" in resolve_calls, (
-            f"resolve_os_artifacts was called with {resolve_calls!r}, "
-            f"but not with the requested os 'ubuntu2404'. "
-            f"cmd_ensure failed to forward --os to cmd_create."
+            f"resolve_os_artifacts called with {resolve_calls!r}, "
+            f"not 'ubuntu2404'"
         )
 
 

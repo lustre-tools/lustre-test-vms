@@ -248,6 +248,7 @@ def _create_args(**overrides) -> argparse.Namespace:
         "os": "",
         "arch": None,
         "ip": None,
+        "json": False,
         "_quiet": True,
     }
     defaults.update(overrides)
@@ -257,10 +258,36 @@ def _create_args(**overrides) -> argparse.Namespace:
 class TestCmdCreateValidation:
     """cmd_create short-circuits on bad arguments before touching the filesystem."""
 
-    def test_existing_vm_dies(self, tmp_vmdir: Path) -> None:
-        _seed_vm_files(tmp_vmdir, "dupe")
-        with pytest.raises(SystemExit):
-            vm_commands.cmd_create(_create_args(name="dupe"))
+    def test_existing_running_vm_noop(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """create on a running VM re-registers SSH and prints 'already running'."""
+        _seed_vm_files(tmp_vmdir, "running")
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.wait_for_ssh"),
+            patch("ltvm_pkg.vm_commands.register_ssh_name"),
+        ):
+            vm_commands.cmd_create(_create_args(name="running"))
+        out = capsys.readouterr().out
+        assert "already running" in out
+
+    def test_existing_stopped_vm_starts(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """create on a stopped VM launches QEMU and prints 'started'."""
+        _seed_vm_files(tmp_vmdir, "stopped-c")
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=False),
+            patch("ltvm_pkg.vm_commands.launch_qemu"),
+            patch("ltvm_pkg.vm_commands.wait_for_ssh"),
+            patch("ltvm_pkg.vm_commands.register_ssh_name"),
+            patch("ltvm_pkg.vm_commands.deploy_ssh_key"),
+            patch("ltvm_pkg.vm_commands._seed_kdump_boot"),
+        ):
+            vm_commands.cmd_create(_create_args(name="stopped-c"))
+        out = capsys.readouterr().out
+        assert "started" in out
 
     def test_nonpositive_vcpus_dies(self, tmp_vmdir: Path) -> None:
         with pytest.raises(SystemExit):

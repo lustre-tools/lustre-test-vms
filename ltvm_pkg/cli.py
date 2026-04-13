@@ -1297,30 +1297,6 @@ def cmd_create(args: argparse.Namespace) -> int:
     return _vm_call(_create, ns, use_json)
 
 
-def cmd_ensure(args: argparse.Namespace) -> int:
-    use_json = args.json
-    err = _require_root(use_json)
-    if err is not None:
-        return err
-    from ltvm_pkg.vm_commands import cmd_ensure as _ensure
-
-    ns = _qemu_ns(
-        name=args.name,
-        vcpus=args.vcpus,
-        mem=args.mem,
-        ip=args.ip,
-        image=args.image or "",
-        kernel=args.kernel or "",
-        mdt_disks=args.mdt_disks,
-        ost_disks=args.ost_disks,
-        disk_size=args.disk_size,
-        arch=args.arch or "x86_64",
-        os=args.os or "",
-        _quiet=False,
-        json=use_json,
-    )
-    return _vm_call(_ensure, ns, use_json)
-
 
 def cmd_destroy(args: argparse.Namespace) -> int:
     use_json = args.json

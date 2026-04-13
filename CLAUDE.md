@@ -227,9 +227,8 @@ Exit codes from `ltvm validate`: 0=compatible, 1=warning
 ## VM Management
 
 ```bash
-# Create / ensure a VM
+# Create a VM (idempotent: starts it if stopped, no-ops if running)
 ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
-ltvm ensure co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 
 # Deploy Lustre and mount (--build defaults to cwd)
 ltvm deploy co1-single --mount
@@ -392,7 +391,7 @@ When reviewing or auditing this codebase, watch for:
 
 - **Root-required operations.** VM lifecycle commands
   that touch host networking or QEMU launch (create,
-  ensure, destroy, start, stop, restart, snapshot,
+  destroy, start, stop, restart, snapshot,
   restore, nmi, doctor, cluster create, cluster destroy)
   require root. Read/observe/SSH commands (exec, ssh,
   console-log, dmesg, deploy, llmount, crash-collect,
