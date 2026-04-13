@@ -1322,6 +1322,8 @@ def _vm_call(fn: Any, ns: argparse.Namespace, use_json: bool) -> int:
         return int(e.code) if e.code is not None else EXIT_ERROR
     except VMNotFound as e:
         return _error(str(e), use_json)
+    except FileNotFoundError as e:
+        return _error(str(e), use_json)
 
 
 def cmd_create(args: argparse.Namespace) -> int:

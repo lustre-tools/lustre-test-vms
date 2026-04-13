@@ -210,11 +210,8 @@ def resolve_os_artifacts(
             raise FileNotFoundError(
                 f"Kernel directory exists but has no vmlinuz/vmlinux: "
                 f"{kdir}\n"
-                f"The build may be in progress, was interrupted, or "
-                f"failed partway through.\n"
-                f"Check state:   ltvm build-status\n"
-                f"Rebuild:       ltvm build-kernel {os_name} "
-                f"--kernel {kernel_dirname}{arch_hint}"
+                f"A build may be in progress, was interrupted, or "
+                f"failed partway through.  Check: ltvm build-status"
             )
 
     # ── Step 2: Locate the image paired with this kernel. ──
