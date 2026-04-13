@@ -342,10 +342,15 @@ def cmd_create(args: argparse.Namespace) -> None:
             f"(kernel: {os_arts.kernel.parent.name})"
         )
     image = explicit_image or str(os_arts.image)
-    # When the caller hands us a literal kernel path (the old semantic),
-    # use it verbatim: this preserves "--kernel /tmp/my-vmlinuz" without
-    # requiring a matching image under output/<os>/images/.
-    kernel = explicit_kernel or str(os_arts.kernel)
+    # When the caller hands us a literal kernel PATH on disk, use it
+    # verbatim: this preserves "--kernel /tmp/my-vmlinuz" without
+    # requiring a matching image under output/<os>/images/.  When the
+    # caller passes a kernel NAME (short or full), resolve_os_artifacts
+    # already turned that into a real vmlinuz path -- use that.
+    if explicit_kernel and Path(explicit_kernel).is_file():
+        kernel = explicit_kernel
+    else:
+        kernel = str(os_arts.kernel)
     # If the user didn't pass --mem, fall back to the target's default
     # (rocky10 needs 4096; others use 2048).  argparse default is None
     # so we can distinguish "user said 2048" from "user said nothing".
@@ -465,6 +470,19 @@ def cmd_create(args: argparse.Namespace) -> None:
         # Best-effort cleanup of overlay/disks/.info/TAP.  If any
         # individual cleanup step fails, swallow it -- the original
         # exception is what we want to surface to the user.
+        # Preserve the QEMU log out-of-band first; _destroy_vm_artifacts
+        # erases it and the stderr message points users at a path that
+        # no longer exists.
+        if vm.log_path.exists():
+            try:
+                preserved = vm.log_path.with_suffix(".log.failed")
+                vm.log_path.rename(preserved)
+                print(
+                    f"  QEMU log preserved at {preserved}",
+                    file=sys.stderr,
+                )
+            except OSError:
+                pass
         try:
             kill_qemu(vm)
         except Exception:
