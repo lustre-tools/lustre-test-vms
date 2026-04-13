@@ -744,7 +744,9 @@ def install_scripts(host: HostInfo) -> None:
     log.info("Installing scripts and VM directories")
 
     for d in ("overlays", "sockets"):
-        (VM_DIR / d).mkdir(parents=True, exist_ok=True)
+        p = VM_DIR / d
+        p.mkdir(parents=True, exist_ok=True)
+        p.chmod(0o755)
 
     # dk-filter
     dk = PKG_DIR / "dk-filter"

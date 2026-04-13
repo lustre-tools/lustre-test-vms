@@ -1139,7 +1139,6 @@ class TestValidationGating:
             vm.save()
 
             with (
-                patch.object(cli_mod, "_require_root", return_value=None),
                 patch("ltvm_pkg.vm_state.VMInfo.load", return_value=vm),
                 patch.object(cli_mod, "TargetConfig", return_value=tc),
                 patch.object(
@@ -1210,7 +1209,6 @@ class TestCmdDeployBuildGating:
             fail_result.returncode = 1
 
             with (
-                patch("ltvm_pkg.cli._require_root", return_value=None),
                 patch("ltvm_pkg.vm_state.VMInfo.load", return_value=vm),
                 patch("ltvm_pkg.cli.TargetConfig") as mock_tc,
                 patch("subprocess.run", return_value=fail_result),
@@ -1263,7 +1261,6 @@ class TestCmdDeployBuildGating:
             ok_result.returncode = 0
 
             with (
-                patch("ltvm_pkg.cli._require_root", return_value=None),
                 patch("ltvm_pkg.vm_state.VMInfo.load", return_value=vm),
                 patch("ltvm_pkg.cli.TargetConfig") as mock_tc,
                 patch("subprocess.run", return_value=ok_result),
@@ -1312,7 +1309,6 @@ class TestCmdDeployBuildGating:
                 return fail_result
 
             with (
-                patch("ltvm_pkg.cli._require_root", return_value=None),
                 patch("ltvm_pkg.vm_state.VMInfo.load", return_value=vm),
                 patch("ltvm_pkg.cli.TargetConfig") as mock_tc,
                 patch("subprocess.run", side_effect=_track_run),
@@ -1583,3 +1579,80 @@ class TestKernelArgPropagation:
         assert calls == ["kernel", "lustre", "image"]
         _, img_kwargs = mock_bi.call_args
         assert img_kwargs.get("with_lustre") == str(lustre_tree)
+
+
+# ---------------------------------------------------------------------------
+# Verify that read/SSH commands no longer gate on root
+# ---------------------------------------------------------------------------
+
+
+class TestNoRootRequiredForReadCommands:
+    """Read/observe/SSH commands must not call _require_root."""
+
+    def test_cmd_llmount_no_require_root(self, tmp_path: Path) -> None:
+        from ltvm_pkg import cli as cli_mod
+
+        sockets_dir = tmp_path / "sockets"
+        sockets_dir.mkdir()
+
+        with (
+            patch("ltvm_pkg.vm_state.SOCKETS", sockets_dir),
+            patch("ltvm_pkg.vm_commands.cmd_llmount") as mock_llmount,
+        ):
+            args = argparse.Namespace(
+                vm="co1-test",
+                json=False,
+                timeout=300,
+                cleanup=False,
+            )
+            cli_mod.cmd_llmount(args)
+
+        mock_llmount.assert_called_once()
+
+    def test_cmd_deploy_no_require_root(self, tmp_path: Path) -> None:
+        from ltvm_pkg import cli as cli_mod
+        from ltvm_pkg.vm_state import VMInfo
+
+        sockets_dir = tmp_path / "sockets"
+        sockets_dir.mkdir()
+        build_path = tmp_path / "lustre-release"
+        build_path.mkdir()
+        for name in ("configure.ac", "lustre", "lnet"):
+            (build_path / name).mkdir()
+
+        staging = (
+            build_path / ".ltvm-staging" / "rocky9" / "x86_64" / "5.14-rhel9.7"
+        )
+        staging.mkdir(parents=True)
+        (staging / ".ltvm-staging-stamp").write_text("")
+        (staging / "mod.ko").write_text("")
+
+        with patch("ltvm_pkg.vm_state.SOCKETS", sockets_dir):
+            vm = VMInfo(name="co1-dr-test", ip="192.168.100.77", os_id="rocky9")
+            vm.save()
+
+        tc = MagicMock()
+        tc.os_family = "rhel"
+        tc.arch = "x86_64"
+        tc.resolve_kernel.side_effect = lambda k: k or "5.14-rhel9.7"
+
+        with (
+            patch("ltvm_pkg.vm_state.SOCKETS", sockets_dir),
+            patch("ltvm_pkg.vm_state.VMInfo.load", return_value=vm),
+            patch.object(cli_mod, "TargetConfig", return_value=tc),
+            patch("ltvm_pkg.cli.deploy_to_vm"),
+            patch("ltvm_pkg.cli._require_root") as mock_rr,
+        ):
+            args = argparse.Namespace(
+                vm="co1-dr-test",
+                build=str(build_path),
+                mount=False,
+                target=None,
+                kernel=None,
+                json=False,
+                userspace_only=False,
+                force_compat=False,
+            )
+            cli_mod.cmd_deploy(args)
+
+        mock_rr.assert_not_called()

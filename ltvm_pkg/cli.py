@@ -1361,9 +1361,6 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 def cmd_vm_ssh(args: argparse.Namespace) -> int:
     use_json = args.json
-    err = _require_root(use_json)
-    if err is not None:
-        return err
     from ltvm_pkg.vm_commands import cmd_ssh as _ssh
 
     return _vm_call(
@@ -1373,9 +1370,6 @@ def cmd_vm_ssh(args: argparse.Namespace) -> int:
 
 def cmd_console_log(args: argparse.Namespace) -> int:
     use_json = args.json
-    err = _require_root(use_json)
-    if err is not None:
-        return err
     from ltvm_pkg.vm_commands import cmd_console_log as _log
 
     return _vm_call(_log, _qemu_ns(name=args.name, lines=args.lines), use_json)
@@ -1383,9 +1377,6 @@ def cmd_console_log(args: argparse.Namespace) -> int:
 
 def cmd_dmesg(args: argparse.Namespace) -> int:
     use_json = args.json
-    err = _require_root(use_json)
-    if err is not None:
-        return err
     from ltvm_pkg.vm_commands import cmd_dmesg as _dmesg
 
     return _vm_call(_dmesg, _qemu_ns(name=args.name, tail=args.tail), use_json)
@@ -1393,9 +1384,6 @@ def cmd_dmesg(args: argparse.Namespace) -> int:
 
 def cmd_crash_collect(args: argparse.Namespace) -> int:
     use_json = args.json
-    err = _require_root(use_json)
-    if err is not None:
-        return err
     from ltvm_pkg.vm_commands import cmd_crash_collect as _crash_collect
 
     return _vm_call(
@@ -1455,10 +1443,6 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     use_json = args.json
     target = getattr(args, "target", None)
     kernel = getattr(args, "kernel", None)
-
-    err = _require_root(use_json)
-    if err is not None:
-        return err
 
     from ltvm_pkg.vm_state import VMInfo, VMNotFound
 
@@ -1836,10 +1820,6 @@ def cmd_exec(args: argparse.Namespace) -> int:
     if not args.cmd:
         return _error("exec requires a command", use_json)
 
-    err = _require_root(use_json)
-    if err is not None:
-        return err
-
     from ltvm_pkg.vm_commands import cmd_exec as _qexec
 
     cmd_str = " ".join(args.cmd)
@@ -1860,10 +1840,6 @@ def cmd_exec(args: argparse.Namespace) -> int:
 
 def cmd_llmount(args: argparse.Namespace) -> int:
     use_json = getattr(args, "json", False)
-    err = _require_root(use_json)
-    if err is not None:
-        return err
-
     from ltvm_pkg.vm_commands import cmd_llmount as _qllmount
 
     timeout = getattr(args, "timeout", 300)
@@ -1885,10 +1861,6 @@ def cmd_cluster(args: argparse.Namespace) -> int:
     use_json = args.json
     action = args.action
     cargs = args.cluster_args
-
-    err = _require_root(use_json)
-    if err is not None:
-        return err
 
     from ltvm_pkg.vm_cluster import (
         cmd_cluster_create as _qc_create,
@@ -1920,6 +1892,9 @@ def cmd_cluster(args: argparse.Namespace) -> int:
             return int(e.code) if e.code is not None else EXIT_ERROR
 
     if action == "create":
+        err = _require_root(use_json)
+        if err is not None:
+            return err
         if len(cargs) < 2:
             return _error(
                 "cluster create requires a name and at least one node spec",
@@ -1985,6 +1960,9 @@ def cmd_cluster(args: argparse.Namespace) -> int:
         )
 
     if action == "destroy":
+        err = _require_root(use_json)
+        if err is not None:
+            return err
         if not cargs:
             return _error("cluster destroy requires a name", use_json)
         return _call(_qc_destroy, _qemu_ns(name=cargs[0]))

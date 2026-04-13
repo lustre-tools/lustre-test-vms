@@ -391,9 +391,13 @@ When reviewing or auditing this codebase, watch for:
   quoting.
 
 - **Root-required operations.** VM lifecycle commands
-  (`vm_commands.py`, `vm_cluster.py`, `vm_net.py`)
-  require root. `cli.py` calls `_require_root()` before
-  dispatching to them. Build commands do not need root.
+  that touch host networking or QEMU launch (create,
+  ensure, destroy, start, stop, restart, snapshot,
+  restore, nmi, doctor, cluster create, cluster destroy)
+  require root. Read/observe/SSH commands (exec, ssh,
+  console-log, dmesg, deploy, llmount, crash-collect,
+  cluster deploy, cluster exec, cluster status, list)
+  do not. Build commands do not need root.
 
 - **Compat gate bypass.** `--force-compat` silences
   refusals but not hard errors. Use only when you know

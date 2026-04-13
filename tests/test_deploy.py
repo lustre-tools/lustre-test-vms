@@ -459,7 +459,6 @@ class TestCmdDeployPerKernelStaging:
             captured["staging"] = Path(staging_arg)
 
         with (
-            patch.object(cli_mod, "_require_root", return_value=None),
             patch.object(cli_mod, "TargetConfig", return_value=tc),
             patch(
                 "ltvm_pkg.cli.deploy_to_vm", side_effect=fake_deploy_to_vm
@@ -511,7 +510,6 @@ class TestCmdDeployPerKernelStaging:
         tc.resolve_kernel.side_effect = lambda k: k or "5.14-rhel9.7"
 
         with (
-            patch.object(cli_mod, "_require_root", return_value=None),
             patch.object(cli_mod, "TargetConfig", return_value=tc),
             patch("ltvm_pkg.cli.deploy_to_vm") as deploy_mock,
         ):

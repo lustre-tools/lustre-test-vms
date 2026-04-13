@@ -372,6 +372,7 @@ class VMInfo:
         try:
             with os.fdopen(fd, "w") as f:
                 f.write(text)
+            os.chmod(tmp, 0o644)
             tmp.rename(self.info_path)
         except BaseException:
             try:

@@ -33,10 +33,10 @@ sudo ltvm ensure co1-single \
     --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 
 # Mount Lustre inside the VM (Lustre is baked into fetched images)
-sudo ltvm llmount co1-single
+ltvm llmount co1-single
 
 # Verify
-sudo ltvm exec co1-single 'mount | grep lustre; lfs df -h /mnt/lustre'
+ltvm exec co1-single 'mount | grep lustre; lfs df -h /mnt/lustre'
 ```
 
 No building required.  Four commands from download to
@@ -115,7 +115,7 @@ ltvm console-log co1-single
 ltvm dmesg co1-single
 
 # Execute commands inside
-sudo ltvm exec --timeout 30 co1-single 'lctl dl'
+ltvm exec --timeout 30 co1-single 'lctl dl'
 
 # Lifecycle
 sudo ltvm start|stop|restart|destroy co1-single
@@ -136,8 +136,8 @@ Never bare names like `testvm`.
 ```bash
 # Build Lustre, then copy modules + userland into a running VM
 ltvm build-lustre rocky9 ~/lustre-release
-sudo ltvm deploy co1-single --build ~/lustre-release
-sudo ltvm llmount co1-single
+ltvm deploy co1-single --build ~/lustre-release
+ltvm llmount co1-single
 ```
 
 `deploy` is idempotent (unmounts/unloads before re-copy).
@@ -158,8 +158,8 @@ ltvm cluster destroy co2
 ## Loading and Unloading Lustre (inside VM)
 
 ```bash
-sudo ltvm llmount co1-single               # mount
-sudo ltvm llmount co1-single --cleanup     # unmount + lustre_rmmod
+ltvm llmount co1-single               # mount
+ltvm llmount co1-single --cleanup     # unmount + lustre_rmmod
 ```
 
 These replace the older manual
@@ -180,7 +180,7 @@ sudo ltvm nmi co1-single
 # or from inside the VM: echo c > /proc/sysrq-trigger
 
 # Collect vmcore from the VM and run the lustre crash recipe
-sudo ltvm crash-collect co1-single --mod-dir ~/lustre-release
+ltvm crash-collect co1-single --mod-dir ~/lustre-release
 
 crash-tool recipes lustre \
     --vmcore /path/to/vmcore \
@@ -194,7 +194,7 @@ Lustre uses an in-kernel ring buffer (per-CPU, default
 ~5 MB/CPU).  All CDEBUG/CERROR output lands there.
 
 ```bash
-sudo ltvm exec co1-single '
+ltvm exec co1-single '
     lctl set_param debug=-1
     lctl set_param debug_mb=10000
     lctl clear
