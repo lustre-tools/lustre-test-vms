@@ -11,8 +11,12 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 from .kernel_build import _shell_var
+
+if TYPE_CHECKING:
+    from .target_config import LustreMode, TargetConfig
 
 
 @dataclass(frozen=True)
@@ -227,4 +231,182 @@ def parse_target_in(tree: Path, series: str) -> TargetIn:
         lnxrel=lnxrel,
         KERNEL_SRPM=srpm,
         SERIES=series_val,
+    )
+
+
+# ------------------------------------------------------------------
+# Compatibility gate
+# ------------------------------------------------------------------
+
+
+ValidationStatus = Literal["ok", "best_effort", "refuse", "error"]
+MatchedIn = Literal[
+    "which_patch_primary",
+    "changelog_primary",
+    "changelog_best_effort",
+    "not_listed",
+]
+
+
+@dataclass(frozen=True)
+class ValidationResult:
+    status: ValidationStatus
+    mode: LustreMode | None
+    kernel_version: str | None
+    matched_in: MatchedIn | None
+    message: str
+
+
+# .target.in uses lnxrel like "611.13.1.el9_7" while the ChangeLog and
+# which_patch tables list the same kernel as "5.14.0-611.13.1.el9"
+# (no trailing "_7").  Normalize by stripping a single trailing "_N"
+# from both sides before comparing so the minor-version suffix doesn't
+# trigger a false mismatch.  This mirrors how the Lustre build itself
+# maps target.in rows to the kernel lists in lustre/ChangeLog.
+_KVER_SUFFIX_RE = re.compile(r"_\d+$")
+
+
+def _normalize_kver(ver: str) -> str:
+    return _KVER_SUFFIX_RE.sub("", ver.strip())
+
+
+def _kver_from_target_in(ti: TargetIn) -> str:
+    return f"{ti.lnxmaj}-{ti.lnxrel}"
+
+
+def _kver_matches(declared: str, target_kver: str) -> bool:
+    return _normalize_kver(declared) == _normalize_kver(target_kver)
+
+
+def validate_target(tc: TargetConfig, lustre_tree: Path) -> ValidationResult:
+    """Decide whether ``tc`` is supported by the given Lustre tree.
+
+    Combines tc.lustre_target + tc.lustre_mode with the tree's
+    declarative files (.target.in, which_patch, ChangeLog).  Returns
+    a ValidationResult; callers use .status to gate further action.
+    """
+    from .target_config import LustreMode
+
+    mode = tc.lustre_mode
+    series = tc.lustre_target
+
+    try:
+        ti = parse_target_in(lustre_tree, series)
+    except (FileNotFoundError, ValueError) as exc:
+        return ValidationResult(
+            status="error",
+            mode=mode,
+            kernel_version=None,
+            matched_in=None,
+            message=(
+                f"Cannot read .target.in for {series!r} under "
+                f"{lustre_tree}: {exc}"
+            ),
+        )
+
+    kver = _kver_from_target_in(ti)
+
+    if mode == LustreMode.SERVER_LDISKFS:
+        try:
+            wp = parse_which_patch(lustre_tree)
+        except (FileNotFoundError, ValueError) as exc:
+            return ValidationResult(
+                status="error",
+                mode=mode,
+                kernel_version=kver,
+                matched_in=None,
+                message=f"Cannot read which_patch: {exc}",
+            )
+        series_file = f"{series}.series"
+        if series_file in wp:
+            declared = wp[series_file]
+            if _kver_matches(declared, kver):
+                return ValidationResult(
+                    status="ok",
+                    mode=mode,
+                    kernel_version=kver,
+                    matched_in="which_patch_primary",
+                    message=(
+                        f"{series} is listed in which_patch with matching "
+                        f"kernel {declared} (target.in: {kver})"
+                    ),
+                )
+            return ValidationResult(
+                status="refuse",
+                mode=mode,
+                kernel_version=kver,
+                matched_in="not_listed",
+                message=(
+                    f"{series} is listed in which_patch as {declared}, "
+                    f"but target.in declares {kver} -- kernel version "
+                    f"mismatch; this series does not match the kernel "
+                    f"it claims to patch"
+                ),
+            )
+        return ValidationResult(
+            status="refuse",
+            mode=mode,
+            kernel_version=kver,
+            matched_in="not_listed",
+            message=(
+                f"{series} is not listed in lustre/kernel_patches/"
+                f"which_patch; ldiskfs server builds require an "
+                f"explicit patch-series entry"
+            ),
+        )
+
+    if mode == LustreMode.SERVER_ZFS:
+        try:
+            cl = parse_changelog(lustre_tree)
+        except (FileNotFoundError, ValueError) as exc:
+            return ValidationResult(
+                status="error",
+                mode=mode,
+                kernel_version=kver,
+                matched_in=None,
+                message=f"Cannot read ChangeLog: {exc}",
+            )
+        for declared in cl.server_primary:
+            if _kver_matches(declared, kver):
+                return ValidationResult(
+                    status="ok",
+                    mode=mode,
+                    kernel_version=kver,
+                    matched_in="changelog_primary",
+                    message=(
+                        f"kernel {kver} is a server primary kernel "
+                        f"in lustre/ChangeLog (matched {declared})"
+                    ),
+                )
+        for declared in cl.server_best_effort:
+            if _kver_matches(declared, kver):
+                return ValidationResult(
+                    status="best_effort",
+                    mode=mode,
+                    kernel_version=kver,
+                    matched_in="changelog_best_effort",
+                    message=(
+                        f"kernel {kver} is listed in ChangeLog only as "
+                        f"'other server kernels' (best-effort; matched "
+                        f"{declared})"
+                    ),
+                )
+        return ValidationResult(
+            status="refuse",
+            mode=mode,
+            kernel_version=kver,
+            matched_in="not_listed",
+            message=(
+                f"kernel {kver} is not listed in either the "
+                f"'Server primary kernels' or 'Other server kernels' "
+                f"section of lustre/ChangeLog"
+            ),
+        )
+
+    return ValidationResult(
+        status="error",
+        mode=mode,
+        kernel_version=kver,
+        matched_in=None,
+        message=f"Unhandled lustre mode: {mode!r}",
     )

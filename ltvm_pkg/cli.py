@@ -21,6 +21,7 @@ from ltvm_pkg.deploy import deploy_to_vm, lustre_mount_vm
 from ltvm_pkg.image_build import build_image, image_status
 from ltvm_pkg.kernel_build import build_kernel, kernel_status
 from ltvm_pkg.lustre_build import build_lustre
+from ltvm_pkg.lustre_compat import ValidationResult, validate_target
 from ltvm_pkg.paths import load_meta_safe
 from ltvm_pkg.release_package import (
     fetch_target,
@@ -1072,6 +1073,71 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"{name:<12} {c:<14} {k:<26} {i:<14}")
 
     return EXIT_OK
+
+
+# ------------------------------------------------------------------
+# Subcommand: validate (Lustre compatibility gate)
+# ------------------------------------------------------------------
+
+
+# Exit codes used by cmd_validate.  "refuse" is a first-class
+# failure (1); "error" is reserved for parse / IO problems (2) so
+# scripts can distinguish "Lustre says no" from "we couldn't even
+# tell".
+_VALIDATE_EXIT = {
+    "ok": EXIT_OK,
+    "best_effort": EXIT_OK,
+    "refuse": EXIT_ERROR,
+    "error": EXIT_NOT_FOUND,
+}
+
+
+def _validation_result_to_dict(r: ValidationResult) -> dict[str, Any]:
+    return {
+        "status": r.status,
+        "mode": r.mode.value if r.mode is not None else None,
+        "kernel_version": r.kernel_version,
+        "matched_in": r.matched_in,
+        "message": r.message,
+    }
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    use_json = args.json
+    tc, err = _load_target(args.target, use_json)
+    if err is not None:
+        return err
+    assert tc is not None
+
+    lustre_arg = getattr(args, "lustre_tree", None)
+    if lustre_arg is None:
+        default = Path.home() / "lustre-release"
+        lustre_arg = str(default)
+    lustre_tree, err_msg = _resolve_lustre_tree(lustre_arg)
+    if err_msg:
+        return _error(
+            err_msg,
+            use_json,
+            hint="Pass --lustre-tree /path/to/lustre-release",
+        )
+    assert lustre_tree is not None
+
+    result = validate_target(tc, lustre_tree)
+    exit_code = _VALIDATE_EXIT[result.status]
+    force = bool(getattr(args, "force", False))
+
+    if use_json:
+        print(json.dumps(_validation_result_to_dict(result), indent=2))
+    else:
+        tag = f"[{result.status}]"
+        if result.status == "refuse" and force:
+            print(f"--force: {tag} {result.message}")
+        else:
+            print(f"{tag} {result.message}")
+
+    if result.status == "refuse" and force:
+        return EXIT_OK
+    return exit_code
 
 
 # ------------------------------------------------------------------

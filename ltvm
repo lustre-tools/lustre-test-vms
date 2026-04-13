@@ -72,6 +72,7 @@ from ltvm_pkg.cli import (  # noqa: E402
     cmd_snapshot,
     cmd_status,
     cmd_update,
+    cmd_validate,
     cmd_vm_ssh,
     cmd_vm_start,
     cmd_vm_stop,
@@ -418,6 +419,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show build status of all targets",
     )
     sp.set_defaults(func=cmd_status)
+
+    # -- validate --
+    sp = sub.add_parser(
+        "validate",
+        parents=[common],
+        help="Check Lustre-tree compatibility for a target (read-only)",
+    )
+    sp.add_argument("target")
+    sp.add_argument(
+        "--lustre-tree",
+        help="Path to Lustre source tree (default: ~/lustre-release)",
+    )
+    sp.add_argument(
+        "--force",
+        action="store_true",
+        help="Downgrade 'refuse' exit code to 0 (message still printed)",
+    )
+    sp.set_defaults(func=cmd_validate)
 
     # -- VM lifecycle: create --
     _vm_create_args = argparse.ArgumentParser(add_help=False)

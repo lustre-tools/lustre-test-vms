@@ -10,10 +10,13 @@ import pytest
 from ltvm_pkg.lustre_compat import (
     ChangeLogEntry,
     TargetIn,
+    ValidationResult,
     parse_changelog,
     parse_target_in,
     parse_which_patch,
+    validate_target,
 )
+from ltvm_pkg.target_config import LustreMode
 
 FIXTURES = Path(__file__).parent / "fixtures" / "lustre_compat"
 
@@ -258,3 +261,238 @@ class TestParseTargetIn:
         ti = parse_target_in(tree, "5.14-rhel9.7")
         with pytest.raises(Exception):
             ti.lnxmaj = "x"  # type: ignore[misc]
+
+
+# ------------------------------------------------------------------
+# validate_target
+# ------------------------------------------------------------------
+
+
+class _FakeTC:
+    """Minimal stand-in for TargetConfig -- validate_target only reads
+    .lustre_target and .lustre_mode."""
+
+    def __init__(self, lustre_target: str, lustre_mode: LustreMode) -> None:
+        self.lustre_target = lustre_target
+        self.lustre_mode = lustre_mode
+
+
+def _make_tree(
+    tmp_path: Path,
+    *,
+    which_patch: str | None,
+    changelog: str | None,
+    target_ins: dict[str, str],
+) -> Path:
+    tree = _mktree(tmp_path)
+    (tree / "lustre").mkdir(exist_ok=True)
+    if which_patch is not None:
+        (tree / "lustre/kernel_patches/which_patch").write_text(which_patch)
+    if changelog is not None:
+        (tree / "lustre/ChangeLog").write_text(changelog)
+    for name, body in target_ins.items():
+        (tree / f"lustre/kernel_patches/targets/{name}.target.in").write_text(
+            body
+        )
+    return tree
+
+
+_TI_RHEL97 = (
+    'lnxmaj="5.14.0"\n'
+    'lnxrel="611.13.1.el9_7"\n'
+    "KERNEL_SRPM=kernel-${lnxmaj}-${lnxrel}.src.rpm\n"
+    "SERIES=5.14-rhel9.7.series\n"
+)
+
+_TI_RHEL97_MISMATCH = (
+    'lnxmaj="5.14.0"\n'
+    'lnxrel="999.99.9.el9_7"\n'
+    "KERNEL_SRPM=kernel-${lnxmaj}-${lnxrel}.src.rpm\n"
+    "SERIES=5.14-rhel9.7.series\n"
+)
+
+_WP_BASIC = (
+    "PATCH SERIES FOR SERVER KERNELS:\n"
+    "5.14-rhel9.7.series    5.14.0-611.13.1.el9  (RHEL 9.7)\n"
+    "\n"
+)
+
+_WP_ABSENT = (
+    "PATCH SERIES FOR SERVER KERNELS:\n"
+    "4.18-rhel8.10.series    4.18.0-553.89.1.el8  (RHEL 8.10)\n"
+    "\n"
+)
+
+_CL_PRIMARY = (
+    "TBD Whamcloud\n"
+    "\t* version 2.18.0\n"
+    "\t* Server primary kernels built and tested during release cycle:\n"
+    "\t  5.14.0-611.13.1.el9  (RHEL9.7)\n"
+    "\t* Other server kernels known to build and work at some point:\n"
+    "\t  vanilla linux 5.4.0  (ZFS + ldiskfs)\n"
+    "\t* Client primary kernels built and tested during release cycle:\n"
+    "\t  5.14.0-611.13.1.el9  (RHEL9.7)\n"
+    "\t* Other clients known to build on these kernels at some point:\n"
+    "\t  4.18.0-348.23.1.el8  (RHEL8.5)\n"
+)
+
+_CL_BEST_EFFORT_ONLY = (
+    "TBD Whamcloud\n"
+    "\t* version 2.18.0\n"
+    "\t* Server primary kernels built and tested during release cycle:\n"
+    "\t  4.18.0-553.89.1.el8  (RHEL8.10)\n"
+    "\t* Other server kernels known to build and work at some point:\n"
+    "\t  5.14.0-611.13.1.el9  (RHEL9.7)\n"
+    "\t* Client primary kernels built and tested during release cycle:\n"
+    "\t  4.18.0-553.89.1.el8  (RHEL8.10)\n"
+    "\t* Other clients known to build on these kernels at some point:\n"
+    "\t  4.18.0-348.23.1.el8  (RHEL8.5)\n"
+)
+
+_CL_ABSENT = (
+    "TBD Whamcloud\n"
+    "\t* version 2.18.0\n"
+    "\t* Server primary kernels built and tested during release cycle:\n"
+    "\t  4.18.0-553.89.1.el8  (RHEL8.10)\n"
+    "\t* Other server kernels known to build and work at some point:\n"
+    "\t  4.18.0-425.10.1.el8  (RHEL8.7)\n"
+    "\t* Client primary kernels built and tested during release cycle:\n"
+    "\t  4.18.0-553.89.1.el8  (RHEL8.10)\n"
+    "\t* Other clients known to build on these kernels at some point:\n"
+    "\t  4.18.0-348.23.1.el8  (RHEL8.5)\n"
+)
+
+
+class TestValidateTarget:
+    def test_ldiskfs_primary_match(self, tmp_path: Path) -> None:
+        tree = _make_tree(
+            tmp_path,
+            which_patch=_WP_BASIC,
+            changelog=_CL_PRIMARY,
+            target_ins={"5.14-rhel9.7": _TI_RHEL97},
+        )
+        tc = _FakeTC("5.14-rhel9.7", LustreMode.SERVER_LDISKFS)
+        r = validate_target(tc, tree)
+        assert r.status == "ok"
+        assert r.matched_in == "which_patch_primary"
+        assert r.mode == LustreMode.SERVER_LDISKFS
+        assert r.kernel_version == "5.14.0-611.13.1.el9_7"
+        assert r.message
+
+    def test_ldiskfs_series_listed_kver_mismatch(self, tmp_path: Path) -> None:
+        tree = _make_tree(
+            tmp_path,
+            which_patch=_WP_BASIC,
+            changelog=_CL_PRIMARY,
+            target_ins={"5.14-rhel9.7": _TI_RHEL97_MISMATCH},
+        )
+        tc = _FakeTC("5.14-rhel9.7", LustreMode.SERVER_LDISKFS)
+        r = validate_target(tc, tree)
+        assert r.status == "refuse"
+        assert r.matched_in == "not_listed"
+        assert "mismatch" in r.message
+
+    def test_ldiskfs_series_absent(self, tmp_path: Path) -> None:
+        tree = _make_tree(
+            tmp_path,
+            which_patch=_WP_ABSENT,
+            changelog=_CL_PRIMARY,
+            target_ins={"5.14-rhel9.7": _TI_RHEL97},
+        )
+        tc = _FakeTC("5.14-rhel9.7", LustreMode.SERVER_LDISKFS)
+        r = validate_target(tc, tree)
+        assert r.status == "refuse"
+        assert r.matched_in == "not_listed"
+        assert "not listed" in r.message
+
+    def test_zfs_primary_match(self, tmp_path: Path) -> None:
+        tree = _make_tree(
+            tmp_path,
+            which_patch=_WP_BASIC,
+            changelog=_CL_PRIMARY,
+            target_ins={"5.14-rhel9.7": _TI_RHEL97},
+        )
+        tc = _FakeTC("5.14-rhel9.7", LustreMode.SERVER_ZFS)
+        r = validate_target(tc, tree)
+        assert r.status == "ok"
+        assert r.matched_in == "changelog_primary"
+
+    def test_zfs_best_effort(self, tmp_path: Path) -> None:
+        tree = _make_tree(
+            tmp_path,
+            which_patch=_WP_BASIC,
+            changelog=_CL_BEST_EFFORT_ONLY,
+            target_ins={"5.14-rhel9.7": _TI_RHEL97},
+        )
+        tc = _FakeTC("5.14-rhel9.7", LustreMode.SERVER_ZFS)
+        r = validate_target(tc, tree)
+        assert r.status == "best_effort"
+        assert r.matched_in == "changelog_best_effort"
+
+    def test_zfs_absent(self, tmp_path: Path) -> None:
+        tree = _make_tree(
+            tmp_path,
+            which_patch=_WP_BASIC,
+            changelog=_CL_ABSENT,
+            target_ins={"5.14-rhel9.7": _TI_RHEL97},
+        )
+        tc = _FakeTC("5.14-rhel9.7", LustreMode.SERVER_ZFS)
+        r = validate_target(tc, tree)
+        assert r.status == "refuse"
+        assert r.matched_in == "not_listed"
+
+    def test_error_missing_target_in(self, tmp_path: Path) -> None:
+        tree = _make_tree(
+            tmp_path,
+            which_patch=_WP_BASIC,
+            changelog=_CL_PRIMARY,
+            target_ins={},
+        )
+        tc = _FakeTC("5.14-rhel9.7", LustreMode.SERVER_LDISKFS)
+        r = validate_target(tc, tree)
+        assert r.status == "error"
+        assert r.kernel_version is None
+        assert "target.in" in r.message
+
+    def test_error_malformed_changelog(self, tmp_path: Path) -> None:
+        tree = _make_tree(
+            tmp_path,
+            which_patch=_WP_BASIC,
+            changelog="TBD Whamcloud\n\t* version 2.18.0\n",
+            target_ins={"5.14-rhel9.7": _TI_RHEL97},
+        )
+        tc = _FakeTC("5.14-rhel9.7", LustreMode.SERVER_ZFS)
+        r = validate_target(tc, tree)
+        assert r.status == "error"
+        assert "ChangeLog" in r.message
+        assert r.matched_in is None
+
+    def test_error_missing_which_patch(self, tmp_path: Path) -> None:
+        tree = _make_tree(
+            tmp_path,
+            which_patch=None,
+            changelog=_CL_PRIMARY,
+            target_ins={"5.14-rhel9.7": _TI_RHEL97},
+        )
+        tc = _FakeTC("5.14-rhel9.7", LustreMode.SERVER_LDISKFS)
+        r = validate_target(tc, tree)
+        assert r.status == "error"
+        assert "which_patch" in r.message
+
+    def test_result_is_frozen_and_fully_populated(self, tmp_path: Path) -> None:
+        tree = _make_tree(
+            tmp_path,
+            which_patch=_WP_BASIC,
+            changelog=_CL_PRIMARY,
+            target_ins={"5.14-rhel9.7": _TI_RHEL97},
+        )
+        tc = _FakeTC("5.14-rhel9.7", LustreMode.SERVER_LDISKFS)
+        r = validate_target(tc, tree)
+        assert isinstance(r, ValidationResult)
+        assert r.status in ("ok", "best_effort", "refuse", "error")
+        assert r.mode is not None
+        assert r.kernel_version is not None
+        assert r.matched_in is not None
+        assert r.message
+        with pytest.raises(Exception):
+            r.status = "refuse"  # type: ignore[misc]

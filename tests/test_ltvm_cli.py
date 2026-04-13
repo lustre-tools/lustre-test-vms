@@ -371,6 +371,158 @@ class TestArtifactLabel:
 
 
 # ---------------------------------------------------------------------------
+# cmd_validate
+# ---------------------------------------------------------------------------
+
+
+class TestCmdValidate:
+    def _make_lustre_tree(
+        self,
+        tmp_path: Path,
+        *,
+        which_patch: str,
+        changelog: str,
+        target_in: str,
+    ) -> Path:
+        lt = tmp_path / "lustre-release"
+        (lt / "lustre/kernel_patches/targets").mkdir(parents=True)
+        (lt / "lustre/kernel_patches/which_patch").write_text(which_patch)
+        (lt / "lustre/ChangeLog").write_text(changelog)
+        (
+            lt / "lustre/kernel_patches/targets/5.14-rhel9.7.target.in"
+        ).write_text(target_in)
+        return lt
+
+    _TI = (
+        'lnxmaj="5.14.0"\nlnxrel="611.13.1.el9_7"\nSERIES=5.14-rhel9.7.series\n'
+    )
+    _WP_OK = (
+        "PATCH SERIES FOR SERVER KERNELS:\n"
+        "5.14-rhel9.7.series    5.14.0-611.13.1.el9  (RHEL 9.7)\n\n"
+    )
+    _WP_ABSENT = (
+        "PATCH SERIES FOR SERVER KERNELS:\n"
+        "4.18-rhel8.10.series    4.18.0-553.89.1.el8  (RHEL 8.10)\n\n"
+    )
+    _CL = (
+        "TBD Whamcloud\n\t* version 2.18.0\n"
+        "\t* Server primary kernels built and tested during release cycle:\n"
+        "\t  5.14.0-611.13.1.el9  (RHEL9.7)\n"
+        "\t* Other server kernels known to build and work at some point:\n"
+        "\t  vanilla linux 5.4.0\n"
+        "\t* Client primary kernels built and tested during release cycle:\n"
+        "\t  5.14.0-611.13.1.el9\n"
+        "\t* Other clients known to build on these kernels at some point:\n"
+        "\t  4.18.0-348.23.1.el8\n"
+    )
+
+    def _tc(self, tmp_targets: Path) -> Any:
+        import ltvm_pkg.target_config as cfg
+
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            return cfg.TargetConfig("rocky9")
+
+    def test_ok(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        tmp_targets: Path,
+    ) -> None:
+        lt = self._make_lustre_tree(
+            tmp_path,
+            which_patch=self._WP_OK,
+            changelog=self._CL,
+            target_in=self._TI,
+        )
+        tc = self._tc(tmp_targets)
+        with patch("ltvm_pkg.cli.TargetConfig", return_value=tc):
+            rc = _run_main(
+                ["validate", "rocky9", "--lustre-tree", str(lt)], capsys
+            )
+        assert rc == EXIT_OK
+        out = capsys.readouterr().out
+        assert "[ok]" in out
+
+    def test_refuse(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        tmp_targets: Path,
+    ) -> None:
+        lt = self._make_lustre_tree(
+            tmp_path,
+            which_patch=self._WP_ABSENT,
+            changelog=self._CL,
+            target_in=self._TI,
+        )
+        tc = self._tc(tmp_targets)
+        with patch("ltvm_pkg.cli.TargetConfig", return_value=tc):
+            rc = _run_main(
+                ["validate", "rocky9", "--lustre-tree", str(lt)], capsys
+            )
+        assert rc == EXIT_ERROR
+        out = capsys.readouterr().out
+        assert "[refuse]" in out
+
+    def test_refuse_with_force_exits_zero(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        tmp_targets: Path,
+    ) -> None:
+        lt = self._make_lustre_tree(
+            tmp_path,
+            which_patch=self._WP_ABSENT,
+            changelog=self._CL,
+            target_in=self._TI,
+        )
+        tc = self._tc(tmp_targets)
+        with patch("ltvm_pkg.cli.TargetConfig", return_value=tc):
+            rc = _run_main(
+                ["validate", "rocky9", "--lustre-tree", str(lt), "--force"],
+                capsys,
+            )
+        assert rc == EXIT_OK
+        out = capsys.readouterr().out
+        assert "--force:" in out
+        assert "[refuse]" in out
+
+    def test_json_output(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_path: Path,
+        tmp_targets: Path,
+    ) -> None:
+        lt = self._make_lustre_tree(
+            tmp_path,
+            which_patch=self._WP_OK,
+            changelog=self._CL,
+            target_in=self._TI,
+        )
+        tc = self._tc(tmp_targets)
+        with patch("ltvm_pkg.cli.TargetConfig", return_value=tc):
+            rc = _run_main(
+                ["validate", "--json", "rocky9", "--lustre-tree", str(lt)],
+                capsys,
+            )
+        assert rc == EXIT_OK
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["status"] == "ok"
+        assert payload["mode"] == "server_ldiskfs"
+        assert payload["kernel_version"] == "5.14.0-611.13.1.el9_7"
+        assert payload["matched_in"] == "which_patch_primary"
+        assert payload["message"]
+
+
+# ---------------------------------------------------------------------------
 # update: missing target and --all
 # ---------------------------------------------------------------------------
 
