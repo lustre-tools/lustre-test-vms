@@ -88,11 +88,24 @@ class OSArtifacts:
     arch: str = "x86_64"
 
 
-def resolve_os_artifacts(os_name: str, arch: str = "x86_64") -> OSArtifacts:
+def resolve_os_artifacts(
+    os_name: str,
+    arch: str = "x86_64",
+    kernel: str | None = None,
+) -> OSArtifacts:
     """Return image, kernel paths and defaults for a target OS.
 
     Looks in output/<os>/ in the repo (from fetch or build).
     No separate install step needed.
+
+    ``kernel`` may be:
+      - None: use the target's default kernel and its paired image.
+      - a path to a kernel file (vmlinuz/vmlinux): the basename of its
+        parent directory identifies the kernel, and we pair it with
+        output/<os>/images/<that-name>/base.ext4.
+      - a kernel name (short or full, e.g. ``5.14-rhel9.7`` or
+        ``5.14-rhel9.7-5.14.0-611.13.1.el9_7_lustre``): resolved to the
+        matching kernel dir under output/<os>/kernels/.
     """
     # Read targets.yaml for kernel suffix and defaults
     kernel_suffix = ""
@@ -121,63 +134,107 @@ def resolve_os_artifacts(os_name: str, arch: str = "x86_64") -> OSArtifacts:
         if arch_dir.is_dir():
             output_dir = arch_dir
 
-    # Find image in output/<os>[/<arch>]/image/
-    img: Path | None = output_dir / "image" / "base.ext4"
-    if img is not None and not img.exists():
-        img = None
-    if not img:
-        arch_hint = (
-            f" --arch {effective_arch}"
-            if effective_arch != default_arch
-            else ""
-        )
+    arch_hint = (
+        f" --arch {effective_arch}" if effective_arch != default_arch else ""
+    )
+
+    # ── Step 1: Resolve the kernel directory name we should use. ──
+    #
+    # --kernel accepts either a path (e.g. a literal vmlinuz) or a name
+    # (short or full lustre-target).  Paths win by existence check: if
+    # the value names a real file, trust it verbatim and derive the
+    # kernel-name from the parent directory.  Otherwise treat it as a
+    # name and resolve it against the kernels dir.
+    kern: Path | None = None
+    kernel_dirname: str | None = None
+    kernels_root = output_dir / "kernels"
+
+    if kernel:
+        maybe_path = Path(kernel)
+        if maybe_path.is_file():
+            kern = maybe_path
+            kernel_dirname = maybe_path.parent.name
+        else:
+            # Treat as a name.  Exact match first, then prefix match.
+            cand = kernels_root / kernel
+            if cand.is_dir():
+                kernel_dirname = kernel
+            else:
+                prefix = kernel + "-"
+                matches = sorted(
+                    d.name
+                    for d in kernels_root.iterdir()
+                    if kernels_root.is_dir()
+                    and d.is_dir()
+                    and d.name.startswith(prefix)
+                ) if kernels_root.is_dir() else []
+                if matches:
+                    kernel_dirname = matches[-1]
+                else:
+                    raise FileNotFoundError(
+                        f"No kernel matching {kernel!r} for '{os_name}' "
+                        f"(arch={effective_arch})\n"
+                        f"Run: ltvm build-kernel {os_name} "
+                        f"--kernel {kernel}{arch_hint}  "
+                        f"(or: ltvm fetch {os_name}{arch_hint})"
+                    )
+    else:
+        # No override: use default kernel suffix, falling back to
+        # lex-latest built kernel dir if the default is not present.
+        if kernel_suffix:
+            cand = kernels_root / kernel_suffix
+            if cand.is_dir():
+                kernel_dirname = kernel_suffix
+            else:
+                prefix = kernel_suffix + "-"
+                matches = sorted(
+                    d.name
+                    for d in kernels_root.iterdir()
+                    if kernels_root.is_dir()
+                    and d.is_dir()
+                    and d.name.startswith(prefix)
+                ) if kernels_root.is_dir() else []
+                if matches:
+                    kernel_dirname = matches[-1]
+        if kernel_dirname is None and kernels_root.is_dir():
+            any_built = sorted(
+                d.name for d in kernels_root.iterdir() if d.is_dir()
+            )
+            if any_built:
+                kernel_dirname = any_built[-1]
+
+    if kernel_dirname is None:
         raise FileNotFoundError(
-            f"No image for '{os_name}' (arch={effective_arch})\n"
-            f"Run: ltvm fetch {os_name}{arch_hint}  (or: ltvm build-image {os_name}{arch_hint})"
+            f"No kernel for '{os_name}' (arch={effective_arch})\n"
+            f"Run: ltvm fetch {os_name}{arch_hint}  "
+            f"(or: ltvm build-kernel {os_name}{arch_hint})"
         )
 
-    # Find kernel: check output dir first, then install dir
-    # Prefer vmlinuz (works without PVH) over vmlinux
-    kern = None
-
-    # Search output/<os>/kernels/<suffix>/
-    if kernel_suffix:
-        kdir = output_dir / "kernels" / kernel_suffix
-        if not kdir.is_dir():
-            # Try glob for versioned subdirs
-            matches = sorted(output_dir.glob(f"kernels/{kernel_suffix}*"))
-            if matches:
-                kdir = matches[-1]
-        for name in ("vmlinuz", "vmlinux"):
-            c = kdir / name
+    # Pick the actual kernel binary file if the caller didn't pass a path.
+    if kern is None:
+        kdir = kernels_root / kernel_dirname
+        for nm in ("vmlinuz", "vmlinux"):
+            c = kdir / nm
             if c.exists():
                 kern = c
                 break
+        if kern is None:
+            raise FileNotFoundError(
+                f"No vmlinuz/vmlinux in {kdir}\n"
+                f"Run: ltvm build-kernel {os_name} "
+                f"--kernel {kernel_dirname}{arch_hint}"
+            )
 
-    # Search output/<os>/kernels/*/ (any kernel).  Pick the lex-latest
-    # name -- with the kernel dir naming scheme
-    # `<lustre_target>-<full_version>` (e.g. 5.14-rhel9.7-5.14.0-611.13.1)
-    # this gives us the newest version, matching TargetConfig.resolve_kernel.
-    # Plain `sorted(...)[0]` would pick the OLDEST and silently boot the VM
-    # against a stale kernel after a new build landed alongside the old one.
-    if not kern and output_dir.is_dir():
-        candidates = sorted(output_dir.glob("kernels/*/vmlinuz"))
-        if candidates:
-            kern = candidates[-1]
-        else:
-            candidates = sorted(output_dir.glob("kernels/*/vmlinux"))
-            if candidates:
-                kern = candidates[-1]
-
-    if not kern:
-        arch_hint = (
-            f" --arch {effective_arch}"
-            if effective_arch != default_arch
-            else ""
-        )
+    # ── Step 2: Locate the image paired with this kernel. ──
+    # New layout: output/<os>[/<arch>]/images/<kernel-dirname>/base.ext4
+    img = output_dir / "images" / kernel_dirname / "base.ext4"
+    if not img.exists():
         raise FileNotFoundError(
-            f"No kernel for '{os_name}' (arch={effective_arch})\n"
-            f"Run: ltvm fetch {os_name}{arch_hint}  (or: ltvm build-kernel {os_name}{arch_hint})"
+            f"No image for '{os_name}' kernel={kernel_dirname} "
+            f"(arch={effective_arch})\n"
+            f"Run: ltvm build-image {os_name} "
+            f"--kernel {kernel_dirname}{arch_hint}  "
+            f"(or: ltvm fetch {os_name}{arch_hint})"
         )
 
     return OSArtifacts(

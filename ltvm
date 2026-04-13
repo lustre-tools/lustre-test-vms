@@ -280,7 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
     # -- build-image --
     sp = sub.add_parser(
         "build-image",
-        parents=[common],
+        parents=[common, kernel_arg],
         help="Build the VM base image for a target",
     )
     sp.add_argument("target")

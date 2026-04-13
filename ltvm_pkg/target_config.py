@@ -318,8 +318,14 @@ class TargetConfig:
             return []
         return sorted(d.name for d in kernels_dir.iterdir() if d.is_dir())
 
-    def image_output_dir(self) -> Path:
-        return self.output_dir / "image"
+    def image_output_dir(self, kernel: str | None = None) -> Path:
+        """Return the output directory for an image, keyed by kernel.
+
+        Images are per-kernel because `/lib/modules/<kver>/` is baked
+        into the rootfs at build time and must match the kernel the VM
+        will boot against.
+        """
+        return self.output_dir / "images" / self.resolve_kernel(kernel)
 
     def container_output_dir(self) -> Path:
         return self.output_dir / "container"
@@ -403,6 +409,15 @@ class TargetConfig:
                 h.update(inner_path.read_bytes())
 
         elif artifact == "image":
+            # Image output is keyed per-kernel because /lib/modules/<kver>/
+            # is baked in at build time.  Fold the resolved kernel name
+            # into the hash so two built kernels under the same target
+            # don't collide on the same cached image.
+            raw_k = kernel if kernel is not None else self.default_kernel
+            short_k = self._short_kernel_name(raw_k)
+            h.update(b"image-kernel:")
+            h.update(short_k.encode())
+
             dockerfile = self.target_dir / "image.Dockerfile"
             if dockerfile.exists():
                 h.update(dockerfile.read_bytes())
@@ -432,7 +447,7 @@ class TargetConfig:
             kernel_meta = (
                 self.output_dir
                 / "kernels"
-                / self.resolve_kernel()
+                / self.resolve_kernel(kernel)
                 / "meta.json"
             )
             km = load_meta_safe(kernel_meta)
@@ -468,6 +483,8 @@ class TargetConfig:
         """
         if artifact == "kernel":
             meta_file = self._kernel_meta_file(kernel)
+        elif artifact == "image":
+            meta_file = self.image_output_dir(kernel) / "meta.json"
         else:
             meta_file = self.output_dir / artifact / "meta.json"
         meta = load_meta_safe(meta_file)
@@ -497,6 +514,8 @@ class TargetConfig:
         """
         if artifact == "kernel":
             out_dir = self._kernel_meta_file(kernel).parent
+        elif artifact == "image":
+            out_dir = self.image_output_dir(kernel)
         else:
             out_dir = self.output_dir / artifact
         out_dir.mkdir(parents=True, exist_ok=True)

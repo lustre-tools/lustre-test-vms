@@ -351,7 +351,45 @@ class TestCmdStatusJson:
         assert "rocky9" in payload
         assert "container" in payload["rocky9"]
         assert "kernel" in payload["rocky9"]
-        assert "image" in payload["rocky9"]
+        assert "images" in payload["rocky9"]
+
+    def test_json_lists_built_kernels_separately(
+        self, capsys: pytest.CaptureFixture[str], tmp_targets: Path
+    ) -> None:
+        """build-status enumerates one image entry per built kernel dir."""
+        import ltvm_pkg.target_config as cfg
+
+        # Pre-populate two built kernel dirs under output/rocky9/kernels/
+        kernels = tmp_targets / "output" / "rocky9" / "kernels"
+        (kernels / "5.14-rhel9.7-5.14.0-611.13.1").mkdir(parents=True)
+        (kernels / "5.14-rhel9.5-5.14.0-503.26.1").mkdir(parents=True)
+
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            tc = cfg.TargetConfig("rocky9")
+
+        with (
+            patch("ltvm_pkg.cli.list_targets", return_value=["rocky9"]),
+            patch("ltvm_pkg.cli.TargetConfig", return_value=tc),
+            patch(
+                "ltvm_pkg.cli.kernel_status",
+                return_value={"built": False, "stale": True},
+            ),
+        ):
+            rc = _run_main(["build-status", "--json"], capsys)
+
+        assert rc == EXIT_OK
+        payload = json.loads(capsys.readouterr().out)
+        images = payload["rocky9"]["images"]
+        assert "5.14-rhel9.7-5.14.0-611.13.1" in images
+        assert "5.14-rhel9.5-5.14.0-503.26.1" in images
 
 
 # ---------------------------------------------------------------------------

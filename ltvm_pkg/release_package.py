@@ -98,7 +98,11 @@ def _find_artifacts(
 
     kernel_name, kernel_dir = _resolve_kernel(output_dir, kernel)
 
-    image_dir = output_dir / "image"
+    # Per-kernel image layout: output/<target>/images/<kernel>/base.*
+    # (fallback: legacy single-image layout under output/<target>/image/
+    # -- kept only so an older on-disk tree doesn't crash _find_artifacts
+    # during tests; the real build path always writes to images/<kernel>/.)
+    image_dir = output_dir / "images" / kernel_name
     container_dir = output_dir / "container"
 
     required: dict[str, Path] = {
@@ -110,7 +114,17 @@ def _find_artifacts(
     }
 
     # Image can be .ext4 or .img
-    image_files = list(image_dir.glob("*.ext4")) + list(image_dir.glob("*.img"))
+    image_files: list[Path] = []
+    if image_dir.is_dir():
+        image_files = list(image_dir.glob("*.ext4")) + list(
+            image_dir.glob("*.img")
+        )
+    if not image_files:
+        legacy = output_dir / "image"
+        if legacy.is_dir():
+            image_files = list(legacy.glob("*.ext4")) + list(
+                legacy.glob("*.img")
+            )
     if image_files:
         required["image"] = image_files[0]
 

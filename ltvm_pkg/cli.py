@@ -261,9 +261,9 @@ def cmd_build_all(args: argparse.Namespace) -> int:
 
     # 3. Image
     if not use_json:
-        print(f"==> Building image for {args.target}...")
+        print(f"==> Building image for {args.target} (kernel={resolved_kernel})...")
     try:
-        build_image(tc, force=args.force)
+        build_image(tc, force=args.force, kernel=kernel)
         results["image"] = "ok"
     except Exception as e:
         return _error(f"Image build failed: {e}", use_json)
@@ -387,15 +387,22 @@ def cmd_build_image(args: argparse.Namespace) -> int:
         return err
     assert tc is not None
 
+    kernel = getattr(args, "kernel", None)
+    resolved_kernel = tc.resolve_kernel(kernel)
+
     if not use_json:
-        print(f"Building image for {args.target}...")
+        print(f"Building image for {args.target} (kernel={resolved_kernel})...")
 
     try:
-        path = build_image(tc, force=args.force)
+        path = build_image(tc, force=args.force, kernel=kernel)
     except Exception as e:
         return _error(f"Image build failed: {e}", use_json)
 
-    result = {"target": args.target, "path": str(path)}
+    result = {
+        "target": args.target,
+        "kernel": resolved_kernel,
+        "path": str(path),
+    }
     _output(result, use_json)
     return EXIT_OK
 
@@ -1066,25 +1073,44 @@ def cmd_status(args: argparse.Namespace) -> int:
             continue  # skip planned/disabled targets
         cs = _container_status(tc)
         ks = kernel_status(tc)
-        ims = image_status(tc)
+        # Images are per-kernel: build one row per built kernel dir, plus
+        # the default kernel (even if nothing is built yet) so the user
+        # sees "not built" instead of an empty section.
+        built_kernels = tc.available_kernels()
+        kernels_to_report = list(built_kernels)
+        if tc.default_kernel not in kernels_to_report:
+            # available_kernels() lists full-version dir names; the
+            # default is the short name.  Resolve it to the matching
+            # full name if one exists, otherwise keep the short name.
+            kernels_to_report.append(tc.resolve_kernel(None))
+        if not kernels_to_report:
+            kernels_to_report = [tc.resolve_kernel(None)]
+        images = {k: image_status(tc, kernel=k) for k in kernels_to_report}
         all_status[name] = {
             "container": cs,
             "kernel": ks,
-            "image": ims,
+            "images": images,
         }
 
     if use_json:
         print(json.dumps(all_status, indent=2))
     else:
-        # Table output
-        hdr = f"{'Target':<12} {'Container':<14} {'Kernel':<26} {'Image':<14}"
+        # Table output: one row per (target, kernel-image) pair.
+        hdr = (
+            f"{'Target':<12} {'Container':<14} {'Kernel':<26} "
+            f"{'Image-Kernel':<44} {'Image':<14}"
+        )
         print(hdr)
         print("-" * len(hdr))
         for name, st in all_status.items():
             c = _artifact_label(st["container"])
             k = _artifact_label(st["kernel"])
-            i = _artifact_label(st["image"])
-            print(f"{name:<12} {c:<14} {k:<26} {i:<14}")
+            for image_kernel, ims in st["images"].items():
+                i = _artifact_label(ims)
+                print(
+                    f"{name:<12} {c:<14} {k:<26} "
+                    f"{image_kernel:<44} {i:<14}"
+                )
 
     return EXIT_OK
 

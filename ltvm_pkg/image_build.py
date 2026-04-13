@@ -157,7 +157,11 @@ def _prebuild_tools_native(
     log.info("Pre-built tools at %s", output_dir)
 
 
-def build_image(target_config: TargetConfig, force: bool = False) -> Path:
+def build_image(
+    target_config: TargetConfig,
+    force: bool = False,
+    kernel: str | None = None,
+) -> Path:
     """Build a VM base image for the given target.
 
     Steps:
@@ -168,17 +172,22 @@ def build_image(target_config: TargetConfig, force: bool = False) -> Path:
     Args:
         target_config: TargetConfig instance
         force: rebuild even if inputs unchanged
+        kernel: kernel name (short or full) whose modules to bake in;
+                defaults to the target's default kernel
     """
     _check_mke2fs()
 
-    if not force and not target_config.is_stale("image"):
-        log.info(
-            "Image for %s is up to date, skipping (use force=True to rebuild)",
-            target_config.name,
-        )
-        return target_config.image_output_dir() / "base.ext4"
+    kernel_name = target_config.resolve_kernel(kernel)
 
-    out_dir = target_config.image_output_dir()
+    if not force and not target_config.is_stale("image", kernel=kernel):
+        log.info(
+            "Image for %s (kernel=%s) is up to date, skipping (use force=True to rebuild)",
+            target_config.name,
+            kernel_name,
+        )
+        return target_config.image_output_dir(kernel) / "base.ext4"
+
+    out_dir = target_config.image_output_dir(kernel)
     out_dir.mkdir(parents=True, exist_ok=True)
     image_path = out_dir / "base.ext4"
 
@@ -265,7 +274,6 @@ def build_image(target_config: TargetConfig, force: bool = False) -> Path:
     # built directory exists yet.  The actual "no kernel built yet"
     # case is detected below by checking has_modules / has_lustre.
     final_tag = tag
-    kernel_name = target_config.resolve_kernel(None)
 
     if kernel_name is not None:
         kdir = target_config.output_dir / "kernels" / kernel_name
@@ -375,10 +383,12 @@ def build_image(target_config: TargetConfig, force: bool = False) -> Path:
 
     target_config.write_meta(
         "image",
+        kernel=kernel,
         build_date=datetime.now(timezone.utc).isoformat(),
         build_seconds=round(elapsed, 1),
         image_size_mb=round(size_mb, 1),
         packages=pkg_manifest,
+        kernel_name=kernel_name,
     )
 
     log.info("Image built: %s (%.0f MiB, %.0fs)", image_path, size_mb, elapsed)
@@ -507,8 +517,9 @@ def _get_package_manifest(
 
 def image_status(
     target_config: TargetConfig,
+    kernel: str | None = None,
 ) -> dict[str, bool | str | float | None]:
-    """Return status dict for the target's image artifact.
+    """Return status dict for the target's image artifact for a kernel.
 
     Keys:
         built: bool -- whether an image exists
@@ -516,8 +527,10 @@ def image_status(
         stale: bool -- whether inputs have changed
         size_mb: float or None -- image file size
         path: str or None -- path to base.ext4
+        kernel: str -- resolved kernel name this image is paired with
     """
-    out_dir = target_config.image_output_dir()
+    kernel_name = target_config.resolve_kernel(kernel)
+    out_dir = target_config.image_output_dir(kernel)
     image_path = out_dir / "base.ext4"
     meta_path = out_dir / "meta.json"
 
@@ -528,12 +541,13 @@ def image_status(
             "stale": True,
             "size_mb": None,
             "path": None,
+            "kernel": kernel_name,
         }
 
     meta = load_meta_safe(meta_path) or {}
 
     size_mb = image_path.stat().st_size / (1024 * 1024)
-    stale = target_config.is_stale("image")
+    stale = target_config.is_stale("image", kernel=kernel)
 
     return {
         "built": True,
@@ -541,4 +555,5 @@ def image_status(
         "stale": stale,
         "size_mb": round(size_mb, 1),
         "path": str(image_path),
+        "kernel": kernel_name,
     }

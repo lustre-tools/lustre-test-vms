@@ -198,7 +198,7 @@ class TestImageStatus:
 
         image.image_status(tc)
 
-        tc.is_stale.assert_called_once_with("image")
+        tc.is_stale.assert_called_once_with("image", kernel=None)
 
     def test_is_stale_not_called_when_no_image(self, tmp_path: Path) -> None:
         import ltvm_pkg.image_build as image
@@ -207,6 +207,24 @@ class TestImageStatus:
         image.image_status(tc)
 
         tc.is_stale.assert_not_called()
+
+
+class TestImageOutputDirPerKernel:
+    """build-image --kernel produces distinct paths for different kernels."""
+
+    def test_distinct_paths_for_distinct_kernels(
+        self, tmp_targets: Path
+    ) -> None:
+        from tests.conftest import _make_config
+
+        tc = _make_config(tmp_targets)
+        p1 = tc.image_output_dir("5.14-rhel9.7")
+        p2 = tc.image_output_dir("5.14-rhel9.5")
+        assert p1 != p2
+        assert p1.name == "5.14-rhel9.7"
+        assert p2.name == "5.14-rhel9.5"
+        assert p1.parent == p2.parent
+        assert p1.parent.name == "images"
 
 
 class TestCheckMke2fs:

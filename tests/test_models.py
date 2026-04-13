@@ -276,3 +276,86 @@ class TestDeploySshKey:
         ):
             with pytest.raises(SystemExit):
                 deploy_ssh_key("192.168.100.99")
+
+
+class TestResolveOsArtifactsPerKernel:
+    """resolve_os_artifacts picks the per-kernel image matching --kernel."""
+
+    def _setup(self, tmp_path: Path) -> Path:
+        out = tmp_path / "output" / "rocky9"
+        # Two built kernels, each with a matching image.
+        k1 = "5.14-rhel9.7"
+        k2 = "6.1-rhel9.7"
+        for k in (k1, k2):
+            (out / "kernels" / k).mkdir(parents=True)
+            (out / "kernels" / k / "vmlinuz").write_bytes(b"k")
+            (out / "images" / k).mkdir(parents=True)
+            (out / "images" / k / "base.ext4").write_bytes(b"i")
+        # targets.yaml
+        yml = tmp_path / "targets" / "targets.yaml"
+        yml.parent.mkdir(parents=True)
+        yml.write_text(
+            "defaults: {}\n"
+            "targets:\n"
+            "  rocky9:\n"
+            "    os_name: rocky\n"
+            "    os_version: '9'\n"
+            "    container_image: rockylinux:9\n"
+            "    status: working\n"
+            "    kernels:\n"
+            "      default: 5.14-rhel9.7\n"
+            "    lustre: {mode: server_ldiskfs}\n"
+        )
+        return tmp_path
+
+    def test_named_kernel_selects_matching_image(
+        self, tmp_path: Path
+    ) -> None:
+        from ltvm_pkg import vm_state
+
+        root = self._setup(tmp_path)
+        with (
+            patch.object(vm_state, "_LTVM_ROOT", root),
+            patch.object(vm_state, "TARGETS_YAML", root / "targets" / "targets.yaml"),
+        ):
+            arts = vm_state.resolve_os_artifacts("rocky9", kernel="6.1-rhel9.7")
+        assert arts.kernel.parent.name == "6.1-rhel9.7"
+        assert arts.image == root / "output" / "rocky9" / "images" / "6.1-rhel9.7" / "base.ext4"
+
+    def test_default_uses_default_kernel_image(self, tmp_path: Path) -> None:
+        from ltvm_pkg import vm_state
+
+        root = self._setup(tmp_path)
+        with (
+            patch.object(vm_state, "_LTVM_ROOT", root),
+            patch.object(vm_state, "TARGETS_YAML", root / "targets" / "targets.yaml"),
+        ):
+            arts = vm_state.resolve_os_artifacts("rocky9")
+        assert arts.image.parent.name == "5.14-rhel9.7"
+
+    def test_missing_image_raises_with_hint(self, tmp_path: Path) -> None:
+        from ltvm_pkg import vm_state
+
+        root = self._setup(tmp_path)
+        # Remove the 6.1 image to force the failure path.
+        (root / "output" / "rocky9" / "images" / "6.1-rhel9.7" / "base.ext4").unlink()
+        with (
+            patch.object(vm_state, "_LTVM_ROOT", root),
+            patch.object(vm_state, "TARGETS_YAML", root / "targets" / "targets.yaml"),
+        ):
+            with pytest.raises(FileNotFoundError, match="build-image"):
+                vm_state.resolve_os_artifacts("rocky9", kernel="6.1-rhel9.7")
+
+    def test_kernel_as_path_still_works(self, tmp_path: Path) -> None:
+        """Back-compat: passing a vmlinuz PATH still resolves the paired image."""
+        from ltvm_pkg import vm_state
+
+        root = self._setup(tmp_path)
+        vmlinuz = root / "output" / "rocky9" / "kernels" / "6.1-rhel9.7" / "vmlinuz"
+        with (
+            patch.object(vm_state, "_LTVM_ROOT", root),
+            patch.object(vm_state, "TARGETS_YAML", root / "targets" / "targets.yaml"),
+        ):
+            arts = vm_state.resolve_os_artifacts("rocky9", kernel=str(vmlinuz))
+        assert arts.kernel == vmlinuz
+        assert arts.image.parent.name == "6.1-rhel9.7"

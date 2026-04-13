@@ -205,8 +205,25 @@ class TestAvailableKernels:
 class TestOutputDirs:
     def test_image_output_dir(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
+        # Default: paired with the target's default kernel.
         assert (
-            tc.image_output_dir() == tmp_targets / "output" / "rocky9" / "image"
+            tc.image_output_dir()
+            == tmp_targets / "output" / "rocky9" / "images" / "5.14-rhel9.7"
+        )
+
+    def test_image_output_dir_explicit_kernel(self, tmp_targets: Path) -> None:
+        tc = _make_config(tmp_targets)
+        assert (
+            tc.image_output_dir("5.14-rhel9.5")
+            == tmp_targets / "output" / "rocky9" / "images" / "5.14-rhel9.5"
+        )
+
+    def test_image_output_dir_distinct_per_kernel(
+        self, tmp_targets: Path
+    ) -> None:
+        tc = _make_config(tmp_targets)
+        assert tc.image_output_dir("5.14-rhel9.7") != tc.image_output_dir(
+            "5.14-rhel9.5"
         )
 
     def test_container_output_dir(self, tmp_targets: Path) -> None:
@@ -368,6 +385,19 @@ class TestStaleness:
         df.write_text("FROM rockylinux:9.7\nRUN echo changed\n")
         assert tc.is_stale("container") is True
 
+    def test_image_staleness_per_kernel(self, tmp_targets: Path) -> None:
+        tc = _make_config(tmp_targets)
+        tc.write_meta("image", kernel="5.14-rhel9.7")
+        assert tc.is_stale("image", kernel="5.14-rhel9.7") is False
+        # Other kernel's image still stale (no meta written for it).
+        assert tc.is_stale("image", kernel="5.14-rhel9.5") is True
+
+    def test_image_hash_per_kernel_distinct(self, tmp_targets: Path) -> None:
+        tc = _make_config(tmp_targets)
+        h1 = tc.input_hash("image", kernel="5.14-rhel9.7")
+        h2 = tc.input_hash("image", kernel="5.14-rhel9.5")
+        assert h1 != h2
+
     def test_kernel_staleness(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
         assert tc.is_stale("kernel") is True
@@ -414,7 +444,14 @@ class TestWriteMeta:
     def test_creates_dirs(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
         tc.write_meta("image")
-        meta_path = tmp_targets / "output" / "rocky9" / "image" / "meta.json"
+        meta_path = (
+            tmp_targets
+            / "output"
+            / "rocky9"
+            / "images"
+            / "5.14-rhel9.7"
+            / "meta.json"
+        )
         assert meta_path.exists()
 
 

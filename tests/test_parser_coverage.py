@@ -509,7 +509,11 @@ class TestEnsureToCreateNamespaceContract:
 
         resolve_calls: list[str] = []
 
-        def capturing_resolve(os_name: str, arch: str = "x86_64") -> Any:
+        def capturing_resolve(
+            os_name: str,
+            arch: str = "x86_64",
+            kernel: str | None = None,
+        ) -> Any:
             resolve_calls.append(os_name)
             return MagicMock(
                 image="/resolved/base.ext4",
