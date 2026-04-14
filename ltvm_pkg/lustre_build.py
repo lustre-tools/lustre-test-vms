@@ -260,18 +260,27 @@ def _kernel_changed(
     target: str = DEFAULT_TARGET,
     arch: str = "x86_64",
 ) -> bool:
-    """Return True iff a previous build stamp exists and its kernel differs.
+    """Return True iff the Lustre tree was previously built against a
+    different kernel than the one we're about to use.
 
-    Used to distinguish "kernel changed" from "never built" so that only
-    the former forces distclean (the latter has nothing to clean).
+    Checks every `.ltvm-kernel-*` stamp under the tree, not just this
+    target's.  Autoconf state (config.cache, kconftest.dir, .deps) is
+    shared across all targets because the Lustre source is shared; a
+    stamp for ANY other target whose kver differs means distclean is
+    required to avoid picking up the wrong feature probes on a fresh
+    build of a new target.
     """
-    suffix = _stamp_suffix(target, arch)
-    stamp = lustre_tree / f".ltvm-kernel-{suffix}"
-    if not stamp.exists():
-        return False
-    prev = stamp.read_text().strip()
     cur = _kernel_release(build_tree)
-    return prev != cur
+    stamps = list(lustre_tree.glob(".ltvm-kernel-*"))
+    if not stamps:
+        return False
+    for stamp in stamps:
+        try:
+            if stamp.read_text().strip() != cur:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _build_in_container(
