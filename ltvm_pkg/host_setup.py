@@ -173,6 +173,8 @@ def check_prerequisites(host: HostInfo) -> None:
         "make": "make",
         "gcc": "gcc",
         "ip": "iproute2" if host.pkg_mgr == "apt" else "iproute",
+        "fakeroot": "fakeroot",
+        "mke2fs": "e2fsprogs",
     }
     missing = []
     for cmd, pkg in needed.items():

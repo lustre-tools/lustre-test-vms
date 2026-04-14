@@ -257,7 +257,7 @@ class TestCheckMke2fs:
         mock_result.stderr = "some other tool output"
 
         with patch("subprocess.run", return_value=mock_result):
-            with pytest.raises(RuntimeError, match="mke2fs not found"):
+            with pytest.raises(RuntimeError, match="mke2fs not functional"):
                 image._check_mke2fs()
 
     def test_raises_runtime_error_on_empty_output(self) -> None:

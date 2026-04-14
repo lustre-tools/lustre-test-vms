@@ -50,12 +50,20 @@ def _run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
 
 
 def _check_mke2fs() -> None:
-    """Verify mke2fs supports -d (populate from directory)."""
-    result = subprocess.run(["mke2fs", "-V"], capture_output=True, text=True)
+    """Verify mke2fs and fakeroot are installed up-front."""
+    import shutil as _sh
+
+    missing = [t for t in ("mke2fs", "fakeroot") if _sh.which(t) is None]
+    if missing:
+        raise RuntimeError(
+            f"missing host tool(s): {', '.join(missing)} -- "
+            f"install e2fsprogs and fakeroot, or run `sudo ltvm install`"
+        )
     # -d support was added in e2fsprogs 1.43 (2016)
+    result = subprocess.run(["mke2fs", "-V"], capture_output=True, text=True)
     version_str = result.stderr + result.stdout
     if "mke2fs" not in version_str:
-        raise RuntimeError("mke2fs not found; install e2fsprogs")
+        raise RuntimeError("mke2fs not functional; reinstall e2fsprogs")
 
 
 def _container_image_tag(target_config: TargetConfig) -> str:
