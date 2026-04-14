@@ -365,11 +365,15 @@ def _deploy_one_node(
     from ltvm_pkg.lustre_build import staging_path as _staging_path
 
     vm = VMInfo.load(node_name)
-    target = vm.os_id or DEFAULT_TARGET
+    if not vm.os_id:
+        raise RuntimeError(
+            f"VM '{vm.name}' has no os_id; recreate it"
+        )
+    target = vm.os_id
     # Pass vm.arch + kernel so the staging dir matches what
     # build-lustre wrote.  Staging is keyed per-kernel so two kernels'
     # userland can coexist under one lustre tree.
-    vm_arch = vm.arch or "x86_64"
+    vm_arch = vm.arch
     deploy_kernel: str | None = None
     if vm.kernel:
         vm_kernel_name = Path(vm.kernel).parent.name

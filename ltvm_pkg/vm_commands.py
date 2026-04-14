@@ -113,16 +113,26 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
                 f"rebuild the image with `ltvm build-image` "
                 f"or restore the kernel output dir."
             )
-        run(
+        scp_r = run(
             [
+                "sshpass",
+                "-p",
+                ROOT_PASSWORD,
                 "scp",
                 "-o", "StrictHostKeyChecking=no",
                 "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "ConnectTimeout=5",
+                "-o", "LogLevel=ERROR",
                 str(vmlinuz),
                 f"root@{vm.ip}:/boot/vmlinuz-{kver}",
             ],
-            check=True,
         )
+        if scp_r.returncode != 0:
+            err = (scp_r.stderr or scp_r.stdout or "").strip()
+            die(
+                f"failed to seed vmlinuz to '{vm.name}' "
+                f"(rc={scp_r.returncode}): {err}"
+            )
         if os_family == "debian":
             regen_cmd = f"update-initramfs -c -k {kver}"
         else:
@@ -811,8 +821,10 @@ def _qmp_nmi(qmp_path: Path) -> None:
             result = _recv_json_line(s, buf)
             if "return" in result or "error" in result:
                 break
-    if "error" in result:
-        raise RuntimeError(result["error"].get("desc", str(result["error"])))
+        if "error" in result:
+            raise RuntimeError(
+                result["error"].get("desc", str(result["error"]))
+            )
 
 
 def cmd_nmi(args: argparse.Namespace) -> None:
@@ -913,25 +925,33 @@ def cmd_crash_collect(args: argparse.Namespace) -> None:
     local_vmcore = local_dir / "vmcore"
 
     print(f"copying vmcore to {local_vmcore}...")
-    r = run(
-        [
-            "sshpass",
-            "-p",
-            ROOT_PASSWORD,
-            "scp",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-o",
-            "LogLevel=ERROR",
-            f"root@{vm.ip}:{vmcore_path}",
-            str(local_vmcore),
-        ],
-        capture_output=False,
-        timeout=300,
-    )
+    try:
+        r = run(
+            [
+                "sshpass",
+                "-p",
+                ROOT_PASSWORD,
+                "scp",
+                "-o",
+                "StrictHostKeyChecking=no",
+                "-o",
+                "UserKnownHostsFile=/dev/null",
+                "-o",
+                "LogLevel=ERROR",
+                f"root@{vm.ip}:{vmcore_path}",
+                str(local_vmcore),
+            ],
+            capture_output=False,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as e:
+        local_vmcore.unlink(missing_ok=True)
+        die(
+            f"timed out after {e.timeout}s copying vmcore from '{args.name}'",
+            EXIT_TIMEOUT,
+        )
     if r.returncode != 0:
+        local_vmcore.unlink(missing_ok=True)
         die("failed to copy vmcore")
 
     # Make vmcore readable by non-root so triage tools (run as SUDO_USER)
@@ -943,14 +963,21 @@ def cmd_crash_collect(args: argparse.Namespace) -> None:
     # Resolve vmlinux: prefer the freshly-built vmlinux from output/, then
     # look next to vm.kernel (which usually points to vmlinuz).  We always
     # prefer vmlinux over vmlinuz because drgn needs full debug symbols.
+    if not vm.os_id:
+        raise RuntimeError(
+            f"VM '{vm.name}' has no os_id; recreate it"
+        )
     vmlinux: Path | None = None
     try:
-        arts = resolve_os_artifacts(vm.os_id or DEFAULT_TARGET, arch=vm.arch)
+        arts = resolve_os_artifacts(vm.os_id, arch=vm.arch)
         candidate = arts.kernel.parent / "vmlinux"
         if candidate.exists():
             vmlinux = candidate
-    except Exception:
-        pass
+    except FileNotFoundError as e:
+        print(
+            f"warning: kernel artifacts not found for os_id={vm.os_id}: {e}",
+            file=sys.stderr,
+        )
     if vmlinux is None and vm.kernel:
         neighbor = Path(vm.kernel).parent / "vmlinux"
         if neighbor.exists():
@@ -1067,12 +1094,20 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
         finally:
             if was_running:
                 print(f"restarting {vm.name}...")
-                launch_qemu(vm)
-                register_ssh_name(vm.name, vm.ip)
-                wait_for_ssh(vm.ip, SSH_TIMEOUT)
-                deploy_ssh_key(vm.ip)
-                _seed_kdump_boot(vm)
-                print(f"started {vm.name}")
+                try:
+                    launch_qemu(vm)
+                    register_ssh_name(vm.name, vm.ip)
+                    wait_for_ssh(vm.ip, SSH_TIMEOUT)
+                    deploy_ssh_key(vm.ip)
+                    _seed_kdump_boot(vm)
+                    print(f"started {vm.name}")
+                except SystemExit as e:
+                    if delete_err:
+                        print(
+                            f"error: snapshot delete failed: {delete_err}",
+                            file=sys.stderr,
+                        )
+                    raise e
         if delete_err:
             die(f"snapshot delete failed: {delete_err}")
         return

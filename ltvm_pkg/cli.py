@@ -228,7 +228,7 @@ def cmd_build_all(args: argparse.Namespace) -> int:
     assert lustre_tree is not None
 
     _gate_lustre_validation(
-        tc, lustre_tree, force=getattr(args, "force_compat", False)
+        tc, lustre_tree, force=args.force_compat
     )
 
     kernel = getattr(args, "kernel", None)
@@ -359,7 +359,7 @@ def cmd_build_kernel(args: argparse.Namespace) -> int:
             )
         assert lustre_tree is not None
         _gate_lustre_validation(
-            tc, lustre_tree, force=getattr(args, "force_compat", False)
+            tc, lustre_tree, force=args.force_compat
         )
 
     kernel = getattr(args, "kernel", None)
@@ -407,7 +407,7 @@ def cmd_build_image(args: argparse.Namespace) -> int:
             _gate_lustre_validation(
                 tc,
                 lustre_tree,
-                force=getattr(args, "force_compat", False),
+                force=args.force_compat,
             )
             with_lustre = str(lustre_tree)
         else:
@@ -472,7 +472,7 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
     assert lustre_tree is not None
 
     _gate_lustre_validation(
-        tc, lustre_tree, force=getattr(args, "force_compat", False)
+        tc, lustre_tree, force=args.force_compat
     )
 
     kernel = getattr(args, "kernel", None)
@@ -588,7 +588,7 @@ def cmd_package(args: argparse.Namespace) -> int:
         # cmd_build_kernel.
         if not tc.kernel_deb_source:
             _gate_lustre_validation(
-                tc, lustre_path, force=getattr(args, "force_compat", False)
+                tc, lustre_path, force=args.force_compat
             )
         if not use_json:
             print(f"Snapshotting Lustre tree from {lustre_path}...")
@@ -1308,7 +1308,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     result = validate_target(tc, lustre_tree)
     exit_code = _VALIDATE_EXIT[result.status]
-    force = bool(getattr(args, "force_compat", False))
+    force = args.force_compat
 
     if use_json:
         print(json.dumps(_validation_result_to_dict(result), indent=2))
@@ -1552,7 +1552,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     # fails to find anything.  We require a valid target here so a
     # missing entry in targets.yaml fails loudly instead of silently
     # falling back to RHEL paths.
-    vm_arch = vm.arch or "x86_64"
+    vm_arch = vm.arch
     try:
         tc = TargetConfig(target, arch=vm_arch)
     except ValueError as e:
@@ -1791,7 +1791,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             _gate_lustre_validation(
                 tc,
                 build_path,
-                force=getattr(args, "force_compat", False),
+                force=args.force_compat,
             )
             build_cmd = [
                 "ltvm",

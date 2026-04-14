@@ -490,13 +490,7 @@ class VMInfo:
                 vals[k] = v
 
         def _int(key: str, default: int) -> int:
-            """Tolerate truncated/empty fields in a hand-edited or
-            partially-written .info file: fall back to the default
-            instead of raising ValueError."""
-            try:
-                return int(vals.get(key, default))
-            except (ValueError, TypeError):
-                return default
+            return int(vals.get(key, default))
 
         return VMInfo(
             name=vals.get("NAME", name),

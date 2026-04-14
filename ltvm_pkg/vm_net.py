@@ -247,10 +247,10 @@ def _unregister_ssh_name_locked(name: str) -> None:
     if hosts.exists():
         lines = [
             line
-            for line in hosts.read_text().splitlines()
-            if not line.endswith(marker)
+            for line in hosts.read_text().splitlines(keepends=True)
+            if not line.rstrip("\r\n").endswith(marker)
         ]
-        _atomic_write(hosts, "\n".join(lines) + "\n")
+        _atomic_write(hosts, "".join(lines))
         reload_dns()
 
     # ~/.ssh/config -- remove block
