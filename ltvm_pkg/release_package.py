@@ -1,25 +1,27 @@
 """Package, fetch, and install target artifacts.
 
-One package per target containing everything needed to boot
-VMs, build Lustre, and optionally deploy pre-built Lustre:
-  - kernels/<kernel-name>/vmlinux
-  - kernels/<kernel-name>/vmlinuz
-  - kernels/<kernel-name>/modules/
-  - kernels/<kernel-name>/build-tree/
-  - kernels/<kernel-name>/lustre-artifacts/ (optional: prebuilt Lustre
-    modules + binaries built against this kernel; output of
-    `ltvm build-lustre` snapshotted via `snapshot_lustre`)
-  - image.ext4 (VM rootfs)
-  - meta.json (version, build info)
+One package per (target, arch) containing everything needed to
+boot VMs, build Lustre, and optionally deploy pre-built Lustre.
+Layout inside a tarball, rooted at <target>/<arch>/:
+  - container/image.tar (build container, always included)
+  - kernels/<kernel-full-name>/vmlinux
+  - kernels/<kernel-full-name>/vmlinuz
+  - kernels/<kernel-full-name>/modules/
+  - kernels/<kernel-full-name>/build-tree/
+  - kernels/<kernel-full-name>/lustre-artifacts/ (optional:
+    prebuilt Lustre modules + binaries built against this kernel;
+    output of `ltvm build-lustre` snapshotted via `snapshot_lustre`)
+  - kernels/<kernel-full-name>/meta.json
+  - images/<kernel-full-name>/base.ext4 (VM rootfs, keyed per kernel)
+  - images/<kernel-full-name>/meta.json
 
-Multiple kernels are supported under output/<target>/kernels/.
-Users can replace the kernel later with `ltvm build-kernel`
-if they need custom patches or a different version.
+Multiple kernels per target are supported; each kernel has its
+own paired image directory.  Users can replace the kernel later
+with `ltvm build-kernel` if they need custom patches or a
+different version.
 
 Lustre prebuilds live UNDER each kernel because Lustre modules
-are kernel-version-specific (vermagic check enforces this).  A
-single target may carry several kernels, each paired with its
-own lustre-artifacts/ directory.
+are kernel-version-specific (vermagic check enforces this).
 """
 
 from __future__ import annotations
@@ -38,7 +40,8 @@ def _resolve_kernel(output_dir: Path, kernel: str | None) -> tuple[str, Path]:
 
     If kernel is provided, return (kernel, output_dir/kernels/kernel).
     If kernel is None, auto-detect by scanning output_dir/kernels/ for
-    a subdirectory containing vmlinux; picks the first match.
+    subdirectories containing vmlinux; picks the lexicographically
+    latest (typically the newest kernel version).
 
     Raises ValueError if no kernel can be found.
     """
@@ -488,6 +491,7 @@ def fetch_target(
                     url,
                 ],
                 check=False,
+                timeout=650,
             )
         except FileNotFoundError:
             raise RuntimeError(

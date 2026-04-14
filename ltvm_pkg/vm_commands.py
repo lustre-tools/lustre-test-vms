@@ -1226,11 +1226,19 @@ def cmd_restore(args: argparse.Namespace) -> None:
     if args.tag not in tags:
         die(f"restore failed: snapshot '{args.tag}' not found")
 
-    with _with_vm_stopped(vm, "before restore"):
+    restore_err: str | None = None
+    with _with_vm_stopped(
+        vm,
+        "before restore",
+        get_error=lambda: (
+            f"restore failed: {restore_err}" if restore_err else None
+        ),
+    ):
         r = run(
             [QEMU_IMG, "snapshot", "-a", args.tag, str(vm.overlay_path)],
         )
         if r.returncode != 0:
+            restore_err = r.stderr
             die(f"restore failed: {r.stderr}")
         print(f"restored {vm.name} to '{args.tag}'")
 

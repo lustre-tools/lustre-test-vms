@@ -381,9 +381,6 @@ class TargetConfig:
             return self.image_output_dir(kernel) / "meta.json"
         if artifact == "container":
             return self.container_output_dir() / "meta.json"
-        # Unknown artifacts: fall back to legacy <output>/<artifact>/meta.json
-        # so callers introducing a new artifact name don't silently miss
-        # this dispatch.
         raise ValueError(f"unknown artifact: {artifact!r}")
 
     # ------------------------------------------------------------------

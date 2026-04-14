@@ -1812,7 +1812,8 @@ class TestFetchKernelFlag:
         assert _kernel_release_signature("5.14-rhel9.7") == "el9_7"
         assert _kernel_release_signature("5.14-rhel9.5") == "el9_5"
         assert _kernel_release_signature("4.18-rhel8.10") == "el8_10"
-        assert _kernel_release_signature("6.8-ubuntu2404") is None
+        assert _kernel_release_signature("6.8-ubuntu2404") == "6.8"
+        assert _kernel_release_signature("weird-no-version") is None
 
     def test_find_release_url_filters_by_kernel_signature(self) -> None:
         from ltvm_pkg.cli import _find_release_url

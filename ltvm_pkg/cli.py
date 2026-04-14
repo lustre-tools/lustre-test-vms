@@ -817,21 +817,30 @@ def _gh_next_link(headers: str) -> str | None:
 
 
 _RHEL_RE = __import__("re").compile(r"rhel(\d+)\.(\d+)")
+_KVER_PREFIX_RE = __import__("re").compile(r"^(\d+\.\d+)")
 
 
 def _kernel_release_signature(kname: str) -> str | None:
     """Derive a substring found in release tag/asset names for ``kname``.
 
-    Release asset names use the kernel uname-r suffix, which for RHEL
-    kernels contains ``elX_Y`` where X.Y is the distro minor version.
-    So ``5.14-rhel9.5`` -> ``el9_5`` and ``5.14-rhel9.7`` -> ``el9_7``.
+    Release asset names use the kernel uname-r suffix:
+    - RHEL kernels contain ``elX_Y`` where X.Y is the distro minor
+      version, so ``5.14-rhel9.5`` -> ``el9_5``.
+    - Non-RHEL (e.g. Ubuntu) fall back to the leading ``MAJOR.MINOR``
+      kernel version, so ``6.8-ubuntu2404`` -> ``6.8``.  This only
+      discriminates if the target's ``kernels.available`` entries
+      differ in their kernel-major version; same-major variants would
+      collide and need a richer signature.
 
-    Returns None if no signature can be derived (e.g. non-RHEL kname);
-    callers should then skip kernel-name filtering.
+    Returns None if no signature can be derived; callers then skip
+    kernel-name filtering.
     """
     m = _RHEL_RE.search(kname)
     if m:
         return f"el{m.group(1)}_{m.group(2)}"
+    m = _KVER_PREFIX_RE.match(kname)
+    if m:
+        return m.group(1)
     return None
 
 

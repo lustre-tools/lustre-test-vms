@@ -440,7 +440,10 @@ class VMInfo:
                 replacement = f"{key}={value}"
                 if re.search(pattern, text, flags=re.MULTILINE):
                     text = re.sub(
-                        pattern, replacement, text, flags=re.MULTILINE
+                        pattern,
+                        lambda _m: replacement,
+                        text,
+                        flags=re.MULTILINE,
                     )
                 else:
                     text = text.rstrip("\n") + f"\n{replacement}\n"
