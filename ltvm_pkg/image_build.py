@@ -692,7 +692,12 @@ def _export_to_ext4(
             f"{shlex.quote(str(rootfs))}/dev/mqueue; "
             f"find {shlex.quote(str(rootfs))} ! -readable "
             f"-exec chmod u+r {{}} + 2>/dev/null || true; "
+            # -O ^metadata_csum works around an e2fsprogs 1.46.5 bug
+            # where `mke2fs -d` fails mid-populate with "Directory block
+            # checksum does not match" on htree dirs.  Fixed upstream in
+            # 1.47; we re-enable the feature with tune2fs afterwards.
             f"mke2fs -t ext4 -b 4096 -L rootfs -E root_owner=0:0 "
+            f"-O ^metadata_csum "
             f"-d {shlex.quote(str(rootfs))} "
             f"{shlex.quote(tmpfile)} {_compute_image_size_mb_from_tar(tarball)}M"
         )
@@ -712,6 +717,11 @@ def _export_to_ext4(
                 f"{r_fsck.stderr.decode(errors='replace').strip()}"
             )
         _run(["resize2fs", "-M", tmpfile])
+        # Re-enable metadata_csum that was skipped during populate to
+        # work around the e2fsprogs 1.46.5 bug.  tune2fs needs a clean
+        # fs, which resize2fs -M leaves us with.
+        _run(["tune2fs", "-O", "metadata_csum", tmpfile])
+        subprocess.run(["e2fsck", "-fy", tmpfile], capture_output=True)
 
         os.rename(tmpfile, str(image_path))
         tmpfile = None
