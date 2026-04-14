@@ -53,10 +53,12 @@ def _resolve_lustre_tree(
 
     Returns (Path, error_string).  error_string is None on success.
     """
+    from .lustre_tree import kp_root
+
     p = Path(arg_value).resolve() if arg_value else Path.cwd()
     if not p.is_dir():
         return None, f"Not a directory: {p}"
-    kp = p / "lustre" / "kernel_patches"
+    kp = kp_root(p)
     if not kp.is_dir():
         return None, (
             f"{p} does not look like a Lustre tree (no lustre/kernel_patches/)"
@@ -79,39 +81,27 @@ def _output(data: Any, use_json: bool) -> None:
                 print(item)
 
 
+def _emit_error(
+    msg: str,
+    use_json: bool,
+    hint: str | None = None,
+    code: int = EXIT_ERROR,
+) -> int:
+    """Print an error message and return the given exit code."""
+    if use_json:
+        err = {"error": msg}
+        if hint:
+            err["hint"] = hint
+        print(json.dumps(err, indent=2), file=sys.stderr)
+    else:
+        print(f"error: {msg}", file=sys.stderr)
+        if hint:
+            print(f"hint: {hint}", file=sys.stderr)
+    return code
+
+
 def _error(msg: str, use_json: bool, hint: str | None = None) -> int:
-    """Print an error message and return EXIT_ERROR."""
-    if use_json:
-        err = {"error": msg}
-        if hint:
-            err["hint"] = hint
-        print(json.dumps(err, indent=2), file=sys.stderr)
-    else:
-        print(f"error: {msg}", file=sys.stderr)
-        if hint:
-            print(f"hint: {hint}", file=sys.stderr)
-    return EXIT_ERROR
-
-
-def _not_found(msg: str, use_json: bool, hint: str | None = None) -> int:
-    """Print a not-found message and return EXIT_NOT_FOUND."""
-    if use_json:
-        err = {"error": msg}
-        if hint:
-            err["hint"] = hint
-        print(json.dumps(err, indent=2), file=sys.stderr)
-    else:
-        print(f"error: {msg}", file=sys.stderr)
-        if hint:
-            print(f"hint: {hint}", file=sys.stderr)
-    return EXIT_NOT_FOUND
-
-
-def _build_container_tag(tc: TargetConfig) -> str:
-    """Return the podman container image tag for a target + arch."""
-    if tc.arch != "x86_64":
-        return f"ltvm-build-{tc.name}-{tc.arch}"
-    return f"ltvm-build-{tc.name}"
+    return _emit_error(msg, use_json, hint=hint, code=EXIT_ERROR)
 
 
 def _load_target(
@@ -128,8 +118,17 @@ def _load_target(
             if targets
             else "No targets configured"
         )
-        code = _not_found(str(e), use_json, hint=hint)
+        code = _emit_error(str(e), use_json, hint=hint, code=EXIT_NOT_FOUND)
         return None, code
+
+
+def _load_target_args(
+    args: argparse.Namespace, use_json: bool
+) -> tuple[TargetConfig | None, int | None]:
+    """Load TargetConfig from args.target + optional args.arch."""
+    return _load_target(
+        args.target, use_json, arch=getattr(args, "arch", None)
+    )
 
 
 # ------------------------------------------------------------------
@@ -207,9 +206,7 @@ def cmd_build_all(args: argparse.Namespace) -> int:
     against the freshly built kernel.
     """
     use_json = args.json
-    tc, err = _load_target(
-        args.target, use_json, arch=getattr(args, "arch", None)
-    )
+    tc, err = _load_target_args(args, use_json)
     if err is not None:
         return err
     assert tc is not None
@@ -270,7 +267,7 @@ def cmd_build_all(args: argparse.Namespace) -> int:
             )
         build_tree = tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree"
         try:
-            container_tag = _build_container_tag(tc)
+            container_tag = tc.container_tag
             lmeta = build_lustre(
                 lustre_tree,
                 build_tree,
@@ -312,9 +309,7 @@ def cmd_build_all(args: argparse.Namespace) -> int:
 
 def cmd_build_container(args: argparse.Namespace) -> int:
     use_json = args.json
-    tc, err = _load_target(
-        args.target, use_json, arch=getattr(args, "arch", None)
-    )
+    tc, err = _load_target_args(args, use_json)
     if err is not None:
         return err
     assert tc is not None
@@ -339,9 +334,7 @@ def cmd_build_container(args: argparse.Namespace) -> int:
 
 def cmd_build_kernel(args: argparse.Namespace) -> int:
     use_json = args.json
-    tc, err = _load_target(
-        args.target, use_json, arch=getattr(args, "arch", None)
-    )
+    tc, err = _load_target_args(args, use_json)
     if err is not None:
         return err
     assert tc is not None
@@ -389,9 +382,7 @@ def cmd_build_kernel(args: argparse.Namespace) -> int:
 
 def cmd_build_image(args: argparse.Namespace) -> int:
     use_json = args.json
-    tc, err = _load_target(
-        args.target, use_json, arch=getattr(args, "arch", None)
-    )
+    tc, err = _load_target_args(args, use_json)
     if err is not None:
         return err
     assert tc is not None
@@ -452,9 +443,7 @@ def cmd_build_image(args: argparse.Namespace) -> int:
 
 def cmd_build_lustre(args: argparse.Namespace) -> int:
     use_json = args.json
-    tc, err = _load_target(
-        args.target, use_json, arch=getattr(args, "arch", None)
-    )
+    tc, err = _load_target_args(args, use_json)
     if err is not None:
         return err
     assert tc is not None
@@ -503,7 +492,7 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
         srv = "server+client" if enable_server else "client-only"
         print(f"Building Lustre ({srv}) against {args.target} kernel tree...")
 
-    container_tag = _build_container_tag(tc)
+    container_tag = tc.container_tag
 
     # Pre-flight: check the container exists in podman storage and give a
     # clean, distinctive error if not.  build_lustre would otherwise raise
@@ -551,9 +540,7 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
 
 def cmd_package(args: argparse.Namespace) -> int:
     use_json = args.json
-    tc, err = _load_target(
-        args.target, use_json, arch=getattr(args, "arch", None)
-    )
+    tc, err = _load_target_args(args, use_json)
     if err is not None:
         return err
     assert tc is not None
@@ -878,9 +865,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 def cmd_publish(args: argparse.Namespace) -> int:
     """Upload a packaged tarball to a GitHub release."""
     use_json = args.json
-    tc, err = _load_target(
-        args.target, use_json, arch=getattr(args, "arch", None)
-    )
+    tc, err = _load_target_args(args, use_json)
     if err is not None:
         return err
     assert tc is not None
@@ -1028,14 +1013,12 @@ def cmd_publish(args: argparse.Namespace) -> int:
 
 def cmd_build_shell(args: argparse.Namespace) -> int:
     use_json = args.json
-    tc, err = _load_target(
-        args.target, use_json, arch=getattr(args, "arch", None)
-    )
+    tc, err = _load_target_args(args, use_json)
     if err is not None:
         return err
     assert tc is not None
 
-    tag = _build_container_tag(tc)
+    tag = tc.container_tag
     mount_path = Path(args.path).resolve()
 
     if not mount_path.is_dir():
@@ -1240,7 +1223,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
 
     hdr = (
         f"{'Target':<12} {'Arch':<8} {'Mode':<16} "
-        f"{'Default kernel':<24} {'Local':<24} {'Remote':<24} Available"
+        f"{'Default kernel':<24} {'Local':<24} {'Remote':<24} Supported"
     )
     print(hdr)
     print("-" * len(hdr))
@@ -1286,9 +1269,7 @@ def _validation_result_to_dict(r: ValidationResult) -> dict[str, Any]:
 
 def cmd_validate(args: argparse.Namespace) -> int:
     use_json = args.json
-    tc, err = _load_target(
-        args.target, use_json, arch=getattr(args, "arch", None)
-    )
+    tc, err = _load_target_args(args, use_json)
     if err is not None:
         return err
     assert tc is not None
@@ -1395,22 +1376,7 @@ def cmd_create(args: argparse.Namespace) -> int:
         return err
     from ltvm_pkg.vm_commands import cmd_create as _create
 
-    ns = _qemu_ns(
-        name=args.name,
-        vcpus=args.vcpus,
-        mem=args.mem,
-        ip=args.ip,
-        image=args.image or "",
-        kernel=args.kernel or "",
-        mdt_disks=args.mdt_disks,
-        ost_disks=args.ost_disks,
-        disk_size=args.disk_size,
-        arch=args.arch or "x86_64",
-        os=args.os or "",
-        _quiet=False,
-        json=use_json,
-    )
-    return _vm_call(_create, ns, use_json)
+    return _vm_call(_create, args, use_json)
 
 
 
@@ -1421,7 +1387,7 @@ def cmd_destroy(args: argparse.Namespace) -> int:
         return err
     from ltvm_pkg.vm_commands import cmd_destroy as _destroy
 
-    return _vm_call(_destroy, _qemu_ns(names=args.names), use_json)
+    return _vm_call(_destroy, args, use_json)
 
 
 def cmd_vm_start(args: argparse.Namespace) -> int:
@@ -1431,7 +1397,7 @@ def cmd_vm_start(args: argparse.Namespace) -> int:
         return err
     from ltvm_pkg.vm_commands import cmd_start as _start
 
-    return _vm_call(_start, _qemu_ns(names=args.names), use_json)
+    return _vm_call(_start, args, use_json)
 
 
 def cmd_vm_stop(args: argparse.Namespace) -> int:
@@ -1441,74 +1407,56 @@ def cmd_vm_stop(args: argparse.Namespace) -> int:
         return err
     from ltvm_pkg.vm_commands import cmd_stop as _stop
 
-    return _vm_call(_stop, _qemu_ns(names=args.names), use_json)
+    return _vm_call(_stop, args, use_json)
 
 
 def cmd_list(args: argparse.Namespace) -> int:
     use_json = args.json
     from ltvm_pkg.vm_commands import cmd_list as _list
 
-    return _vm_call(_list, _qemu_ns(json=use_json), use_json)
+    return _vm_call(_list, args, use_json)
 
 
 def cmd_console_log(args: argparse.Namespace) -> int:
     use_json = args.json
     from ltvm_pkg.vm_commands import cmd_console_log as _log
 
-    return _vm_call(_log, _qemu_ns(name=args.name, lines=args.lines), use_json)
+    return _vm_call(_log, args, use_json)
 
 
 def cmd_dmesg(args: argparse.Namespace) -> int:
     use_json = args.json
     from ltvm_pkg.vm_commands import cmd_dmesg as _dmesg
 
-    return _vm_call(_dmesg, _qemu_ns(name=args.name, tail=args.tail), use_json)
+    return _vm_call(_dmesg, args, use_json)
 
 
 def cmd_crash_collect(args: argparse.Namespace) -> int:
     use_json = args.json
     from ltvm_pkg.vm_commands import cmd_crash_collect as _crash_collect
 
-    return _vm_call(
-        _crash_collect,
-        _qemu_ns(
-            name=args.name,
-            outdir=args.outdir,
-            trigger=args.trigger,
-            wait=args.wait,
-            mod_dir=args.mod_dir,
-        ),
-        use_json,
-    )
+    return _vm_call(_crash_collect, args, use_json)
 
 
 def cmd_nmi(args: argparse.Namespace) -> int:
     use_json = args.json
     from ltvm_pkg.vm_commands import cmd_nmi as _nmi
 
-    return _vm_call(_nmi, _qemu_ns(name=args.name), use_json)
+    return _vm_call(_nmi, args, use_json)
 
 
 def cmd_snapshot(args: argparse.Namespace) -> int:
     use_json = args.json
     from ltvm_pkg.vm_commands import cmd_snapshot as _snapshot
 
-    return _vm_call(
-        _snapshot,
-        _qemu_ns(
-            name=args.name,
-            tag=args.tag,
-            delete=getattr(args, "delete", None),
-        ),
-        use_json,
-    )
+    return _vm_call(_snapshot, args, use_json)
 
 
 def cmd_restore(args: argparse.Namespace) -> int:
     use_json = args.json
     from ltvm_pkg.vm_commands import cmd_restore as _restore
 
-    return _vm_call(_restore, _qemu_ns(name=args.name, tag=args.tag), use_json)
+    return _vm_call(_restore, args, use_json)
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -1518,7 +1466,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         return err
     from ltvm_pkg.vm_commands import cmd_doctor as _doctor
 
-    return _vm_call(_doctor, _qemu_ns(fix=args.fix), use_json)
+    return _vm_call(_doctor, args, use_json)
 
 
 def cmd_deploy(args: argparse.Namespace) -> int:
@@ -1890,19 +1838,10 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
 
 def cmd_llmount(args: argparse.Namespace) -> int:
-    use_json = getattr(args, "json", False)
     from ltvm_pkg.vm_commands import cmd_llmount as _qllmount
 
-    timeout = getattr(args, "timeout", 300)
-    cleanup = getattr(args, "cleanup", False)
     try:
-        _qllmount(
-            _qemu_ns(
-                name=args.vm,
-                timeout=timeout,
-                cleanup=cleanup,
-            )
-        )
+        _qllmount(args)
         return EXIT_OK
     except SystemExit as e:
         return int(e.code) if e.code is not None else EXIT_ERROR
