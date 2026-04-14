@@ -226,12 +226,15 @@ def cmd_build_all(args: argparse.Namespace) -> int:
         )
     assert lustre_tree is not None
 
-    _gate_lustre_validation(
-        tc, lustre_tree, force=args.force_compat
-    )
-
     kernel = getattr(args, "kernel", None)
     resolved_kernel = tc.resolve_kernel(kernel)
+
+    _gate_lustre_validation(
+        tc,
+        lustre_tree,
+        force=args.force_compat,
+        kernel_build_tree=tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree",
+    )
 
     results: dict[str, Any] = {}
 
@@ -401,6 +404,7 @@ def cmd_build_image(args: argparse.Namespace) -> int:
                 tc,
                 lustre_tree,
                 force=args.force_compat,
+                kernel_build_tree=tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree",
             )
             with_lustre = str(lustre_tree)
         else:
@@ -565,10 +569,6 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
         )
     assert lustre_tree is not None
 
-    _gate_lustre_validation(
-        tc, lustre_tree, force=args.force_compat
-    )
-
     kernel = getattr(args, "kernel", None)
     resolved_kernel = tc.resolve_kernel(kernel)
     build_tree = tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree"
@@ -579,6 +579,13 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
             hint=f"Run: ltvm build-kernel {args.target} "
             f"--kernel {resolved_kernel}",
         )
+
+    _gate_lustre_validation(
+        tc,
+        lustre_tree,
+        force=args.force_compat,
+        kernel_build_tree=build_tree,
+    )
 
     # Server build follows lustre.mode unless overridden
     enable_server = tc.lustre_mode != LustreMode.CLIENT
@@ -1048,10 +1055,21 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         print("Next:")
         arch_flag = f" --arch {arch}" if arch != "x86_64" else ""
         print(
-            f"  sudo ltvm create co1-test --os {target}{arch_flag} "
+            f"  sudo ltvm create co1-test --target {target}{arch_flag} "
             f"--vcpus 2 --mdt-disks 1 --ost-disks 2"
         )
         print("  ltvm llmount co1-test")
+        try:
+            tc_hint = TargetConfig(target)
+            avail = tc_hint.declared_kernels()
+            default_k = tc_hint.default_kernel
+        except Exception:
+            avail = []
+            default_k = ""
+        if len(avail) > 1:
+            alt = next((k for k in avail if k != default_k), None)
+            if alt is not None:
+                print(f"  # or pass --kernel {alt} to select a different kernel")
 
     return EXIT_OK
 
@@ -1449,17 +1467,31 @@ def cmd_targets(args: argparse.Namespace) -> int:
     )
     print(hdr)
     print("-" * len(hdr))
+    prev_key: tuple[str, str] | None = None
     for r in rows:
         if "kernel" not in r:
             print(f"{r['name']:<12} {r.get('error', '')}")
+            prev_key = None
             continue
         default_mark = "yes" if r["is_default"] else ""
+        key = (r["name"], r["arch"])
+        if key == prev_key:
+            name_col = ""
+            status_col = ""
+            arch_col = ""
+            mode_col = ""
+        else:
+            name_col = r["name"]
+            status_col = r["status"]
+            arch_col = r["arch"]
+            mode_col = r["lustre_mode"]
         print(
-            f"{r['name']:<12} {r['status']:<13} {r['arch']:<8} "
-            f"{r['kernel']:<20} {r['lustre_mode']:<16} "
+            f"{name_col:<12} {status_col:<13} {arch_col:<8} "
+            f"{r['kernel']:<20} {mode_col:<16} "
             f"{r['local_release']:<24} {r['remote_release']:<24} "
             f"{default_mark}"
         )
+        prev_key = key
     return EXIT_OK
 
 
@@ -1510,7 +1542,10 @@ def cmd_validate(args: argparse.Namespace) -> int:
         )
     assert lustre_tree is not None
 
-    result = validate_target(tc, lustre_tree)
+    kernel = getattr(args, "kernel", None)
+    resolved_kernel = tc.resolve_kernel(kernel)
+    kbt = tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree"
+    result = validate_target(tc, lustre_tree, kernel_build_tree=kbt)
     exit_code = _VALIDATE_EXIT[result.status]
     force = args.force_compat
 
@@ -1533,6 +1568,7 @@ def _gate_lustre_validation(
     lustre_tree: Path,
     *,
     force: bool,
+    kernel_build_tree: Path | None = None,
 ) -> None:
     """Run validate_target as a gate before producing Lustre artifacts.
 
@@ -1548,7 +1584,7 @@ def _gate_lustre_validation(
     deb-based ones (client-mode ubuntu lives in ChangeLog's client
     kernel lists).
     """
-    result = validate_target(tc, lustre_tree)
+    result = validate_target(tc, lustre_tree, kernel_build_tree=kernel_build_tree)
     if result.status == "ok":
         return
     if result.status == "best_effort":
@@ -1963,6 +1999,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 tc,
                 build_path,
                 force=args.force_compat,
+                kernel_build_tree=tc.kernel_output_dir(kernel=deploy_kernel) / "build-tree",
             )
             build_cmd = [
                 "ltvm",
@@ -2112,8 +2149,9 @@ def cmd_cluster(args: argparse.Namespace) -> int:
             return _error(
                 "cluster create requires a name and at least one node spec",
                 use_json,
-                hint="ltvm cluster create <name> [--os TARGET] [--arch ARCH] "
-                "[--vcpus N] [--mem MB] <role:vm[:disks]> ...",
+                hint="ltvm cluster create <name> [--target TARGET] "
+                "[--arch ARCH] [--vcpus N] [--mem MB] "
+                "<role:vm[:disks]> ...",
             )
         # Parse optional flags out of cargs; remaining positionals are
         # name + node specs.
@@ -2134,7 +2172,7 @@ def cmd_cluster(args: argparse.Namespace) -> int:
             elif cargs[i] == "--mem" and i + 1 < len(cargs):
                 mem = int(cargs[i + 1])
                 i += 2
-            elif cargs[i] == "--os" and i + 1 < len(cargs):
+            elif cargs[i] == "--target" and i + 1 < len(cargs):
                 os_target = cargs[i + 1]
                 i += 2
             elif cargs[i] == "--arch" and i + 1 < len(cargs):
@@ -2147,7 +2185,7 @@ def cmd_cluster(args: argparse.Namespace) -> int:
                 return _error(
                     f"cluster create: unknown argument '{cargs[i]}'",
                     use_json,
-                    hint="valid: --vcpus, --mem, --os, --arch, --disk-size",
+                    hint="valid: --vcpus, --mem, --target, --arch, --disk-size",
                 )
             else:
                 positional.append(cargs[i])
@@ -2156,8 +2194,9 @@ def cmd_cluster(args: argparse.Namespace) -> int:
             return _error(
                 "cluster create requires a name and at least one node spec",
                 use_json,
-                hint="ltvm cluster create <name> [--os TARGET] [--arch ARCH] "
-                "[--vcpus N] [--mem MB] <role:vm[:disks]> ...",
+                hint="ltvm cluster create <name> [--target TARGET] "
+                "[--arch ARCH] [--vcpus N] [--mem MB] "
+                "<role:vm[:disks]> ...",
             )
         return _call(
             _qc_create,

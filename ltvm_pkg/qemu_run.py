@@ -177,7 +177,7 @@ def launch_qemu(vm: VMInfo) -> None:
     run(["ip", "link", "set", vm.tap, "up"], check=True)
 
     if not vm.kernel:
-        die(f"VM '{vm.name}' has no kernel path set — recreate with --os")
+        die(f"VM '{vm.name}' has no kernel path set — recreate with --target")
     kernel = Path(vm.kernel)
 
     import platform as _platform

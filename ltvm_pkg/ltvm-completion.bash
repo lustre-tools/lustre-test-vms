@@ -48,7 +48,7 @@ _ltvm_completions() {
 			COMPREPLY=($(compgen -W "--force --json -v" -- "$cur"))
 			;;
 		create|ensure)
-			COMPREPLY=($(compgen -W "--vcpus --mem --ip --os --mdt-disks --ost-disks --disk-size --json -v" -- "$cur"))
+			COMPREPLY=($(compgen -W "--vcpus --mem --ip --target --mdt-disks --ost-disks --disk-size --json -v" -- "$cur"))
 			;;
 		deploy-lustre|deploy)
 			COMPREPLY=($(compgen -W "--build --mount --target --json -v" -- "$cur"))

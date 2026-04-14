@@ -501,7 +501,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--kernel", default=None, help="Explicit kernel path"
     )
     _vm_create_args.add_argument(
-        "--os", default=None, help="OS target (e.g. rocky9)"
+        "--target",
+        dest="os",
+        default=None,
+        help="OS target (e.g. rocky9)",
     )
     _vm_create_args.add_argument(
         "--mdt-disks",

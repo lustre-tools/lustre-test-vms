@@ -9,12 +9,13 @@ reading the requested file.
 from __future__ import annotations
 
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from .kernel_build import _shell_var
-from .lustre_tree import ldiskfs_series, kp_targets
+from .lustre_tree import ldiskfs_patches, ldiskfs_series, kp_targets
 
 if TYPE_CHECKING:
     from .target_config import LustreMode, TargetConfig
@@ -254,6 +255,74 @@ def parse_ldiskfs_series(tree: Path) -> set[str]:
 
 
 # ------------------------------------------------------------------
+# ldiskfs series-file parser and dry-apply runner
+# ------------------------------------------------------------------
+
+
+def parse_ldiskfs_series_file(tree: Path, series_stem: str) -> list[Path]:
+    """Return absolute paths to patches listed in a series file.
+
+    series_stem is the filename without .series (e.g.
+    'ldiskfs-6.8.0-90-ubuntu24').  Skips comments (#-prefixed) and
+    blank lines.  Patch paths are resolved under
+    lustre/ldiskfs/kernel_patches/patches/.
+    """
+    series_file = ldiskfs_series(tree) / f"{series_stem}.series"
+    patches_root = ldiskfs_patches(tree)
+    result: list[Path] = []
+    for line in series_file.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        result.append(patches_root / line)
+    return result
+
+
+def dry_apply_patches(
+    patches: list[Path], kernel_src: Path
+) -> tuple[bool, list[str]]:
+    """Dry-apply a list of patches against a kernel source tree.
+
+    Returns (all_clean, failures) where failures is a list of
+    '<patch> <reason>' strings for patches that did not apply.
+    Uses `patch -p1 --dry-run -F2 --no-backup-if-mismatch` so
+    minor context drift is tolerated but genuine hunks that can't
+    be found at any offset are caught.
+    """
+    failures: list[str] = []
+    for patch_path in patches:
+        try:
+            proc = subprocess.run(
+                [
+                    "patch",
+                    "-p1",
+                    "--dry-run",
+                    "-F2",
+                    "--no-backup-if-mismatch",
+                    "-d",
+                    str(kernel_src),
+                ],
+                stdin=patch_path.open("rb"),
+                capture_output=True,
+            )
+        except OSError as exc:
+            failures.append(f"{patch_path.name}: cannot run patch: {exc}")
+            continue
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode(errors="replace").strip()
+            stdout = proc.stdout.decode(errors="replace").strip()
+            detail = stderr or stdout
+            first_fail = ""
+            for line in (stdout + "\n" + stderr).splitlines():
+                if "FAILED" in line:
+                    first_fail = line.strip()
+                    break
+            reason = first_fail or detail.splitlines()[0] if detail else "rejected"
+            failures.append(f"{patch_path.name}: {reason}")
+    return (len(failures) == 0, failures)
+
+
+# ------------------------------------------------------------------
 # Compatibility gate
 # ------------------------------------------------------------------
 
@@ -333,7 +402,11 @@ def _ldiskfs_series_matches(
     return None
 
 
-def validate_target(tc: TargetConfig, lustre_tree: Path) -> ValidationResult:
+def validate_target(
+    tc: TargetConfig,
+    lustre_tree: Path,
+    kernel_build_tree: Path | None = None,
+) -> ValidationResult:
     """Decide whether ``tc`` is supported by the given Lustre tree.
 
     Combines tc.default_kernel + tc.lustre_mode with the tree's
@@ -409,6 +482,42 @@ def validate_target(tc: TargetConfig, lustre_tree: Path) -> ValidationResult:
         stems = parse_ldiskfs_series(lustre_tree)
         match_stem = _ldiskfs_series_matches(stems, kver_mm)
         if match_stem is not None:
+            bt = kernel_build_tree
+            sysfs_c = bt / "fs" / "ext4" / "sysfs.c" if bt else None
+            if bt is not None and bt.is_dir() and sysfs_c is not None and sysfs_c.exists():
+                patches = parse_ldiskfs_series_file(lustre_tree, match_stem)
+                all_clean, failures = dry_apply_patches(patches, bt)
+                if all_clean:
+                    return ValidationResult(
+                        status="ok",
+                        mode=mode,
+                        kernel_version=kver,
+                        matched_in="ldiskfs_series",
+                        message=(
+                            f"matched ldiskfs series file {match_stem!r}; "
+                            f"all {len(patches)} patches dry-applied cleanly "
+                            f"against {bt}"
+                        ),
+                    )
+                return ValidationResult(
+                    status="refuse",
+                    mode=mode,
+                    kernel_version=kver,
+                    matched_in="not_listed",
+                    message=(
+                        f"ldiskfs series {match_stem!r} matched by filename "
+                        f"but {len(failures)} patch(es) failed to dry-apply "
+                        f"against {bt}: "
+                        + "; ".join(failures[:3])
+                        + (" ..." if len(failures) > 3 else "")
+                    ),
+                )
+            no_bt_note = (
+                "patch dry-apply not run (kernel not built yet); "
+                "rerun validate after `ltvm build-kernel`"
+                if bt is None
+                else "patch dry-apply not run (kernel build-tree incomplete)"
+            )
             return ValidationResult(
                 status="ok",
                 mode=mode,
@@ -417,7 +526,7 @@ def validate_target(tc: TargetConfig, lustre_tree: Path) -> ValidationResult:
                 message=(
                     f"matched ldiskfs series file {match_stem!r} under "
                     f"lustre/ldiskfs/kernel_patches/series/ for kernel "
-                    f"{kver} (prefix ldiskfs-{kver_mm}.)"
+                    f"{kver} (prefix ldiskfs-{kver_mm}.); {no_bt_note}"
                 ),
             )
         return ValidationResult(

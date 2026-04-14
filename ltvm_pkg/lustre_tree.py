@@ -38,3 +38,8 @@ def kp_patches(tree: str | Path) -> Path:
 def ldiskfs_series(tree: str | Path) -> Path:
     """ldiskfs/kernel_patches/series/ (ldiskfs series files)."""
     return Path(tree) / "ldiskfs" / "kernel_patches" / "series"
+
+
+def ldiskfs_patches(tree: str | Path) -> Path:
+    """ldiskfs/kernel_patches/patches/ (ldiskfs patch files)."""
+    return Path(tree) / "ldiskfs" / "kernel_patches" / "patches"

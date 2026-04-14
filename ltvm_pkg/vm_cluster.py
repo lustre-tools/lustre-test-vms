@@ -211,7 +211,7 @@ def _create_one_node(
     if mem is not None:
         cmd += ["--mem", str(mem)]
     if os_target:
-        cmd += ["--os", os_target]
+        cmd += ["--target", os_target]
     if arch:
         cmd += ["--arch", arch]
     if disk_size:
