@@ -11,8 +11,10 @@ from ltvm_pkg.lustre_compat import (
     ChangeLogEntry,
     TargetIn,
     ValidationResult,
+    dry_apply_patches,
     parse_changelog,
     parse_ldiskfs_series,
+    parse_ldiskfs_series_file,
     parse_target_in,
     parse_which_patch,
     validate_target,
@@ -612,3 +614,219 @@ class TestValidateTarget:
         assert r.message
         with pytest.raises(Exception):
             r.status = "refuse"  # type: ignore[misc]
+
+
+# ------------------------------------------------------------------
+# parse_ldiskfs_series_file
+# ------------------------------------------------------------------
+
+_SERIES_WITH_COMMENTS = """\
+# This is a header comment
+
+linux-5.16/ext4-inode-version.patch
+# another comment
+linux-6.10/ext4-prealloc.patch
+
+base/ext4-htree-lock.patch
+"""
+
+
+def _make_ldiskfs_tree(
+    tmp_path: Path, series_stem: str, series_content: str, patches: dict[str, str]
+) -> Path:
+    """Build a minimal ldiskfs directory with a series file and patch files."""
+    series_dir = tmp_path / "ldiskfs" / "kernel_patches" / "series"
+    series_dir.mkdir(parents=True)
+    (series_dir / f"{series_stem}.series").write_text(series_content)
+    patches_root = tmp_path / "ldiskfs" / "kernel_patches" / "patches"
+    for rel_path, content in patches.items():
+        p = patches_root / rel_path
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+    return tmp_path
+
+
+_CLEAN_PATCH = """\
+--- a/fs/ext4/sysfs.c
++++ b/fs/ext4/sysfs.c
+@@ -1,4 +1,4 @@
+ /* sysfs.c -- ext4 sysfs interface */
+-static int ext4_attr_match = 1;
++static int ext4_attr_match = 42;
+ static int ext4_attr_other = 2;
+ static int ext4_attr_third = 3;
+"""
+
+_FAILING_PATCH = """\
+--- a/fs/ext4/sysfs.c
++++ b/fs/ext4/sysfs.c
+@@ -100,4 +100,4 @@
+ /* line that does not exist */
+-this line is not present;
++replaced line;
+ more context;
+ final context;
+"""
+
+_SYSFS_C_CONTENT = """\
+/* sysfs.c -- ext4 sysfs interface */
+static int ext4_attr_match = 1;
+static int ext4_attr_other = 2;
+static int ext4_attr_third = 3;
+"""
+
+
+def _make_kernel_src(tmp_path: Path) -> Path:
+    """Return a minimal kernel source tree with fs/ext4/sysfs.c."""
+    src = tmp_path / "kernel_src"
+    ext4 = src / "fs" / "ext4"
+    ext4.mkdir(parents=True)
+    (ext4 / "sysfs.c").write_text(_SYSFS_C_CONTENT)
+    return src
+
+
+class TestParseLdiskfsSeriesFile:
+    def test_parses_comments_and_blanks(self, tmp_path: Path) -> None:
+        stem = "ldiskfs-6.8.0-90-ubuntu24"
+        _make_ldiskfs_tree(
+            tmp_path,
+            stem,
+            _SERIES_WITH_COMMENTS,
+            {
+                "linux-5.16/ext4-inode-version.patch": "",
+                "linux-6.10/ext4-prealloc.patch": "",
+                "base/ext4-htree-lock.patch": "",
+            },
+        )
+        result = parse_ldiskfs_series_file(tmp_path, stem)
+        assert len(result) == 3
+        patches_root = tmp_path / "ldiskfs" / "kernel_patches" / "patches"
+        assert result[0] == patches_root / "linux-5.16" / "ext4-inode-version.patch"
+        assert result[1] == patches_root / "linux-6.10" / "ext4-prealloc.patch"
+        assert result[2] == patches_root / "base" / "ext4-htree-lock.patch"
+
+    def test_empty_series(self, tmp_path: Path) -> None:
+        stem = "ldiskfs-5.14-rhel9.7"
+        _make_ldiskfs_tree(tmp_path, stem, "# only a comment\n\n", {})
+        result = parse_ldiskfs_series_file(tmp_path, stem)
+        assert result == []
+
+
+# ------------------------------------------------------------------
+# dry_apply_patches
+# ------------------------------------------------------------------
+
+
+class TestDryApplyPatches:
+    def test_clean_patch_returns_true(self, tmp_path: Path) -> None:
+        kernel_src = _make_kernel_src(tmp_path)
+        patch_file = tmp_path / "clean.patch"
+        patch_file.write_text(_CLEAN_PATCH)
+        ok, failures = dry_apply_patches([patch_file], kernel_src)
+        assert ok is True
+        assert failures == []
+
+    def test_failing_patch_returns_false(self, tmp_path: Path) -> None:
+        kernel_src = _make_kernel_src(tmp_path)
+        patch_file = tmp_path / "bad.patch"
+        patch_file.write_text(_FAILING_PATCH)
+        ok, failures = dry_apply_patches([patch_file], kernel_src)
+        assert ok is False
+        assert len(failures) == 1
+        assert "bad.patch" in failures[0]
+
+    def test_mixed_patches(self, tmp_path: Path) -> None:
+        kernel_src = _make_kernel_src(tmp_path)
+        clean = tmp_path / "clean.patch"
+        clean.write_text(_CLEAN_PATCH)
+        bad = tmp_path / "bad.patch"
+        bad.write_text(_FAILING_PATCH)
+        ok, failures = dry_apply_patches([clean, bad], kernel_src)
+        assert ok is False
+        assert len(failures) == 1
+        assert "bad.patch" in failures[0]
+
+    def test_empty_list(self, tmp_path: Path) -> None:
+        kernel_src = _make_kernel_src(tmp_path)
+        ok, failures = dry_apply_patches([], kernel_src)
+        assert ok is True
+        assert failures == []
+
+
+# ------------------------------------------------------------------
+# validate_target -- ldiskfs_series with kernel_build_tree
+# ------------------------------------------------------------------
+
+
+def _make_ldiskfs_validate_tree(
+    tmp_path: Path,
+    series_stem: str,
+    patch_content: str,
+) -> Path:
+    """Build a minimal Lustre+ldiskfs tree for ldiskfs_series validation."""
+    tree = _mktree(tmp_path)
+    (tree / "lustre").mkdir(exist_ok=True)
+    (tree / "lustre/kernel_patches/which_patch").write_text(_WP_ABSENT)
+    target_body = (
+        'lnxmaj="6.8.0"\n'
+        'lnxrel="90"\n'
+        "KERNEL_SRPM=kernel-${lnxmaj}-${lnxrel}.src.rpm\n"
+        "SERIES=6.8-ubuntu2404.series\n"
+    )
+    (tree / "lustre/kernel_patches/targets/6.8-ubuntu2404.target.in").write_text(
+        target_body
+    )
+    series_dir = tree / "ldiskfs" / "kernel_patches" / "series"
+    series_dir.mkdir(parents=True)
+    (series_dir / f"{series_stem}.series").write_text(
+        "subdir/test.patch\n"
+    )
+    patches_dir = tree / "ldiskfs" / "kernel_patches" / "patches" / "subdir"
+    patches_dir.mkdir(parents=True)
+    (patches_dir / "test.patch").write_text(patch_content)
+    return tree
+
+
+class TestValidateTargetLdiskfsBuildTree:
+    def test_no_build_tree_ok_with_note(self, tmp_path: Path) -> None:
+        tree = _make_ldiskfs_validate_tree(
+            tmp_path, "ldiskfs-6.8.0-90-ubuntu24", _CLEAN_PATCH
+        )
+        tc = _FakeTC("6.8-ubuntu2404", LustreMode.SERVER_LDISKFS)
+        r = validate_target(tc, tree, kernel_build_tree=None)
+        assert r.status == "ok"
+        assert r.matched_in == "ldiskfs_series"
+        assert "build-kernel" in r.message
+
+    def test_build_tree_clean_patches_ok(self, tmp_path: Path) -> None:
+        tree = _make_ldiskfs_validate_tree(
+            tmp_path, "ldiskfs-6.8.0-90-ubuntu24", _CLEAN_PATCH
+        )
+        kernel_src = _make_kernel_src(tmp_path)
+        tc = _FakeTC("6.8-ubuntu2404", LustreMode.SERVER_LDISKFS)
+        r = validate_target(tc, tree, kernel_build_tree=kernel_src)
+        assert r.status == "ok"
+        assert r.matched_in == "ldiskfs_series"
+        assert "all 1 patches dry-applied cleanly" in r.message
+
+    def test_build_tree_failing_patches_refuse(self, tmp_path: Path) -> None:
+        tree = _make_ldiskfs_validate_tree(
+            tmp_path, "ldiskfs-6.8.0-90-ubuntu24", _FAILING_PATCH
+        )
+        kernel_src = _make_kernel_src(tmp_path)
+        tc = _FakeTC("6.8-ubuntu2404", LustreMode.SERVER_LDISKFS)
+        r = validate_target(tc, tree, kernel_build_tree=kernel_src)
+        assert r.status == "refuse"
+        assert r.matched_in == "not_listed"
+        assert "test.patch" in r.message
+
+    def test_build_tree_dir_absent_ok_with_note(self, tmp_path: Path) -> None:
+        tree = _make_ldiskfs_validate_tree(
+            tmp_path, "ldiskfs-6.8.0-90-ubuntu24", _CLEAN_PATCH
+        )
+        nonexistent = tmp_path / "no-such-build-tree"
+        tc = _FakeTC("6.8-ubuntu2404", LustreMode.SERVER_LDISKFS)
+        r = validate_target(tc, tree, kernel_build_tree=nonexistent)
+        assert r.status == "ok"
+        assert r.matched_in == "ldiskfs_series"
+        assert "build-tree incomplete" in r.message

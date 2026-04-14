@@ -572,6 +572,14 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
     kernel = getattr(args, "kernel", None)
     resolved_kernel = tc.resolve_kernel(kernel)
     build_tree = tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree"
+
+    _gate_lustre_validation(
+        tc,
+        lustre_tree,
+        force=args.force_compat,
+        kernel_build_tree=build_tree,
+    )
+
     if not build_tree.is_dir():
         return _error(
             f"Kernel build-tree not found: {build_tree}",
