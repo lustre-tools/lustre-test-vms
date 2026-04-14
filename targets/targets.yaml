@@ -64,4 +64,4 @@ targets:
     os_family: debian
     os_name: ubuntu
     os_version: '24.04'
-    status: experimental
+    status: working

@@ -1439,6 +1439,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
             local, remote = _release_status(
                 name, tc.arch, all_releases, kernel_signature=signature
             )
+            built = tc.meta_path("kernel", kname).exists()
             rows.append(
                 {
                     "name": name,
@@ -1449,6 +1450,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
                     "server": tc.lustre_mode != LustreMode.CLIENT,
                     "default_kernel": tc.default_kernel,
                     "lustre_mode": tc.lustre_mode.value,
+                    "built": built,
                     "local_release": local,
                     "remote_release": remote,
                 }
@@ -1463,36 +1465,42 @@ def cmd_targets(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     hdr = (
-        f"{'Target':<12} {'Status':<13} {'Arch':<8} {'Kernel':<20} "
+        f"{'Target':<12} {'Built':<6} {'Arch':<8} {'Kernel':<20} "
         f"{'Mode':<16} {'Local':<24} {'Remote':<24} Default?"
     )
     print(hdr)
     print("-" * len(hdr))
     prev_key: tuple[str, str] | None = None
+    has_experimental = False
     for r in rows:
         if "kernel" not in r:
             print(f"{r['name']:<12} {r.get('error', '')}")
             prev_key = None
             continue
         default_mark = "yes" if r["is_default"] else ""
+        built_col = "yes" if r["built"] else "-"
         key = (r["name"], r["arch"])
         if key == prev_key:
             name_col = ""
-            status_col = ""
             arch_col = ""
             mode_col = ""
         else:
-            name_col = r["name"]
-            status_col = r["status"]
+            marker = "*" if r["status"] != "working" else ""
+            if marker:
+                has_experimental = True
+            name_col = f"{r['name']}{marker}"
             arch_col = r["arch"]
             mode_col = r["lustre_mode"]
         print(
-            f"{name_col:<12} {status_col:<13} {arch_col:<8} "
+            f"{name_col:<12} {built_col:<6} {arch_col:<8} "
             f"{r['kernel']:<20} {mode_col:<16} "
             f"{r['local_release']:<24} {r['remote_release']:<24} "
             f"{default_mark}"
         )
         prev_key = key
+    if has_experimental:
+        print()
+        print("* experimental -- may not build or boot cleanly")
     return EXIT_OK
 
 
