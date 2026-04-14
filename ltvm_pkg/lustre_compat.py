@@ -492,8 +492,22 @@ def validate_target(tc: TargetConfig, lustre_tree: Path) -> ValidationResult:
                 matched_in=None,
                 message=f"Cannot read ChangeLog: {exc}",
             )
-        for declared in cl.client_primary:
+        # Deb targets don't have a .target.in declaring an exact kver;
+        # the best we have at validate-time is the kernel-name's
+        # major.minor (e.g. "6.8" from "6.8-ubuntu2404").  Match any
+        # ChangeLog entry whose major.minor equals ours; the actual
+        # micro version is determined later at build time.
+        kver_mm = _kver_majmin(kver) if tc.kernel_deb_source else None
+
+        def _client_match(declared: str) -> bool:
             if _kver_matches(declared, kver):
+                return True
+            if kver_mm is not None and _kver_majmin(declared) == kver_mm:
+                return True
+            return False
+
+        for declared in cl.client_primary:
+            if _client_match(declared):
                 return ValidationResult(
                     status="ok",
                     mode=mode,
@@ -505,7 +519,7 @@ def validate_target(tc: TargetConfig, lustre_tree: Path) -> ValidationResult:
                     ),
                 )
         for declared in cl.client_best_effort:
-            if _kver_matches(declared, kver):
+            if _client_match(declared):
                 return ValidationResult(
                     status="best_effort",
                     mode=mode,
