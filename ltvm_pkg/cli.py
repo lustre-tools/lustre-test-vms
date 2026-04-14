@@ -1424,6 +1424,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
                 {
                     "name": name,
                     "arch": tc.arch,
+                    "status": tc.status,
                     "kernel": kname,
                     "is_default": kname == tc.default_kernel,
                     "server": tc.lustre_mode != LustreMode.CLIENT,
@@ -1443,8 +1444,8 @@ def cmd_targets(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     hdr = (
-        f"{'Target':<12} {'Arch':<8} {'Kernel':<20} {'Mode':<16} "
-        f"{'Local':<24} {'Remote':<24} Default?"
+        f"{'Target':<12} {'Status':<13} {'Arch':<8} {'Kernel':<20} "
+        f"{'Mode':<16} {'Local':<24} {'Remote':<24} Default?"
     )
     print(hdr)
     print("-" * len(hdr))
@@ -1454,8 +1455,8 @@ def cmd_targets(args: argparse.Namespace) -> int:
             continue
         default_mark = "yes" if r["is_default"] else ""
         print(
-            f"{r['name']:<12} {r['arch']:<8} {r['kernel']:<20} "
-            f"{r['lustre_mode']:<16} "
+            f"{r['name']:<12} {r['status']:<13} {r['arch']:<8} "
+            f"{r['kernel']:<20} {r['lustre_mode']:<16} "
             f"{r['local_release']:<24} {r['remote_release']:<24} "
             f"{default_mark}"
         )
