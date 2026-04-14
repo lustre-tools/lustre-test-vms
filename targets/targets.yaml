@@ -12,9 +12,9 @@ targets:
         srpm_version: 6.12.0-55.41.1.el10_0
       config:
         CONFIG_XEN_PVH: y
-      default: 6.12-rhel10.1
+      default: 6.12-rhel10.0
     lustre:
-      mode: client
+      mode: server_ldiskfs
     os_name: rocky
     os_version: '10.1'
     srpm_url: https://dl.rockylinux.org/pub/rocky/10/BaseOS/source/tree/Packages/k
