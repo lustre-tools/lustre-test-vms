@@ -400,6 +400,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Specific kernel name from targets.yaml kernels.available "
         "(e.g. 5.14-rhel9.5)",
     )
+    sp.add_argument(
+        "--replace",
+        action="store_true",
+        help="Wipe the target's existing output dir before fetching "
+        "(forces a clean re-fetch even if already up to date)",
+    )
     sp.set_defaults(func=cmd_fetch)
 
     # -- publish (hidden: maintainer use only) --

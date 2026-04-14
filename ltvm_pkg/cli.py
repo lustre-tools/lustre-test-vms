@@ -1039,7 +1039,8 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     else:
         release_tag = ""
     tag_file = OUTPUT_DIR / target / arch / ".ltvm-release-tag"
-    if release_tag and tag_file.exists():
+    replace = bool(getattr(args, "replace", False))
+    if not replace and release_tag and tag_file.exists():
         existing_tag = tag_file.read_text().strip()
         if existing_tag == release_tag:
             if not use_json:
@@ -1047,6 +1048,18 @@ def cmd_fetch(args: argparse.Namespace) -> int:
             result = {"target": target, "path": str(OUTPUT_DIR / target / arch)}
             _output(result, use_json)
             return EXIT_OK
+
+    # --replace: wipe the target's output dir so a partial or
+    # mismatched prior fetch doesn't leave stale files behind the
+    # new extraction.  The reference directory is target/arch, not
+    # target/, because per-arch fetches share output/<target>/.
+    if replace:
+        target_out = OUTPUT_DIR / target / arch
+        if target_out.exists():
+            if not use_json:
+                print(f"  Removing existing {target_out}...")
+            import shutil as _shutil
+            _shutil.rmtree(target_out)
 
     if not use_json:
         print(f"Fetching {target}...")
