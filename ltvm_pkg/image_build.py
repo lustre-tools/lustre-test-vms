@@ -674,8 +674,12 @@ def _export_to_ext4(
         rootfs.mkdir()
         tarball = Path(tmpdir) / "rootfs.tar"
 
+        image_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_f = tempfile.NamedTemporaryFile(
-            suffix=".ext4", prefix="ltvm-image-", delete=False
+            suffix=".ext4",
+            prefix="ltvm-image-",
+            dir=str(image_path.parent),
+            delete=False,
         )
         tmpfile = tmp_f.name
         tmp_f.close()
