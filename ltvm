@@ -159,6 +159,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Rebuild even if inputs unchanged",
     )
 
+    # Shared --variant flag for build subcommands that operate on a
+    # target's variant artifacts (e.g. MOFED).  Default 'base' is the
+    # pre-variant behavior.
+    variant_arg = argparse.ArgumentParser(add_help=False)
+    variant_arg.add_argument(
+        "--variant",
+        default="base",
+        metavar="NAME",
+        help="Target variant to build (default: base). "
+        "E.g. 'mofed' to layer MOFED on top of the base.",
+    )
+    variant_arg.add_argument(
+        "--mofed-version",
+        default=None,
+        metavar="VER",
+        help="Override mofed_version param for the mofed variant. "
+        "Folds into the variant's input hash.",
+    )
+
     # Shared --force-compat flag for subcommands that gate on Lustre-tree
     # compatibility (build + deploy paths).  'refuse' status is bypassed
     # when set; hard errors (parse/IO) are never bypassed.
@@ -250,7 +269,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     bap = build_sub.add_parser(
         "all",
-        parents=[common, kernel_arg, force_arg, force_compat_arg],
+        parents=[common, kernel_arg, force_arg, force_compat_arg, variant_arg],
         help="Build container + kernel + image from scratch",
     )
     bap.add_argument("target")
@@ -266,7 +285,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     bcp = build_sub.add_parser(
         "container",
-        parents=[common],
+        parents=[common, variant_arg],
         help="Build the build container for a target",
     )
     bcp.add_argument("target")
@@ -285,7 +304,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     bip = build_sub.add_parser(
         "image",
-        parents=[common, kernel_arg, force_arg, force_compat_arg],
+        parents=[common, kernel_arg, force_arg, force_compat_arg, variant_arg],
         help="Build the VM base image for a target",
     )
     bip.add_argument("target")
@@ -309,7 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
     # but the flag behaviour is identical.
     blp = build_sub.add_parser(
         "lustre",
-        parents=[common, kernel_arg, force_arg, force_compat_arg],
+        parents=[common, kernel_arg, force_arg, force_compat_arg, variant_arg],
         help="Build a Lustre source tree against the target kernel build-tree",
     )
     blp.add_argument(

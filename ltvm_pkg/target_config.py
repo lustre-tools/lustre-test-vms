@@ -128,16 +128,26 @@ class Variant:
         return h.digest()
 
 
-def build_container_tag(name: str, arch: str = "x86_64") -> str:
-    """Compute the podman build-container tag for a target + arch.
+def build_container_tag(
+    name: str, arch: str = "x86_64", variant: str = DEFAULT_VARIANT
+) -> str:
+    """Compute the podman build-container tag for a target + arch + variant.
 
     Module-level so callers that don't have a full TargetConfig in hand
     (e.g. release_package.export_build_container, which may run against
     a synthetic target name) share the exact same logic.
+
+    Base-variant tag is unchanged from the pre-variant scheme so
+    existing cached podman images keep their tags.  Non-base variants
+    get a ``-<variant>`` suffix.
     """
     if arch != "x86_64":
-        return f"ltvm-build-{name}-{arch}"
-    return f"ltvm-build-{name}"
+        tag = f"ltvm-build-{name}-{arch}"
+    else:
+        tag = f"ltvm-build-{name}"
+    if variant != DEFAULT_VARIANT:
+        tag = f"{tag}-{variant}"
+    return tag
 
 
 def _dockerfile_referenced_files(dockerfile: Path) -> list[Path]:
@@ -188,8 +198,14 @@ class TargetConfig:
               paths don't need an x86_64 special case.
     """
 
-    def __init__(self, name: str, arch: str | None = None) -> None:
+    def __init__(
+        self,
+        name: str,
+        arch: str | None = None,
+        variant: str = DEFAULT_VARIANT,
+    ) -> None:
         self.name = name
+        self.variant_name = variant
         self.target_dir = TARGETS_DIR / name
 
         registry = _load_registry()
@@ -278,6 +294,13 @@ class TargetConfig:
                 )
             self._variants[vname] = Variant(vname, vdata, self.target_dir)
 
+        if variant not in self._variants:
+            declared = ", ".join(sorted(self._variants))
+            raise ValueError(
+                f"target {name!r}: unknown variant {variant!r} "
+                f"(declared: {declared})"
+            )
+
     # ------------------------------------------------------------------
     # OS metadata
     # ------------------------------------------------------------------
@@ -304,8 +327,12 @@ class TargetConfig:
 
     @property
     def container_tag(self) -> str:
-        """Podman tag for this target's build container."""
-        return build_container_tag(self.name, self.arch)
+        """Podman tag for this target's build container (bound variant)."""
+        return build_container_tag(self.name, self.arch, self.variant_name)
+
+    def container_tag_for(self, variant: str) -> str:
+        """Container tag for an explicit variant (bypasses the bound one)."""
+        return build_container_tag(self.name, self.arch, variant)
 
     @property
     def status(self) -> str:
@@ -458,7 +485,7 @@ class TargetConfig:
         return sorted(d.name for d in kernels_dir.iterdir() if d.is_dir())
 
     def image_output_dir(
-        self, kernel: str | None = None, variant: str = DEFAULT_VARIANT
+        self, kernel: str | None = None, variant: str | None = None
     ) -> Path:
         """Return the output directory for an image, keyed by kernel.
 
@@ -466,20 +493,23 @@ class TargetConfig:
         into the rootfs at build time and must match the kernel the VM
         will boot against.  Non-base variants nest under a subdir so
         base-variant paths keep their pre-variant layout and existing
-        on-disk caches don't get orphaned.
+        on-disk caches don't get orphaned.  ``variant=None`` means
+        "use the variant this TargetConfig was bound to".
         """
+        v = self.variant_name if variant is None else variant
         base = self.output_dir / "images" / self.resolve_kernel(kernel)
-        return base if variant == DEFAULT_VARIANT else base / variant
+        return base if v == DEFAULT_VARIANT else base / v
 
-    def container_output_dir(self, variant: str = DEFAULT_VARIANT) -> Path:
+    def container_output_dir(self, variant: str | None = None) -> Path:
+        v = self.variant_name if variant is None else variant
         base = self.output_dir / "container"
-        return base if variant == DEFAULT_VARIANT else base / variant
+        return base if v == DEFAULT_VARIANT else base / v
 
     def meta_path(
         self,
         artifact: str,
         kernel: str | None = None,
-        variant: str = DEFAULT_VARIANT,
+        variant: str | None = None,
     ) -> Path:
         """Path to meta.json for an artifact ('kernel'|'image'|'container').
 
@@ -488,14 +518,15 @@ class TargetConfig:
         image_output_dir(kernel)/meta.json, output_dir/<artifact>/meta.json),
         which silently diverged once image_output_dir grew per-kernel keying.
         """
+        v = self.variant_name if variant is None else variant
         if artifact == "kernel":
             # Kernel is variant-independent; variant arg is accepted but
             # ignored so callers can thread it uniformly without branching.
             return self.kernel_output_dir(kernel) / "meta.json"
         if artifact == "image":
-            return self.image_output_dir(kernel, variant=variant) / "meta.json"
+            return self.image_output_dir(kernel, variant=v) / "meta.json"
         if artifact == "container":
-            return self.container_output_dir(variant=variant) / "meta.json"
+            return self.container_output_dir(variant=v) / "meta.json"
         raise ValueError(f"unknown artifact: {artifact!r}")
 
     # ------------------------------------------------------------------
@@ -530,7 +561,7 @@ class TargetConfig:
         artifact: str,
         kernel: str | None = None,
         extra: bytes = b"",
-        variant: str = DEFAULT_VARIANT,
+        variant: str | None = None,
     ) -> str:
         """Hash inputs for an artifact to detect staleness.
 
@@ -656,8 +687,9 @@ class TargetConfig:
         # variant feature does not invalidate any existing base caches.
         # Kernel artifacts ignore variant (kernel is shared across
         # variants; see image_build for module injection).
-        if variant != DEFAULT_VARIANT and artifact in ("container", "image"):
-            v = self.variant(variant)
+        v_name = self.variant_name if variant is None else variant
+        if v_name != DEFAULT_VARIANT and artifact in ("container", "image"):
+            v = self.variant(v_name)
             h.update(v.hash_bytes(artifact))
 
         return h.hexdigest()[:16]
@@ -670,14 +702,15 @@ class TargetConfig:
         artifact: str,
         kernel: str | None = None,
         extra_hash: bytes = b"",
-        variant: str = DEFAULT_VARIANT,
+        variant: str | None = None,
     ) -> bool:
         """Check if an artifact needs rebuilding.
 
         ``extra_hash`` is forwarded to ``input_hash`` so callers can fold
         in inputs target_config doesn't know about (see ``input_hash``).
         """
-        meta_file = self.meta_path(artifact, kernel, variant=variant)
+        v = self.variant_name if variant is None else variant
+        meta_file = self.meta_path(artifact, kernel, variant=v)
         meta = load_meta_safe(meta_file)
         if meta is None:
             # Missing or corrupt meta -- treat as stale so the next
@@ -687,7 +720,7 @@ class TargetConfig:
         return bool(
             meta.get("input_hash")
             != self.input_hash(
-                artifact, kernel=kernel, extra=extra_hash, variant=variant
+                artifact, kernel=kernel, extra=extra_hash, variant=v
             )
         )
 
@@ -696,7 +729,7 @@ class TargetConfig:
         artifact: str,
         kernel: str | None = None,
         extra_hash: bytes = b"",
-        variant: str = DEFAULT_VARIANT,
+        variant: str | None = None,
         **extra: object,
     ) -> None:
         """Write build metadata after a successful build.
@@ -706,24 +739,25 @@ class TargetConfig:
         next run.  ``extra`` keyword args are written into meta.json
         verbatim (kernel_version, build_date, etc.).
         """
+        v = self.variant_name if variant is None else variant
         if artifact == "kernel":
             out_dir = self._kernel_meta_file(kernel).parent
         elif artifact == "image":
-            out_dir = self.image_output_dir(kernel, variant=variant)
+            out_dir = self.image_output_dir(kernel, variant=v)
         elif artifact == "container":
-            out_dir = self.container_output_dir(variant=variant)
+            out_dir = self.container_output_dir(variant=v)
         else:
             out_dir = self.output_dir / artifact
         out_dir.mkdir(parents=True, exist_ok=True)
         meta = {
             "target": self.name,
             "input_hash": self.input_hash(
-                artifact, kernel=kernel, extra=extra_hash, variant=variant
+                artifact, kernel=kernel, extra=extra_hash, variant=v
             ),
             **extra,
         }
-        if variant != DEFAULT_VARIANT:
-            meta["variant"] = variant
+        if v != DEFAULT_VARIANT:
+            meta["variant"] = v
         # Atomic write via tempfile + rename so a concurrent reader
         # (load_meta_safe) can't see a half-written JSON blob -- which
         # would fail to parse, return None, and trigger a spurious

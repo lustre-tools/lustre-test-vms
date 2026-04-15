@@ -327,6 +327,7 @@ class TestEnsureContainerImage:
         cfg.arch = "x86_64"
         cfg.target_dir = target_dir
         cfg.container_tag = "ltvm-build-rocky9"
+        cfg.variant_name = "base"
         return cfg
 
     def test_returns_correct_tag(self, tmp_path: Path) -> None:
