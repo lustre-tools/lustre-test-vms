@@ -171,21 +171,29 @@ def alloc_ip(name: str, explicit_ip: str | None = None) -> Iterator[str]:
 def reload_dns() -> None:
     """SIGHUP dnsmasq to re-read /etc/hosts."""
     pid_path = Path("/run/dnsmasq.pid")
-    pid = None
+    pid: int | None = None
+    pid_err: str | None = None
     if pid_path.exists():
         try:
             pid = int(pid_path.read_text().strip())
-        except (ValueError, OSError):
-            pass
+        except (ValueError, OSError) as e:
+            pid_err = f"read {pid_path}: {e}"
     if pid is None:
         r = run(["pgrep", "-x", "dnsmasq"])
         if r.returncode == 0 and r.stdout.strip():
             pid = int(r.stdout.strip().splitlines()[0])
-    if pid:
-        try:
-            os.kill(pid, signal.SIGHUP)
-        except OSError:
-            pass
+        else:
+            raise RuntimeError(
+                "failed to reload dnsmasq: "
+                f"pidfile {pid_path} unusable ({pid_err or 'missing'}) "
+                f"and pgrep -x dnsmasq returned rc={r.returncode}"
+            )
+    try:
+        os.kill(pid, signal.SIGHUP)
+    except OSError as e:
+        raise RuntimeError(
+            f"failed to reload dnsmasq: kill SIGHUP {pid}: {e}"
+        ) from e
 
 
 # ── SSH name / key management ────────────────────────────
