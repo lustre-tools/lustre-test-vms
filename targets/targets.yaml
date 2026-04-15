@@ -48,6 +48,12 @@ targets:
     os_version: '9.7'
     srpm_url: https://dl.rockylinux.org/pub/rocky/9/BaseOS/source/tree/Packages/k
     status: working
+    variants:
+      mofed:
+        container_overlay: rocky9/variants/mofed.container.Dockerfile
+        image_overlay: rocky9/variants/mofed.image.Dockerfile
+        params:
+          mofed_version: 24.10-1.1.4.0
   ubuntu2404:
     configure_args:
     - --with-o2ib=no
