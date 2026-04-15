@@ -175,6 +175,11 @@ def check_prerequisites(host: HostInfo) -> None:
         "ip": "iproute2" if host.pkg_mgr == "apt" else "iproute",
         "fakeroot": "fakeroot",
         "mke2fs": "e2fsprogs",
+        # Needed by `ltvm target export` (bootable-disk packaging).
+        "parted": "parted",
+        ("grub-install" if host.pkg_mgr == "apt" else "grub2-install"): (
+            "grub-pc-bin" if host.pkg_mgr == "apt" else "grub2-pc"
+        ),
     }
     missing = []
     for cmd, pkg in needed.items():
@@ -451,7 +456,7 @@ def install_qemu(host: HostInfo, force: bool = False) -> None:
         if host.pkg_mgr == "dnf":
             _pkg_install(host, "qemu-kvm")
         elif host.pkg_mgr == "apt":
-            _run(["apt-get", "update", "-qq"], check=False)
+            _run(["apt-get", "update", "-qq"])
             _pkg_install(host, "qemu-system-x86")
         sys_qemu = _system_qemu_has_microvm()
 
@@ -504,8 +509,8 @@ def install_qemu(host: HostInfo, force: bool = False) -> None:
     # Build from source
     log.info("Installing QEMU build dependencies...")
     if host.pkg_mgr == "dnf":
-        _run(["dnf", "install", "-y", "epel-release"], check=False)
-        _run(["dnf", "config-manager", "--set-enabled", "crb"], check=False)
+        _run(["dnf", "install", "-y", "epel-release"])
+        _run(["dnf", "config-manager", "--set-enabled", "crb"])
         _pkg_install(
             host,
             "gcc",
@@ -519,7 +524,7 @@ def install_qemu(host: HostInfo, force: bool = False) -> None:
             "ninja-build",
         )
     elif host.pkg_mgr == "apt":
-        _run(["apt-get", "update", "-qq"], check=False)
+        _run(["apt-get", "update", "-qq"])
         _pkg_install(
             host,
             "gcc",
@@ -534,7 +539,7 @@ def install_qemu(host: HostInfo, force: bool = False) -> None:
             "pkg-config",
         )
 
-    _run(["pip3", "install", "tomli"], check=False)
+    _run(["pip3", "install", "tomli"])
 
     tmpdir = Path(tempfile.mkdtemp(prefix="qemu-build."))
     try:
@@ -663,13 +668,11 @@ def setup_network(host: HostInfo, subnet: str = DEFAULT_SUBNET) -> None:
         if legacy:
             _run(
                 ["update-alternatives", "--set", "iptables", legacy],
-                check=False,
             )
             alt6 = shutil.which("ip6tables-legacy")
             if alt6:
                 _run(
                     ["update-alternatives", "--set", "ip6tables", alt6],
-                    check=False,
                 )
             log.info("WSL2: using iptables-legacy")
 
@@ -690,7 +693,7 @@ def setup_network(host: HostInfo, subnet: str = DEFAULT_SUBNET) -> None:
     sysctl_src = HOST_CONFIG_DIR / "99-qemu-vms.conf"
     sysctl_dst = Path("/etc/sysctl.d/99-qemu-vms.conf")
     sysctl_dst.write_text(sysctl_src.read_text())
-    _run(["sysctl", "-p", str(sysctl_dst)], check=False)
+    _run(["sysctl", "-p", str(sysctl_dst)])
 
     # Generate bridge service with correct subnet
     svc_tmpl = (HOST_CONFIG_DIR / "qemu-bridge.service").read_text()
