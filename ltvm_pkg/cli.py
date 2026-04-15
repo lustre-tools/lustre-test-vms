@@ -1506,6 +1506,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
                     "default_kernel": tc.default_kernel,
                     "lustre_mode": tc.lustre_mode.value,
                     "available": avail,
+                    "built": built,
                     "local_release": local,
                     "remote_release": remote,
                 }
@@ -1520,21 +1521,41 @@ def cmd_targets(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     hdr = (
-        f"{'Available':<10} {'Target':<12} {'Arch':<8} {'Kernel':<20} "
-        f"{'Mode':<16} Default?"
+        f"{'Local':<6} {'Remote':<7} {'Target':<12} {'Arch':<8} "
+        f"{'Kernel':<20} {'Mode':<16} Default?"
     )
     print(hdr)
     print("-" * len(hdr))
     prev_key: tuple[str, str] | None = None
     has_experimental = False
     has_behind = False
+    has_unreachable = False
     for r in rows:
         if "kernel" not in r:
             print(f"{r['name']:<12} {r.get('error', '')}")
             prev_key = None
             continue
         default_mark = "yes" if r["is_default"] else ""
-        if r["available"].endswith("!"):
+        # Local: "yes" if kernel meta.json exists on disk, else "-"
+        # Remote: "yes" if a release matches, "-" if none, "?" if
+        # GitHub was unreachable.  Both present AND differing gets
+        # a "!" marker on Local to flag the local copy as stale.
+        local_col = "yes" if r["built"] else "-"
+        remote_raw = r["remote_release"]
+        if remote_raw == "?":
+            remote_col = "?"
+            has_unreachable = True
+        elif remote_raw == "-":
+            remote_col = "-"
+        else:
+            remote_col = "yes"
+        if (
+            r["built"]
+            and r["local_release"] not in ("-", "?")
+            and remote_raw not in ("-", "?")
+            and r["local_release"] != remote_raw
+        ):
+            local_col = "yes!"
             has_behind = True
         key = (r["name"], r["arch"])
         if key == prev_key:
@@ -1549,18 +1570,20 @@ def cmd_targets(args: argparse.Namespace) -> int:
             arch_col = r["arch"]
             mode_col = r["lustre_mode"]
         print(
-            f"{r['available']:<10} {name_col:<12} {arch_col:<8} "
+            f"{local_col:<6} {remote_col:<7} {name_col:<12} {arch_col:<8} "
             f"{r['kernel']:<20} {mode_col:<16} "
             f"{default_mark}"
         )
         prev_key = key
-    if has_experimental or has_behind:
+    if has_experimental or has_behind or has_unreachable:
         print()
         if has_experimental:
             print("* experimental -- may not build or boot cleanly")
+        if has_unreachable:
+            print("? github unreachable -- remote status unknown")
         if has_behind:
             print(
-                "! local copy behind latest release -- "
+                "yes! = local copy differs from latest release -- "
                 "`sudo ltvm target fetch --replace <target>` to refresh"
             )
     return EXIT_OK

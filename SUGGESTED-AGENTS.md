@@ -118,7 +118,7 @@ ltvm vm console-log co1-single
 ssh co1-single 'lctl dl'
 
 # Lifecycle
-sudo ltvm start|stop|restart|destroy co1-single
+sudo ltvm start|stop|destroy co1-single
 ltvm vm snapshot co1-single before-test
 ltvm vm restore co1-single before-test
 
@@ -232,13 +232,13 @@ ltvm target publish <target>           Upload tarball to GitHub release
 
 # VM lifecycle
 ltvm create <name>              Create / idempotent-create
-ltvm start|stop|restart <name>  Power control
+ltvm start|stop <name>          Power control
 ltvm destroy <name>             Remove VM and its overlay
 ltvm list                       Running + stopped VMs
-ltvm vm console-log <name>         Observe QEMU serial log
-ltvm snapshot|restore <name>    Overlay snapshots
-ltvm vm nmi <name>                 Inject NMI (panic + kdump)
-ltvm vm crash-collect <name>       Pull vmcore + run lustre_triage
+ltvm vm console-log <name>      Observe QEMU serial log
+ltvm vm snapshot|restore <name> Overlay snapshots
+ltvm vm nmi <name>              Inject NMI (panic + kdump)
+ltvm vm crash-collect <name>    Pull vmcore + run lustre_triage
 ltvm doctor [--fix]             Host-infra health check
 
 # Lustre in a VM
