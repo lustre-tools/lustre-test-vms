@@ -243,6 +243,31 @@ class TestStagingPath:
         assert "x86_64" in parts
         assert "5.14-rhel9.7" in parts
 
+    def test_base_variant_unchanged(self, tmp_path: Path) -> None:
+        """Default variant keeps the pre-variant layout so existing
+        staging dirs on disk stay addressable."""
+        from ltvm_pkg.lustre_build import staging_path
+
+        p_default = staging_path(tmp_path, "rocky9", kernel="5.14-rhel9.7")
+        p_base = staging_path(
+            tmp_path, "rocky9", kernel="5.14-rhel9.7", variant="base"
+        )
+        assert p_default == p_base
+        assert "mofed" not in p_base.parts
+
+    def test_variant_nests_under_kernel(self, tmp_path: Path) -> None:
+        """Non-base variant appends a <variant>/ subdir so base and
+        MOFED Lustre builds for the same kernel can coexist."""
+        from ltvm_pkg.lustre_build import staging_path
+
+        p_base = staging_path(
+            tmp_path, "rocky9", kernel="5.14-rhel9.7", variant="base"
+        )
+        p_mofed = staging_path(
+            tmp_path, "rocky9", kernel="5.14-rhel9.7", variant="mofed"
+        )
+        assert p_mofed == p_base / "mofed"
+
 
 # ── lustre_build.read_staging_meta ───────────────────────────────────────────
 

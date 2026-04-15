@@ -307,6 +307,7 @@ def cmd_build_all(args: argparse.Namespace) -> int:
                 force=args.force,
                 arch=tc.arch,
                 kernel=resolved_kernel,
+                variant=tc.variant_name,
             )
             results["lustre"] = lmeta
         except Exception as e:
@@ -421,7 +422,10 @@ def cmd_build_image(args: argparse.Namespace) -> int:
     with_lustre: str | None = None
     if not args.no_lustre:
         lustre_tree = Path(args.lustre_tree) if args.lustre_tree else Path(os.getcwd())
-        candidate = staging_path(lustre_tree, args.target, arch=tc.arch, kernel=resolved_kernel)
+        candidate = staging_path(
+            lustre_tree, args.target, arch=tc.arch,
+            kernel=resolved_kernel, variant=tc.variant_name,
+        )
         if not candidate.exists():
             return _error(
                 f"no Lustre staging at {candidate}",
@@ -663,6 +667,7 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
             force=getattr(args, "force", False),
             arch=tc.arch,
             kernel=resolved_kernel,
+            variant=tc.variant_name,
         )
     except Exception as e:
         return _error(f"Lustre build failed: {e}", use_json)
@@ -2334,7 +2339,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         if vm_kernel_name:
             deploy_kernel = tc.resolve_kernel(vm_kernel_name)
     staging = _staging_path(
-        build_path, target, arch=vm_arch, kernel=deploy_kernel
+        build_path, target, arch=vm_arch, kernel=deploy_kernel,
+        variant=vm.variant,
     )
     # If the bundled-snapshot path is involved we DON'T require a
     # pre-existing per-kernel staging -- the snapshot rsync below

@@ -90,13 +90,14 @@ def staging_path(
     arch: str = "x86_64",
     *,
     kernel: str,
+    variant: str = "base",
 ) -> Path:
     """Return the host-side Lustre build staging directory.
 
     Lives **inside the user's lustre tree** at
-    ``<tree>/.ltvm-staging/<target>/<arch>/<kernel>/`` rather than
-    under the shared ltvm output dir.  This is the only sane layout
-    for a multi-user host: alice's
+    ``<tree>/.ltvm-staging/<target>/<arch>/<kernel>[/<variant>]/``
+    rather than under the shared ltvm output dir.  This is the only
+    sane layout for a multi-user host: alice's
     `~alice/lustre-release/.ltvm-staging/` cannot collide with bob's
     `~bob/lustre-release/.ltvm-staging/`, each user owns their own
     staging tree, and `rm -rf <tree>` cleans up the staging along
@@ -110,8 +111,15 @@ def staging_path(
     co-exists.  Without per-kernel keying two sequential
     `ltvm build lustre` runs against different kernels would silently
     clobber each other's userland.
+
+    ``variant`` adds a trailing subdir for non-base variants so a
+    MOFED-linked Lustre build (``ko2iblnd`` against ``mlx_compat``)
+    can coexist with a base build for the same kernel instead of
+    clobbering it.  Base-variant paths are left unchanged to match
+    the pre-variant layout.
     """
-    return Path(lustre_tree) / ".ltvm-staging" / target / arch / kernel
+    base = Path(lustre_tree) / ".ltvm-staging" / target / arch / kernel
+    return base if variant == "base" else base / variant
 
 
 class BuildResult(TypedDict):
@@ -223,6 +231,7 @@ def build_lustre(
     force: bool = False,
     arch: str = "x86_64",
     kernel: str | None = None,
+    variant: str = "base",
 ) -> BuildResult:
     """Build a Lustre source tree.
 
@@ -286,6 +295,7 @@ def build_lustre(
             arch=arch,
             target=target,
             kernel=kernel,
+            variant=variant,
         )
 
 
@@ -330,6 +340,7 @@ def _build_in_container(
     arch: str = "x86_64",
     target: str = DEFAULT_TARGET,
     kernel: str | None = None,
+    variant: str = "base",
 ) -> BuildResult:
     """Build Lustre inside the build container.
 
@@ -508,7 +519,8 @@ fi""")
     except Exception:
         resolved_kernel = kernel or kver
     host_staging = staging_path(
-        lustre_tree, target, arch=arch, kernel=resolved_kernel
+        lustre_tree, target, arch=arch, kernel=resolved_kernel,
+        variant=variant,
     )
     host_staging.mkdir(parents=True, exist_ok=True)
     # When invoked via sudo, chown the staging dir to the real user so
@@ -700,6 +712,7 @@ def lustre_status(
     target: str = DEFAULT_TARGET,
     arch: str = "x86_64",
     kernel: str | None = None,
+    variant: str = "base",
 ) -> StatusResult:
     """Return a status dict for the Lustre build."""
     lustre_tree = Path(lustre_tree).resolve()
@@ -720,13 +733,29 @@ def lustre_status(
         )
     else:
         host_staging = staging_path(
-            lustre_tree, target, arch=arch, kernel=kernel
+            lustre_tree, target, arch=arch, kernel=kernel, variant=variant
         )
-        ko_count = (
-            len(list(host_staging.rglob("*.ko")))
-            if host_staging.is_dir()
-            else 0
-        )
+        if host_staging.is_dir():
+            # rglob catches this variant's .ko files.  For the "base"
+            # variant we additionally need to exclude any sibling
+            # variant subdirs (e.g. mofed/) that happen to live under
+            # the same kernel root -- those aren't part of the base
+            # staging tree.
+            sibling_variants = (
+                {
+                    d.name for d in host_staging.iterdir()
+                    if d.is_dir()
+                    and (d / ".ltvm-staging-meta.json").exists()
+                }
+                if variant == "base"
+                else set()
+            )
+            ko_count = sum(
+                1 for p in host_staging.rglob("*.ko")
+                if p.relative_to(host_staging).parts[0] not in sibling_variants
+            )
+        else:
+            ko_count = 0
 
     built_against = stamp.read_text().strip() if stamp.exists() else None
     current_kver = _kernel_release(build_tree) if build_tree.exists() else None

@@ -349,6 +349,7 @@ def build_image(
             target_config.name,
             arch=target_config.arch,
             kernel=kernel_name,
+            variant=target_config.variant_name,
         )
         if not lustre_staging.is_dir() or not any(
             lustre_staging.rglob("*.ko")

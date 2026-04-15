@@ -320,7 +320,12 @@ class TestSnapshotLustreVariant:
         kdir = out / "kernels" / "5.14-rhel9.7"
 
         tree = tmp_path / "lustre-release"
-        staging = tree / ".ltvm-staging" / "rocky9" / "x86_64" / "5.14-rhel9.7"
+        # Staging is variant-keyed: mofed nests under a /mofed subdir
+        # so a base build for the same kernel coexists.
+        staging = (
+            tree / ".ltvm-staging" / "rocky9" / "x86_64"
+            / "5.14-rhel9.7" / "mofed"
+        )
         modules = staging / "lib" / "modules" / "5.14.0-611.test" / "extra"
         modules.mkdir(parents=True)
         ko = modules / "lustre.ko"

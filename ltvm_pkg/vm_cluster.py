@@ -388,7 +388,8 @@ def _deploy_one_node(
             f"cannot resolve kernel for {node_name}: vm.kernel is unset",
         )
     staging = _staging_path(
-        lustre_tree, target, arch=vm_arch, kernel=deploy_kernel
+        lustre_tree, target, arch=vm_arch, kernel=deploy_kernel,
+        variant=vm.variant,
     )
     try:
         deploy_to_vm(vm, staging, os_family=os_family)

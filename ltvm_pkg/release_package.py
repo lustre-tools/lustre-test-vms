@@ -359,7 +359,7 @@ def snapshot_lustre(
     kernel_name, kernel_dir = _resolve_kernel(output_dir, kernel)
 
     staging_src = staging_path(
-        lustre_tree, target, arch=arch, kernel=kernel_name
+        lustre_tree, target, arch=arch, kernel=kernel_name, variant=variant
     )
     if not staging_src.is_dir():
         v_hint = (
