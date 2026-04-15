@@ -253,8 +253,9 @@ def snapshot_lustre(
     size_mb = _dir_size_mb(dest)
     print(f"    Snapshot size: {size_mb:.0f} MB")
 
-    # Capture git commit hash if available
-    lustre_commit = None
+    # Capture git commit hash. Hard error: if the caller passed a tree,
+    # we must be able to record which commit we packaged; storing None
+    # produces meta.json that looks valid but is un-auditable.
     try:
         r = subprocess.run(
             ["git", "-C", str(lustre_tree), "rev-parse", "HEAD"],
@@ -262,10 +263,20 @@ def snapshot_lustre(
             text=True,
             check=False,
         )
-        if r.returncode == 0:
-            lustre_commit = r.stdout.strip()
-    except FileNotFoundError:
-        pass
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            f"git not found; cannot record lustre_commit for {lustre_tree}"
+        ) from e
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"git rev-parse HEAD failed for {lustre_tree} "
+            f"(rc={r.returncode}): {(r.stderr or '').strip()}"
+        )
+    lustre_commit = r.stdout.strip()
+    if not lustre_commit:
+        raise RuntimeError(
+            f"git rev-parse HEAD returned empty output for {lustre_tree}"
+        )
 
     # Write metadata
     meta = {

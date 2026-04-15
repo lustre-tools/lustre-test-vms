@@ -241,14 +241,22 @@ def _setup_lustre_tree(tmp_path: Path) -> Path:
 
 
 def _make_rsync_mock(dest_dir: Path) -> MagicMock:
-    """Return a subprocess.run mock that creates dest_dir (simulating rsync)."""
+    """Return a subprocess.run mock that creates dest_dir (simulating rsync).
+
+    Also returns a fake commit hash for `git rev-parse HEAD` calls so that
+    snapshot_lustre's git-commit capture step succeeds.
+    """
 
     def _side_effect(cmd, *args, **kwargs):
         # rsync would create the destination; simulate that
-        dest_dir.mkdir(parents=True, exist_ok=True)
+        if cmd and cmd[0] == "rsync":
+            dest_dir.mkdir(parents=True, exist_ok=True)
         result = MagicMock()
         result.returncode = 0
-        result.stdout = ""
+        if cmd and cmd[0] == "git" and "rev-parse" in cmd:
+            result.stdout = "deadbeefcafef00dbaadf00dfeedfacedeadbeef\n"
+        else:
+            result.stdout = ""
         result.stderr = ""
         return result
 
