@@ -167,21 +167,27 @@ def resolve_os_artifacts(
     kernels_root = output_dir / "kernels"
 
     if kernel:
-        # Exact match first, then prefix match.
+        # Exact match first, then prefix match. When multiple kernel
+        # directories share the prefix, pick the newest by mtime -- the
+        # user wants the most recently built, and a lexicographic sort
+        # gets this wrong (e.g. "5.14.0-9..." > "5.14.0-10..." under
+        # string ordering).
         cand = kernels_root / kernel
         if cand.is_dir():
             kernel_dirname = kernel
         else:
             prefix = kernel + "-"
-            matches = sorted(
-                d.name
-                for d in kernels_root.iterdir()
+            matches = (
+                sorted(
+                    (d for d in kernels_root.iterdir()
+                     if d.is_dir() and d.name.startswith(prefix)),
+                    key=lambda d: d.stat().st_mtime,
+                )
                 if kernels_root.is_dir()
-                and d.is_dir()
-                and d.name.startswith(prefix)
-            ) if kernels_root.is_dir() else []
+                else []
+            )
             if matches:
-                kernel_dirname = matches[-1]
+                kernel_dirname = matches[-1].name
             else:
                 raise FileNotFoundError(
                     f"No kernel matching {kernel!r} for '{os_name}' "
@@ -201,15 +207,20 @@ def resolve_os_artifacts(
                 kernel_dirname = kernel_suffix
             else:
                 prefix = kernel_suffix + "-"
-                matches = sorted(
-                    d.name
-                    for d in kernels_root.iterdir()
+                # Pick newest by mtime, not by lexicographic order --
+                # kernel names like "5.14.0-9..." sort after
+                # "5.14.0-10..." as strings.
+                matches = (
+                    sorted(
+                        (d for d in kernels_root.iterdir()
+                         if d.is_dir() and d.name.startswith(prefix)),
+                        key=lambda d: d.stat().st_mtime,
+                    )
                     if kernels_root.is_dir()
-                    and d.is_dir()
-                    and d.name.startswith(prefix)
-                ) if kernels_root.is_dir() else []
+                    else []
+                )
                 if matches:
-                    kernel_dirname = matches[-1]
+                    kernel_dirname = matches[-1].name
         if kernel_dirname is None and kernels_root.is_dir():
             any_built = sorted(
                 d.name for d in kernels_root.iterdir() if d.is_dir()
