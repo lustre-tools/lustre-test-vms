@@ -217,9 +217,14 @@ def snapshot_lustre(
             text=True,
             check=False,
         )
-        parts = r.stdout.split() if r.returncode == 0 else []
+        if r.returncode != 0 or not r.stdout.strip():
+            raise RuntimeError(
+                f"modinfo failed to read vermagic from {sample} "
+                f"(rc={r.returncode}): {r.stderr.strip()}"
+            )
+        parts = r.stdout.split()
         actual_kver = parts[0] if parts else ""
-        if actual_kver and actual_kver != expected_kver:
+        if actual_kver != expected_kver:
             raise ValueError(
                 f"Lustre modules built for {actual_kver} but target "
                 f"kernel is {expected_kver}\n"
