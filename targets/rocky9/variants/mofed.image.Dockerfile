@@ -52,3 +52,10 @@ RUN cd /opt/mofed-src/current/RPMS && \
 # Make sure mlx5_core / rdma_rxe / ib_uverbs etc. are loaded early.
 RUN echo -e "mlx5_core\nib_uverbs\nrdma_cm\nrdma_ucm" \
         > /etc/modules-load.d/mofed.conf
+
+# Drop the extracted MOFED bundle (~1.2 GB) from the rootfs now that
+# userspace is installed.  The tarball is already gone; remove the
+# tree itself.  A future per-kernel kmod-build stage should pull the
+# bundle from the builder container's /opt/mofed-src (which we keep)
+# rather than baking it into the shipped VM image.
+RUN rm -rf /opt/mofed-src

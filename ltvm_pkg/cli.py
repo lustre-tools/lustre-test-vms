@@ -684,14 +684,13 @@ def cmd_package(args: argparse.Namespace) -> int:
     assert tc is not None
 
     kernel = getattr(args, "kernel", None)
+    variant = getattr(args, "variant", None) or "base"
 
     # Bundling Lustre is mandatory by default.  The publisher's whole
     # job is to ship something a fetcher can immediately deploy from --
     # a "kernel-only" package without Lustre forces every consumer to
     # build it themselves on first deploy, which defeats the whole
-    # point of the fetch flow.  --no-lustre is the explicit opt-out
-    # for the "I just want a kernel package" case (e.g. publishing
-    # an interim kernel for testing without rebuilding Lustre).
+    # point of the fetch flow.  --no-lustre is the explicit opt-out.
     no_lustre = getattr(args, "no_lustre", False)
     if not no_lustre:
         lustre_tree_arg = getattr(args, "lustre_tree", None)
@@ -706,11 +705,6 @@ def cmd_package(args: argparse.Namespace) -> int:
                 ),
             )
         assert lustre_path is not None
-        # Deb-based targets (Ubuntu) have no .target.in in Lustre's
-        # kernel_patches/, so the compat gate can't parse a target
-        # file and always returns status=error, which --force-compat
-        # doesn't override.  Skip the gate for those, matching
-        # cmd_build_kernel.
         if not tc.kernel_deb_source:
             _gate_lustre_validation(
                 tc, lustre_path, force=args.force_compat
@@ -724,25 +718,32 @@ def cmd_package(args: argparse.Namespace) -> int:
                 target=args.target,
                 kernel=kernel,
                 arch=tc.arch,
+                variant=variant,
             )
         except Exception as e:
             return _error(f"Lustre snapshot failed: {e}", use_json)
 
     if not use_json:
-        print(f"Packaging {args.target}...")
+        v_hint = "" if variant == "base" else f" variant={variant}"
+        print(f"Packaging {args.target}{v_hint}...")
 
     try:
-        tarball = package_target(
+        assets = package_target(
             args.target,
             tc.output_dir,
             kernel=kernel,
             dest_dir=getattr(args, "output", None),
             arch=tc.arch,
+            variant=variant,
         )
     except Exception as e:
         return _error(f"Package failed: {e}", use_json)
 
-    result = {"target": args.target, "tarball": str(tarball)}
+    result = {
+        "target": args.target,
+        "variant": variant,
+        "assets": {kind: str(p) for kind, p in assets.items()},
+    }
     _output(result, use_json)
     return EXIT_OK
 
@@ -888,30 +889,45 @@ def _find_release_url(
     filter_str: str | None = None,
     arch: str = "x86_64",
     kernel_signature: str | None = None,
+    variant: str = "base",
+    mode: str = "ecosystem",
 ) -> str:
-    """Find a tarball download URL from GitHub releases.
+    """Find an asset download URL from GitHub releases.
 
-    Searches all releases for one whose tag starts with the target
-    name and optionally contains filter_str.  Returns the first
-    matching asset's download URL.
+    ``mode`` selects which asset to look for:
 
-    Asset filenames always contain '-<arch>-' (e.g.
-    rocky9-x86_64-5.14.0_lustre.tar.gz).  We match on that substring
-    so an x86_64 fetch never picks up an aarch64 asset and vice versa.
+      * "ecosystem" (default) -- the manifest JSON produced by
+        ``package_target``; ``fetch_target`` consumes this URL.
+      * "bootable" -- a standalone bootable qcow2.zst produced by
+        ``package_bootable``.
 
-    If ``kernel_signature`` is given (e.g. ``el9_5``), only releases
-    whose assets contain that substring are returned.
+    The asset name encodes (target, arch, kver, [variant]); for a
+    variant fetch we require the exact ``-<variant>`` suffix so a
+    ``--variant mofed`` request doesn't silently grab the base
+    asset and vice versa.
     """
     releases = _gh_api("releases")
     if not isinstance(releases, list):
         releases = [releases]
 
     arch_match = f"-{arch}-"
+    if mode == "bootable":
+        prefix = f"bootable-{target}{arch_match}"
+        suffix = ".zst"
+    else:
+        prefix = f"manifest-{target}{arch_match}"
+        suffix = ".json"
 
+    variant_tail = (
+        f"-{variant}{suffix}" if variant != "base" else suffix
+    )
+    # For base variant we need to reject names that have any variant
+    # suffix (e.g. `-mofed.json`); otherwise a base lookup could grab
+    # a mofed asset.  We check by stripping the suffix and looking for
+    # a '-' in what remains after the kver.  Simpler: require the name
+    # to end with a kver-looking token (digits/dots) before suffix.
     for rel in releases:
         tag = rel.get("tag_name", "")
-        # Require exact match or a separator after the target name so
-        # `rocky9` doesn't match a hypothetical `rocky90-...` tag.
         if tag != target and not tag.startswith(target + "-"):
             continue
         if filter_str and filter_str not in tag:
@@ -922,10 +938,21 @@ def _find_release_url(
             continue
         for asset in rel.get("assets", []):
             name = asset.get("name", "")
-            if not name.endswith(".tar.gz"):
+            if not name.startswith(prefix):
                 continue
-            if arch_match not in name:
+            if not name.endswith(variant_tail):
                 continue
+            if variant == "base":
+                # Reject names whose tail before the suffix ends with
+                # a non-numeric `-<variant>` segment.  The kver
+                # always ends in digits.dots; variant segments are
+                # letters.
+                stem = name[:-len(suffix)]
+                last_seg = stem.rsplit("-", 1)[-1]
+                if last_seg and not any(
+                    ch.isdigit() for ch in last_seg
+                ):
+                    continue
             if kernel_signature and kernel_signature not in name:
                 continue
             return str(asset["browser_download_url"])
@@ -934,8 +961,10 @@ def _find_release_url(
     hint = f" matching '{filter_str}'" if filter_str else ""
     if kernel_signature:
         hint += f" kernel-signature={kernel_signature!r}"
+    if variant != "base":
+        hint += f" variant={variant!r}"
     raise RuntimeError(
-        f"No release found for '{target}'{hint}\n"
+        f"No {mode} release found for '{target}'{hint}\n"
         f"  Available releases: {', '.join(avail)}\n"
         f"  Try: ltvm target fetch --list"
     )
@@ -985,6 +1014,8 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     filt = getattr(args, "filter", None)
     arch = getattr(args, "arch", None) or "x86_64"
     kernel = getattr(args, "kernel", None)
+    variant = getattr(args, "variant", None) or "base"
+    image_mode = bool(getattr(args, "image", False))
 
     # Validate --kernel against the target's declared kernels (if both
     # are given).  This is user-friendly: it catches typos before we
@@ -1039,16 +1070,61 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
     from ltvm_pkg.target_config import OUTPUT_DIR
 
-    # Resolve URL: explicit --url, or GitHub release lookup
+    # Bootable mode: fetch a single qcow2.zst asset, no manifest, no
+    # ecosystem.  Handled up-front so we skip all the tag/ecosystem
+    # plumbing below.
+    if image_mode:
+        from ltvm_pkg.release_package import fetch_bootable
+
+        if not url:
+            if not use_json:
+                print(
+                    f"Looking up bootable {target} ({variant}) "
+                    f"from GitHub releases..."
+                )
+            try:
+                url = _find_release_url(
+                    target,
+                    filter_str=filt,
+                    arch=arch,
+                    kernel_signature=kernel_signature,
+                    variant=variant,
+                    mode="bootable",
+                )
+            except RuntimeError as e:
+                return _error(str(e), use_json)
+
+        try:
+            path = fetch_bootable(
+                target, url, OUTPUT_DIR, arch=arch, variant=variant
+            )
+        except Exception as e:
+            return _error(f"Fetch bootable failed: {e}", use_json)
+
+        if not use_json:
+            print(f"  Bootable disk at: {path}")
+        _output(
+            {"target": target, "variant": variant, "path": str(path),
+             "mode": "bootable"},
+            use_json,
+        )
+        return EXIT_OK
+
+    # Resolve URL: explicit --url, or GitHub release lookup.  In the
+    # normal (ecosystem) path we look for the manifest; fetch_target
+    # pulls the rest of the assets from the same release by parsing
+    # their names out of the manifest.
     if not url:
         if not use_json:
-            print(f"Looking up {target} from GitHub releases...")
+            print(f"Looking up {target} ({variant}) from GitHub releases...")
         try:
             url = _find_release_url(
                 target,
                 filter_str=filt,
                 arch=arch,
                 kernel_signature=kernel_signature,
+                variant=variant,
+                mode="ecosystem",
             )
         except RuntimeError as e:
             return _error(str(e), use_json)
@@ -1102,7 +1178,9 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         print(f"Fetching {target}...")
 
     try:
-        target_dir = fetch_target(target, url, OUTPUT_DIR, arch=arch)
+        target_dir = fetch_target(
+            target, url, OUTPUT_DIR, arch=arch, variant=variant
+        )
         # Record the release tag so repeat fetches are instant
         tag_file.parent.mkdir(parents=True, exist_ok=True)
         tag_file.write_text(release_tag + "\n")
@@ -1141,8 +1219,69 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------
 
 
+def _gh_release_upload(
+    tag: str, assets: list[Path], notes: str, use_json: bool
+) -> tuple[int | None, str | None]:
+    """Create (if needed) a GitHub release at ``tag`` and upload every
+    path in ``assets`` to it.  Returns (exit_code, err_msg): on success,
+    (None, None).  ``--clobber`` is set so re-runs overwrite prior
+    uploads with the same asset name, which matches the rest of the
+    publish flow.
+    """
+    try:
+        create = subprocess.run(
+            [
+                "gh", "release", "create", tag,
+                "--repo", GITHUB_REPO,
+                "--title", tag,
+                "--notes", notes,
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return EXIT_ERROR, "gh CLI not found (https://cli.github.com/)"
+    if create.returncode != 0:
+        gh_msg = (create.stderr or "") + (create.stdout or "")
+        if "already exists" not in gh_msg:
+            return EXIT_ERROR, (
+                f"gh release create failed (rc={create.returncode}): "
+                f"{gh_msg.strip()}"
+            )
+
+    for a in assets:
+        if not use_json:
+            size_mb = a.stat().st_size / (1024 * 1024)
+            print(f"  Uploading {a.name} ({size_mb:.0f} MB)...")
+        r = subprocess.run(
+            [
+                "gh", "release", "upload", tag, str(a),
+                "--repo", GITHUB_REPO, "--clobber",
+            ],
+        )
+        if r.returncode != 0:
+            return EXIT_ERROR, (
+                f"gh release upload failed (rc={r.returncode}) for {a.name}"
+            )
+    return None, None
+
+
 def cmd_publish(args: argparse.Namespace) -> int:
-    """Upload a packaged tarball to a GitHub release."""
+    """Upload a packaged asset set to a GitHub release.
+
+    Two modes, selected by ``--image``:
+
+    * default: publishes the ecosystem -- every asset listed by the
+      manifest produced by ``package_target`` (container, kernel, image,
+      optional lustre) to a single release tagged ``<target>-<arch>-<kver>[-<variant>]``.
+      The manifest is uploaded alongside so ``fetch`` can verify.
+
+    * ``--image``: publishes only a bootable qcow2 (produced by
+      ``ltvm target export`` earlier) to a dedicated release tagged
+      ``bootable-<target>-<arch>-<kver>[-<variant>]``.  Completely
+      separate from the ecosystem release so fetching one doesn't
+      accidentally grab the other.
+    """
     use_json = args.json
     tc, err = _load_target_args(args, use_json)
     if err is not None:
@@ -1150,130 +1289,130 @@ def cmd_publish(args: argparse.Namespace) -> int:
     assert tc is not None
 
     kernel = getattr(args, "kernel", None)
+    variant = getattr(args, "variant", None) or "base"
+    image_mode = bool(getattr(args, "image", False))
     tag = getattr(args, "tag", None)
-    tarball_path = getattr(args, "tarball", None)
 
-    # Find tarball: explicit path or auto-detect from output/
-    if tarball_path:
-        tarball = Path(tarball_path)
-        if not tarball.exists():
-            return _error(
-                f"Tarball not found: {tarball}",
-                use_json,
+    if image_mode:
+        from ltvm_pkg.release_package import package_bootable
+
+        if not use_json:
+            print(f"Preparing bootable asset for {args.target}...")
+        try:
+            asset = package_bootable(
+                args.target,
+                tc.output_dir,
+                kernel=kernel,
+                arch=tc.arch,
+                variant=variant,
             )
-    else:
-        # Look for existing tarball in output/.  tc.output_dir is
-        # output/<target>/<arch>/, tarballs sit one level above the
-        # target dir (output/), hence parent.parent.parent.
-        pattern = f"{args.target}-{tc.arch}-*.tar.*"
-        tarball_root = tc.output_dir.parent.parent
-        candidates = [
-            c
-            for c in sorted(tarball_root.glob(pattern))
-            if c.name.endswith(".tar.gz")
-        ]
-        if kernel:
-            candidates = [c for c in candidates if kernel in c.name]
-        if not candidates:
+        except Exception as e:
+            return _error(f"Package bootable failed: {e}", use_json)
+
+        # Tag: derive from the filename, stripping .qcow2.zst so the
+        # tag reads naturally.  Keeps bootable releases separate from
+        # ecosystem releases (they use different tag prefixes).
+        if not tag:
+            name = asset.name
+            for suffix in (".qcow2.zst", ".raw.zst", ".zst"):
+                if name.endswith(suffix):
+                    tag = name[: -len(suffix)]
+                    break
+            else:
+                tag = asset.stem
+
+        if not use_json:
+            print(f"  Tag: {tag}")
+        exit_code, err_msg = _gh_release_upload(
+            tag, [asset],
+            notes=(
+                f"Bootable disk image for {args.target} ({variant}) -- "
+                f"self-contained, no ltvm runtime required"
+            ),
+            use_json=use_json,
+        )
+        if exit_code is not None:
+            return _error(err_msg or "upload failed", use_json)
+
+        url = f"https://github.com/{GITHUB_REPO}/releases/tag/{tag}"
+        if not use_json:
+            print(f"  Published: {url}")
+        _output(
+            {"target": args.target, "tag": tag, "asset": str(asset),
+             "url": url, "mode": "bootable"},
+            use_json,
+        )
+        return EXIT_OK
+
+    # --- Ecosystem publish: package, then upload every asset. ---
+    # cmd_package did the work if the caller ran it first, but we
+    # can't tell cheaply; re-run it inline so `publish` is always
+    # self-sufficient (package_target is idempotent given fresh
+    # artifacts -- it just recompresses).
+    no_lustre = getattr(args, "no_lustre", False)
+    if not no_lustre:
+        lustre_tree_arg = getattr(args, "lustre_tree", None)
+        lustre_path, err_msg = _resolve_lustre_tree(lustre_tree_arg)
+        if err_msg:
             return _error(
-                f"No tarball found matching {pattern}",
-                use_json,
-                hint=f"Run 'ltvm target package {args.target}' first",
+                err_msg, use_json,
+                hint=(
+                    "Run from a Lustre tree, pass --lustre-tree, or "
+                    "use --no-lustre for a kernel-only publish"
+                ),
             )
-        tarball = candidates[-1]  # newest
+        assert lustre_path is not None
+        if not tc.kernel_deb_source:
+            _gate_lustre_validation(tc, lustre_path, force=args.force_compat)
+        if not use_json:
+            print(f"Snapshotting Lustre tree from {lustre_path}...")
+        try:
+            snapshot_lustre(
+                lustre_path, tc.output_dir,
+                target=args.target, kernel=kernel,
+                arch=tc.arch, variant=variant,
+            )
+        except Exception as e:
+            return _error(f"Lustre snapshot failed: {e}", use_json)
 
     if not use_json:
-        print(f"Publishing {tarball.name}...")
+        v_hint = "" if variant == "base" else f" variant={variant}"
+        print(f"Packaging {args.target}{v_hint}...")
+    try:
+        assets = package_target(
+            args.target, tc.output_dir,
+            kernel=kernel, arch=tc.arch, variant=variant,
+            dest_dir=getattr(args, "output", None),
+        )
+    except Exception as e:
+        return _error(f"Package failed: {e}", use_json)
 
-    # Generate tag if not provided. Strip the exact suffix only; using
-    # str.replace(".tar", "") would also mangle names that happen to
-    # contain ".tar" earlier in the basename.
+    # Tag: derive from the manifest filename (strips .json, natural
+    # read).  Variant is embedded in the manifest name for free.
     if not tag:
-        name = tarball.name
-        for suffix in (".tar.gz", ".tar.xz", ".tar.bz2", ".tgz", ".tar"):
-            if name.endswith(suffix):
-                tag = name[: -len(suffix)]
-                break
-        else:
-            tag = tarball.stem
+        manifest_name = assets["manifest"].name
+        tag = manifest_name[len("manifest-"): -len(".json")]
 
-    # Create release + upload via gh CLI
     if not use_json:
         print(f"  Tag: {tag}")
-        print(f"  Tarball: {tarball}")
-        print(f"  Size: {tarball.stat().st_size / (1024 * 1024):.0f} MB")
+        print(f"  Assets: {len(assets)}")
 
-    # Create release.  An "already exists" error is fine (we'll just
-    # upload to the existing release below); any other failure is
-    # fatal -- previously the return code was completely unchecked,
-    # so an auth error would silently produce a confusing upload
-    # failure two lines down.
-    try:
-        create = subprocess.run(
-            [
-                "gh",
-                "release",
-                "create",
-                tag,
-                "--repo",
-                GITHUB_REPO,
-                "--title",
-                tag,
-                "--notes",
-                f"Pre-built artifacts for {args.target}",
-            ],
-            capture_output=True,
-            text=True,
-        )
-    except FileNotFoundError:
-        return _error(
-            "gh CLI not found",
-            use_json,
-            hint="install GitHub CLI: https://cli.github.com/",
-        )
-    if create.returncode != 0:
-        gh_msg = (create.stderr or "") + (create.stdout or "")
-        if "already exists" not in gh_msg:
-            return _error(
-                f"gh release create failed (rc={create.returncode}): "
-                f"{gh_msg.strip()}",
-                use_json,
-            )
-
-    # Upload asset
-    try:
-        r = subprocess.run(
-            [
-                "gh",
-                "release",
-                "upload",
-                tag,
-                str(tarball),
-                "--repo",
-                GITHUB_REPO,
-                "--clobber",
-            ],
-        )
-    except FileNotFoundError:
-        return _error(
-            "gh CLI not found",
-            use_json,
-            hint="install GitHub CLI: https://cli.github.com/",
-        )
-    if r.returncode != 0:
-        return _error(
-            f"Upload failed (rc={r.returncode})",
-            use_json,
-            hint="Check 'gh auth status' for credentials",
-        )
+    # Upload EVERYTHING including the manifest so fetch can find it.
+    to_upload = list(assets.values())
+    exit_code, err_msg = _gh_release_upload(
+        tag, to_upload,
+        notes=f"Pre-built artifacts for {args.target} (variant={variant})",
+        use_json=use_json,
+    )
+    if exit_code is not None:
+        return _error(err_msg or "upload failed", use_json)
 
     url = f"https://github.com/{GITHUB_REPO}/releases/tag/{tag}"
     if not use_json:
         print(f"  Published: {url}")
 
     # Record the release tag locally so subsequent `ltvm fetch` knows
-    # the artifacts already on disk match this release.  Lives under
-    # the arch-qualified output dir.
+    # the artifacts already on disk match this release.
     from ltvm_pkg.target_config import OUTPUT_DIR
 
     arch = getattr(args, "arch", None) or "x86_64"
@@ -1283,8 +1422,9 @@ def cmd_publish(args: argparse.Namespace) -> int:
 
     result = {
         "target": args.target,
+        "variant": variant,
         "tag": tag,
-        "tarball": str(tarball),
+        "assets": {k: str(p) for k, p in assets.items()},
         "url": url,
     }
     _output(result, use_json)
@@ -1699,6 +1839,57 @@ def cmd_target_show(args: argparse.Namespace) -> int:
 
 
 # ------------------------------------------------------------------
+# ------------------------------------------------------------------
+# Subcommand: target export (bootable-disk packaging)
+# ------------------------------------------------------------------
+
+
+def cmd_target_export(args: argparse.Namespace) -> int:
+    use_json = args.json
+    err = _require_root(
+        use_json,
+        hint="export uses losetup + mount; run: sudo ltvm target export ...",
+    )
+    if err is not None:
+        return err
+
+    tc, terr = _load_target_args(args, use_json)
+    if terr is not None:
+        return terr
+    assert tc is not None
+
+    from ltvm_pkg.image_export import export_image
+
+    kernel = getattr(args, "kernel", None)
+    kernel_name = tc.resolve_kernel(kernel)
+    fmt = args.format
+    ext = "qcow2" if fmt == "qcow2" else "raw"
+    if args.output:
+        out = Path(args.output).expanduser().resolve()
+    else:
+        out = tc.image_output_dir(kernel) / f"bootable-{kernel_name}.{ext}"
+
+    try:
+        result = export_image(
+            tc, kernel, out, image_format=fmt, force=args.force,
+        )
+    except FileExistsError as e:
+        return _error(str(e), use_json,
+                      hint="Re-run with --force to overwrite")
+    except (FileNotFoundError, RuntimeError, ValueError) as e:
+        return _error(str(e), use_json)
+
+    payload = {
+        "target": tc.name,
+        "kernel": kernel_name,
+        "format": fmt,
+        "path": str(result),
+        "size_mb": round(result.stat().st_size / (1024 * 1024), 1),
+    }
+    _output(payload, use_json)
+    return EXIT_OK
+
+
 # Subcommand: validate (Lustre compatibility gate)
 # ------------------------------------------------------------------
 

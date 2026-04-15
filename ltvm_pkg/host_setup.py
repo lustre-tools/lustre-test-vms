@@ -175,6 +175,10 @@ def check_prerequisites(host: HostInfo) -> None:
         "ip": "iproute2" if host.pkg_mgr == "apt" else "iproute",
         "fakeroot": "fakeroot",
         "mke2fs": "e2fsprogs",
+        # zstd: publish/fetch compress artifacts with it; gzip is too
+        # weak on ext4 rootfs content (compresses ~2x) to fit within
+        # GitHub's 2 GiB per-asset release cap.
+        "zstd": "zstd",
         # Needed by `ltvm target export` (bootable-disk packaging).
         "parted": "parted",
         ("grub-install" if host.pkg_mgr == "apt" else "grub2-install"): (
@@ -895,6 +899,18 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
         "version": pv,
     }
 
+    # zstd (used by release_package publish/fetch)
+    zv = None
+    zstd_path = shutil.which("zstd")
+    if zstd_path:
+        r = _run_quiet(["zstd", "--version"], check=False)
+        m = re.search(r"v?(\d+\.\d+\.\d+)", r.stdout or "")
+        zv = m.group(1) if m else "unknown"
+    results["zstd"] = {
+        "installed": zstd_path is not None,
+        "version": zv,
+    }
+
     # SSH config
     ssh_config = Path("/root/.ssh/config")
     results["ssh"] = {
@@ -912,6 +928,7 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
             results["dnsmasq"]["running"],
             results["ltvm"]["installed"],
             results["podman"]["installed"],
+            results["zstd"]["installed"],
             results["ssh"]["configured"],
         ]
     )
@@ -967,6 +984,12 @@ def print_verify(results: dict[str, Any]) -> None:
         ok(f"podman: {p['version']}")
     else:
         fail("podman: not installed (needed by ltvm)")
+
+    z = results.get("zstd", {})
+    if z.get("installed"):
+        ok(f"zstd: {z['version']}")
+    else:
+        fail("zstd: not installed (needed by ltvm target publish/fetch)")
 
     if results["ssh"]["configured"]:
         ok("SSH config: configured")

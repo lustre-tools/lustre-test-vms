@@ -1121,7 +1121,12 @@ class TestValidationGating:
         from ltvm_pkg import cli as cli_mod
 
         tc = self._tc(tmp_targets)
-        tarball = tmp_path / "out.tar.gz"
+        assets = {
+            "container": tmp_path / "container.tar.zst",
+            "kernel": tmp_path / "kernel.tar.zst",
+            "image": tmp_path / "image.tar.zst",
+            "manifest": tmp_path / "manifest.json",
+        }
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
             patch.object(
@@ -1129,7 +1134,7 @@ class TestValidationGating:
             ),
             patch.object(cli_mod, "snapshot_lustre") as snap,
             patch.object(
-                cli_mod, "package_target", return_value=tarball
+                cli_mod, "package_target", return_value=assets
             ) as pt,
         ):
             rc = _run_main(
@@ -1830,8 +1835,11 @@ class TestFetchKernelFlag:
                 "tag_name": "rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre",
                 "assets": [
                     {
-                        "name": "rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre.tar.gz",
-                        "browser_download_url": "https://ex/97.tar.gz",
+                        "name": (
+                            "manifest-rocky9-x86_64-5.14.0-"
+                            "611.13.1.el9_7_lustre.json"
+                        ),
+                        "browser_download_url": "https://ex/97.json",
                     }
                 ],
             },
@@ -1839,8 +1847,11 @@ class TestFetchKernelFlag:
                 "tag_name": "rocky9-x86_64-5.14.0-503.26.1.el9_5_lustre",
                 "assets": [
                     {
-                        "name": "rocky9-x86_64-5.14.0-503.26.1.el9_5_lustre.tar.gz",
-                        "browser_download_url": "https://ex/95.tar.gz",
+                        "name": (
+                            "manifest-rocky9-x86_64-5.14.0-"
+                            "503.26.1.el9_5_lustre.json"
+                        ),
+                        "browser_download_url": "https://ex/95.json",
                     }
                 ],
             },
@@ -1849,7 +1860,7 @@ class TestFetchKernelFlag:
             url = _find_release_url(
                 "rocky9", arch="x86_64", kernel_signature="el9_5"
             )
-        assert url == "https://ex/95.tar.gz"
+        assert url == "https://ex/95.json"
 
     def test_cmd_fetch_rejects_unknown_kernel(
         self, capsys: pytest.CaptureFixture[str], tmp_targets: Path

@@ -70,6 +70,7 @@ from ltvm_pkg.cli import (  # noqa: E402
     cmd_setup,
     cmd_snapshot,
     cmd_status,
+    cmd_target_export,
     cmd_target_show,
     cmd_targets,
     cmd_update,
@@ -483,7 +484,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="With --replace, re-fetch even when the local tag "
         "already matches the remote release.",
     )
+    tfp.add_argument(
+        "--variant",
+        default="base",
+        help="Target variant to fetch (default: base). E.g. 'mofed'.",
+    )
+    tfp.add_argument(
+        "--image",
+        action="store_true",
+        help="Fetch only a standalone bootable qcow2 (ignores the "
+        "ecosystem assets).  Lands under output/<target>/<arch>/bootable/.",
+    )
     tfp.set_defaults(func=cmd_fetch)
+
+    # export (bootable-disk packaging for non-ltvm users)
+    tep = target_sub.add_parser(
+        "export",
+        parents=[common, kernel_arg],
+        help="Export base.ext4 + kernel as a bootable qcow2/raw disk",
+    )
+    tep.add_argument("target")
+    tep.add_argument(
+        "--output", "-o", default=None,
+        help="Output file (default: "
+        "output/<target>/<arch>/images/<kernel>/bootable-<kernel>.<ext>)",
+    )
+    tep.add_argument(
+        "--format", choices=["qcow2", "raw"], default="qcow2",
+        help="Disk image format (default: qcow2)",
+    )
+    tep.add_argument(
+        "--force", action="store_true",
+        help="Overwrite --output if it already exists",
+    )
+    tep.set_defaults(func=cmd_target_export)
 
     # package (maintainer use)
     tpkp = target_sub.add_parser(
@@ -515,13 +549,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Output directory for tarball (default: output/)",
     )
+    tpkp.add_argument(
+        "--variant",
+        default="base",
+        help="Target variant to package (default: base). E.g. 'mofed'.",
+    )
     tpkp.set_defaults(func=cmd_package)
 
     # publish (maintainer use)
     tpbp = target_sub.add_parser(
         "publish",
-        parents=[common, kernel_arg],
-        help="Upload a packaged tarball to a GitHub release (maintainer)",
+        parents=[common, kernel_arg, force_compat_arg],
+        help="Upload a packaged asset set to a GitHub release (maintainer)",
     )
     tpbp.add_argument("target")
     tpbp.add_argument(
@@ -532,7 +571,33 @@ def build_parser() -> argparse.ArgumentParser:
     tpbp.add_argument(
         "--tarball",
         default=None,
-        help="Path to tarball (default: auto-detect from output/)",
+        help="(Deprecated; unused by the split-asset publish flow.)",
+    )
+    tpbp.add_argument(
+        "--variant",
+        default="base",
+        help="Target variant to publish (default: base). E.g. 'mofed'.",
+    )
+    tpbp.add_argument(
+        "--image",
+        action="store_true",
+        help="Publish only a standalone bootable qcow2 produced by "
+        "`ltvm target export` (separate release from the ecosystem).",
+    )
+    tpbp.add_argument(
+        "--lustre-tree",
+        help="Path to Lustre source to snapshot (default: cwd).",
+    )
+    tpbp.add_argument(
+        "--no-lustre",
+        action="store_true",
+        default=False,
+        help="Skip Lustre snapshot+bundle.  Kernel-only publish.",
+    )
+    tpbp.add_argument(
+        "--output",
+        default=None,
+        help="Staging dir for packaged assets (default: output/)",
     )
     tpbp.set_defaults(func=cmd_publish)
 

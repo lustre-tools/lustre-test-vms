@@ -1267,6 +1267,30 @@ def cmd_restore(args: argparse.Namespace) -> None:
 # ── doctor ───────────────────────────────────────────────
 
 
+def _check_export_tools() -> list[str]:
+    """Return warning lines for missing `ltvm target export` deps.
+
+    Split out so tests can exercise the check directly without
+    mocking the rest of cmd_doctor.  `ltvm install` is the fixer for
+    anything listed here.
+    """
+    import shutil as _shutil
+
+    warnings: list[str] = []
+    for tool in ("parted", "qemu-img"):
+        if _shutil.which(tool) is None:
+            warnings.append(
+                f"missing host tool: {tool} (needed by `ltvm target export`)"
+            )
+    if _shutil.which("grub2-install") is None and \
+            _shutil.which("grub-install") is None:
+        warnings.append(
+            "missing host tool: grub2-install/grub-install "
+            "(needed by `ltvm target export`)"
+        )
+    return warnings
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     issues = 0
 
@@ -1434,6 +1458,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 if args.fix:
                     run(["ip", "link", "del", tap])
                     print("  fixed: removed")
+
+    for line in _check_export_tools():
+        print(line)
+        issues += 1
 
     _, ssh_dir = _real_user_ssh_dir()
     ssh_cfg = ssh_dir / "config"
