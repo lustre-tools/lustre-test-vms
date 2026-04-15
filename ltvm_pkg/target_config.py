@@ -80,6 +80,12 @@ class Variant:
         self.image_overlay: Path | None = (TARGETS_DIR / io) if io else None
         self.packages: list[str] = list(self._data.get("packages", []))
         self.params: dict[str, Any] = dict(self._data.get("params", {}))
+        # Optional kernel pin: restrict this variant to one declared
+        # kernel.  ``None`` means "applies to every kernel the target
+        # declares" (the default).  See lustre_test_vms_v2-stp for
+        # design rationale.
+        k = self._data.get("kernel")
+        self.pinned_kernel: str | None = str(k) if k is not None else None
 
     @property
     def is_base(self) -> bool:
@@ -100,6 +106,7 @@ class Variant:
         v.image_overlay = self.image_overlay
         v.packages = list(self.packages)
         v.params = new_params
+        v.pinned_kernel = self.pinned_kernel
         return v
 
     def hash_bytes(self, artifact: str) -> bytes:
@@ -294,6 +301,25 @@ class TargetConfig:
                 )
             self._variants[vname] = Variant(vname, vdata, self.target_dir)
 
+        # Validate kernel pins against the declared kernel list so a
+        # typo in targets.yaml fails at TargetConfig load instead of
+        # much later with a confusing "no kernel for variant" error.
+        # Done lazily -- only if some variant actually pins -- so
+        # malformed kernel entries don't break construction of
+        # unrelated (unpinned-variant) targets.
+        if any(v.pinned_kernel for v in self._variants.values()):
+            declared_kernel_names = self.declared_kernels()
+            for vname, var in self._variants.items():
+                if var.pinned_kernel is None:
+                    continue
+                if var.pinned_kernel not in declared_kernel_names:
+                    raise ValueError(
+                        f"target {name!r} variant {vname!r}: pinned "
+                        f"kernel {var.pinned_kernel!r} is not declared in "
+                        f"kernels.available (declared: "
+                        f"{', '.join(declared_kernel_names)})"
+                    )
+
         if variant not in self._variants:
             declared = ", ".join(sorted(self._variants))
             raise ValueError(
@@ -441,12 +467,35 @@ class TargetConfig:
         (e.g. 5.14-rhel9.7-5.14.0-611.13.1.el9_7_lustre).
 
         Resolution order:
-          1. If kernel is None, use default_kernel.
-          2. Exact directory match.
-          3. Prefix match: scan for dirs starting with <kernel>-,
+          1. If this TargetConfig is bound to a variant with a kernel
+             pin, the pin acts as the default.  Passing an explicit
+             kernel that doesn't match the pin raises ValueError so
+             mismatched (--variant, --kernel) combos fail loudly
+             instead of silently routing to the wrong artifacts.
+          2. Else if kernel is None, use default_kernel.
+          3. Exact directory match.
+          4. Prefix match: scan for dirs starting with <kernel>-,
              pick the lexicographically latest.
-          4. Return name as-is (for new builds not yet on disk).
+          5. Return name as-is (for new builds not yet on disk).
         """
+        # Honor the variant's kernel pin first: if bound to a variant
+        # that pins a specific kernel, treat that pin as the default
+        # and reject explicit --kernel that disagrees.  resolve_kernel
+        # is on the hot path for every build/package/fetch call so
+        # getting it right here catches the mismatch early.
+        pin = None
+        var = self._variants.get(self.variant_name)
+        if var is not None and var.pinned_kernel is not None:
+            pin = var.pinned_kernel
+        if pin is not None:
+            if kernel is None:
+                kernel = pin
+            elif self._short_kernel_name(kernel) != pin:
+                raise ValueError(
+                    f"target {self.name!r} variant "
+                    f"{self.variant_name!r} is pinned to kernel "
+                    f"{pin!r}; cannot use {kernel!r}"
+                )
         name = kernel if kernel is not None else self.default_kernel
         kernels_dir = self.output_dir / "kernels"
 
@@ -551,6 +600,27 @@ class TargetConfig:
                 f"(declared: {declared})"
             )
         return self._variants[name]
+
+    def applicable_kernels(self, variant: str | None = None) -> list[str]:
+        """Return the declared kernels the given variant applies to.
+
+        * base variant (or any variant without a ``kernel:`` pin):
+          every kernel the target declares.
+        * variant with a ``kernel:`` pin: a single-element list with
+          just that kernel.
+
+        Consumed by cmd_targets / cmd_target_show so a pinned variant
+        only surfaces under its one valid kernel, and by callers that
+        iterate over (kernel, variant) pairs to emit asset rows.
+        """
+        v = self.variant_name if variant is None else variant
+        all_kernels = self.declared_kernels()
+        if v == DEFAULT_VARIANT:
+            return all_kernels
+        var = self.variant(v)
+        if var.pinned_kernel is not None:
+            return [var.pinned_kernel]
+        return all_kernels
 
     # ------------------------------------------------------------------
     # Staleness and metadata

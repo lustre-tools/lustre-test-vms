@@ -1708,6 +1708,14 @@ def cmd_targets(args: argparse.Namespace) -> int:
                 }
             )
             for variant in declared_variants:
+                # Honor variant kernel-pin: a pinned variant only
+                # surfaces under its single declared kernel (see
+                # lustre_test_vms_v2-stp).
+                if (
+                    variant != "base"
+                    and kname not in tc.applicable_kernels(variant)
+                ):
+                    continue
                 local, remote = _release_status(
                     name, tc.arch, all_releases,
                     kernel_signature=signature, variant=variant,

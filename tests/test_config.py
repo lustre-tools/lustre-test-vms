@@ -871,6 +871,121 @@ class TestVariants:
         assert h_default != v_over.hash_bytes("container")
 
 
+class TestVariantKernelPin:
+    """Variant can pin itself to a single kernel; resolve_kernel
+    routes to the pin and rejects mismatched explicit kernels.  See
+    lustre_test_vms_v2-stp for the design."""
+
+    def _pin_yaml(
+        self, tmp_targets: Path, pin: str, variant_name: str = "mofed"
+    ) -> None:
+        data = yaml.safe_load(
+            (tmp_targets / "targets" / "targets.yaml").read_text()
+        )
+        data["targets"]["rocky9"]["variants"] = {
+            variant_name: {"kernel": pin},
+        }
+        _write_targets_yaml(tmp_targets / "targets", data)
+
+    def test_pin_parses(self, tmp_targets: Path) -> None:
+        self._pin_yaml(tmp_targets, "5.14-rhel9.5")
+        tc = _make_config(tmp_targets)
+        assert tc.variant("mofed").pinned_kernel == "5.14-rhel9.5"
+
+    def test_no_pin_by_default(self, tmp_targets: Path) -> None:
+        self._pin_yaml(tmp_targets, "5.14-rhel9.5")
+        tc = _make_config(tmp_targets)
+        assert tc.variant("base").pinned_kernel is None
+
+    def test_applicable_kernels_pinned(self, tmp_targets: Path) -> None:
+        self._pin_yaml(tmp_targets, "5.14-rhel9.5")
+        tc = _make_config(tmp_targets)
+        assert tc.applicable_kernels("mofed") == ["5.14-rhel9.5"]
+        assert set(tc.applicable_kernels("base")) == {
+            "5.14-rhel9.7", "5.14-rhel9.5"
+        }
+
+    def test_applicable_kernels_unpinned(self, tmp_targets: Path) -> None:
+        data = yaml.safe_load(
+            (tmp_targets / "targets" / "targets.yaml").read_text()
+        )
+        data["targets"]["rocky9"]["variants"] = {"mofed": {}}
+        _write_targets_yaml(tmp_targets / "targets", data)
+        tc = _make_config(tmp_targets)
+        assert set(tc.applicable_kernels("mofed")) == {
+            "5.14-rhel9.7", "5.14-rhel9.5"
+        }
+
+    def test_unknown_pin_rejected(self, tmp_targets: Path) -> None:
+        self._pin_yaml(tmp_targets, "5.14-nonexistent")
+        with pytest.raises(
+            ValueError, match="pinned kernel '5.14-nonexistent'"
+        ):
+            _make_config(tmp_targets)
+
+    def test_resolve_kernel_uses_pin_as_default(
+        self, tmp_targets: Path
+    ) -> None:
+        import ltvm_pkg.target_config as cfg
+
+        self._pin_yaml(tmp_targets, "5.14-rhel9.5")
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(
+                cfg, "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            tc = cfg.TargetConfig("rocky9", variant="mofed")
+        assert tc.resolve_kernel(None) == "5.14-rhel9.5"
+
+    def test_resolve_kernel_mismatch_rejected(
+        self, tmp_targets: Path
+    ) -> None:
+        import ltvm_pkg.target_config as cfg
+
+        self._pin_yaml(tmp_targets, "5.14-rhel9.5")
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(
+                cfg, "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            tc = cfg.TargetConfig("rocky9", variant="mofed")
+        with pytest.raises(ValueError, match="pinned to kernel"):
+            tc.resolve_kernel("5.14-rhel9.7")
+
+    def test_resolve_kernel_matching_pin_accepted(
+        self, tmp_targets: Path
+    ) -> None:
+        """Explicit --kernel matching the pin should be accepted so
+        scripts that always pass --kernel keep working."""
+        import ltvm_pkg.target_config as cfg
+
+        self._pin_yaml(tmp_targets, "5.14-rhel9.5")
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(
+                cfg, "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            tc = cfg.TargetConfig("rocky9", variant="mofed")
+        assert tc.resolve_kernel("5.14-rhel9.5") == "5.14-rhel9.5"
+
+    def test_with_param_overrides_preserves_pin(
+        self, tmp_targets: Path
+    ) -> None:
+        self._pin_yaml(tmp_targets, "5.14-rhel9.5")
+        tc = _make_config(tmp_targets)
+        v = tc.variant("mofed").with_param_overrides({"foo": "bar"})
+        assert v.pinned_kernel == "5.14-rhel9.5"
+
+
 class TestListTargets:
     def test_finds_targets(self, tmp_targets: Path) -> None:
         import ltvm_pkg.target_config as cfg
