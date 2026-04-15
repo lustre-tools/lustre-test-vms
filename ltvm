@@ -51,6 +51,7 @@ from ltvm_pkg.cli import (  # noqa: E402
     cmd_build_image,
     cmd_build_kernel,
     cmd_build_lustre,
+    cmd_build_mofed_kmods,
     cmd_build_shell,
     cmd_clean,
     cmd_cluster,
@@ -378,6 +379,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to mount in container (default: cwd)",
     )
     bshp.set_defaults(func=cmd_build_shell)
+
+    bmkp = build_sub.add_parser(
+        "mofed-kmods",
+        parents=[common, kernel_arg, force_arg, variant_arg],
+        help="Build MOFED kernel modules against the target's Lustre-patched kernel",
+    )
+    bmkp.add_argument("target")
+    bmkp.set_defaults(func=cmd_build_mofed_kmods)
 
     bstp = build_sub.add_parser(
         "status",

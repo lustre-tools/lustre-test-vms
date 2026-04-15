@@ -7,6 +7,7 @@ raw ext4.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -338,6 +339,38 @@ def build_image(
 
     kernel_name = target_config.resolve_kernel(kernel)
 
+    # MOFED variant: ensure per-kernel kmod RPMs exist (auto-build if
+    # not).  Their hash folds into the image hash so changing kernel or
+    # mofed_version invalidates the image.
+    from .target_config import DEFAULT_VARIANT
+    mofed_kmods_dir: Path | None = None
+    mofed_kmods_hash_input: bytes = b""
+    if target_config.variant_name != DEFAULT_VARIANT and \
+            target_config.variant(target_config.variant_name).params.get(
+                "mofed_version"
+            ):
+        from .mofed_kmod_build import (
+            build_mofed_kmods,
+            is_stale as _mofed_is_stale,
+            mofed_kmod_dir as _mofed_kmod_dir,
+        )
+        mofed_kmods_dir = _mofed_kmod_dir(target_config, kernel)
+        if force or _mofed_is_stale(target_config, kernel) or \
+                not any(mofed_kmods_dir.glob("*.rpm")):
+            log.info("MOFED kmods missing or stale -- building first...")
+            mofed_kmods_dir = build_mofed_kmods(
+                target_config, kernel=kernel, force=force,
+            )
+        # Hash the produced RPM names + sizes so image rebuilds when
+        # the kmod set changes (e.g. mofed_version bump).
+        h = hashlib.sha256()
+        for rpm in sorted(mofed_kmods_dir.glob("*.rpm")):
+            h.update(rpm.name.encode())
+            h.update(b"\0")
+            h.update(str(rpm.stat().st_size).encode())
+            h.update(b"\0")
+        mofed_kmods_hash_input = h.digest()
+
     lustre_staging: Path | None = None
     lustre_hash_input: bytes = b""
     if with_lustre is not None:
@@ -361,8 +394,9 @@ def build_image(
             )
         lustre_hash_input = _lustre_staging_hash_input(lustre_staging)
 
+    combined_extra_hash = lustre_hash_input + mofed_kmods_hash_input
     if not force and not target_config.is_stale(
-        "image", kernel=kernel, extra_hash=lustre_hash_input
+        "image", kernel=kernel, extra_hash=combined_extra_hash
     ):
         log.info(
             "Image for %s (kernel=%s) is up to date, skipping (use force=True to rebuild)",
@@ -564,6 +598,30 @@ def build_image(
                 (inject_dir / "modules").iterdir()
             ):
                 lines.append("COPY modules/ /lib/modules/")
+            # MOFED kmod RPMs (when present) install BEFORE depmod so
+            # the resulting modules.dep includes mlnx-ofa_kernel kmods.
+            # These provide MOFED's mlx5_core / ib_core / rdma_cm symbol
+            # versions, which Lustre's ko2iblnd was linked against in
+            # the build container.
+            if mofed_kmods_dir is not None and any(
+                mofed_kmods_dir.glob("*.rpm")
+            ):
+                kmod_dest = inject_dir / "mofed-kmods"
+                kmod_dest.mkdir(exist_ok=True)
+                for rpm in mofed_kmods_dir.glob("*.rpm"):
+                    shutil.copy2(rpm, kmod_dest / rpm.name)
+                log.info(
+                    "Including %d MOFED kmod RPMs", len(list(kmod_dest.iterdir()))
+                )
+                lines.append("COPY mofed-kmods/ /tmp/mofed-kmods/")
+                # --nodeps because the kmod RPMs Require kernel-core =
+                # <stock-rhel-version>, which our Lustre-patched kernel
+                # doesn't provide via rpmdb.  The actual ABI match is
+                # enforced by the kver we built them against.
+                lines.append(
+                    "RUN rpm -ivh --nodeps --force /tmp/mofed-kmods/*.rpm "
+                    "&& rm -rf /tmp/mofed-kmods"
+                )
             if kver:
                 lines.append(f"RUN ldconfig && depmod -a {kver}")
             else:
@@ -637,12 +695,17 @@ def build_image(
     target_config.write_meta(
         "image",
         kernel=kernel,
-        extra_hash=lustre_hash_input,
+        extra_hash=combined_extra_hash,
         build_date=datetime.now(timezone.utc).isoformat(),
         with_lustre=str(Path(with_lustre).resolve())
         if with_lustre is not None
         else None,
         lustre_version=lustre_version,
+        mofed_kmods=(
+            sorted(p.name for p in mofed_kmods_dir.glob("*.rpm"))
+            if mofed_kmods_dir is not None
+            else None
+        ),
         build_seconds=round(elapsed, 1),
         image_size_mb=round(size_mb, 1),
         packages=pkg_manifest,

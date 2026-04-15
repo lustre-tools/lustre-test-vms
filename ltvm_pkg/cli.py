@@ -405,6 +405,51 @@ def cmd_build_kernel(args: argparse.Namespace) -> int:
 
 
 # ------------------------------------------------------------------
+# Subcommand: build mofed-kmods
+# ------------------------------------------------------------------
+
+
+def cmd_build_mofed_kmods(args: argparse.Namespace) -> int:
+    use_json = args.json
+    tc, err = _load_target_args(args, use_json)
+    if err is not None:
+        return err
+    assert tc is not None
+
+    from ltvm_pkg.mofed_kmod_build import build_mofed_kmods
+    from ltvm_pkg.target_config import DEFAULT_VARIANT
+
+    if tc.variant_name == DEFAULT_VARIANT:
+        return _error(
+            f"target {tc.name!r} is bound to base variant -- "
+            f"mofed-kmods only applies to a mofed variant",
+            use_json,
+            hint=f"Pass --variant mofed-24 (or whichever mofed-* is declared)",
+        )
+
+    try:
+        out_dir = build_mofed_kmods(
+            tc, kernel=getattr(args, "kernel", None),
+            force=getattr(args, "force", False),
+        )
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        return _error(f"MOFED kmod build failed: {e}", use_json)
+
+    rpms = sorted(p.name for p in out_dir.glob("*.rpm"))
+    _output(
+        {
+            "target": tc.name,
+            "variant": tc.variant_name,
+            "kernel": tc.resolve_kernel(getattr(args, "kernel", None)),
+            "path": str(out_dir),
+            "rpms": rpms,
+        },
+        use_json,
+    )
+    return EXIT_OK
+
+
+# ------------------------------------------------------------------
 # Subcommand: build-image
 # ------------------------------------------------------------------
 
@@ -426,22 +471,54 @@ def cmd_build_image(args: argparse.Namespace) -> int:
             lustre_tree, args.target, arch=tc.arch,
             kernel=resolved_kernel, variant=tc.variant_name,
         )
-        if not candidate.exists():
-            return _error(
-                f"no Lustre staging at {candidate}",
-                use_json,
-                hint=(
-                    f"run `ltvm build lustre {args.target} --kernel "
-                    f"{resolved_kernel}` first, or pass --no-lustre to "
-                    f"bake a kernel-only image"
-                ),
-            )
+        build_tree = tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree"
         _gate_lustre_validation(
             tc,
             lustre_tree,
             force=args.force_compat,
-            kernel_build_tree=tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree",
+            kernel_build_tree=build_tree,
         )
+        if not candidate.exists():
+            if not build_tree.is_dir():
+                return _error(
+                    f"Kernel build-tree not found: {build_tree}",
+                    use_json,
+                    hint=f"Run: ltvm build kernel {args.target} "
+                    f"--kernel {resolved_kernel}",
+                )
+            container_check = subprocess.run(
+                ["podman", "image", "exists", tc.container_tag],
+                capture_output=True,
+            )
+            if container_check.returncode != 0:
+                return _error(
+                    f"Build container '{tc.container_tag}' not found",
+                    use_json,
+                    hint=(
+                        f"Run: ltvm build container {args.target}\n"
+                        f"  Or fetch a published target: "
+                        f"ltvm target fetch {args.target}"
+                    ),
+                )
+            if not use_json:
+                print(
+                    f"No Lustre staging at {candidate} -- "
+                    f"building Lustre first..."
+                )
+            try:
+                build_lustre(
+                    lustre_tree,
+                    build_tree,
+                    container_tag=tc.container_tag,
+                    target=args.target,
+                    enable_server=(tc.lustre_mode != LustreMode.CLIENT),
+                    extra_configure=list(tc.configure_args),
+                    arch=tc.arch,
+                    kernel=resolved_kernel,
+                    variant=tc.variant_name,
+                )
+            except Exception as e:
+                return _error(f"Lustre build failed: {e}", use_json)
         with_lustre = str(lustre_tree)
 
     if not use_json:
