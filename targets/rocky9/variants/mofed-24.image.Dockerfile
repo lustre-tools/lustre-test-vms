@@ -49,6 +49,12 @@ RUN cd /opt/mofed-src/current/RPMS && \
       | xargs dnf install -y --allowerasing --nogpgcheck --setopt=install_weak_deps=False \
     && dnf clean all
 
+# MOFED's openvswitch-selinux-policy dep drags in selinux-policy-targeted,
+# which would activate SELinux on a rootfs that was never labeled (the
+# base image installs no policy and runs unconfined). Disable SELinux so
+# init doesn't load the policy.
+RUN sed -i 's/^SELINUX=.*/SELINUX=disabled/' /etc/selinux/config
+
 # Make sure mlx5_core / rdma_rxe / ib_uverbs etc. are loaded early.
 RUN echo -e "mlx5_core\nib_uverbs\nrdma_cm\nrdma_ucm" \
         > /etc/modules-load.d/mofed.conf

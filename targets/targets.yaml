@@ -24,6 +24,12 @@ targets:
     kernels:
       available:
       - 4.18-rhel8.10
+      - 4.18-rhel8.9
+      - 4.18-rhel8.8
+      - 4.18-rhel8.7
+      - 4.18-rhel8.6
+      - 4.18-rhel8.5
+      - 4.18-rhel8.4
       config:
         CONFIG_XEN_PVH: y
       default: 4.18-rhel8.10
@@ -38,7 +44,12 @@ targets:
     kernels:
       available:
       - 5.14-rhel9.7
+      - 5.14-rhel9.6
       - 5.14-rhel9.5
+      - 5.14-rhel9.4
+      - 5.14-rhel9.3
+      - 5.14-rhel9.2
+      - 5.14-rhel9.1
       config:
         CONFIG_XEN_PVH: y
       default: 5.14-rhel9.7
@@ -49,13 +60,17 @@ targets:
     srpm_url: https://dl.rockylinux.org/pub/rocky/9/BaseOS/source/tree/Packages/k
     status: working
     variants:
-      mofed:
-        container_overlay: rocky9/variants/mofed.container.Dockerfile
-        image_overlay: rocky9/variants/mofed.image.Dockerfile
+      mofed-24:
+        container_overlay: rocky9/variants/mofed-24.container.Dockerfile
+        image_overlay: rocky9/variants/mofed-24.image.Dockerfile
+        # MOFED 24.10-2.1.8.0's source predates rhel9.7's backport of
+        # the NETIF_F_NETNS_LOCAL netdev-feature removal, so its kmods
+        # won't compile against the rhel9.7 kernel.  Pin the variant
+        # to rhel9.5 (which the bundle officially targets) until
+        # NVIDIA ships a rhel9.7-compatible MOFED -- which will land
+        # as a separate ``mofed-25`` variant alongside this one.
+        kernel: 5.14-rhel9.5
         params:
-          # NVIDIA doesn't ship an rhel9.7 MOFED bundle; the rhel9.5
-          # bundle works against the 9.7 kernel via
-          # mlnxofedinstall --add-kernel-support.
           mofed_version: 24.10-2.1.8.0
           mofed_distro: rhel9.5
   ubuntu2404:
