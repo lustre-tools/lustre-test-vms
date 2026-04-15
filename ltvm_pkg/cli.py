@@ -1769,7 +1769,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
 
     hdr = (
         f"{'Local':<6} {'Remote':<7} {'Target':<12} {'Arch':<8} "
-        f"{'Kernel':<20} {'Variants':<9} {'Mode':<16} Default?"
+        f"{'Variants':<30} {'Mode':<16} Default?"
     )
     print(hdr)
     print("-" * len(hdr))
@@ -1823,19 +1823,19 @@ def cmd_targets(args: argparse.Namespace) -> int:
             name_col = f"{r['name']}{marker}"
             arch_col = r["arch"]
             mode_col = r["lustre_mode"]
-        # Kernel + default mark live on the header row only; variant
-        # rows below leave those columns blank so the visual grouping
-        # reads top-down as (kernel -> variants).
-        if kernel_key == prev_kernel_key or not is_header:
-            kernel_col = "" if not is_header else r["kernel"]
-            default_col = "" if not is_header else default_mark
-        else:
-            kernel_col = r["kernel"]
+        # Kernel and variant fold into a single Variants column: a
+        # kernel-header row prints the kernel name; per-variant rows
+        # below indent with a leading tree glyph to show they're nested
+        # under that kernel.
+        if is_header:
+            variants_col = r["kernel"]
             default_col = default_mark
-        variant_col = "" if is_header else r["variant"]
+        else:
+            variants_col = f"  {r['variant']}"
+            default_col = ""
         print(
             f"{local_col:<6} {remote_col:<7} {name_col:<12} {arch_col:<8} "
-            f"{kernel_col:<20} {variant_col:<9} {mode_col:<16} "
+            f"{variants_col:<30} {mode_col:<16} "
             f"{default_col}"
         )
         prev_key = key
