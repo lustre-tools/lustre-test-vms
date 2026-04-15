@@ -557,7 +557,17 @@ def package_target(
         )
 
     if dest_dir is None:
-        dest_dir = output_dir.parent.parent  # OUTPUT_DIR root
+        # Scope staging under output/publish/<target>-<arch>-<variant>/
+        # so two concurrent `ltvm target publish` runs for different
+        # variants of the same target don't clobber each other's
+        # kernel-*.tar.zst (kernel assets are variant-independent and
+        # therefore share an asset name).  Keeping staging out of
+        # output/ itself also stops packaging litter from ending up
+        # next to build artifacts.
+        dest_dir = (
+            output_dir.parent.parent / "publish"
+            / f"{target_name}-{arch}-{variant}"
+        )
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -718,7 +728,10 @@ def package_bootable(
     ext = qcow2_path.suffix.lstrip(".") or "qcow2"
 
     if dest_dir is None:
-        dest_dir = output_dir.parent.parent
+        dest_dir = (
+            output_dir.parent.parent / "publish"
+            / f"{target_name}-{arch}-{variant}-bootable"
+        )
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
