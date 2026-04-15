@@ -112,7 +112,7 @@ class TestBuildParser:
 
     def test_deploy_subcommand(self) -> None:
         p = ltvm.build_parser()
-        args = p.parse_args(["deploy", "myvm", "--mount"])
+        args = p.parse_args(["deploy-lustre", "myvm", "--mount"])
         assert args.vm == "myvm"
         assert args.mount is True
 

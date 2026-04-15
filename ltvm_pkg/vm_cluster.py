@@ -626,7 +626,7 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
         except subprocess.TimeoutExpired as e:
             die(
                 f"llmount.sh timed out after {e.timeout}s on {mgs.name}\n"
-                f"  modules are deployed; check `ltvm dmesg {mgs.name}` and "
+                f"  modules are deployed; check `ssh {mgs.name} dmesg` and "
                 f"`ltvm cluster exec {cluster.name} mds 'lctl dl'`"
             )
         if r.returncode != 0:

@@ -224,7 +224,7 @@ ltvm validate rocky9 --lustre-tree ~/lustre-release
 ltvm build-all rocky9 --lustre-tree ~/lustre-release --force-compat
 ltvm build-kernel rocky9 --lustre-tree ~/lustre-release --force-compat
 ltvm build-lustre rocky9 ~/lustre-release --force-compat
-ltvm deploy co1-single --build ~/lustre-release --force-compat
+ltvm deploy-lustre co1-single --build ~/lustre-release --force-compat
 ```
 
 Exit codes from `ltvm validate`: 0=compatible, 1=warning
@@ -237,8 +237,8 @@ Exit codes from `ltvm validate`: 0=compatible, 1=warning
 ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 
 # Deploy Lustre and mount (--build defaults to cwd)
-ltvm deploy co1-single --mount
-ltvm deploy co1-single --build ~/lustre-release --mount
+ltvm deploy-lustre co1-single --mount
+ltvm deploy-lustre co1-single --build ~/lustre-release --mount
 
 # Mount / unmount Lustre (clears stale dm targets first)
 ltvm llmount co1-single            # dmsetup remove_all + llmount.sh
@@ -249,7 +249,6 @@ ssh co1-single 'lctl dl'
 
 # Observe
 ltvm console-log co1-single
-ltvm dmesg co1-single
 
 # Crash / kdump
 ltvm nmi co1-single              # inject NMI -> panic + kdump
@@ -400,7 +399,7 @@ When reviewing or auditing this codebase, watch for:
   destroy, start, stop, restart, snapshot,
   restore, nmi, doctor, cluster create, cluster destroy)
   require root. Read/observe commands (console-log,
-  dmesg, deploy, llmount, crash-collect, cluster deploy,
+  deploy, llmount, crash-collect, cluster deploy,
   cluster exec, cluster status, list) do not. Build
   commands do not need root.
 

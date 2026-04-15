@@ -484,7 +484,7 @@ def build_image(
         # so build_image can no longer auto-inject Lustre from a global
         # location it owns.  Maintainers who want to bake Lustre into the
         # image should run `ltvm build-lustre` then deploy via
-        # `ltvm deploy --build`, or rely on `ltvm fetch` which carries
+        # `ltvm deploy-lustre --build`, or rely on `ltvm fetch` which carries
         # prebuilt Lustre in the package via lustre-artifacts/.  We keep
         # injecting kernel modules because those live deterministically
         # next to the kernel build output, not in a per-user tree.

@@ -113,7 +113,6 @@ sudo ltvm create co1-single --kernel 5.14-rhel9.5
 # Observe
 ltvm list
 ltvm console-log co1-single
-ltvm dmesg co1-single
 
 # Execute commands inside (plain ssh — VMs are set up for passwordless root)
 ssh co1-single 'lctl dl'
@@ -137,7 +136,7 @@ Never bare names like `testvm`.
 ```bash
 # Build Lustre, then copy modules + userland into a running VM
 ltvm build-lustre rocky9 ~/lustre-release
-ltvm deploy co1-single --build ~/lustre-release
+ltvm deploy-lustre co1-single --build ~/lustre-release
 ltvm llmount co1-single
 ```
 
@@ -236,14 +235,14 @@ ltvm create <name>              Create / idempotent-create
 ltvm start|stop|restart <name>  Power control
 ltvm destroy <name>             Remove VM and its overlay
 ltvm list                       Running + stopped VMs
-ltvm console-log|dmesg <name>   Observe
+ltvm console-log <name>         Observe QEMU serial log
 ltvm snapshot|restore <name>    Overlay snapshots
 ltvm nmi <name>                 Inject NMI (panic + kdump)
 ltvm crash-collect <name>       Pull vmcore + run lustre_triage
 ltvm doctor [--fix]             Host-infra health check
 
 # Lustre in a VM
-ltvm deploy <vm> --build <tree>   Copy Lustre build into running VM
+ltvm deploy-lustre <vm> --build <tree>   Copy Lustre build into running VM
 ltvm llmount <vm> [--cleanup]     Mount (or unmount) Lustre
 
 # Clusters

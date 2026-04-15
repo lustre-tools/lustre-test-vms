@@ -817,21 +817,6 @@ def cmd_console_log(args: argparse.Namespace) -> None:
         print(line)
 
 
-def cmd_dmesg(args: argparse.Namespace) -> None:
-    vm = VMInfo.load(args.name)
-    if not is_running(vm):
-        die(f"VM '{args.name}' not running", EXIT_UNREACHABLE)
-    try:
-        r = run_ssh(vm.ip, f"dmesg | tail -n {args.tail}", timeout=10)
-        if r.stdout:
-            print(r.stdout, end="")
-        if r.returncode != 0 and r.stderr:
-            print(r.stderr, end="", file=sys.stderr)
-        sys.exit(r.returncode)
-    except subprocess.TimeoutExpired:
-        die(f"timeout reading dmesg from '{args.name}'", EXIT_TIMEOUT)
-
-
 # ── nmi ──────────────────────────────────────────────────
 
 

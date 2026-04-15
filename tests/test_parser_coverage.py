@@ -173,7 +173,6 @@ _VM_SUBCOMMAND_PARSE_ARGS: dict[str, list[str]] = {
     "stop": ["co1-test"],
     "list": [],
     "console-log": ["co1-test"],
-    "dmesg": ["co1-test"],
     "nmi": ["co1-test"],
     "crash-collect": ["co1-test"],
     "snapshot": ["co1-test"],

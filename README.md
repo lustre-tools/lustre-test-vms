@@ -19,7 +19,7 @@ Multiple kernel versions are supported per target (e.g., Rocky 9.5 and 9.7).
 ./ltvm install rocky9
 sudo vm.py create --name co1-single \
     --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
-./ltvm deploy co1-single --mount
+./ltvm deploy-lustre co1-single --mount
 ```
 
 **Build everything from scratch:**
@@ -30,14 +30,14 @@ sudo vm.py create --name co1-single \
 ./ltvm build-lustre rocky9 --lustre-tree ~/lustre-release
 sudo vm.py create --name co1-single \
     --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
-./ltvm deploy co1-single --build ~/lustre-release --mount
+./ltvm deploy-lustre co1-single --build ~/lustre-release --mount
 ```
 
 **Day-to-day iteration:**
 
 ```bash
 ./ltvm build-lustre rocky9          # incremental, fast
-./ltvm deploy co1-single --mount    # redeploy
+./ltvm deploy-lustre co1-single --mount    # redeploy
 ```
 
 ## Target OS support
@@ -113,7 +113,7 @@ ltvm package <target>           Create distributable tarball
 ltvm fetch <target> --url URL   Download pre-built package
 ltvm install <target>           Install kernel + image to system paths
 
-ltvm deploy <vm>                Deploy Lustre to a VM
+ltvm deploy-lustre <vm>                Deploy Lustre to a VM
 ltvm vm <action> [args]         VM lifecycle (create/destroy/etc.)
 ltvm cluster <action> [args]    Cluster management
 

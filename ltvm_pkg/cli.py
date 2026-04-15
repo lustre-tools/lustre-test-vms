@@ -1754,13 +1754,6 @@ def cmd_console_log(args: argparse.Namespace) -> int:
     return _vm_call(_log, args, use_json)
 
 
-def cmd_dmesg(args: argparse.Namespace) -> int:
-    use_json = args.json
-    from ltvm_pkg.vm_commands import cmd_dmesg as _dmesg
-
-    return _vm_call(_dmesg, args, use_json)
-
-
 def cmd_crash_collect(args: argparse.Namespace) -> int:
     use_json = args.json
     from ltvm_pkg.vm_commands import cmd_crash_collect as _crash_collect

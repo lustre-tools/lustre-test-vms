@@ -8,7 +8,7 @@ _ltvm_completions() {
 
 	commands="install build-all build-container build-kernel
 		build-image build-lustre build-shell build-status fetch
-		create ensure destroy start stop list ssh console-log dmesg
+		create ensure destroy start stop list ssh console-log
 		nmi crash-collect snapshot restore doctor deploy-lustre exec
 		cluster"
 
@@ -28,8 +28,8 @@ _ltvm_completions() {
 
 	# Complete VM names for commands that take them
 	case "${COMP_WORDS[1]}" in
-		destroy|start|stop|ssh|exec|deploy-lustre|deploy|console-log| \
-		dmesg|nmi|crash-collect|snapshot|restore)
+		destroy|start|stop|ssh|exec|deploy-lustre|console-log| \
+		nmi|crash-collect|snapshot|restore)
 			if [[ $COMP_CWORD -eq 2 ]]; then
 				local vms
 				vms=$(ltvm list 2>/dev/null | awk 'NR>2 && NF {print $1}')
@@ -50,7 +50,7 @@ _ltvm_completions() {
 		create|ensure)
 			COMPREPLY=($(compgen -W "--vcpus --mem --ip --target --mdt-disks --ost-disks --disk-size --json -v" -- "$cur"))
 			;;
-		deploy-lustre|deploy)
+		deploy-lustre)
 			COMPREPLY=($(compgen -W "--build --mount --target --json -v" -- "$cur"))
 			;;
 		install|setup)

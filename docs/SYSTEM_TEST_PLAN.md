@@ -143,7 +143,7 @@ sudo ltvm destroy co1-t1 co1-t3 co1-t4 co1-t5
 
 ```bash
 sudo ltvm ensure co1-single
-sudo ltvm deploy co1-single --build ~/lustre-release --mount
+sudo ltvm deploy-lustre co1-single --build ~/lustre-release --mount
 ssh co1-single 'lctl dl'
 ssh co1-single 'lctl get_param osd-*.*.mntdev'
 ssh co1-single 'lfs df /mnt/lustre'
@@ -157,22 +157,22 @@ ssh co1-single 'ls /proc/fs/lustre/'
 ```bash
 # 4.1. Fresh deploy on new VM
 sudo ltvm ensure co1-deploy
-sudo ltvm deploy co1-deploy --build ~/lustre-release --mount
+sudo ltvm deploy-lustre co1-deploy --build ~/lustre-release --mount
 ssh co1-deploy 'lctl dl'
 ssh co1-deploy 'lfs df /mnt/lustre'
 
 # 4.2. Idempotency: re-deploy to same VM
-sudo ltvm deploy co1-deploy --build ~/lustre-release --mount
+sudo ltvm deploy-lustre co1-deploy --build ~/lustre-release --mount
 ssh co1-deploy 'lctl dl'
 
 # 4.3. 4-OST VM
 sudo ltvm ensure co1-4ost --ost-disks 4
-sudo ltvm deploy co1-4ost --build ~/lustre-release --mount
+sudo ltvm deploy-lustre co1-4ost --build ~/lustre-release --mount
 ssh co1-4ost 'lfs df /mnt/lustre'
 
 # 4.4. Deploy without --mount, then mount manually
 sudo ltvm ensure co1-nomount
-sudo ltvm deploy co1-nomount --build ~/lustre-release
+sudo ltvm deploy-lustre co1-nomount --build ~/lustre-release
 ssh co1-nomount 'lctl dl | grep -c UP'
 ssh co1-nomount 'bash lustre/tests/llmount.sh'
 ssh co1-nomount 'lctl dl'
@@ -185,7 +185,7 @@ sudo ltvm destroy co1-deploy co1-4ost co1-nomount
 ```bash
 timeout 300 ssh co1-single \
     'sudo -E ONLY="1 2 4 17 36" bash /usr/lib64/lustre/tests/sanity.sh'
-sudo ltvm dmesg co1-single | grep -iE 'BUG|Oops|assert'
+ssh co1-single dmesg | grep -iE 'BUG|Oops|assert'
 ssh co1-single 'lctl get_param *.*.assertion_failed 2>/dev/null'
 ssh co1-single 'cat /proc/fs/lustre/llite/*/stats | grep -v " 0 samples"'
 ```
@@ -217,7 +217,7 @@ Client VM mounts a Lustre filesystem served by a rocky9 server VM.
 ```bash
 # Server: rocky9 (already tested in phase 3)
 sudo ltvm ensure co1-server
-sudo ltvm deploy co1-server --build ~/lustre-release --mount
+sudo ltvm deploy-lustre co1-server --build ~/lustre-release --mount
 SERVER_IP=$(sudo ltvm list --json | python3 -c \
     "import sys,json; [print(v['ip']) for v in json.load(sys.stdin)['vms'] \
     if v['name']=='co1-server']")
