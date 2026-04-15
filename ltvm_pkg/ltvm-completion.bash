@@ -7,8 +7,8 @@ _ltvm_completions() {
 	prev="${COMP_WORDS[COMP_CWORD-1]}"
 
 	commands="install update build target vm
-		create ensure destroy start stop list ssh
-		doctor deploy-lustre exec cluster llmount"
+		create destroy start stop list
+		doctor deploy-lustre cluster llmount"
 
 	cluster_actions="create destroy deploy status exec list ssh"
 	target_actions="list show clean validate fetch package publish"
@@ -55,7 +55,7 @@ _ltvm_completions() {
 
 	# Complete VM names for top-level commands that take them
 	case "${COMP_WORDS[1]}" in
-		destroy|start|stop|ssh|exec|deploy-lustre|llmount)
+		destroy|start|stop|deploy-lustre|llmount)
 			if [[ $COMP_CWORD -eq 2 ]]; then
 				local vms
 				vms=$(ltvm list 2>/dev/null | awk 'NR>2 && NF {print $1}')
@@ -80,7 +80,7 @@ _ltvm_completions() {
 	fi
 
 	case "${COMP_WORDS[1]}" in
-		create|ensure)
+		create)
 			COMPREPLY=($(compgen -W "--vcpus --mem --ip --target --mdt-disks --ost-disks --disk-size --json -v" -- "$cur"))
 			;;
 		deploy-lustre)
@@ -88,9 +88,6 @@ _ltvm_completions() {
 			;;
 		install|setup)
 			COMPREPLY=($(compgen -W "--qemu --network --install --ssh --verify --force --subnet" -- "$cur"))
-			;;
-		exec)
-			COMPREPLY=($(compgen -W "--timeout --json -v" -- "$cur"))
 			;;
 		*)
 			COMPREPLY=($(compgen -W "--json -v" -- "$cur"))
