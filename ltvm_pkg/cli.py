@@ -1686,6 +1686,27 @@ def cmd_targets(args: argparse.Namespace) -> int:
         declared_variants = ["base", *tc.declared_variants()]
         for kname in declared:
             signature = _kernel_release_signature(kname)
+            # Emit one header-style row per kernel with blank Variants;
+            # each variant then gets its own row below so "base" reads
+            # explicitly alongside any declared variants (instead of
+            # being the implicit interpretation of the kernel row).
+            rows.append(
+                {
+                    "name": name,
+                    "arch": tc.arch,
+                    "status": tc.status,
+                    "kernel": kname,
+                    "variant": None,  # header row
+                    "is_default": kname == tc.default_kernel,
+                    "server": tc.lustre_mode != LustreMode.CLIENT,
+                    "default_kernel": tc.default_kernel,
+                    "lustre_mode": tc.lustre_mode.value,
+                    "available": "",
+                    "built": False,
+                    "local_release": "-",
+                    "remote_release": "-",
+                }
+            )
             for variant in declared_variants:
                 local, remote = _release_status(
                     name, tc.arch, all_releases,
@@ -1723,7 +1744,11 @@ def cmd_targets(args: argparse.Namespace) -> int:
                         "status": tc.status,
                         "kernel": kname,
                         "variant": variant,
-                        "is_default": kname == tc.default_kernel,
+                        # Default is a per-kernel property; attach it to
+                        # the kernel's header row only so JSON consumers
+                        # can match `is_default==True` to "exactly one
+                        # default kernel".
+                        "is_default": False,
                         "server": tc.lustre_mode != LustreMode.CLIENT,
                         "default_kernel": tc.default_kernel,
                         "lustre_mode": tc.lustre_mode.value,
@@ -1744,7 +1769,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
 
     hdr = (
         f"{'Local':<6} {'Remote':<7} {'Target':<12} {'Arch':<8} "
-        f"{'Kernel':<20} {'Variant':<8} {'Mode':<16} Default?"
+        f"{'Kernel':<20} {'Variants':<9} {'Mode':<16} Default?"
     )
     print(hdr)
     print("-" * len(hdr))
@@ -1760,23 +1785,30 @@ def cmd_targets(args: argparse.Namespace) -> int:
             prev_kernel_key = None
             continue
         default_mark = "yes" if r["is_default"] else ""
-        local_col = "yes" if r["built"] else "-"
-        remote_raw = r["remote_release"]
-        if remote_raw == "?":
-            remote_col = "?"
-            has_unreachable = True
-        elif remote_raw == "-":
+        is_header = r["variant"] is None
+
+        if is_header:
+            # Per-kernel header row: no Local/Remote/Variants cells.
+            local_col = "-"
             remote_col = "-"
         else:
-            remote_col = "yes"
-        if (
-            r["built"]
-            and r["local_release"] not in ("-", "?")
-            and remote_raw not in ("-", "?")
-            and r["local_release"] != remote_raw
-        ):
-            local_col = "yes!"
-            has_behind = True
+            local_col = "yes" if r["built"] else "-"
+            remote_raw = r["remote_release"]
+            if remote_raw == "?":
+                remote_col = "?"
+                has_unreachable = True
+            elif remote_raw == "-":
+                remote_col = "-"
+            else:
+                remote_col = "yes"
+            if (
+                r["built"]
+                and r["local_release"] not in ("-", "?")
+                and remote_raw not in ("-", "?")
+                and r["local_release"] != remote_raw
+            ):
+                local_col = "yes!"
+                has_behind = True
 
         key = (r["name"], r["arch"])
         kernel_key = (r["name"], r["arch"], r["kernel"])
@@ -1791,21 +1823,19 @@ def cmd_targets(args: argparse.Namespace) -> int:
             name_col = f"{r['name']}{marker}"
             arch_col = r["arch"]
             mode_col = r["lustre_mode"]
-        # Kernel collapses across variant rows so a target with
-        # multiple variants doesn't repeat the same kernel name.
-        # Default mark stays on the base row only.
-        if kernel_key == prev_kernel_key:
-            kernel_col = ""
-            default_col = ""
+        # Kernel + default mark live on the header row only; variant
+        # rows below leave those columns blank so the visual grouping
+        # reads top-down as (kernel -> variants).
+        if kernel_key == prev_kernel_key or not is_header:
+            kernel_col = "" if not is_header else r["kernel"]
+            default_col = "" if not is_header else default_mark
         else:
             kernel_col = r["kernel"]
             default_col = default_mark
-        # Base variant reads as blank in the column; declared variants
-        # show their name so the row ties back to targets.yaml.
-        variant_col = "" if r["variant"] == "base" else r["variant"]
+        variant_col = "" if is_header else r["variant"]
         print(
             f"{local_col:<6} {remote_col:<7} {name_col:<12} {arch_col:<8} "
-            f"{kernel_col:<20} {variant_col:<8} {mode_col:<16} "
+            f"{kernel_col:<20} {variant_col:<9} {mode_col:<16} "
             f"{default_col}"
         )
         prev_key = key
