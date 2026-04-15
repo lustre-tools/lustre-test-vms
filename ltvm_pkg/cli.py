@@ -1839,10 +1839,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
             variants_col = r["kernel"]
             default_col = default_mark
         else:
-            # Display base as "-" so it reads as "no add-on" rather
-            # than an add-on named "base".
-            label = "-" if r["variant"] == "base" else r["variant"]
-            variants_col = f"  {label}"
+            variants_col = f"  {r['variant']}"
             default_col = ""
         print(
             f"{local_col:<6} {remote_col:<7} {name_col:<12} {arch_col:<8} "
