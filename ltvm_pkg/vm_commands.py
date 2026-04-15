@@ -541,20 +541,32 @@ def cmd_create(args: argparse.Namespace) -> None:
                     f"  QEMU log preserved at {preserved}",
                     file=sys.stderr,
                 )
-            except OSError:
-                pass
+            except OSError as e:
+                print(
+                    f"  rollback: preserving QEMU log failed: {e}",
+                    file=sys.stderr,
+                )
+        # Log (don't swallow silently) so a later investigator can see
+        # which cleanup step failed; continue through the remaining
+        # steps regardless.
         try:
             kill_qemu(vm)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  rollback: kill_qemu failed: {e}", file=sys.stderr)
         try:
             _destroy_vm_artifacts(vm.name)
-        except Exception:
-            pass
+        except Exception as e:
+            print(
+                f"  rollback: _destroy_vm_artifacts failed: {e}",
+                file=sys.stderr,
+            )
         try:
             unregister_ssh_name(vm.name)
-        except Exception:
-            pass
+        except Exception as e:
+            print(
+                f"  rollback: unregister_ssh_name failed: {e}",
+                file=sys.stderr,
+            )
         raise
 
     if args.json:
