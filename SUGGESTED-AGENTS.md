@@ -112,15 +112,15 @@ sudo ltvm create co1-single --kernel 5.14-rhel9.5
 
 # Observe
 ltvm list
-ltvm console-log co1-single
+ltvm vm console-log co1-single
 
 # Execute commands inside (plain ssh — VMs are set up for passwordless root)
 ssh co1-single 'lctl dl'
 
 # Lifecycle
 sudo ltvm start|stop|restart|destroy co1-single
-ltvm snapshot co1-single before-test
-ltvm restore co1-single before-test
+ltvm vm snapshot co1-single before-test
+ltvm vm restore co1-single before-test
 
 # Host-level infrastructure health check
 sudo ltvm doctor            # or doctor --fix
@@ -176,11 +176,11 @@ reboots (~15 s).
 
 ```bash
 # Trigger a panic
-ltvm nmi co1-single
+ltvm vm nmi co1-single
 # or from inside the VM: echo c > /proc/sysrq-trigger
 
 # Collect vmcore from the VM and run the lustre crash recipe
-ltvm crash-collect co1-single --mod-dir ~/lustre-release
+ltvm vm crash-collect co1-single --mod-dir ~/lustre-release
 
 crash-tool recipes lustre \
     --vmcore /path/to/vmcore \
@@ -235,10 +235,10 @@ ltvm create <name>              Create / idempotent-create
 ltvm start|stop|restart <name>  Power control
 ltvm destroy <name>             Remove VM and its overlay
 ltvm list                       Running + stopped VMs
-ltvm console-log <name>         Observe QEMU serial log
+ltvm vm console-log <name>         Observe QEMU serial log
 ltvm snapshot|restore <name>    Overlay snapshots
-ltvm nmi <name>                 Inject NMI (panic + kdump)
-ltvm crash-collect <name>       Pull vmcore + run lustre_triage
+ltvm vm nmi <name>                 Inject NMI (panic + kdump)
+ltvm vm crash-collect <name>       Pull vmcore + run lustre_triage
 ltvm doctor [--fix]             Host-infra health check
 
 # Lustre in a VM

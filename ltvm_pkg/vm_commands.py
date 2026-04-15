@@ -1434,7 +1434,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"{issues} issue(s) found and fixed")
         return EXIT_OK
     print(f"{issues} issue(s) found")
-    print("run with --fix to clean up")
+    # Offer to fix interactively when a human is at the terminal.
+    # CI/non-tty callers still get the old "run with --fix" hint +
+    # non-zero exit so they can gate on it.
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            resp = input("Fix them now? [y/N] ").strip().lower()
+        except EOFError:
+            resp = ""
+        if resp in ("y", "yes"):
+            args.fix = True
+            print("---")
+            return cmd_doctor(args)
+    else:
+        print("run with --fix to clean up")
     # Non-zero exit so CI scripts running `ltvm doctor` can detect
     # orphans without parsing stdout.  --fix path still returns 0
     # because the issues were resolved.

@@ -193,9 +193,9 @@ ssh co1-single 'cat /proc/fs/lustre/llite/*/stats | grep -v " 0 samples"'
 ### Phase 6: Crash / kdump
 
 ```bash
-sudo ltvm nmi co1-single
+sudo ltvm vm nmi co1-single
 # Wait ~30s for reboot
-sudo ltvm crash-collect co1-single --mod-dir ~/lustre-release
+sudo ltvm vm crash-collect co1-single --mod-dir ~/lustre-release
 # Verify kdump re-armed
 ssh co1-single 'systemctl is-active kdump'
 ```
@@ -240,12 +240,12 @@ sudo ltvm destroy co1-server co1-client
 ### Phase 9: Snapshot / Restore
 
 ```bash
-sudo ltvm snapshot co1-single before-test
+sudo ltvm vm snapshot co1-single before-test
 ssh co1-single 'sudo bash lustre/tests/llmountcleanup.sh && sudo lustre_rmmod'
-sudo ltvm restore co1-single before-test
+sudo ltvm vm restore co1-single before-test
 ssh co1-single 'lctl dl'
 # Error path
-sudo ltvm restore co1-single no-such-tag   # expect non-zero exit
+sudo ltvm vm restore co1-single no-such-tag   # expect non-zero exit
 ```
 
 ### Phase 10: Correctness
@@ -269,7 +269,7 @@ ssh co1-4ost \
 ### Phase 11: CLI Error Paths
 
 ```bash
-sudo ltvm nmi co1-stopped                   # expect non-zero + clear error
+sudo ltvm vm nmi co1-stopped                   # expect non-zero + clear error
 sudo ltvm destroy co1-nonexistent           # expect exit 0
 ```
 

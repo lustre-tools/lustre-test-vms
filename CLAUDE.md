@@ -248,11 +248,11 @@ ltvm llmount co1-single --cleanup  # llmountcleanup.sh + lustre_rmmod
 ssh co1-single 'lctl dl'
 
 # Observe
-ltvm console-log co1-single
+ltvm vm console-log co1-single
 
 # Crash / kdump
-ltvm nmi co1-single              # inject NMI -> panic + kdump
-ltvm crash-collect co1-single --mod-dir $CO/1
+ltvm vm nmi co1-single              # inject NMI -> panic + kdump
+ltvm vm crash-collect co1-single --mod-dir $CO/1
 
 # Destroy
 ltvm destroy co1-single

@@ -650,7 +650,7 @@ class TestVmSubcommands:
     def test_crash_collect_mod_dir(self) -> None:
         p = ltvm.build_parser()
         args = p.parse_args(
-            ["crash-collect", "co1-single", "--mod-dir", "/path/to/build"]
+            ["vm", "crash-collect", "co1-single", "--mod-dir", "/path/to/build"]
         )
         assert args.name == "co1-single"
         assert args.mod_dir == "/path/to/build"

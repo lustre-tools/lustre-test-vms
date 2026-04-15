@@ -172,11 +172,6 @@ _VM_SUBCOMMAND_PARSE_ARGS: dict[str, list[str]] = {
     "start": ["co1-test"],
     "stop": ["co1-test"],
     "list": [],
-    "console-log": ["co1-test"],
-    "nmi": ["co1-test"],
-    "crash-collect": ["co1-test"],
-    "snapshot": ["co1-test"],
-    "restore": ["co1-test"],
     "doctor": [],
     "llmount": ["co1-single"],
 }
@@ -289,12 +284,20 @@ def _action_from_cmd_name(cmd_name: str) -> str:
 
 
 def _top_level_subcommand_names() -> set[str]:
-    """Return all top-level subcommand names (and aliases) from the parser."""
+    """Return all parser action names, including nested ones under
+    grouped parents like `vm`, `target`, `build`, `cluster`."""
     p = ltvm.build_parser()
     names: set[str] = set()
-    for action in p._subparsers._actions:
-        if hasattr(action, "_name_parser_map"):
-            names.update(action._name_parser_map.keys())
+
+    def _walk(parser: argparse.ArgumentParser) -> None:
+        for action in parser._actions:
+            m = getattr(action, "_name_parser_map", None)
+            if m:
+                names.update(m.keys())
+                for sub_parser in m.values():
+                    _walk(sub_parser)
+
+    _walk(p)
     return names
 
 

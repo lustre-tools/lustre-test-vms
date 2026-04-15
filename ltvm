@@ -616,97 +616,109 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.set_defaults(func=cmd_list)
 
-    # -- VM observability: console-log --
-    sp = sub.add_parser(
+    # -- vm (console-log | crash-collect | nmi | snapshot | restore) --
+    vm_parser = sub.add_parser(
+        "vm",
+        parents=[common],
+        help="VM inspection and crash/snapshot ops "
+        "(console-log/crash-collect/nmi/snapshot/restore)",
+    )
+    vm_sub = vm_parser.add_subparsers(
+        dest="vm_action", metavar="<action>"
+    )
+
+    vclp = vm_sub.add_parser(
         "console-log",
         parents=[common],
         help="Show QEMU console log for a VM",
     )
-    sp.add_argument("name", help="VM name")
-    sp.add_argument(
+    vclp.add_argument("name", help="VM name")
+    vclp.add_argument(
         "--lines",
         type=int,
         default=50,
         help="Number of lines to show (default: 50)",
     )
-    sp.set_defaults(func=cmd_console_log)
+    vclp.set_defaults(func=cmd_console_log)
 
-    # -- VM crash: crash-collect --
-    sp = sub.add_parser(
+    vccp = vm_sub.add_parser(
         "crash-collect",
         parents=[common],
         help="Collect vmcore from a VM (optionally trigger crash first)",
     )
-    sp.add_argument("name", help="VM name")
-    sp.add_argument(
+    vccp.add_argument("name", help="VM name")
+    vccp.add_argument(
         "--outdir",
         default=None,
         help="Local directory for crash dumps (default: ~/ltvm-crashes)",
     )
-    sp.add_argument(
+    vccp.add_argument(
         "--trigger",
         action="store_true",
         default=False,
         help="Trigger a crash via sysrq before collecting",
     )
-    sp.add_argument(
+    vccp.add_argument(
         "--wait",
         type=int,
         default=120,
         help="Seconds to wait for VM to come back (default: 120)",
     )
-    sp.add_argument(
+    vccp.add_argument(
         "--mod-dir",
         dest="mod_dir",
         default=None,
         help="Lustre build tree for triage (enables auto-triage)",
     )
-    sp.set_defaults(func=cmd_crash_collect)
+    vccp.set_defaults(func=cmd_crash_collect)
 
-    # -- VM crash: nmi --
-    sp = sub.add_parser(
+    vnp = vm_sub.add_parser(
         "nmi",
         parents=[common],
         help="Inject NMI into a VM (triggers kernel panic + kdump)",
     )
-    sp.add_argument("name", help="VM name")
-    sp.set_defaults(func=cmd_nmi)
+    vnp.add_argument("name", help="VM name")
+    vnp.set_defaults(func=cmd_nmi)
 
-    # -- VM snapshot: snapshot --
-    sp = sub.add_parser(
+    vsp = vm_sub.add_parser(
         "snapshot",
         parents=[common],
         help="Create a snapshot of a VM's overlay disk",
     )
-    sp.add_argument("name", help="VM name")
-    sp.add_argument(
+    vsp.add_argument("name", help="VM name")
+    vsp.add_argument(
         "tag",
         nargs="?",
         default=None,
         help="Snapshot tag (default: auto-generated timestamp)",
     )
-    sp.add_argument(
+    vsp.add_argument(
         "--delete",
         metavar="TAG",
         default=None,
         help="Delete the named snapshot instead of creating one",
     )
-    sp.set_defaults(func=cmd_snapshot)
+    vsp.set_defaults(func=cmd_snapshot)
 
-    # -- VM snapshot: restore --
-    sp = sub.add_parser(
+    vrp = vm_sub.add_parser(
         "restore",
         parents=[common],
         help="Restore a VM to a snapshot (or list snapshots if no tag)",
     )
-    sp.add_argument("name", help="VM name")
-    sp.add_argument(
+    vrp.add_argument("name", help="VM name")
+    vrp.add_argument(
         "tag",
         nargs="?",
         default=None,
         help="Snapshot tag to restore (omit to list snapshots)",
     )
-    sp.set_defaults(func=cmd_restore)
+    vrp.set_defaults(func=cmd_restore)
+
+    def _vm_no_action(args: argparse.Namespace) -> int:
+        vm_parser.print_help()
+        return EXIT_ERROR
+
+    vm_parser.set_defaults(func=_vm_no_action)
 
     # -- VM maintenance: doctor --
     sp = sub.add_parser(

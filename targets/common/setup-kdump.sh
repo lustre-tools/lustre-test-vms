@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Configure kdump for near-complete crash dumps.
 #
-# Writes dumps to /var/crash. Use `ltvm crash-collect` to retrieve.
+# Writes dumps to /var/crash. Use `ltvm vm crash-collect` to retrieve.
 # crashkernel=... must be in QEMU kernel cmdline (set by qemu_run.py).
 #
 # Handles both RHEL (kdump service, /etc/kdump.conf + /etc/sysconfig/kdump)
