@@ -591,6 +591,11 @@ def build_parser() -> argparse.ArgumentParser:
             "default 500M, max 100G"
         ),
     )
+    _vm_create_args.add_argument(
+        "--variant",
+        default="base",
+        help="Target variant to boot (default: base). E.g. 'mofed'.",
+    )
 
     sp = sub.add_parser(
         "create",

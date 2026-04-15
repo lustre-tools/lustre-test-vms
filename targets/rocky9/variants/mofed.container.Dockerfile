@@ -44,16 +44,19 @@ RUN set -eux; \
 
 # Install userspace + -devel packages (no kmods at this stage; those
 # get rebuilt in the image overlay against the target kernel).
-RUN cd /opt/mofed-src/current && \
-    ./mlnxofedinstall \
-        --user-space-only \
-        --without-fw-update \
-        --force \
-        --skip-repo \
-        --distro rhel9.5 \
-        || true
-# `|| true` above because mlnxofedinstall's userspace-only still
-# probes for a kernel match and can exit non-zero in a stripped
-# container; the actual package installs succeed.  The image overlay
-# re-runs the installer end-to-end so anything missed here is picked
-# up there.
+# Install userspace-only bundle + mlnx-ofa_kernel-devel.  The
+# bundle ships `-user-only` metapackages specifically for the "no
+# kmods" case, which is what we want in the BUILDER: Lustre
+# configure just needs the -devel headers to link o2iblnd.
+# mlnx-ofa_kernel-devel provides MOFED's ibverbs/rdma_cm kernel
+# headers so `--with-o2ib=<path>` works when Lustre's configure
+# scans for the MOFED-OFED kernel source tree.
+RUN cd /opt/mofed-src/current/RPMS && \
+    ls *.rpm \
+      | grep -vE '^(kmod-|kernel-mft-mlnx-|mlnx-ofed-)' \
+      | xargs dnf install -y --allowerasing --nogpgcheck --setopt=install_weak_deps=False \
+    && dnf clean all
+
+# Path hint for Lustre configure --with-o2ib; mlnx-ofa_kernel-devel
+# installs headers under /usr/src/ofa_kernel/default.
+ENV O2IB_PATH=/usr/src/ofa_kernel/default

@@ -118,6 +118,7 @@ def resolve_os_artifacts(
     os_name: str,
     arch: str = "x86_64",
     kernel: str | None = None,
+    variant: str = "base",
 ) -> OSArtifacts:
     """Return image, kernel paths and defaults for a target OS.
 
@@ -139,7 +140,7 @@ def resolve_os_artifacts(
     from .target_config import TargetConfig
 
     try:
-        tc = TargetConfig(os_name, arch=arch)
+        tc = TargetConfig(os_name, arch=arch, variant=variant)
     except ValueError as e:
         # TargetConfig raises ValueError for unknown target; callers
         # expect FileNotFoundError from this helper.
@@ -253,14 +254,19 @@ def resolve_os_artifacts(
             )
 
     # ── Step 2: Locate the image paired with this kernel. ──
-    # New layout: output/<os>[/<arch>]/images/<kernel-dirname>/base.ext4
-    img = output_dir / "images" / kernel_dirname / "base.ext4"
+    # Layout:
+    #   output/<os>[/<arch>]/images/<kernel-dirname>/base.ext4         (base)
+    #   output/<os>[/<arch>]/images/<kernel-dirname>/<variant>/base.ext4  (variant)
+    base_img_dir = output_dir / "images" / kernel_dirname
+    img_dir = base_img_dir if variant == "base" else base_img_dir / variant
+    img = img_dir / "base.ext4"
     if not img.exists():
+        variant_hint = f" --variant {variant}" if variant != "base" else ""
         raise FileNotFoundError(
             f"No image for '{os_name}' kernel={kernel_dirname} "
-            f"(arch={effective_arch})\n"
+            f"variant={variant} (arch={effective_arch})\n"
             f"Run: ltvm build image {os_name} "
-            f"--kernel {kernel_dirname}{arch_hint}  "
+            f"--kernel {kernel_dirname}{arch_hint}{variant_hint}  "
             f"(or: ltvm target fetch {os_name}{arch_hint})"
         )
 
@@ -348,6 +354,7 @@ class VMInfo:
     os_id: str = ""  # OS identifier (e.g. rocky9, ubuntu24)
     arch: str = "x86_64"  # CPU architecture (x86_64, aarch64)
     creator: str = ""  # username that created the VM (SUDO_USER, or "" for legacy)
+    variant: str = "base"  # target variant (e.g. mofed); "base" is the default
 
     @property
     def info_path(self) -> Path:
@@ -398,6 +405,7 @@ class VMInfo:
             f"OS_ID={self.os_id}\n"
             f"ARCH={self.arch}\n"
             f"CREATOR={self.creator}\n"
+            f"VARIANT={self.variant}\n"
         )
         _atomic_write(self.info_path, text)
 
@@ -505,6 +513,7 @@ class VMInfo:
             os_id=vals.get("OS_ID", ""),
             arch=vals.get("ARCH", "x86_64"),
             creator=vals.get("CREATOR", ""),
+            variant=vals.get("VARIANT", "base"),
         )
 
     @staticmethod

@@ -363,13 +363,14 @@ def cmd_create(args: argparse.Namespace) -> None:
     explicit_image = getattr(args, "image", "")
     explicit_kernel = getattr(args, "kernel", "")
     arch = getattr(args, "arch", None) or "x86_64"
+    variant = getattr(args, "variant", None) or "base"
     defaulted_target = not os_target
     if defaulted_target:
         os_target = DEFAULT_TARGET
     # Pass explicit_kernel (a name, not a path) through to resolve_os_artifacts
     # which will find the right kernel dir and pair the correct image with it.
     os_arts = resolve_os_artifacts(
-        os_target, arch=arch, kernel=explicit_kernel or None
+        os_target, arch=arch, kernel=explicit_kernel or None, variant=variant
     )
     image = explicit_image or str(os_arts.image)
     kernel = str(os_arts.kernel)
@@ -440,6 +441,7 @@ def cmd_create(args: argparse.Namespace) -> None:
             # in `ltvm list` so a shared host can show whose VM is
             # whose without forcing per-user namespaces.
             creator=os.environ.get("SUDO_USER", "") or "root",
+            variant=variant,
         )
 
         # Create overlay + backing disks.  If any step fails partway,

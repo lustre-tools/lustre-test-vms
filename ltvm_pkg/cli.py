@@ -1946,8 +1946,12 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     # missing entry in targets.yaml fails loudly instead of silently
     # falling back to RHEL paths.
     vm_arch = vm.arch
+    # Thread the VM's recorded variant into TargetConfig so tc.container_tag
+    # picks the matching build container (e.g. ltvm-build-rocky9-mofed for
+    # a MOFED VM) and tc.image_output_dir() resolves to the variant image.
+    vm_variant = getattr(vm, "variant", "base") or "base"
     try:
-        tc = TargetConfig(target, arch=vm_arch)
+        tc = TargetConfig(target, arch=vm_arch, variant=vm_variant)
     except ValueError as e:
         return _error(
             f"Unknown target '{target}' for VM '{args.vm}': {e}",

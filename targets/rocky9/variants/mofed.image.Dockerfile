@@ -39,13 +39,16 @@ RUN set -eux; \
     rm -f "${BUNDLE}.tgz"; \
     ln -s "${BUNDLE}" current
 
-RUN cd /opt/mofed-src/current && \
-    ./mlnxofedinstall \
-        --add-kernel-support \
-        --without-fw-update \
-        --force \
-        --skip-repo \
-        --distro rhel9.5
+# Install all MOFED RPMs (userspace + kmods).  Bundle kmod RPMs
+# target rhel9.5's stock kernel; they'll install fine but modprobe
+# against a Lustre-patched 9.7 kernel depends on ABI compatibility.
+# The 5.14 RHEL kABI is stable across minors, so this works in
+# practice for the rdma stack.  Image also carries `/opt/mofed-src`
+# so a boot-time DKMS-style rebuild against the booted kernel is
+# possible later.
+RUN cd /opt/mofed-src/current/RPMS && \
+    dnf install -y --allowerasing --nogpgcheck --setopt=install_weak_deps=False *.rpm && \
+    dnf clean all
 
 # Make sure mlx5_core / rdma_rxe / ib_uverbs etc. are loaded early.
 RUN echo -e "mlx5_core\nib_uverbs\nrdma_cm\nrdma_ucm" \
