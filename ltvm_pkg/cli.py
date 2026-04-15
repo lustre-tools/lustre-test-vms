@@ -109,12 +109,15 @@ def _error(msg: str, use_json: bool, hint: str | None = None) -> int:
 
 
 def _load_target(
-    name: str, use_json: bool, arch: str | None = None
+    name: str,
+    use_json: bool,
+    arch: str | None = None,
+    variant: str = "base",
 ) -> tuple[TargetConfig | None, int | None]:
     """Load a TargetConfig, returning (config, None) or
     (None, exit_code) on failure."""
     try:
-        return TargetConfig(name, arch=arch), None
+        return TargetConfig(name, arch=arch, variant=variant), None
     except ValueError as e:
         targets = list_targets()
         hint = (
@@ -129,10 +132,26 @@ def _load_target(
 def _load_target_args(
     args: argparse.Namespace, use_json: bool
 ) -> tuple[TargetConfig | None, int | None]:
-    """Load TargetConfig from args.target + optional args.arch."""
-    return _load_target(
-        args.target, use_json, arch=getattr(args, "arch", None)
+    """Load TargetConfig from args.target + optional args.arch + --variant.
+
+    Applies CLI param overrides (e.g. --mofed-version) onto the variant
+    so they fold into the input hash.
+    """
+    variant = getattr(args, "variant", "base") or "base"
+    tc, err = _load_target(
+        args.target, use_json, arch=getattr(args, "arch", None), variant=variant
     )
+    if tc is None:
+        return None, err
+    # Thread ad-hoc param overrides into the bound variant.
+    overrides: dict[str, Any] = {}
+    if getattr(args, "mofed_version", None):
+        overrides["mofed_version"] = args.mofed_version
+    if overrides and variant != "base":
+        tc._variants[variant] = tc._variants[variant].with_param_overrides(
+            overrides
+        )
+    return tc, None
 
 
 # ------------------------------------------------------------------
@@ -1937,8 +1956,12 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     # missing entry in targets.yaml fails loudly instead of silently
     # falling back to RHEL paths.
     vm_arch = vm.arch
+    # Thread the VM's recorded variant into TargetConfig so tc.container_tag
+    # picks the matching build container (e.g. ltvm-build-rocky9-mofed for
+    # a MOFED VM) and tc.image_output_dir() resolves to the variant image.
+    vm_variant = getattr(vm, "variant", "base") or "base"
     try:
-        tc = TargetConfig(target, arch=vm_arch)
+        tc = TargetConfig(target, arch=vm_arch, variant=vm_variant)
     except ValueError as e:
         return _error(
             f"Unknown target '{target}' for VM '{args.vm}': {e}",

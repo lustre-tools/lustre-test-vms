@@ -494,6 +494,7 @@ class TestCmdCreateIdempotence:
             os_name: str,
             arch: str = "x86_64",
             kernel: str | None = None,
+            variant: str = "base",
         ) -> Any:
             resolve_calls.append(os_name)
             return MagicMock(

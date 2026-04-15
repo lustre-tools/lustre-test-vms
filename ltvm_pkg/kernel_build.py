@@ -330,27 +330,33 @@ def _ccache_volume(target_config: TargetConfig) -> str:
 def _ensure_container_image(target_config: TargetConfig) -> str:
     """Build the container image if needed.
 
-    Returns the image tag.
+    For non-base variants, first ensures the base container exists
+    and then builds a variant container ``FROM`` it with the variant's
+    container_overlay Dockerfile applied.  Base and variant containers
+    have distinct tags (see build_container_tag) so both can coexist
+    on the host.  Returns the (possibly variant-suffixed) tag.
     """
-    # Arch-qualify the tag so cross-compile containers coexist with native
-    arch = target_config.arch
-    tag = target_config.container_tag
-    dockerfile = target_config.target_dir / "container.Dockerfile"
+    from .target_config import DEFAULT_VARIANT, build_container_tag
 
-    log.info("Building container image: %s", tag)
-    # Map target arch to podman platform string so cross-arch builds
-    # pull the correct base image (e.g. arm64 instead of amd64).
+    arch = target_config.arch
+    variant = target_config.variant_name
+
+    # Base container -- always built first, even when the caller asked
+    # for a variant, since the variant Dockerfile does `FROM <base>`.
+    base_tag = build_container_tag(target_config.name, arch, DEFAULT_VARIANT)
+    base_dockerfile = target_config.target_dir / "container.Dockerfile"
+
     _arch_to_platform = {"x86_64": "linux/amd64", "aarch64": "linux/arm64"}
     platform = _arch_to_platform.get(arch, "linux/amd64")
-    # Build context must be targets/ (parent of target_dir) so that
-    # COPY common/... directives in the Dockerfile resolve correctly.
+
+    log.info("Building container image: %s", base_tag)
     cmd = [
         "podman",
         "build",
         "--platform",
         platform,
         "-t",
-        tag,
+        base_tag,
         "--build-arg",
         f"BASE_IMAGE={target_config.container_image}",
     ]
@@ -361,12 +367,47 @@ def _ensure_container_image(target_config: TargetConfig) -> str:
         ]
     cmd += [
         "-f",
-        str(dockerfile),
+        str(base_dockerfile),
         str(TARGETS_DIR),
     ]
     subprocess.run(cmd, check=True)
 
-    return tag
+    if variant == DEFAULT_VARIANT:
+        return base_tag
+
+    v = target_config.variant(variant)
+    overlay = v.container_overlay
+    if overlay is None or not overlay.exists():
+        raise RuntimeError(
+            f"variant {variant!r}: container_overlay is required but "
+            f"missing (checked {overlay})"
+        )
+    variant_tag = target_config.container_tag  # variant-suffixed
+
+    log.info(
+        "Building variant container %s (overlay=%s)", variant_tag, overlay
+    )
+    # Build arg BASE_TAG lets the overlay Dockerfile say
+    # `ARG BASE_TAG` + `FROM ${BASE_TAG}` so the parent image is wired
+    # at build time instead of hardcoded.  Variant params are also
+    # surfaced as --build-arg VARIANT_<KEY>=value for overlay use
+    # (e.g. VARIANT_MOFED_VERSION).
+    v_cmd = [
+        "podman",
+        "build",
+        "--platform",
+        platform,
+        "-t",
+        variant_tag,
+        "--build-arg",
+        f"BASE_TAG={base_tag}",
+    ]
+    for key, val in sorted(v.params.items()):
+        v_cmd += ["--build-arg", f"VARIANT_{key.upper()}={val}"]
+    v_cmd += ["-f", str(overlay), str(TARGETS_DIR)]
+    subprocess.run(v_cmd, check=True)
+
+    return variant_tag
 
 
 # ------------------------------------------------------------------

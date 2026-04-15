@@ -48,6 +48,16 @@ targets:
     os_version: '9.7'
     srpm_url: https://dl.rockylinux.org/pub/rocky/9/BaseOS/source/tree/Packages/k
     status: working
+    variants:
+      mofed:
+        container_overlay: rocky9/variants/mofed.container.Dockerfile
+        image_overlay: rocky9/variants/mofed.image.Dockerfile
+        params:
+          # NVIDIA doesn't ship an rhel9.7 MOFED bundle; the rhel9.5
+          # bundle works against the 9.7 kernel via
+          # mlnxofedinstall --add-kernel-support.
+          mofed_version: 24.10-2.1.8.0
+          mofed_distro: rhel9.5
   ubuntu2404:
     configure_args:
     - --with-o2ib=no

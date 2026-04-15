@@ -452,6 +452,43 @@ def build_image(
         capture_output=False,
     )
 
+    # ── Step 1a: Apply variant image overlay (e.g. MOFED) ──
+    # Sits between the base image build and the kernel-module inject
+    # step so MOFED lands in the rootfs before `depmod -a` runs (which
+    # might pick up MOFED kmods too, depending on what the overlay
+    # installs).  Kernel build-tree is exposed at /kernel-build-tree
+    # in the context for overlays that need --kernel-sources.
+    from .target_config import DEFAULT_VARIANT
+
+    variant_name = target_config.variant_name
+    if variant_name != DEFAULT_VARIANT:
+        v = target_config.variant(variant_name)
+        if v.image_overlay is None or not v.image_overlay.exists():
+            raise RuntimeError(
+                f"variant {variant_name!r}: image_overlay is required "
+                f"but missing (checked {v.image_overlay})"
+            )
+        overlay_tag = f"{tag}-{variant_name}"
+        log.info(
+            "Applying variant image overlay %s -> %s",
+            v.image_overlay,
+            overlay_tag,
+        )
+        v_cmd = [
+            "podman",
+            "build",
+            *platform_args,
+            "--build-arg",
+            f"BASE_IMAGE_TAG={tag}",
+            "-t",
+            overlay_tag,
+        ]
+        for key, val in sorted(v.params.items()):
+            v_cmd += ["--build-arg", f"VARIANT_{key.upper()}={val}"]
+        v_cmd += ["-f", str(v.image_overlay), str(TARGETS_DIR)]
+        _run(v_cmd, capture_output=False)
+        tag = overlay_tag  # downstream stages layer on top of the overlay
+
     # ── Step 1b: Add kernel modules + Lustre via a second Dockerfile stage ──
     # resolve_kernel never raises -- it returns the short name if no
     # built directory exists yet.  The actual "no kernel built yet"

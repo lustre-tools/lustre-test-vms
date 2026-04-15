@@ -242,7 +242,9 @@ class TestLoadTarget:
     ) -> None:
         # TargetConfig raises ValueError for unknown target names;
         # _load_target must catch it and return EXIT_NOT_FOUND.
-        def _raise(name: str, arch: str = "x86_64") -> None:
+        def _raise(
+            name: str, arch: str = "x86_64", variant: str = "base"
+        ) -> None:
             raise ValueError(f"Unknown target: {name}")
 
         with patch("ltvm_pkg.cli.TargetConfig", side_effect=_raise):

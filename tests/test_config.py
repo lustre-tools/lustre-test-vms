@@ -602,6 +602,275 @@ class TestOutputDirEnvOverride:
             importlib.reload(cfg)
 
 
+class TestVariants:
+    """Optional per-target variants (e.g. MOFED overlay).
+
+    Design invariants asserted here:
+      - base variant exists implicitly; its paths match the pre-variant
+        layout so on-disk caches don't get orphaned.
+      - changing a variant's inputs does NOT invalidate the base hash.
+      - changing base inputs DOES invalidate the variant hash.
+      - kernel artifact ignores variant (kernel is shared).
+    """
+
+    def _yaml_with_variant(
+        self, tmp_targets: Path, variants: dict
+    ) -> None:
+        data = yaml.safe_load(
+            (tmp_targets / "targets" / "targets.yaml").read_text()
+        )
+        data["targets"]["rocky9"]["variants"] = variants
+        _write_targets_yaml(tmp_targets / "targets", data)
+
+    def _write_overlay(
+        self, tmp_targets: Path, rel: str, contents: str
+    ) -> Path:
+        path = tmp_targets / "targets" / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents)
+        return path
+
+    def test_base_variant_always_present(self, tmp_targets: Path) -> None:
+        tc = _make_config(tmp_targets)
+        assert "base" in tc.variants()
+        assert tc.variant("base").is_base
+
+    def test_no_declared_variants_by_default(self, tmp_targets: Path) -> None:
+        tc = _make_config(tmp_targets)
+        assert tc.declared_variants() == []
+
+    def test_declared_variants(self, tmp_targets: Path) -> None:
+        self._yaml_with_variant(
+            tmp_targets,
+            {"mofed": {"params": {"mofed_version": "24.10-1.1.4.0"}}},
+        )
+        tc = _make_config(tmp_targets)
+        assert tc.declared_variants() == ["mofed"]
+        v = tc.variant("mofed")
+        assert v.params == {"mofed_version": "24.10-1.1.4.0"}
+
+    def test_unknown_variant_raises(self, tmp_targets: Path) -> None:
+        tc = _make_config(tmp_targets)
+        with pytest.raises(ValueError, match="unknown variant 'mofed'"):
+            tc.variant("mofed")
+
+    def test_reserved_base_name_rejected(self, tmp_targets: Path) -> None:
+        self._yaml_with_variant(tmp_targets, {"base": {}})
+        with pytest.raises(ValueError, match="reserved variant name"):
+            _make_config(tmp_targets)
+
+    def test_non_dict_variant_rejected(self, tmp_targets: Path) -> None:
+        self._yaml_with_variant(tmp_targets, {"mofed": "not a dict"})  # type: ignore[dict-item]
+        with pytest.raises(ValueError, match="must be a mapping"):
+            _make_config(tmp_targets)
+
+    def test_container_output_dir_variant(self, tmp_targets: Path) -> None:
+        self._yaml_with_variant(tmp_targets, {"mofed": {}})
+        tc = _make_config(tmp_targets)
+        base_dir = tmp_targets / "output" / "rocky9" / "x86_64" / "container"
+        assert tc.container_output_dir() == base_dir
+        assert tc.container_output_dir("base") == base_dir
+        assert tc.container_output_dir("mofed") == base_dir / "mofed"
+
+    def test_image_output_dir_variant(self, tmp_targets: Path) -> None:
+        self._yaml_with_variant(tmp_targets, {"mofed": {}})
+        tc = _make_config(tmp_targets)
+        base_dir = (
+            tmp_targets
+            / "output"
+            / "rocky9"
+            / "x86_64"
+            / "images"
+            / "5.14-rhel9.7"
+        )
+        assert tc.image_output_dir() == base_dir
+        assert tc.image_output_dir("5.14-rhel9.7", variant="base") == base_dir
+        assert (
+            tc.image_output_dir("5.14-rhel9.7", variant="mofed")
+            == base_dir / "mofed"
+        )
+
+    def test_meta_path_variant(self, tmp_targets: Path) -> None:
+        self._yaml_with_variant(tmp_targets, {"mofed": {}})
+        tc = _make_config(tmp_targets)
+        base_meta = (
+            tmp_targets / "output" / "rocky9" / "x86_64" / "container" / "meta.json"
+        )
+        assert tc.meta_path("container") == base_meta
+        assert tc.meta_path("container", variant="mofed") == (
+            base_meta.parent / "mofed" / "meta.json"
+        )
+
+    def test_base_hash_unchanged_by_variant_declaration(
+        self, tmp_targets: Path
+    ) -> None:
+        """Introducing a variant must not invalidate the base cache."""
+        tc = _make_config(tmp_targets)
+        h_before = tc.input_hash("container")
+        self._yaml_with_variant(
+            tmp_targets,
+            {"mofed": {"params": {"mofed_version": "24.10-1.1.4.0"}}},
+        )
+        tc2 = _make_config(tmp_targets)
+        h_after = tc2.input_hash("container")
+        assert h_before == h_after, (
+            "declaring a variant must not change the base input hash"
+        )
+
+    def test_variant_hash_differs_from_base(self, tmp_targets: Path) -> None:
+        self._yaml_with_variant(
+            tmp_targets,
+            {"mofed": {"params": {"mofed_version": "24.10-1.1.4.0"}}},
+        )
+        tc = _make_config(tmp_targets)
+        assert tc.input_hash("container") != tc.input_hash(
+            "container", variant="mofed"
+        )
+        assert tc.input_hash("image") != tc.input_hash(
+            "image", variant="mofed"
+        )
+
+    def test_variant_params_change_invalidates_variant_only(
+        self, tmp_targets: Path
+    ) -> None:
+        self._yaml_with_variant(
+            tmp_targets,
+            {"mofed": {"params": {"mofed_version": "24.10-1.1.4.0"}}},
+        )
+        tc = _make_config(tmp_targets)
+        h_variant_before = tc.input_hash("container", variant="mofed")
+        h_base = tc.input_hash("container")
+
+        self._yaml_with_variant(
+            tmp_targets,
+            {"mofed": {"params": {"mofed_version": "23.10-2.1.3.0"}}},
+        )
+        tc2 = _make_config(tmp_targets)
+        assert tc2.input_hash("container") == h_base
+        assert tc2.input_hash("container", variant="mofed") != h_variant_before
+
+    def test_base_change_invalidates_variant(self, tmp_targets: Path) -> None:
+        """Bumping a base input must cascade to the variant."""
+        self._yaml_with_variant(tmp_targets, {"mofed": {}})
+        tc = _make_config(tmp_targets)
+        h_before = tc.input_hash("container", variant="mofed")
+        df = tmp_targets / "targets" / "rocky9" / "container.Dockerfile"
+        df.write_text("FROM rockylinux:9.7\nRUN echo changed\n")
+        tc2 = _make_config(tmp_targets)
+        h_after = tc2.input_hash("container", variant="mofed")
+        assert h_before != h_after
+
+    def test_variant_overlay_file_folded_in(self, tmp_targets: Path) -> None:
+        overlay = self._write_overlay(
+            tmp_targets,
+            "rocky9/variants/mofed.container.Dockerfile",
+            "RUN echo v1\n",
+        )
+        self._yaml_with_variant(
+            tmp_targets,
+            {
+                "mofed": {
+                    "container_overlay": "rocky9/variants/mofed.container.Dockerfile"
+                }
+            },
+        )
+        tc = _make_config(tmp_targets)
+        h1 = tc.input_hash("container", variant="mofed")
+        overlay.write_text("RUN echo v2\n")
+        h2 = tc.input_hash("container", variant="mofed")
+        assert h1 != h2
+
+    def test_container_overlay_does_not_affect_image_hash(
+        self, tmp_targets: Path
+    ) -> None:
+        """Image hash must only mix in the image overlay, not container."""
+        overlay_c = self._write_overlay(
+            tmp_targets,
+            "rocky9/variants/mofed.container.Dockerfile",
+            "RUN echo container\n",
+        )
+        self._yaml_with_variant(
+            tmp_targets,
+            {
+                "mofed": {
+                    "container_overlay": "rocky9/variants/mofed.container.Dockerfile"
+                }
+            },
+        )
+        tc = _make_config(tmp_targets)
+        h_image_before = tc.input_hash("image", variant="mofed")
+        overlay_c.write_text("RUN echo changed\n")
+        h_image_after = tc.input_hash("image", variant="mofed")
+        assert h_image_before == h_image_after
+
+    def test_kernel_hash_ignores_variant(self, tmp_targets: Path) -> None:
+        self._yaml_with_variant(
+            tmp_targets,
+            {"mofed": {"params": {"mofed_version": "24.10-1.1.4.0"}}},
+        )
+        tc = _make_config(tmp_targets)
+        assert tc.input_hash("kernel") == tc.input_hash(
+            "kernel", variant="mofed"
+        )
+
+    def test_staleness_per_variant(self, tmp_targets: Path) -> None:
+        self._yaml_with_variant(tmp_targets, {"mofed": {}})
+        tc = _make_config(tmp_targets)
+        tc.write_meta("container", variant="base")
+        assert tc.is_stale("container", variant="base") is False
+        assert tc.is_stale("container", variant="mofed") is True
+        tc.write_meta("container", variant="mofed")
+        assert tc.is_stale("container", variant="mofed") is False
+
+    def test_write_meta_records_variant(self, tmp_targets: Path) -> None:
+        self._yaml_with_variant(tmp_targets, {"mofed": {}})
+        tc = _make_config(tmp_targets)
+        tc.write_meta("container", variant="mofed", build_date="2026-04-15")
+        meta = json.loads(
+            (
+                tmp_targets
+                / "output"
+                / "rocky9"
+                / "x86_64"
+                / "container"
+                / "mofed"
+                / "meta.json"
+            ).read_text()
+        )
+        assert meta["variant"] == "mofed"
+        assert meta["build_date"] == "2026-04-15"
+
+    def test_write_meta_base_omits_variant_key(self, tmp_targets: Path) -> None:
+        """Base meta must not carry a variant field, so old readers that
+        don't know about variants keep working."""
+        tc = _make_config(tmp_targets)
+        tc.write_meta("container")
+        meta = json.loads(
+            (
+                tmp_targets
+                / "output"
+                / "rocky9"
+                / "x86_64"
+                / "container"
+                / "meta.json"
+            ).read_text()
+        )
+        assert "variant" not in meta
+
+    def test_param_override_affects_hash(self, tmp_targets: Path) -> None:
+        self._yaml_with_variant(
+            tmp_targets,
+            {"mofed": {"params": {"mofed_version": "24.10-1.1.4.0"}}},
+        )
+        tc = _make_config(tmp_targets)
+        v = tc.variant("mofed")
+        h_default = v.hash_bytes("container")
+        v_over = v.with_param_overrides({"mofed_version": "23.10-2.1.3.0"})
+        assert v_over.params["mofed_version"] == "23.10-2.1.3.0"
+        assert v.params["mofed_version"] == "24.10-1.1.4.0"  # unchanged
+        assert h_default != v_over.hash_bytes("container")
+
+
 class TestListTargets:
     def test_finds_targets(self, tmp_targets: Path) -> None:
         import ltvm_pkg.target_config as cfg
