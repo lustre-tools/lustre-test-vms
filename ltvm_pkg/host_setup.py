@@ -327,30 +327,60 @@ def _install_qemu_path_profile() -> None:
 # GitHub release tag and asset names for pre-built QEMU binaries
 _QEMU_RELEASE_TAG = f"qemu-{QEMU_VERSION}"
 _QEMU_GITHUB_REPO = "lustre-tools/lustre-test-vms"
+# EL major versions for which we publish prebuilt QEMU tarballs on the
+# GitHub release `qemu-<QEMU_VERSION>`.  Keep in sync with the assets
+# actually uploaded -- running `gh release view qemu-<ver>` should list
+# one `qemu-<ver>-el<N>.tar.gz` for each entry here.  EL8 is intentionally
+# absent: building QEMU 9.2.2 needs Rocky 8 podman tooling that the CI
+# publisher doesn't currently have set up (see CLAUDE.md "Rebuilding
+# Pre-built QEMU Binaries" for the manual recipe).
+_QEMU_PUBLISHED_EL_MAJORS = frozenset({"9", "10"})
+
+
+def _is_el_host(host: HostInfo) -> bool:
+    return host.id in ("rocky", "rhel", "centos", "almalinux")
 
 
 def _fetch_prebuilt_qemu(host: HostInfo) -> bool:
     """Try to download pre-built QEMU binaries from GitHub.
 
     Returns True if installed successfully, False if not available.
-    """
-    # Determine which binary to fetch based on host OS
-    osr = Path("/etc/os-release")
-    os_id = "unknown"
-    os_ver = "0"
-    if osr.exists():
-        for line in osr.read_text().splitlines():
-            if line.startswith("ID="):
-                os_id = line.split("=", 1)[1].strip('"').strip("'")
-            elif line.startswith("VERSION_ID="):
-                os_ver = line.split("=", 1)[1].strip('"').strip("'")
 
-    if os_id in ("rocky", "rhel", "centos", "almalinux"):
-        major = os_ver.split(".")[0]
-        asset = f"qemu-{QEMU_VERSION}-el{major}.tar.gz"
-    else:
-        # No pre-built binary for this OS
+    On EL hosts where no prebuilt asset is published (see
+    _QEMU_PUBLISHED_EL_MAJORS) this raises RuntimeError with a clear
+    message, rather than returning False and letting the caller fall
+    through to a source build.  QEMU 9.2.2 fails to build on EL8 (glib,
+    pixman, etc. too old -- see beads lustre_test_vms_v2-47m), so
+    silently falling through produces a confusing compile failure far
+    from the real problem.
+    """
+    if not _is_el_host(host):
+        # No pre-built binary for non-EL hosts; apt path handles its own
+        # QEMU via the system package, and source build is viable there.
         return False
+
+    major = host.version.split(".")[0]
+    asset = f"qemu-{QEMU_VERSION}-el{major}.tar.gz"
+
+    if major not in _QEMU_PUBLISHED_EL_MAJORS:
+        published = ", ".join(
+            f"el{m}" for m in sorted(_QEMU_PUBLISHED_EL_MAJORS)
+        )
+        raise RuntimeError(
+            f"No pre-built QEMU {QEMU_VERSION} asset published for "
+            f"EL{major} (have: {published}).\n"
+            f"\n"
+            f"QEMU {QEMU_VERSION} cannot be built from source on EL{major} "
+            f"(system glib2/pixman/etc. are too old).\n"
+            f"\n"
+            f"Ask a maintainer to build and publish {asset}:\n"
+            f"  - Follow the 'Rebuilding Pre-built QEMU Binaries' recipe "
+            f"in lustre-test-vms-v2/CLAUDE.md\n"
+            f"  - Publish with: gh release upload {_QEMU_RELEASE_TAG} "
+            f"{asset} --clobber\n"
+            f"\n"
+            f"Tracking: beads lustre_test_vms_v2-47m"
+        )
 
     url = (
         f"https://github.com/{_QEMU_GITHUB_REPO}/releases/download/"
@@ -366,10 +396,18 @@ def _fetch_prebuilt_qemu(host: HostInfo) -> bool:
             quiet=True,
         )
         if r.returncode != 0:
-            log.warning(
-                "Pre-built QEMU not available for this platform -- will build from source"
+            # EL major is in the published set but the download failed
+            # (network, transient GitHub error, asset removed, ...).  Do
+            # NOT silently fall through to a source build on EL: hard-fail
+            # so the user knows to retry or investigate, instead of
+            # watching an unrelated compile error.
+            raise RuntimeError(
+                f"Failed to download pre-built QEMU asset {asset} from "
+                f"{url} (curl rc={r.returncode}).\n"
+                f"Check network access to github.com, or retry.  "
+                f"Do not fall back to a source build on EL hosts -- "
+                f"required build deps may be too old."
             )
-            return False
 
         # Tarball is structured as a /opt/qemu overlay: bin/qemu-system-*,
         # bin/qemu-img, share/qemu/<firmware>.  Extract directly into
