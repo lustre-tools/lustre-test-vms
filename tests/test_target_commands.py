@@ -304,6 +304,116 @@ class TestCmdTargetsJsonShape:
         assert all(r["remote_release"] == "?" for r in variant_rows)
 
 
+def _seed_image_meta(
+    tmp_targets: Path,
+    target: str,
+    kernel: str,
+    *,
+    variant: str | None = None,
+    with_lustre: object = None,
+    lustre_version: object = None,
+) -> None:
+    """Seed a minimal image meta.json on disk.
+
+    Mirrors the real layout:
+        output/<target>/<arch>/images/<kernel>/[<variant>/]meta.json
+    Callers control whether the image declares Lustre (`with_lustre`
+    and `lustre_version` -- None mimics the --no-lustre build path).
+    Also seeds the paired kernel meta so cmd_targets sees the kernel
+    as built (its `built=` path for the base row reads the kernel
+    meta, not the image meta).
+    """
+    kdir = (
+        tmp_targets / "output" / target / "x86_64" / "kernels" / kernel
+    )
+    kdir.mkdir(parents=True, exist_ok=True)
+    (kdir / "meta.json").write_text("{}")
+    img_dir = (
+        tmp_targets / "output" / target / "x86_64" / "images" / kernel
+    )
+    if variant and variant != "base":
+        img_dir = img_dir / variant
+    img_dir.mkdir(parents=True, exist_ok=True)
+    (img_dir / "meta.json").write_text(
+        json.dumps({
+            "target": target,
+            "input_hash": "x" * 16,
+            "with_lustre": with_lustre,
+            "lustre_version": lustre_version,
+        })
+    )
+
+
+class TestCmdTargetsLustreMissing:
+    """A built image with no Lustre baked in (the --no-lustre build
+    path or a pre-Lustre-staging fetch) produces VMs that can't mount
+    Lustre.  cmd_targets flags these with `yes?` on the Local column
+    and includes a legend footer explaining the marker."""
+
+    def test_json_lustre_missing_flagged(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        variant_targets: Path,
+    ) -> None:
+        # Seed a built image WITHOUT lustre, and a second one WITH.
+        _seed_image_meta(
+            variant_targets, "rocky9", "5.14-rhel9.7",
+            with_lustre=None, lustre_version=None,  # --no-lustre build
+        )
+        _seed_image_meta(
+            variant_targets, "rocky9", "5.14-rhel9.5",
+            with_lustre="/some/tree",
+            lustre_version="2.8.0",
+        )
+        with _patch_cfg_paths(variant_targets), \
+                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+            cmd_targets(_ns(json=True))
+        rows = json.loads(capsys.readouterr().out)
+        by_key = {
+            (r["kernel"], r["variant"]): r for r in rows
+            if r["variant"] is not None
+        }
+        # rhel9.7 base row: lustre missing
+        assert by_key[("5.14-rhel9.7", "base")]["lustre_missing"] is True
+        # rhel9.5 base row: lustre present
+        assert by_key[("5.14-rhel9.5", "base")]["lustre_missing"] is False
+
+    def test_text_yes_question_marker(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        variant_targets: Path,
+    ) -> None:
+        """The Local column shows `yes?` for no-lustre images and the
+        legend footer explains it.  `yes` (plain) for good images."""
+        _seed_image_meta(
+            variant_targets, "rocky9", "5.14-rhel9.7",
+            with_lustre=None, lustre_version=None,
+        )
+        with _patch_cfg_paths(variant_targets), \
+                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+            cmd_targets(_ns(json=False))
+        out = capsys.readouterr().out
+        # `yes?` (Local column) for the no-lustre row.
+        assert "yes?" in out
+        # Legend footer must explain the marker so the user can act.
+        assert "yes? = image built WITHOUT Lustre" in out
+
+    def test_text_no_marker_when_lustre_present(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        variant_targets: Path,
+    ) -> None:
+        _seed_image_meta(
+            variant_targets, "rocky9", "5.14-rhel9.7",
+            with_lustre="/x", lustre_version="2.8.0",
+        )
+        with _patch_cfg_paths(variant_targets), \
+                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+            cmd_targets(_ns(json=False))
+        out = capsys.readouterr().out
+        assert "yes?" not in out  # no false positive
+
+
 class TestCmdTargetsTextOutput:
     """Refactor-safety: the text table is the human-facing surface
     of `target list`.  Column order, presence of the legend, and

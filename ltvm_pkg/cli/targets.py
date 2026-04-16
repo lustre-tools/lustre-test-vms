@@ -216,6 +216,32 @@ def cmd_targets(args: argparse.Namespace) -> int:
                         / "meta.json"
                     )
                     built = img_meta.exists()
+
+                # A built image can still be Lustre-less (happens when
+                # someone ran `ltvm build image --no-lustre` during
+                # iteration, or when the target is client-only and
+                # Lustre wasn't baked).  `ltvm create` picks the base
+                # image verbatim, so a Lustre-less image produces a VM
+                # that can't mount anything -- the precise failure mode
+                # the user hit with `pafvm`.  Record the miss so the
+                # renderer can flag it.
+                lustre_missing = False
+                if built:
+                    img_meta_path = (
+                        tc.image_output_dir(kname, variant=variant)
+                        / "meta.json"
+                    )
+                    try:
+                        meta_doc = _cli_attr("load_meta_safe")(img_meta_path)
+                    except Exception:
+                        meta_doc = None
+                    if meta_doc is not None:
+                        # Only the image meta carries these fields; kernel
+                        # meta does not.  Treat None/empty as "missing".
+                        lv = meta_doc.get("lustre_version")
+                        wl = meta_doc.get("with_lustre")
+                        lustre_missing = not (lv or wl)
+
                 if built:
                     avail = "ready"
                 elif remote not in ("-", "?"):
@@ -248,6 +274,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
                         "built": built,
                         "local_release": local,
                         "remote_release": remote,
+                        "lustre_missing": lustre_missing,
                     }
                 )
 
@@ -270,6 +297,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
     has_experimental = False
     has_behind = False
     has_unreachable = False
+    has_no_lustre = False
     for r in rows:
         if "kernel" not in r:
             print(f"{r['name']:<12} {r.get('error', '')}")
@@ -301,6 +329,13 @@ def cmd_targets(args: argparse.Namespace) -> int:
             ):
                 local_col = "yes!"
                 has_behind = True
+            # 'yes?' -> image is built but has no Lustre baked in.
+            # A VM created from this image can't mount Lustre.  Stacks
+            # with the 'yes!' behind marker so `yes?!` is possible
+            # when the image is both no-lustre AND out-of-date.
+            if r.get("lustre_missing") and local_col.startswith("yes"):
+                local_col = f"{local_col}?" if "?" not in local_col else local_col
+                has_no_lustre = True
 
         key = (r["name"], r["arch"])
         kernel_key = (r["name"], r["arch"], r["kernel"])
@@ -332,7 +367,8 @@ def cmd_targets(args: argparse.Namespace) -> int:
         )
         prev_key = key
         prev_kernel_key = kernel_key
-    if has_experimental or has_behind or has_unreachable:
+    if (has_experimental or has_behind or has_unreachable
+            or has_no_lustre):
         print()
         if has_experimental:
             print("* experimental -- may not build or boot cleanly")
@@ -342,6 +378,13 @@ def cmd_targets(args: argparse.Namespace) -> int:
             print(
                 "yes! = local copy differs from latest release -- "
                 "`sudo ltvm target fetch --replace <target>` to refresh"
+            )
+        if has_no_lustre:
+            print(
+                "yes? = image built WITHOUT Lustre baked in -- a VM "
+                "created from this image can't mount Lustre.  Rebuild "
+                "with `ltvm build image <target> --lustre-tree <path>` "
+                "(drop --no-lustre) or `ltvm target fetch <target>`."
             )
     return EXIT_OK
 
