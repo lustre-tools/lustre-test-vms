@@ -452,14 +452,34 @@ Notes:
 
 ## Issue Tracking
 
-Use GitHub Issues on `lustre-tools/lustre-test-vms`.
+Two trackers, by scope:
+
+- **`bd` (beads)** for local, in-flight, session-scoped work:
+  bugs found mid-task, TODOs that live and die within a few
+  sessions, scratch tracking an agent can pick up and close.
+  Fast to create; doesn't clutter the public tracker.
+- **GitHub Issues** on `lustre-tools/lustre-test-vms` for
+  longer-term work: feature requests, cross-session designs,
+  anything worth showing an external user or contributor.
+
+Rule of thumb: if it'll be done before the week is out, it's
+a bead.  If it needs to survive a month and show up in `gh
+issue list`, it's a GH issue.  Migrate beads to GH issues
+when they age out of the "current work" horizon.
 
 ```bash
+# beads (local)
+bd ready          # find available work
+bd show <id>
+bd update <id> --claim
+bd close <id>
+
+# GH issues (longer-term)
 gh issue list
 gh issue view <n>
 gh issue create --title "..." --body "..." --label enhancement
-gh issue close <n>
 ```
 
-Closed PRs/commits can reference issues with `Fixes #N`
-in the commit message or PR body to auto-close on merge.
+**Sync model (beads):** state is shared by exporting to JSONL
+and committing it to git.  If `.beads/` has no `issues.jsonl`
+after a `git pull`, the other machine forgot to export.
