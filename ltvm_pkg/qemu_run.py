@@ -159,15 +159,39 @@ def launch_qemu(vm: VMInfo) -> None:
     console = "ttyAMA0" if vm.arch == "aarch64" else "ttyS0"
 
     crashkernel = "512M" if vm.mem >= 2048 else "256M"
+    # Thread the list of extra NIC *types* onto the kernel cmdline as
+    # fc_nics=<csv>.  rc.local uses this to drive per-type setup for
+    # each extra interface (eth1, eth2, ...).  The mgmt NIC (eth0) is
+    # still configured from fc_ip / fc_gw / fc_name as before.
+    # Empty list -> omit the parameter entirely so existing single-NIC
+    # VMs' cmdline is byte-identical to the pre-feature path.
+    extra_nics = vm.extra_nics()
+    fc_nics_fragment = ""
+    if extra_nics:
+        # Replace the ':' in 'passthrough:0000:00:02.0' with ';' on the
+        # cmdline so the CSV separator stays unambiguous.  rc.local
+        # reverses this when parsing.  'tcp' has no arg, so it's
+        # unaffected.
+        cmdline_types = [
+            nic_type.replace(":", ";")
+            for (_idx, nic_type, _tap, _mac) in extra_nics
+        ]
+        fc_nics_fragment = f" fc_nics={','.join(cmdline_types)}"
     boot_args = (
         f"console={console} reboot=k panic=1 crashkernel={crashkernel} "
         f"net.ifnames=0 biosdevname=0 "
         f"root=/dev/vda rw fc_ip={vm.ip} fc_gw={GATEWAY} "
         f"fc_name={vm.name}"
+        f"{fc_nics_fragment}"
     )
 
-    # Recreate TAP and flush any stale ARP entry for this IP.
-    run(["ip", "link", "del", vm.tap], capture_output=True)
+    # Recreate TAP and flush any stale ARP entry for this IP.  Also
+    # tear down any extra-NIC TAPs from a previous launch so ``ltvm
+    # start`` on a VM created with ``--nic tcp`` doesn't leak TAPs
+    # across restarts.
+    all_taps = [vm.tap] + [t for (_i, _n, t, _m) in extra_nics]
+    for _tap in all_taps:
+        run(["ip", "link", "del", _tap], capture_output=True)
     run(["ip", "neigh", "flush", vm.ip, "dev", BRIDGE], capture_output=True)
     run(
         ["ip", "tuntap", "add", "dev", vm.tap, "mode", "tap"],
@@ -175,6 +199,31 @@ def launch_qemu(vm: VMInfo) -> None:
     )
     run(["ip", "link", "set", vm.tap, "master", BRIDGE], check=True)
     run(["ip", "link", "set", vm.tap, "up"], check=True)
+
+    # Extra NICs: create one TAP per declared nic.  They all join the
+    # same bridge as the mgmt NIC for now (tcp only); softroce (-r55)
+    # and passthrough (-5a0) will override this dispatch and may take
+    # a different path entirely (rxe on top of the bridge for softroce,
+    # vfio-pci with no TAP for passthrough).  Keep the construction
+    # shape as a per-type dispatch so those follow-ups slot in without
+    # reworking this loop.
+    for _idx, _nic_type, _tap, _mac in extra_nics:
+        if _nic_type == "tcp":
+            run(
+                ["ip", "tuntap", "add", "dev", _tap, "mode", "tap"],
+                check=True,
+            )
+            run(["ip", "link", "set", _tap, "master", BRIDGE], check=True)
+            run(["ip", "link", "set", _tap, "up"], check=True)
+        else:
+            # Unreachable under the current CLI parser (validate_nic_spec
+            # rejects everything except 'tcp').  Fail loud instead of
+            # silently skipping -- a missing case here would produce a
+            # VM that boots but is missing an expected NIC.
+            die(
+                f"internal error: launch_qemu saw unimplemented NIC type "
+                f"{_nic_type!r} on VM {vm.name!r}; expected 'tcp' only"
+            )
 
     if not vm.kernel:
         die(f"VM '{vm.name}' has no kernel path set — recreate with --target")
@@ -247,6 +296,34 @@ def launch_qemu(vm: VMInfo) -> None:
         f"unix:{vm.socket_path},server,nowait",
     ]
 
+    # Extra NICs: per-type dispatch.  The mgmt NIC (net0 / vm.tap /
+    # vm.mac) was already emitted above; here we append one netdev +
+    # one device for each entry in vm.nics.  IDs are net1, net2, ...
+    # so they correspond 1:1 to the guest's eth1, eth2, ... (QEMU
+    # assigns PCI slots in args order on q35 / aarch64 virt).
+    # The per-type dispatch shape is deliberate: softroce (-r55) will
+    # add a `softroce` branch that looks a lot like this tcp branch
+    # but with extra rxe-related guest-side setup; passthrough (-5a0)
+    # will add a `passthrough` branch that emits `-device vfio-pci,
+    # host=<BDF>` with no -netdev / no TAP.  The current CLI parser
+    # rejects both, so those branches aren't emitted today -- but the
+    # loop shape is what lets them slot in without reworking.
+    for _idx, _nic_type, _tap, _mac in extra_nics:
+        _netdev_id = f"net{_idx}"
+        if _nic_type == "tcp":
+            qemu_args += [
+                "-netdev",
+                f"tap,id={_netdev_id},ifname={_tap},"
+                f"script=no,downscript=no",
+                "-device",
+                f"{net_driver},netdev={_netdev_id},mac={_mac}",
+            ]
+        else:
+            die(
+                f"internal error: launch_qemu saw unimplemented NIC type "
+                f"{_nic_type!r} on VM {vm.name!r}; expected 'tcp' only"
+            )
+
     total_disks = vm.mdt_disks + vm.ost_disks
     for n in range(1, total_disks + 1):
         disk = vm.disk_path(n)
@@ -288,13 +365,15 @@ def launch_qemu(vm: VMInfo) -> None:
         except OSError:
             pass
     except BaseException:
-        # TAP was created above; tear it down so we don't leak the device.
-        # cmd_create has its own broader rollback, but cmd_start, cmd_ensure
-        # and cmd_cluster_* call launch_qemu directly with no rollback path,
-        # so the TAP would otherwise leak until the next restart of this VM.
-        # BaseException catches SystemExit raised by die() so cleanup runs
-        # before the process exits.
-        run(["ip", "link", "del", vm.tap], capture_output=True)
+        # TAPs were created above; tear them down so we don't leak
+        # devices.  cmd_create has its own broader rollback, but
+        # cmd_start, cmd_ensure and cmd_cluster_* call launch_qemu
+        # directly with no rollback path, so the TAPs would otherwise
+        # leak until the next restart of this VM.  BaseException
+        # catches SystemExit raised by die() so cleanup runs before
+        # the process exits.
+        for _tap in all_taps:
+            run(["ip", "link", "del", _tap], capture_output=True)
         raise
 
     vm.update_pid(pid)
@@ -339,7 +418,13 @@ def kill_qemu(vm: VMInfo) -> None:
         # VMInfo.load and now.  We're tearing the VM down anyway, so
         # this is benign.
         pass
+    # Delete the mgmt TAP plus every extra NIC TAP.  Missing TAPs are
+    # ignored (capture_output swallows the ip-link error), so this is
+    # safe even when launch_qemu never created them (e.g. a kill on a
+    # VM that failed partway through its own launch).
     run(["ip", "link", "del", vm.tap], capture_output=True)
+    for _idx, _nic_type, _tap, _mac in vm.extra_nics():
+        run(["ip", "link", "del", _tap], capture_output=True)
     # Flush stale ARP entry so the bridge doesn't poison new VMs or
     # re-creations of this VM that may get a different MAC.
     run(["ip", "neigh", "flush", vm.ip, "dev", BRIDGE], capture_output=True)

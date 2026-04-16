@@ -119,8 +119,45 @@ def tap_for_name(name: str) -> str:
     return f"tap-{suffix}"
 
 
+def extra_tap_for_name(name: str, idx: int) -> str:
+    """Return the TAP device name for extra NIC ``idx`` (1-based).
+
+    The mgmt NIC (idx 0, eth0) lives at ``tap_for_name(name)``; extra
+    NICs use ``tap_for_name(name) + "-<idx>"`` so that prefix-matching
+    against ``tap-<vm>`` finds all of a VM's TAPs (used in cmd_doctor
+    for orphan detection).  The Linux interface-name limit is 15 chars
+    including the NUL, so we hash-compress the name portion if the
+    combined name would overflow -- same fallback as ``tap_for_name``
+    uses for long VM names on its own.
+    """
+    if idx < 1:
+        raise ValueError(f"extra NIC index must be >= 1, got {idx}")
+    base = tap_for_name(name)
+    suffix = f"-{idx}"
+    if len(base) + len(suffix) <= 15:
+        return base + suffix
+    # base is already at its 15-char limit; re-hash with the index
+    # folded in so the combined ifname fits.
+    h = hashlib.md5(f"{name}|{idx}".encode()).hexdigest()
+    return f"tap-{h[:11 - len(suffix)]}{suffix}"
+
+
 def mac_for_name(name: str) -> str:
     h = hashlib.md5(name.encode()).hexdigest()
+    return f"AA:FC:00:{h[0:2]}:{h[2:4]}:{h[4:6]}"
+
+
+def extra_mac_for_name(name: str, idx: int) -> str:
+    """Return a deterministic MAC for extra NIC ``idx`` (1-based).
+
+    Keys on ``(name, idx)`` so each extra NIC has a distinct MAC that
+    doesn't collide with the mgmt NIC (idx 0, ``mac_for_name``) or
+    with any other VM's NICs.  Uses the same AA:FC:00 locally-administered
+    prefix as the mgmt NIC.
+    """
+    if idx < 1:
+        raise ValueError(f"extra NIC index must be >= 1, got {idx}")
+    h = hashlib.md5(f"{name}|nic{idx}".encode()).hexdigest()
     return f"AA:FC:00:{h[0:2]}:{h[2:4]}:{h[4:6]}"
 
 

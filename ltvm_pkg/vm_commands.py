@@ -277,6 +277,69 @@ def _parse_disk_size(value: str | int | None) -> int:
 _VM_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
+# Accepted --nic types.  `tcp` is fully wired in this feature; the
+# `softroce` and `passthrough` types are recognised syntactically so
+# follow-up issues (lustre_test_vms_v2-r55, -5a0) don't have to re-plumb
+# the CLI parser, but they are rejected at validation time with a
+# pointer at the tracking issue.  Downstream code (launch_qemu,
+# rc.local, etc.) must only see `tcp` values from this list until those
+# issues land.
+_NIC_TYPES_IMPLEMENTED = ("tcp",)
+_NIC_TYPES_RESERVED = {
+    "softroce": "lustre_test_vms_v2-r55",
+    "passthrough": "lustre_test_vms_v2-5a0",
+}
+_NIC_TYPES_ALL = _NIC_TYPES_IMPLEMENTED + tuple(_NIC_TYPES_RESERVED)
+
+
+def parse_nic_spec(raw: str) -> tuple[str, str]:
+    """Parse ``--nic <type>[:<arg>]`` into ``(type, arg)``.
+
+    Raises ``SystemExit`` (via ``die()``) for unknown types.  Does NOT
+    reject the reserved types (softroce / passthrough) -- callers that
+    only support implemented types must reject them themselves so the
+    error can cite where the work will land (see ``validate_nic_spec``).
+
+    Returning ``(type, arg)`` keeps the reserved arg available for
+    future backends -- passthrough needs the BDF string, softroce may
+    take a device hint later.  ``arg`` is the empty string when no
+    ``:<arg>`` was given.
+    """
+    if not raw:
+        die("--nic value is empty")
+    parts = raw.split(":", 1)
+    nic_type = parts[0].strip().lower()
+    nic_arg = parts[1] if len(parts) > 1 else ""
+    if nic_type not in _NIC_TYPES_ALL:
+        valid = ", ".join(_NIC_TYPES_ALL)
+        die(
+            f"unknown --nic type {nic_type!r}: valid types are: {valid}"
+        )
+    return nic_type, nic_arg
+
+
+def validate_nic_spec(raw: str) -> str:
+    """Validate a ``--nic`` spec and return the normalised type string.
+
+    Reserved types raise ``SystemExit`` with a pointer at the tracking
+    issue.  Implemented types round-trip through the canonical form
+    (lowercased, arg preserved for types that need it).  The returned
+    string is what gets stored in ``VMInfo.nics`` and threaded onto the
+    kernel cmdline as ``fc_nics=<csv>``.
+    """
+    nic_type, nic_arg = parse_nic_spec(raw)
+    if nic_type in _NIC_TYPES_RESERVED:
+        issue = _NIC_TYPES_RESERVED[nic_type]
+        die(
+            f"--nic {nic_type!r} is not supported yet; that backend "
+            f"lands in {issue}. For this issue use --nic tcp."
+        )
+    # Implemented types: fold back to canonical storage form.
+    if nic_arg:
+        return f"{nic_type}:{nic_arg}"
+    return nic_type
+
+
 def _validate_vm_name(name: str) -> None:
     """Reject VM names with characters that break /etc/hosts, SSH
     config, hostnames, shell quoting, or QEMU's fc_name= cmdline arg.
@@ -358,6 +421,13 @@ def cmd_create(args: argparse.Namespace) -> None:
 
     tap = tap_for_name(name)
     mac = mac_for_name(name)
+
+    # Parse + validate any extra NICs.  The mgmt NIC (eth0) is always
+    # created; --nic adds NICs on top of it.  Invalid specs die() now
+    # so we don't half-create the VM.  validate_nic_spec rejects
+    # softroce/passthrough with a pointer at the follow-up issues.
+    raw_nics = getattr(args, "nic", None) or []
+    extra_nic_types = [validate_nic_spec(n) for n in raw_nics]
 
     os_target = getattr(args, "os", "")
     explicit_image = getattr(args, "image", "")
@@ -442,6 +512,7 @@ def cmd_create(args: argparse.Namespace) -> None:
             # whose without forcing per-user namespaces.
             creator=os.environ.get("SUDO_USER", "") or "root",
             variant=variant,
+            nics=list(extra_nic_types),
         )
 
         # Create overlay + backing disks.  If any step fails partway,
@@ -1438,26 +1509,32 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     r = run(["ip", "-o", "link", "show", "type", "tun"])
     if r.returncode == 0:
+        # Build the set of TAPs owned by running VMs -- mgmt TAP plus
+        # every extra-NIC TAP.  Anything under tap-* that isn't in this
+        # set (and is currently visible to `ip link`) is an orphan.
+        live_taps: set[str] = set()
+        for name in VMInfo.all_names():
+            try:
+                vm = VMInfo.load(name)
+            except VMNotFound:
+                continue
+            if not is_running(vm):
+                continue
+            live_taps.add(vm.tap)
+            for _idx, _nic_type, _tap, _mac in vm.extra_nics():
+                live_taps.add(_tap)
         for line in r.stdout.splitlines():
             m = re.search(r":\s*(tap-\S+?)[@:]", line)
             if not m:
                 continue
             tap = m.group(1)
-            found = False
-            for name in VMInfo.all_names():
-                try:
-                    vm = VMInfo.load(name)
-                except VMNotFound:
-                    continue
-                if vm.tap == tap and is_running(vm):
-                    found = True
-                    break
-            if not found:
-                print(f"orphan TAP: {tap}")
-                issues += 1
-                if args.fix:
-                    run(["ip", "link", "del", tap])
-                    print("  fixed: removed")
+            if tap in live_taps:
+                continue
+            print(f"orphan TAP: {tap}")
+            issues += 1
+            if args.fix:
+                run(["ip", "link", "del", tap])
+                print("  fixed: removed")
 
     for line in _check_export_tools():
         print(line)

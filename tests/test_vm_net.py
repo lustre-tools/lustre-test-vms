@@ -34,6 +34,72 @@ class TestTapForName:
         assert a != b
 
 
+class TestExtraTapForName:
+    """extra_tap_for_name builds ifnames for extra NICs under the 15-char limit."""
+
+    def test_appends_index_for_short_names(self) -> None:
+        """Short VM names: tap-<name>-<idx>."""
+        assert vm_net.extra_tap_for_name("co1-mds", 1) == "tap-co1-mds-1"
+        assert vm_net.extra_tap_for_name("co1-mds", 2) == "tap-co1-mds-2"
+
+    def test_stays_under_15_chars(self) -> None:
+        """Long names fall back to a hash so the full ifname fits IFNAMSIZ."""
+        long = "x" * 30
+        for idx in (1, 9, 10):
+            name = vm_net.extra_tap_for_name(long, idx)
+            assert len(name) <= 15, name
+            assert name.startswith("tap-")
+            assert name.endswith(f"-{idx}")
+
+    def test_different_index_different_name(self) -> None:
+        assert (
+            vm_net.extra_tap_for_name("co1-mds", 1)
+            != vm_net.extra_tap_for_name("co1-mds", 2)
+        )
+
+    def test_distinct_from_mgmt_tap(self) -> None:
+        """The mgmt TAP (tap_for_name) must not collide with any extras."""
+        mgmt = vm_net.tap_for_name("co1-mds")
+        for idx in (1, 2, 3):
+            assert vm_net.extra_tap_for_name("co1-mds", idx) != mgmt
+
+    def test_index_zero_is_rejected(self) -> None:
+        """Index 0 is the mgmt NIC; use tap_for_name instead."""
+        with pytest.raises(ValueError):
+            vm_net.extra_tap_for_name("co1-mds", 0)
+
+
+class TestExtraMacForName:
+    """extra_mac_for_name produces deterministic, non-colliding MACs."""
+
+    def test_prefix_is_locally_administered(self) -> None:
+        mac = vm_net.extra_mac_for_name("co1-mds", 1)
+        assert mac.startswith("AA:FC:00:")
+
+    def test_distinct_from_mgmt_mac(self) -> None:
+        """Must not collide with the mgmt NIC MAC for the same VM."""
+        assert (
+            vm_net.extra_mac_for_name("co1-mds", 1)
+            != vm_net.mac_for_name("co1-mds")
+        )
+
+    def test_different_index_different_mac(self) -> None:
+        assert (
+            vm_net.extra_mac_for_name("co1-mds", 1)
+            != vm_net.extra_mac_for_name("co1-mds", 2)
+        )
+
+    def test_deterministic(self) -> None:
+        assert (
+            vm_net.extra_mac_for_name("co1-mds", 1)
+            == vm_net.extra_mac_for_name("co1-mds", 1)
+        )
+
+    def test_index_zero_is_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            vm_net.extra_mac_for_name("co1-mds", 0)
+
+
 class TestMacForName:
     """mac_for_name is deterministic and stays in the AA:FC:00 locally-adminned range."""
 

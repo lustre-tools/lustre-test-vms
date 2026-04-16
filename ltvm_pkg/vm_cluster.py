@@ -188,6 +188,7 @@ def _create_one_node(
     os_target: str | None = None,
     arch: str | None = None,
     disk_size: str | None = None,
+    nics: list[str] | None = None,
 ) -> tuple[str, int, str]:
     """Create a single cluster VM via ltvm subprocess.
 
@@ -199,6 +200,12 @@ def _create_one_node(
     default_mem", so cluster nodes inherit the per-target memory default
     instead of being silently overridden by a hardcoded constant in the
     cluster CLI parser.
+
+    `nics` is an optional list of `--nic` spec strings that get applied
+    uniformly to every node.  Validation of each spec (including the
+    reserved-type rejection for softroce/passthrough) happens inside
+    the child `ltvm create`, so bad specs surface per-node with the
+    follow-up-issue hint the single-node path prints.
     """
     mgs_disk = 1 if (node.is_mgs and not node.is_mds) else 0
     cmd = [
@@ -221,6 +228,8 @@ def _create_one_node(
         cmd += ["--mdt-disks", str(node.mdt_disks + mgs_disk)]
     if node.ost_disks:
         cmd += ["--ost-disks", str(node.ost_disks)]
+    for nic in nics or []:
+        cmd += ["--nic", nic]
 
     # 300s: cold boot + disk creation + first-boot SSH wait (the inner
     # `ltvm create` already enforces SSH_TIMEOUT, but we leave headroom
@@ -264,6 +273,11 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     os_target = getattr(args, "os", None)
     arch = getattr(args, "arch", None)
     disk_size = getattr(args, "disk_size", None)
+    # Multi-NIC: same list of --nic specs applies to every node in the
+    # cluster.  The CLI layer (cli.py::cmd_cluster) collects them into
+    # args.nic; older call sites that don't know about --nic land here
+    # with the attr unset, in which case we pass an empty list through.
+    nics: list[str] = list(getattr(args, "nic", None) or [])
 
     print(f"=== Creating cluster '{cluster_name}' ===")
     if os_target:
@@ -281,6 +295,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                 os_target,
                 arch,
                 disk_size,
+                nics,
             ): node
             for node in node_specs
         }

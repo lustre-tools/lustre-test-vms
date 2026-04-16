@@ -55,6 +55,72 @@ class TestValidateVmName:
             vm_commands._validate_vm_name(name)
 
 
+# ── parse_nic_spec / validate_nic_spec ───────────────────
+
+
+class TestParseNicSpec:
+    """parse_nic_spec splits TYPE[:ARG] and rejects unknown types."""
+
+    def test_tcp_no_arg(self) -> None:
+        assert vm_commands.parse_nic_spec("tcp") == ("tcp", "")
+
+    def test_softroce_recognised(self) -> None:
+        """softroce parses (the rejection is in validate_nic_spec)."""
+        assert vm_commands.parse_nic_spec("softroce") == ("softroce", "")
+
+    def test_passthrough_with_bdf(self) -> None:
+        """Colons in ARG survive (PCIe BDF has colons: 0000:00:02.0)."""
+        t, a = vm_commands.parse_nic_spec("passthrough:0000:00:02.0")
+        assert t == "passthrough"
+        assert a == "0000:00:02.0"
+
+    def test_type_case_insensitive(self) -> None:
+        assert vm_commands.parse_nic_spec("TCP")[0] == "tcp"
+
+    def test_empty_dies(self) -> None:
+        with pytest.raises(SystemExit):
+            vm_commands.parse_nic_spec("")
+
+    def test_unknown_type_dies(self) -> None:
+        with pytest.raises(SystemExit):
+            vm_commands.parse_nic_spec("infiniband")
+
+
+class TestValidateNicSpec:
+    """validate_nic_spec is the final CLI-layer gate.
+
+    Implemented types round-trip through the canonical storage form.
+    Reserved types die with a pointer at the tracking issue so agents
+    working on -r55 / -5a0 don't accidentally land their code against
+    a parser that already accepts those types silently.
+    """
+
+    def test_tcp_passes(self) -> None:
+        assert vm_commands.validate_nic_spec("tcp") == "tcp"
+
+    def test_softroce_rejected_with_r55_hint(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit):
+            vm_commands.validate_nic_spec("softroce")
+        err = capsys.readouterr().err
+        assert "softroce" in err
+        assert "lustre_test_vms_v2-r55" in err
+
+    def test_passthrough_rejected_with_5a0_hint(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit):
+            vm_commands.validate_nic_spec("passthrough:0000:00:02.0")
+        err = capsys.readouterr().err
+        assert "passthrough" in err
+        assert "lustre_test_vms_v2-5a0" in err
+
+    def test_unknown_type_rejected(self) -> None:
+        with pytest.raises(SystemExit):
+            vm_commands.validate_nic_spec("ethernet")
+
+
 # ── _parse_disk_size ─────────────────────────────────────
 
 
@@ -250,6 +316,7 @@ def _create_args(**overrides) -> argparse.Namespace:
         "ip": None,
         "json": False,
         "_quiet": True,
+        "nic": None,  # repeatable --nic; None == no extras
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -305,6 +372,26 @@ class TestCmdCreateValidation:
     def test_invalid_name_dies(self, tmp_vmdir: Path) -> None:
         with pytest.raises(SystemExit):
             vm_commands.cmd_create(_create_args(name="bad name"))
+
+    def test_nic_softroce_rejected_early(self, tmp_vmdir: Path) -> None:
+        """--nic softroce dies before touching the filesystem.
+
+        The whole point of validating --nic at CLI entry is that a bad
+        spec fails without leaving behind any partial VM state.
+        """
+        with pytest.raises(SystemExit):
+            vm_commands.cmd_create(
+                _create_args(name="co1-sroce", nic=["softroce"])
+            )
+
+    def test_nic_passthrough_rejected_early(self, tmp_vmdir: Path) -> None:
+        with pytest.raises(SystemExit):
+            vm_commands.cmd_create(
+                _create_args(
+                    name="co1-pt",
+                    nic=["passthrough:0000:00:02.0"],
+                )
+            )
 
 
 # ── cmd_destroy ──────────────────────────────────────────

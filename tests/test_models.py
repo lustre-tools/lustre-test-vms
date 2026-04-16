@@ -132,6 +132,111 @@ class TestVMInfoMetadata:
         assert loaded.kver == "5.14.0-x"
 
 
+class TestVMInfoNicsField:
+    """VMInfo.nics survives save/load, and legacy .info files parse as []."""
+
+    def test_default_is_empty_list(self, tmp_sockets: Path) -> None:
+        """A VM created without --nic has an empty nics list."""
+        vm = VMInfo(name="solo", ip="192.168.100.50")
+        assert vm.nics == []
+
+    def test_nics_round_trip(self, tmp_sockets: Path) -> None:
+        """nics survives save/load."""
+        vm = VMInfo(
+            name="twonic",
+            ip="192.168.100.51",
+            nics=["tcp", "tcp"],
+        )
+        vm.save()
+        loaded = VMInfo.load("twonic")
+        assert loaded.nics == ["tcp", "tcp"]
+
+    def test_nics_with_colon_arg_round_trip(
+        self, tmp_sockets: Path
+    ) -> None:
+        """NICs whose storage string has ':' (e.g. passthrough) survive.
+
+        VMInfo joins on '|' so that a spec like
+        'passthrough:0000:00:02.0' doesn't get confused with the CSV
+        separator.  We shouldn't be able to create one of these via the
+        CLI today, but a future VMInfo written by -5a0 must still load
+        cleanly.
+        """
+        vm = VMInfo(
+            name="vfio",
+            ip="192.168.100.52",
+            nics=["tcp", "passthrough:0000:00:02.0"],
+        )
+        vm.save()
+        loaded = VMInfo.load("vfio")
+        assert loaded.nics == ["tcp", "passthrough:0000:00:02.0"]
+
+    def test_legacy_info_file_without_nics_line(
+        self, tmp_sockets: Path
+    ) -> None:
+        """A .info file missing the NICS= line (pre-multi-NIC) loads as []."""
+        info = tmp_sockets / "legacy.info"
+        info.write_text(
+            "NAME=legacy\n"
+            "IP=192.168.100.90\n"
+            "PID=0\n"
+            "TAP=tap-legacy\n"
+            "MAC=AA:FC:00:00:00:01\n"
+            "VCPUS=2\n"
+            "MEM=2048\n"
+            "MDT_DISKS=0\n"
+            "OST_DISKS=0\n"
+            "IMAGE=\n"
+            "KERNEL=\n"
+        )
+        vm = VMInfo.load("legacy")
+        # Backward compat: no NICS= line -> empty list, not None / error
+        assert vm.nics == []
+
+    def test_empty_nics_line_parses_as_empty_list(
+        self, tmp_sockets: Path
+    ) -> None:
+        """A VM saved with nics=[] writes ``NICS=`` and loads it back empty."""
+        vm = VMInfo(name="nonics", ip="192.168.100.91")
+        vm.save()
+        # Confirm NICS= is present but empty-valued
+        assert "NICS=\n" in vm.info_path.read_text()
+        loaded = VMInfo.load("nonics")
+        assert loaded.nics == []
+
+    def test_extra_nics_empty_by_default(self, tmp_sockets: Path) -> None:
+        """extra_nics() is empty when nics is empty."""
+        vm = VMInfo(name="empty", ip="192.168.100.92")
+        assert vm.extra_nics() == []
+
+    def test_extra_nics_generates_deterministic_names(
+        self, tmp_sockets: Path
+    ) -> None:
+        """extra_nics() yields (idx, type, tap, mac) starting at idx=1."""
+        vm = VMInfo(
+            name="co1-two",
+            ip="192.168.100.93",
+            nics=["tcp", "tcp"],
+        )
+        entries = vm.extra_nics()
+        assert len(entries) == 2
+        (i1, t1, tap1, mac1), (i2, t2, tap2, mac2) = entries
+        # Index, type
+        assert (i1, t1) == (1, "tcp")
+        assert (i2, t2) == (2, "tcp")
+        # Deterministic TAP names tied to the VM name
+        assert tap1.startswith("tap-")
+        assert tap1.endswith("-1")
+        assert tap2.endswith("-2")
+        # Distinct MACs per NIC
+        assert mac1 != mac2
+        # Extras don't collide with the mgmt NIC
+        from ltvm_pkg.vm_net import mac_for_name, tap_for_name
+
+        assert tap1 != tap_for_name(vm.name)
+        assert mac1 != mac_for_name(vm.name)
+
+
 class TestVMInfoLoadCorruption:
     """VMInfo.load fails loud on corrupt int fields -- writes are atomic
     (tempfile + rename) so a truncated/garbage int signals real damage."""

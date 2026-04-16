@@ -9,7 +9,7 @@ import re
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -381,6 +381,13 @@ class VMInfo:
     arch: str = "x86_64"  # CPU architecture (x86_64, aarch64)
     creator: str = ""  # username that created the VM (SUDO_USER, or "" for legacy)
     variant: str = "base"  # target variant (e.g. mofed); "base" is the default
+    # Extra NICs beyond the mgmt NIC (eth0), in order.  Each element is
+    # a type string from the CLI: 'tcp', 'softroce', or 'passthrough:<BDF>'.
+    # The management NIC is *not* included here -- this list describes
+    # additional NICs that will be wired as eth1, eth2, ... in the guest.
+    # Backward compat: older .info files (pre-nic field) load as an empty
+    # list, so existing single-NIC VMs behave exactly as before.
+    nics: list[str] = field(default_factory=list)
 
     @property
     def info_path(self) -> Path:
@@ -404,6 +411,30 @@ class VMInfo:
 
     def disk_path(self, n: int) -> Path:
         return OVERLAYS / f"{self.name}-disk{n}.img"
+
+    def extra_nics(self) -> list[tuple[int, str, str, str]]:
+        """Return ``(index, nic_type, tap_name, mac)`` tuples for extra NICs.
+
+        The mgmt NIC (index 0, eth0, type 'tcp', stored in ``self.tap`` /
+        ``self.mac``) is *not* included -- that one is wired by the
+        existing single-NIC path.  Extra NICs start at index 1, the
+        first entry of ``self.nics``.
+
+        TAP names use the ``-<idx>`` suffix (tap-<vm>-1, tap-<vm>-2, ...)
+        so destroy/doctor can find them with a prefix match against the
+        mgmt TAP name.
+        """
+        from .vm_net import extra_mac_for_name, extra_tap_for_name
+
+        return [
+            (
+                idx,
+                nic_type,
+                extra_tap_for_name(self.name, idx),
+                extra_mac_for_name(self.name, idx),
+            )
+            for idx, nic_type in enumerate(self.nics, start=1)
+        ]
 
     def save(self) -> None:
         # Atomic write via tempfile + rename so a SIGKILL mid-save
@@ -432,6 +463,11 @@ class VMInfo:
             f"ARCH={self.arch}\n"
             f"CREATOR={self.creator}\n"
             f"VARIANT={self.variant}\n"
+            # NICs are joined with '|' -- a spec like
+            # 'passthrough:0000:00:02.0' contains colons, so ',' or ':'
+            # would ambiguate.  '|' is not a valid character in any
+            # accepted NIC type or PCIe BDF.
+            f"NICS={'|'.join(self.nics)}\n"
         )
         _atomic_write(self.info_path, text)
 
@@ -517,6 +553,15 @@ class VMInfo:
         def _int(key: str, default: int) -> int:
             return int(vals.get(key, default))
 
+        # Parse the pipe-delimited NIC list.  A missing NICS= line (old
+        # .info files predating the multi-NIC feature) parses as the
+        # empty list, keeping single-NIC VMs behaving exactly as before.
+        # An empty NICS= line (no extra NICs requested at create time)
+        # also parses as the empty list -- "".split("|") returns [""]
+        # which we must filter out.
+        nics_raw = vals.get("NICS", "")
+        nics_list = [s for s in nics_raw.split("|") if s]
+
         return VMInfo(
             name=vals.get("NAME", name),
             ip=vals.get("IP", ""),
@@ -540,6 +585,7 @@ class VMInfo:
             arch=vals.get("ARCH", "x86_64"),
             creator=vals.get("CREATOR", ""),
             variant=vals.get("VARIANT", "base"),
+            nics=nics_list,
         )
 
     @staticmethod

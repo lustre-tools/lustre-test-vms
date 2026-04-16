@@ -2768,6 +2768,7 @@ def cmd_cluster(args: argparse.Namespace) -> int:
         os_target: str | None = None
         arch: str | None = None
         disk_size: str | None = None
+        nics: list[str] = []
         positional: list[str] = []
         i = 0
         while i < len(cargs):
@@ -2786,11 +2787,19 @@ def cmd_cluster(args: argparse.Namespace) -> int:
             elif cargs[i] == "--disk-size" and i + 1 < len(cargs):
                 disk_size = cargs[i + 1]
                 i += 2
+            elif cargs[i] == "--nic" and i + 1 < len(cargs):
+                # --nic is repeatable and applies uniformly to every
+                # node in the cluster.  Validation happens inside each
+                # node's `ltvm create`, so a bad value (e.g. softroce)
+                # surfaces per-node with the usual follow-up-issue hint.
+                nics.append(cargs[i + 1])
+                i += 2
             elif cargs[i].startswith("--"):
                 return _error(
                     f"cluster create: unknown argument '{cargs[i]}'",
                     use_json,
-                    hint="valid: --vcpus, --mem, --target, --arch, --disk-size",
+                    hint="valid: --vcpus, --mem, --target, --arch, "
+                    "--disk-size, --nic",
                 )
             else:
                 positional.append(cargs[i])
@@ -2813,6 +2822,7 @@ def cmd_cluster(args: argparse.Namespace) -> int:
                 os=os_target,
                 arch=arch,
                 disk_size=disk_size,
+                nic=nics,
             ),
         )
 

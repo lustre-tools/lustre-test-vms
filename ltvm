@@ -685,6 +685,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="base",
         help="Target variant to boot (default: base). E.g. 'mofed'.",
     )
+    _vm_create_args.add_argument(
+        "--nic",
+        action="append",
+        default=None,
+        metavar="TYPE[:ARG]",
+        help=(
+            "Add an extra NIC beyond the mgmt NIC (eth0).  Repeat for "
+            "multiple.  Types: 'tcp' (plain virtio-net).  'softroce' "
+            "and 'passthrough:<BDF>' are reserved for follow-up features "
+            "(tracked in lustre_test_vms_v2-r55 and -5a0)."
+        ),
+    )
 
     sp = sub.add_parser(
         "create",

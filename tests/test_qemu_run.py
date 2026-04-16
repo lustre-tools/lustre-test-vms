@@ -258,6 +258,74 @@ class TestLaunchQemuCommand:
         append2 = h2.qemu_args[h2.qemu_args.index("-append") + 1]
         assert "console=ttyS0" in append2
 
+    def test_single_nic_baseline_unchanged(self, tmp_vmdir: Path) -> None:
+        """A VM with no --nic produces a single virtio-net-pci device,
+        exactly as before the feature.  Regression guard against
+        inadvertently changing the default single-NIC wiring.
+        """
+        vm = _make_vm(tmp_vmdir)  # vm.nics == []
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        joined = " ".join(h.qemu_args)
+        # Exactly one netdev and one virtio-net-pci -- the mgmt NIC.
+        assert joined.count("-netdev") == 1
+        assert joined.count("virtio-net-pci") == 1
+        # No fc_nics= on the cmdline when no extras are requested.
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        assert "fc_nics=" not in append
+
+    def test_extra_nics_emit_one_device_each(self, tmp_vmdir: Path) -> None:
+        """Each --nic tcp adds one tap netdev + one virtio-net-pci.
+
+        IDs are net1, net2, ... and correspond to eth1, eth2 in the
+        guest.  MAC and ifname are distinct per NIC.
+        """
+        vm = _make_vm(tmp_vmdir, name="co1-two")
+        vm.nics = ["tcp", "tcp"]
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        joined = " ".join(h.qemu_args)
+        # 1 mgmt + 2 extras = 3 netdevs and 3 virtio-net-pci devices.
+        assert joined.count("-netdev") == 3
+        assert joined.count("virtio-net-pci") == 3
+        # net1 and net2 appear with matching id/netdev pairs.
+        assert "id=net1" in joined
+        assert "id=net2" in joined
+        assert "netdev=net1" in joined
+        assert "netdev=net2" in joined
+
+    def test_extra_nic_taps_created(self, tmp_vmdir: Path) -> None:
+        """Pre-launch: each extra NIC gets an ip-tuntap-add + master + up."""
+        vm = _make_vm(tmp_vmdir, name="co1-two")
+        vm.nics = ["tcp", "tcp"]
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        # Collect the set of TAP names that were created
+        added = set()
+        for call in h.run_calls:
+            if len(call) >= 5 and call[1:4] == ["tuntap", "add", "dev"]:
+                added.add(call[4])
+        # mgmt + 2 extras
+        assert len(added) == 3
+
+    def test_fc_nics_cmdline_single_extra(self, tmp_vmdir: Path) -> None:
+        """--nic tcp threads through to fc_nics=tcp on the kernel cmdline."""
+        vm = _make_vm(tmp_vmdir)
+        vm.nics = ["tcp"]
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        assert "fc_nics=tcp" in append
+
+    def test_fc_nics_cmdline_two_extras(self, tmp_vmdir: Path) -> None:
+        """Two --nic tcp yields fc_nics=tcp,tcp in order."""
+        vm = _make_vm(tmp_vmdir)
+        vm.nics = ["tcp", "tcp"]
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        assert "fc_nics=tcp,tcp" in append
+
     def test_data_disks_emit_device_and_drive(self, tmp_vmdir: Path) -> None:
         """mdt+ost disks produce paired -device/-drive args, 1-indexed."""
         vm = _make_vm(tmp_vmdir, mdt_disks=1, ost_disks=2)
@@ -616,6 +684,45 @@ class TestKillQemu:
             qemu_run.kill_qemu(vm)
         assert _signal.SIGTERM in sent
         assert _signal.SIGKILL in sent
+
+    def test_kill_qemu_tears_down_extra_taps(self, tmp_vmdir: Path) -> None:
+        """kill_qemu must delete every TAP the VM owns, including extras.
+
+        Without this the next ``ltvm create`` (or ``ltvm start``) on the
+        same VM name would collide with the leftover TAPs.  The mgmt
+        TAP always gets torn down; extras need explicit iteration.
+        """
+        vm = _make_vm(tmp_vmdir, name="co1-two")
+        vm.pid = 0  # skip the signalling path; we only care about TAP teardown
+        vm.nics = ["tcp", "tcp"]
+
+        run_calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            if isinstance(cmd, list):
+                run_calls.append(cmd)
+            r = MagicMock()
+            r.returncode = 0
+            return r
+
+        with (
+            patch("ltvm_pkg.qemu_run.run", side_effect=fake_run),
+            patch("ltvm_pkg.qemu_run.os.kill"),
+            patch.object(VMInfo, "update_pid"),
+        ):
+            qemu_run.kill_qemu(vm)
+
+        # Three TAPs should have been deleted: mgmt + 2 extras.
+        deletions = {
+            c[3]
+            for c in run_calls
+            if len(c) >= 4 and c[:3] == ["ip", "link", "del"]
+        }
+        # mgmt tap
+        assert vm.tap in deletions
+        # both extras
+        for _idx, _type, _tap, _mac in vm.extra_nics():
+            assert _tap in deletions
 
     def test_kill_qemu_skips_when_pid_is_not_qemu(
         self,

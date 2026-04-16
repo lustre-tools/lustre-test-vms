@@ -1,6 +1,9 @@
 #!/bin/bash
 # VM init -- networking + auto-resize root filesystem.
-# QEMU passes fc_ip=, fc_gw=, fc_name= on the kernel command line.
+# QEMU passes fc_ip=, fc_gw=, fc_name=, and optionally fc_nics= on the
+# kernel command line.  The management NIC (eth0) is configured from
+# fc_ip / fc_gw.  Extra NICs declared via fc_nics (see ltvm --nic) are
+# brought up here and optionally handed off to per-type hook scripts.
 
 # Grow root filesystem to fill the virtual disk (overlay may be larger
 # than the base image's shrunk ext4).
@@ -10,6 +13,7 @@ resize2fs "$ROOT_DEV" 2>/dev/null || true
 FC_IP=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_ip= | cut -d= -f2)
 FC_GW=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_gw= | cut -d= -f2)
 FC_NAME=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_name= | cut -d= -f2)
+FC_NICS=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_nics= | cut -d= -f2)
 
 if [ -n "${FC_IP}" ]; then
     ip addr add ${FC_IP}/24 dev eth0 2>/dev/null
@@ -24,4 +28,60 @@ fi
 if [ -n "${FC_NAME}" ]; then
     hostnamectl set-hostname "${FC_NAME}" 2>/dev/null || \
         hostname "${FC_NAME}"
+fi
+
+# --- Extra NICs (--nic) --------------------------------------------
+# fc_nics is a comma-separated list of NIC *types* in the order they
+# were added on the ltvm command line.  The first entry maps to eth1,
+# the second to eth2, etc. -- the mgmt NIC (eth0) is not represented
+# here.  Each entry is of the form TYPE or TYPE;ARG (the ';' is a
+# CSV-safe stand-in for ':' in specs like 'passthrough;0000;00;02.0').
+#
+# Per-type setup (bringing up an IB device under softroce, configuring
+# LNet, etc.) is delegated to a hook script at
+#   /usr/local/sbin/setup-nic-<type>.sh <ifname> [<arg>]
+# The hook is optional; a missing hook is a warning, not an error, so
+# plain 'tcp' NICs work even without any hook files on the image.
+#
+# TODO(lustre_test_vms_v2-r55): when softroce lands, the LNet config
+# emitter (see the standalone lnet_config pure function added in that
+# issue) should be called here with the full fc_nics list so LNet knows
+# about every rxe device in one pass.  E.g.:
+#   lnet_config.emit "$FC_NICS" > /etc/modprobe.d/lnet.conf
+if [ -n "${FC_NICS}" ]; then
+    idx=1
+    IFS=',' read -ra _nic_entries <<< "${FC_NICS}"
+    for entry in "${_nic_entries[@]}"; do
+        # Split type[;arg] -- ';' is the cmdline-safe arg separator.
+        nic_type="${entry%%;*}"
+        if [[ "${entry}" == *";"* ]]; then
+            nic_arg="${entry#*;}"
+            # Restore ':' in the arg (see the host-side substitution).
+            nic_arg="${nic_arg//;/:}"
+        else
+            nic_arg=""
+        fi
+        ifname="eth${idx}"
+        if ip link show "${ifname}" >/dev/null 2>&1; then
+            ip link set "${ifname}" up 2>/dev/null || true
+        else
+            echo "rc.local: warning: ${ifname} not present for" \
+                 "--nic ${nic_type} (is the NIC wired in QEMU?)" >&2
+        fi
+        hook="/usr/local/sbin/setup-nic-${nic_type}.sh"
+        if [ -x "${hook}" ]; then
+            "${hook}" "${ifname}" "${nic_arg}" || \
+                echo "rc.local: warning: ${hook} exited non-zero for" \
+                     "${ifname}" >&2
+        else
+            # No hook present for this type.  That's fine for plain
+            # 'tcp' NICs (no extra setup needed) and for any type whose
+            # hook hasn't been published yet (--nic softroce is
+            # rejected at CLI level until -r55 lands).  Softroce /
+            # passthrough hook scripts come from those follow-up
+            # issues; see the TODO above.
+            :
+        fi
+        idx=$((idx + 1))
+    done
 fi
