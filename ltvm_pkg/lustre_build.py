@@ -492,14 +492,36 @@ fi""")
     make_cross = ""
     if cross_compiling:
         make_cross = " ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-"
-    script_parts.append(f"make{make_cross} -j{jobs}")
+    # LIBTOOLFLAGS=--silent quietens *some* libtool output (the per-file
+    # compile banners).  It does NOT silence the "has not been installed
+    # in <prefix>" warnings that fire when libtool relinks intra-tree
+    # .la deps at install time -- those dominate the log (~76 lines of
+    # ~3000 in a clean build).  Route stderr through an awk filter via
+    # process substitution to drop that one phrase; real errors say
+    # "libtool: error:" or have different prefixes and pass through.
+    #
+    # Process substitution (not `| awk`) so make's exit code reaches
+    # the outer `set -e` directly -- pipefail interacts badly with the
+    # `libtool --version | head -1` check above, which SIGPIPEs libtool
+    # by design.
+    libtool_silent = " LIBTOOLFLAGS=--silent"
+    noise_filter = (
+        " 2> >(awk "
+        "'!/libtool: warning: .* has not been installed/' >&2)"
+    )
+    script_parts.append(
+        f"make{make_cross} -j{jobs}{libtool_silent}{noise_filter}"
+    )
     # Install into /staging (bind-mounted from
     # <lustre_tree>/.ltvm-staging/<target>[/<arch>]/) so build artifacts
     # stay outside the autotools tree but still inside the user's lustre
     # tree -- which means they're naturally per-user on a multi-user
     # host with no extra namespacing.
     script_parts.append("rm -rf /staging/*")
-    script_parts.append(f"make{make_cross} install DESTDIR=/staging -j{jobs}")
+    script_parts.append(
+        f"make{make_cross} install DESTDIR=/staging -j{jobs}"
+        f"{libtool_silent}{noise_filter}"
+    )
     script = "\n".join(script_parts)
 
     # Ensure the staging directory exists on the host before mounting.
