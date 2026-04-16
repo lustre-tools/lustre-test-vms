@@ -198,7 +198,11 @@ class TestImageStatus:
 
         image.image_status(tc)
 
-        tc.is_stale.assert_called_once_with("image", kernel=None)
+        # image_status now threads the bound TargetConfig's variant into
+        # is_stale so variant-scoped images report staleness correctly.
+        tc.is_stale.assert_called_once_with(
+            "image", kernel=None, variant=tc.variant_name
+        )
 
     def test_is_stale_not_called_when_no_image(self, tmp_path: Path) -> None:
         import ltvm_pkg.image_build as image

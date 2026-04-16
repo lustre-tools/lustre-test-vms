@@ -391,9 +391,13 @@ class TestCmdStatusJson:
 
         assert rc == EXIT_OK
         payload = json.loads(capsys.readouterr().out)
+        # images is a list of {kernel, variant, ...} entries so variant
+        # subdirs (mofed-24 etc.) can coexist with the base row under
+        # the same kernel.
         images = payload["rocky9"]["images"]
-        assert "5.14-rhel9.7-5.14.0-611.13.1" in images
-        assert "5.14-rhel9.5-5.14.0-503.26.1" in images
+        kernels = {img["kernel"] for img in images}
+        assert "5.14-rhel9.7-5.14.0-611.13.1" in kernels
+        assert "5.14-rhel9.5-5.14.0-503.26.1" in kernels
 
 
 # ---------------------------------------------------------------------------

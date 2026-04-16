@@ -887,8 +887,13 @@ def _get_package_manifest(
 def image_status(
     target_config: TargetConfig,
     kernel: str | None = None,
+    variant: str | None = None,
 ) -> dict[str, bool | str | float | None]:
     """Return status dict for the target's image artifact for a kernel.
+
+    ``variant`` defaults to the variant this TargetConfig is bound to;
+    pass an explicit name to inspect a sibling variant's image without
+    constructing a second TargetConfig.
 
     Keys:
         built: bool -- whether an image exists
@@ -897,9 +902,15 @@ def image_status(
         size_mb: float or None -- image file size
         path: str or None -- path to base.ext4
         kernel: str -- resolved kernel name this image is paired with
+        variant: str -- variant name this image belongs to
     """
+    from .target_config import DEFAULT_VARIANT
+
+    variant_name = (
+        target_config.variant_name if variant is None else variant
+    )
     kernel_name = target_config.resolve_kernel(kernel)
-    out_dir = target_config.image_output_dir(kernel)
+    out_dir = target_config.image_output_dir(kernel, variant=variant_name)
     image_path = out_dir / "base.ext4"
     meta_path = out_dir / "meta.json"
 
@@ -911,12 +922,13 @@ def image_status(
             "size_mb": None,
             "path": None,
             "kernel": kernel_name,
+            "variant": variant_name,
         }
 
     meta = load_meta_safe(meta_path) or {}
 
     size_mb = image_path.stat().st_size / (1024 * 1024)
-    stale = target_config.is_stale("image", kernel=kernel)
+    stale = target_config.is_stale("image", kernel=kernel, variant=variant_name)
 
     return {
         "built": True,
@@ -925,4 +937,5 @@ def image_status(
         "size_mb": round(size_mb, 1),
         "path": str(image_path),
         "kernel": kernel_name,
+        "variant": variant_name,
     }

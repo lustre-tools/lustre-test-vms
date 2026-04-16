@@ -1566,19 +1566,43 @@ def cmd_status(args: argparse.Namespace) -> int:
             continue  # skip planned/disabled targets
         cs = _container_status(tc)
         ks = kernel_status(tc)
-        # Images are per-kernel: build one row per built kernel dir, plus
-        # the default kernel (even if nothing is built yet) so the user
-        # sees "not built" instead of an empty section.
+        # Images are per-(kernel, variant): build one row per built
+        # kernel dir, plus the default kernel (even if nothing is built
+        # yet) so the user sees "not built" instead of an empty section.
+        # For each kernel, always report the base variant, then append a
+        # row for every non-base variant subdir that actually has a
+        # built image -- that way the `mofed-24` image shows up here
+        # even when the user didn't remember to look under a subdir.
+        from ltvm_pkg.target_config import DEFAULT_VARIANT
+
         built_kernels = tc.available_kernels()
-        kernels_to_report = list(built_kernels)
-        if tc.default_kernel not in kernels_to_report:
-            # available_kernels() lists full-version dir names; the
-            # default is the short name.  Resolve it to the matching
-            # full name if one exists, otherwise keep the short name.
-            kernels_to_report.append(tc.resolve_kernel(None))
+        # Dedup while preserving order: available_kernels() returns full
+        # directory names, but the default may resolve to the same full
+        # name -- without dedup we'd emit that row twice (base + any
+        # variants, doubled).
+        kernels_to_report: list[str] = []
+        seen: set[str] = set()
+        for kname in [*built_kernels, tc.resolve_kernel(None)]:
+            if kname and kname not in seen:
+                seen.add(kname)
+                kernels_to_report.append(kname)
         if not kernels_to_report:
             kernels_to_report = [tc.resolve_kernel(None)]
-        images = {k: image_status(tc, kernel=k) for k in kernels_to_report}
+        declared_variants = tc.declared_variants()
+        images: list[dict[str, Any]] = []
+        for k in kernels_to_report:
+            images.append(image_status(tc, kernel=k, variant=DEFAULT_VARIANT))
+            # Non-base variants only get a row when actually built --
+            # otherwise every kernel row would sprout a "mofed-24: not
+            # built" line, which is noise for users who never touch MOFED.
+            kernel_image_dir = tc.image_output_dir(
+                kernel=k, variant=DEFAULT_VARIANT
+            )
+            for v in declared_variants:
+                v_dir = kernel_image_dir / v
+                if not (v_dir / "base.ext4").exists():
+                    continue
+                images.append(image_status(tc, kernel=k, variant=v))
         all_status[name] = {
             "container": cs,
             "kernel": ks,
@@ -1588,21 +1612,23 @@ def cmd_status(args: argparse.Namespace) -> int:
     if use_json:
         print(json.dumps(all_status, indent=2))
     else:
-        # Table output: one row per (target, kernel-image) pair.
+        # Table output: one row per (target, kernel, variant) image.
         hdr = (
             f"{'Target':<12} {'Container':<14} {'Kernel':<26} "
-            f"{'Image-Kernel':<44} {'Image':<14}"
+            f"{'Image-Kernel':<44} {'Variant':<10} {'Image':<14}"
         )
         print(hdr)
         print("-" * len(hdr))
         for name, st in all_status.items():
             c = _artifact_label(st["container"])
             k = _artifact_label(st["kernel"])
-            for image_kernel, ims in st["images"].items():
+            for ims in st["images"]:
                 i = _artifact_label(ims)
+                image_kernel = ims.get("kernel", "")
+                variant = ims.get("variant", "base")
                 print(
                     f"{name:<12} {c:<14} {k:<26} "
-                    f"{image_kernel:<44} {i:<14}"
+                    f"{image_kernel:<44} {variant:<10} {i:<14}"
                 )
 
     return EXIT_OK
