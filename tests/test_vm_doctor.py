@@ -71,17 +71,9 @@ def doctor_env(
             "ltvm_pkg.vm_commands.is_running", return_value=False
         ),
     ):
-        # Re-patch Path so the hosts file read goes to our fake.
-        # cmd_doctor uses `Path("/etc/hosts")` literally, so patch that
-        # specific string via side_effect lookup.
-        real_path = Path
-
-        def path_router(p: str | Path) -> Path:
-            if str(p) == "/etc/hosts":
-                return fake_hosts
-            return real_path(p)
-
-        with patch("ltvm_pkg.vm_commands.Path", side_effect=path_router):
+        # cmd_doctor reads vm_commands.HOSTS_FILE (re-exported from
+        # vm_net), so redirect that module attribute to the fake.
+        with patch("ltvm_pkg.vm_commands.HOSTS_FILE", fake_hosts):
             yield {
                 "hosts": fake_hosts,
                 "ssh_dir": fake_ssh_dir,
@@ -325,15 +317,8 @@ class TestDoctorOrphanTaps:
             stderr="",
         )
 
-        real_path = Path
-
-        def path_router(p: str | Path) -> Path:
-            if str(p) == "/etc/hosts":
-                return fake_hosts
-            return real_path(p)
-
         with (
-            patch("ltvm_pkg.vm_commands.Path", side_effect=path_router),
+            patch("ltvm_pkg.vm_commands.HOSTS_FILE", fake_hosts),
             patch(
                 "ltvm_pkg.vm_commands._real_user_ssh_dir",
                 return_value=("root", ssh_dir),

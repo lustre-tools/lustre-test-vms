@@ -138,21 +138,14 @@ def _ltvm_repo_root() -> Path:
     `ltvm install` symlinks the entry-point script into ``/usr/local/bin``
     and then resolves that symlink at startup, so when the user runs
     ``ltvm update`` from an installed copy we still load ``ltvm_pkg``
-    from the real checkout.  ``Path(__file__).resolve()`` follows any
-    intermediate symlink and lands us at the real cli module file.
+    from the real checkout.
 
-    We read ``__file__`` off ``ltvm_pkg.cli`` (rather than this
-    submodule) because a longstanding test flips
-    ``ltvm_pkg.cli.__file__`` via ``patch.object`` to simulate a
-    symlinked install -- reading our own ``__file__`` would pin the
-    resolved path to ``ltvm_pkg/cli/setup.py`` and the patch would
-    have no effect.
-
-    The cli module lived as ``ltvm_pkg/cli.py`` before the package
-    split and now lives at ``ltvm_pkg/cli/__init__.py``; to stay
-    compatible with both the production layout AND the pre-split
-    test fixture (which fakes a flat ``ltvm_pkg/cli.py``), walk up
-    until we find an ``ltvm_pkg`` directory and return its parent.
+    We read ``__file__`` off ``ltvm_pkg.cli`` (not this submodule)
+    because a test flips ``ltvm_pkg.cli.__file__`` via ``patch.object``
+    to simulate a symlinked install.  The cli module used to be
+    ``ltvm_pkg/cli.py`` and now lives at ``ltvm_pkg/cli/__init__.py``,
+    so the on-disk depth varies.  Walk up from the resolved path
+    until we find the ``ltvm_pkg`` package dir and return its parent.
     """
     import ltvm_pkg.cli as _cli
 
@@ -160,9 +153,9 @@ def _ltvm_repo_root() -> Path:
     for parent in resolved.parents:
         if parent.name == "ltvm_pkg":
             return parent.parent
-    # Fallback to the pre-split two-parents rule if we can't locate
-    # the package directory (shouldn't happen in any normal install).
-    return resolved.parent.parent
+    raise RuntimeError(
+        f"cannot locate ltvm_pkg package directory above {resolved}"
+    )
 
 
 def _git(

@@ -160,8 +160,18 @@ class TestParseDiskSize:
     def test_int_value_returned_as_is_when_big_enough(self) -> None:
         assert vm_commands._parse_disk_size(200 * (1 << 20)) == 200 * (1 << 20)
 
-    def test_int_below_minimum_falls_back_to_default(self) -> None:
-        assert vm_commands._parse_disk_size(1024) == DISK_SIZE_BYTES
+    def test_int_below_minimum_dies(self) -> None:
+        """Sub-floor int input dies loud, matching string behavior.
+        The older silent-substitute-default behavior was a footgun --
+        callers passing a deliberately small byte count got silently
+        upgraded to the default without warning.
+        """
+        with pytest.raises(SystemExit):
+            vm_commands._parse_disk_size(1024)
+
+    def test_int_above_maximum_dies(self) -> None:
+        with pytest.raises(SystemExit):
+            vm_commands._parse_disk_size(200 * (1 << 30))
 
     def test_invalid_suffix_dies(self) -> None:
         with pytest.raises(SystemExit):

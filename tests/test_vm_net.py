@@ -242,18 +242,20 @@ class TestSshRegistry:
         fake_ssh = tmp_path / "home" / ".ssh"
         fake_ssh.mkdir(parents=True)
 
-        # Patch Path("/etc/hosts") + _real_user_ssh_dir.
+        # vm_net.HOSTS_FILE is the module constant every caller reads
+        # for /etc/hosts, so redirecting it is enough.  We still need a
+        # Path router for the remaining literal (/run/dnsmasq.pid) so
+        # reload_dns doesn't blow up before its own patch takes effect.
         real_path = vm_net.Path
 
         class _PathRouter(type(real_path)):
             def __call__(cls, *a, **k):
-                if a and a[0] == "/etc/hosts":
-                    return fake_hosts
                 if a and a[0] == "/run/dnsmasq.pid":
                     return tmp_path / "dnsmasq.pid"
                 return real_path(*a, **k)
 
         with (
+            patch("ltvm_pkg.vm_net.HOSTS_FILE", fake_hosts),
             patch(
                 "ltvm_pkg.vm_net._real_user_ssh_dir",
                 return_value=("nobody", fake_ssh),

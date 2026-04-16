@@ -18,6 +18,7 @@ from .deploy import configure_test_disks
 from .paths import load_meta_safe
 from .qemu_run import die, is_running, kill_qemu, launch_qemu, run
 from .vm_net import (
+    HOSTS_FILE,
     _real_user_ssh_dir,
     alloc_ip,
     deploy_ssh_key,
@@ -239,16 +240,22 @@ def _parse_disk_size(value: str | int | None) -> int:
     Accepts:
       * None or "" -> default
       * str like "500M", "10G" (suffix required, M or G)
-      * int bytes -- returned as-is if >= the minimum, otherwise default
-        (this path exists for callers that already hold a byte count and
-        just want it normalized against the same floor the CLI enforces).
+      * int bytes -- validated against the same floor/ceiling as the
+        string path.  A below-floor or above-ceiling int raises
+        SystemExit, matching the string behavior; no silent substitution
+        of the default (which previously surprised callers passing a
+        small-but-deliberate byte count).
 
-    Raises SystemExit on invalid string input.
+    Raises SystemExit on out-of-range or invalid input.
     """
     if value is None or value == "":
         return DISK_SIZE_BYTES
     if isinstance(value, int):
-        return value if value >= _MIN_DISK_BYTES else DISK_SIZE_BYTES
+        if value < _MIN_DISK_BYTES:
+            die(f"disk size {value} bytes is below the minimum of 64M")
+        if value > _MAX_DISK_BYTES:
+            die(f"disk size {value} bytes exceeds the maximum of 100G")
+        return value
     s = value.strip().upper()
     if not s:
         return DISK_SIZE_BYTES
@@ -1099,21 +1106,26 @@ def cmd_crash_collect(args: argparse.Namespace) -> int:
                 args, f"VM '{args.name}' not running, can't trigger crash"
             )
         print(f"triggering crash on {args.name}...")
+        # The trigger's expected success case is ssh dying mid-command
+        # as the kernel panics -- TimeoutExpired is the happy path.
+        # A clean ssh return with rc != 0 means the SSH connection
+        # worked but the sysrq write failed (auth, permissions,
+        # command not found), and we'd hang forever waiting for a
+        # kdump that never happens -- fail loud.  A clean rc == 0 is
+        # unusual (kernel usually dies before ssh returns) but still
+        # valid; fall through to the wait-for-reboot loop.
         try:
             r = run_ssh(vm.ip, "echo c > /proc/sysrq-trigger", timeout=5)
         except subprocess.TimeoutExpired:
-            # Expected: ssh session dies as the kernel panics.
-            r = None
-        if r is not None and r.returncode != 0:
-            # ssh returned cleanly but the trigger command failed (auth
-            # issue, connection refused, permission error, etc).
-            # Without that trigger, waiting for kdump will hang forever.
-            return _handler_error(
-                args,
-                f"failed to trigger crash on {args.name} "
-                f"(rc={r.returncode}): "
-                f"{(r.stderr or '').strip() or '(no stderr)'}",
-            )
+            pass  # panic in flight; proceed to wait-for-reboot
+        else:
+            if r.returncode != 0:
+                return _handler_error(
+                    args,
+                    f"failed to trigger crash on {args.name} "
+                    f"(rc={r.returncode}): "
+                    f"{(r.stderr or '').strip() or '(no stderr)'}",
+                )
 
         print("waiting for kdump + reboot...", end="", flush=True)
         time.sleep(5)
@@ -1576,7 +1588,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             # No --fix for partial degradation: the user may want to
             # recreate the missing nodes manually.
 
-    hosts = Path("/etc/hosts")
+    hosts = HOSTS_FILE
     if hosts.exists():
         for line in hosts.read_text().splitlines():
             m = re.search(

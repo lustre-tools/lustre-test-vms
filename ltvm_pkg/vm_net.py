@@ -19,6 +19,11 @@ from .vm_state import MARKER, ROOT_PASSWORD, SUBNET, VM_DIR, VMInfo, VMNotFound
 _IP_LOCK_PATH = VM_DIR / ".ip-alloc.lock"
 _HOSTS_LOCK_PATH = VM_DIR / ".hosts.lock"
 
+# Host /etc/hosts path -- module-level so tests can monkey-patch a
+# tmp file instead of the real system file.  All readers/writers in
+# this package import HOSTS_FILE rather than hard-coding the literal.
+HOSTS_FILE = Path("/etc/hosts")
+
 # Shared SSH client options for all sshpass-driven ssh/scp calls.
 # Kept here so call sites can't diverge (one was omitting
 # UserKnownHostsFile=/dev/null, silently polluting known_hosts on
@@ -252,7 +257,7 @@ def register_ssh_name(name: str, ip: str) -> None:
 
 
 def _register_ssh_name_locked(name: str, ip: str) -> None:
-    hosts = Path("/etc/hosts")
+    hosts = HOSTS_FILE
     marker_line = f"{MARKER}:{name}"
 
     # /etc/hosts — always replace any existing entry for this name so the
@@ -332,7 +337,7 @@ def _unregister_ssh_name_locked(name: str) -> None:
     # /etc/hosts (atomic write to avoid races with parallel destroys).
     # Anchor the marker match to end-of-line: see the prefix-collision
     # comment in _register_ssh_name_locked above.
-    hosts = Path("/etc/hosts")
+    hosts = HOSTS_FILE
     if hosts.exists():
         lines = [
             line

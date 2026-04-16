@@ -63,13 +63,9 @@ class TestHostsMarkerCollision:
             )
         )
 
-        # Patch Path("/etc/hosts") -> fake_hosts.
-        real_path = Path
-        monkeypatch.setattr(
-            vm_net,
-            "Path",
-            lambda p: fake_hosts if p == "/etc/hosts" else real_path(p),
-        )
+        # Redirect HOSTS_FILE (the centralised module constant) to
+        # our fake -- no need to patch Path() wholesale any more.
+        monkeypatch.setattr(vm_net, "HOSTS_FILE", fake_hosts)
         # Stub the surrounding ssh-config machinery so we only exercise
         # the /etc/hosts logic under test.
         monkeypatch.setattr(vm_net, "reload_dns", lambda: None)
@@ -115,12 +111,7 @@ class TestHostsMarkerCollision:
             )
         )
 
-        real_path = Path
-        monkeypatch.setattr(
-            vm_net,
-            "Path",
-            lambda p: fake_hosts if p == "/etc/hosts" else real_path(p),
-        )
+        monkeypatch.setattr(vm_net, "HOSTS_FILE", fake_hosts)
         monkeypatch.setattr(vm_net, "reload_dns", lambda: None)
         monkeypatch.setattr(
             vm_net,
