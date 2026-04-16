@@ -426,6 +426,27 @@ def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
     return True
 
 
+def _print_create_report(vm: VMInfo, args: argparse.Namespace) -> None:
+    """Print the final create outcome (JSON or human)."""
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "action": "created",
+                    "name": vm.name,
+                    "status": "running",
+                }
+            )
+        )
+    elif not getattr(args, "_quiet", False):
+        print(
+            f"VM created: {vm.name}\n"
+            f"  ip:    {vm.ip}\n"
+            f"  pid:   {vm.pid}\n"
+            f"  disks: {vm.mdt_disks} MDT + {vm.ost_disks} OST"
+        )
+
+
 def _resolve_os_and_kernel(args: argparse.Namespace) -> tuple:
     """Resolve the OS target + kernel + image for create, and read
     the kernel version from meta.json.  Mutates args.mem to the
@@ -775,23 +796,7 @@ def cmd_create(args: argparse.Namespace) -> None:
         _rollback_launch_failure(vm)
         raise
 
-    if args.json:
-        print(
-            json.dumps(
-                {
-                    "action": "created",
-                    "name": vm.name,
-                    "status": "running",
-                }
-            )
-        )
-    elif not getattr(args, "_quiet", False):
-        print(
-            f"VM created: {vm.name}\n"
-            f"  ip:    {vm.ip}\n"
-            f"  pid:   {vm.pid}\n"
-            f"  disks: {vm.mdt_disks} MDT + {vm.ost_disks} OST"
-        )
+    _print_create_report(vm, args)
 
 
 def cmd_start(args: argparse.Namespace) -> None:
