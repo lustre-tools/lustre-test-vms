@@ -186,18 +186,13 @@ def launch_qemu(vm: VMInfo) -> None:
     qemu_bin = qemu_binary_for_arch(arch)
     machine = qemu_machine_for_arch(arch)
 
-    # Device model suffix: microvm attaches virtio via MMIO; q35 (x86)
-    # and virt (aarch64) attach via PCI.  Branch on the resolved
-    # machine string so the LTVM_X86_MACHINE=q35 prototype hook gets
-    # the right device flavors without a separate code path.
-    if "microvm" in machine:
-        blk_driver = "virtio-blk-device"
-        net_driver = "virtio-net-device"
-        rng_driver = "virtio-rng-device"
-    else:
-        blk_driver = "virtio-blk-pci"
-        net_driver = "virtio-net-pci"
-        rng_driver = "virtio-rng-pci"
+    # q35 (x86) and virt (aarch64) both have a PCI bus, so virtio
+    # devices attach as virtio-*-pci.  Previously x86 used microvm and
+    # virtio-*-device (MMIO); q35 replaced microvm after benchmarking
+    # showed only ~300 ms of boot overhead.
+    blk_driver = "virtio-blk-pci"
+    net_driver = "virtio-net-pci"
+    rng_driver = "virtio-rng-pci"
 
     # KVM allows -cpu host; TCG (cross-arch emulation) needs a real model.
     host_arch = _platform.machine()

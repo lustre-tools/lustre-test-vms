@@ -85,12 +85,17 @@ def qemu_machine_for_arch(arch: str = "x86_64") -> str:
 
     if arch == "x86_64":
         accel = "accel=kvm" if host_is_x86 else "accel=tcg"
-        # Prototype hook: set LTVM_X86_MACHINE=q35 to compare q35 vs
-        # microvm end-to-end without a CLI change.  Delete after the
-        # benchmark decision lands.
-        if os.environ.get("LTVM_X86_MACHINE") == "q35":
-            return f"q35,{accel}"
-        return f"microvm,{accel},pit=off,pic=off,rtc=on"
+        # q35 matches the aarch64 'virt' path: PCIe root complex, full
+        # device set, virtio-*-pci drivers.  Benchmarked against microvm
+        # at ~+300 ms create-to-ssh (within create-path noise) with no
+        # measurable memory delta, in exchange for:
+        #   * one device-wiring model shared with aarch64
+        #   * PCIe passthrough (vfio-pci) becomes possible
+        #   * PCIe hotplug of disks/NICs (currently destroy/recreate)
+        #   * QEMU version floor drops (microvm needs 4.0+; q35 is older)
+        # Kernel cmdline and root=/dev/vda are unchanged; virtio-blk-pci
+        # still presents as /dev/vda to the guest.
+        return f"q35,{accel}"
     if arch == "aarch64":
         accel = "accel=kvm" if host_is_arm64 else "accel=tcg"
         return f"virt,{accel},gic-version=max"
