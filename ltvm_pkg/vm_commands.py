@@ -383,44 +383,55 @@ def _validate_vm_name(name: str) -> None:
         )
 
 
+def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
+    """If a VMInfo already exists for *name*, handle the idempotent
+    restart/no-op paths and return True.  Returns False when no
+    existing .info file is found (caller should proceed to create).
+    """
+    info_path = SOCKETS / f"{name}.info"
+    if not info_path.exists():
+        return False
+    vm = VMInfo.load(name)
+    if is_running(vm):
+        wait_for_ssh(vm.ip, SSH_TIMEOUT)
+        register_ssh_name(vm.name, vm.ip)
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "action": "none",
+                        "name": name,
+                        "status": "already running",
+                    }
+                )
+            )
+        else:
+            print(f"{name}: already running")
+        return True
+    launch_qemu(vm)
+    provision_vm_ssh(vm, SSH_TIMEOUT)
+    _seed_kdump_boot(vm)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "action": "started",
+                    "name": name,
+                    "status": "running",
+                }
+            )
+        )
+    else:
+        print(f"{name}: started")
+    return True
+
+
 def cmd_create(args: argparse.Namespace) -> None:
     name = args.name
     _validate_vm_name(name)
 
     info_path = SOCKETS / f"{name}.info"
-    if info_path.exists():
-        vm = VMInfo.load(name)
-        if is_running(vm):
-            wait_for_ssh(vm.ip, SSH_TIMEOUT)
-            register_ssh_name(vm.name, vm.ip)
-            if args.json:
-                print(
-                    json.dumps(
-                        {
-                            "action": "none",
-                            "name": name,
-                            "status": "already running",
-                        }
-                    )
-                )
-            else:
-                print(f"{name}: already running")
-            return
-        launch_qemu(vm)
-        provision_vm_ssh(vm, SSH_TIMEOUT)
-        _seed_kdump_boot(vm)
-        if args.json:
-            print(
-                json.dumps(
-                    {
-                        "action": "started",
-                        "name": name,
-                        "status": "running",
-                    }
-                )
-            )
-        else:
-            print(f"{name}: started")
+    if _handle_existing_vm(name, args):
         return
 
     # Validate vCPU and memory bounds.  argparse accepts any int (and
