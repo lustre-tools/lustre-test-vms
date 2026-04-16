@@ -936,3 +936,550 @@ class TestCmdCrashCollectOutdir:
             assert rc != 0
 
         assert Path(explicit).exists()
+
+
+# ── _handler_error ───────────────────────────────────────
+
+
+class TestHandlerError:
+    """_handler_error emits JSON to stdout or text to stderr based on
+    args.json, and returns the caller-supplied exit code."""
+
+    def test_json_mode_stdout(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        args = argparse.Namespace(json=True)
+        rc = vm_commands._handler_error(args, "boom", code=7)
+        assert rc == 7
+        captured = capsys.readouterr()
+        # JSON on stdout, not stderr
+        assert json.loads(captured.out) == {"error": "boom"}
+        assert captured.err == ""
+
+    def test_text_mode_stderr(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        args = argparse.Namespace(json=False)
+        rc = vm_commands._handler_error(args, "bad thing")
+        # Default code is EXIT_ERROR (1)
+        assert rc == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "error: bad thing" in captured.err
+
+    def test_missing_json_attr_treated_as_false(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """args without a json attr: default to text mode (CLI callers
+        always set it, but the handler must not crash if a caller forgets).
+        """
+        args = argparse.Namespace()
+        vm_commands._handler_error(args, "oops")
+        assert "error: oops" in capsys.readouterr().err
+
+
+# ── _os_family_for_vm ────────────────────────────────────
+
+
+class TestOsFamilyForVm:
+    """Falls back to rhel (with a warning) only when the target config
+    is genuinely missing/broken, not for every exception."""
+
+    def test_empty_os_id_returns_rhel_no_warning(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        vm = VMInfo(name="x", ip="10.0.0.1", os_id="")
+        assert vm_commands._os_family_for_vm(vm) == "rhel"
+        assert capsys.readouterr().err == ""
+
+    def test_resolves_from_target_config(self) -> None:
+        vm = VMInfo(name="x", ip="10.0.0.1", os_id="rocky9")
+        with patch("ltvm_pkg.target_config.TargetConfig") as mock_tc:
+            mock_tc.return_value.os_family = "rhel"
+            assert vm_commands._os_family_for_vm(vm) == "rhel"
+
+    def test_debian_resolved(self) -> None:
+        vm = VMInfo(name="x", ip="10.0.0.1", os_id="ubuntu24")
+        with patch("ltvm_pkg.target_config.TargetConfig") as mock_tc:
+            mock_tc.return_value.os_family = "debian"
+            assert vm_commands._os_family_for_vm(vm) == "debian"
+
+    def test_unknown_target_warns_and_falls_back(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        vm = VMInfo(name="x", ip="10.0.0.1", os_id="gone")
+        with patch(
+            "ltvm_pkg.target_config.TargetConfig",
+            side_effect=ValueError("unknown target"),
+        ):
+            assert vm_commands._os_family_for_vm(vm, "kdump path") == "rhel"
+        err = capsys.readouterr().err
+        assert "cannot resolve target" in err
+        assert "'gone'" in err
+        assert "kdump path" in err
+
+    def test_missing_yaml_warns_and_falls_back(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        vm = VMInfo(name="x", ip="10.0.0.1", os_id="any")
+        with patch(
+            "ltvm_pkg.target_config.TargetConfig",
+            side_effect=FileNotFoundError("targets.yaml"),
+        ):
+            assert vm_commands._os_family_for_vm(vm) == "rhel"
+        assert "cannot resolve target" in capsys.readouterr().err
+
+
+# ── _with_vm_stopped ─────────────────────────────────────
+
+
+class TestWithVmStopped:
+    """Context manager that stops a running VM for the duration of a
+    block then restarts it.  No-op if the VM isn't running."""
+
+    def _vm(self) -> VMInfo:
+        return VMInfo(name="co1-wvs", ip="10.0.0.10")
+
+    def test_noop_when_not_running(self) -> None:
+        """If the VM is stopped, _with_vm_stopped does nothing."""
+        vm = self._vm()
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=False),
+            patch("ltvm_pkg.vm_commands.kill_qemu") as mock_kill,
+            patch("ltvm_pkg.vm_commands.launch_qemu") as mock_launch,
+        ):
+            with vm_commands._with_vm_stopped(vm, "for test"):
+                pass
+        mock_kill.assert_not_called()
+        mock_launch.assert_not_called()
+
+    def test_running_is_stopped_then_restarted(self) -> None:
+        """Running VM: stop before block, relaunch + provision + kdump
+        after block (always, even on exception)."""
+        vm = self._vm()
+        calls: list[str] = []
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch(
+                "ltvm_pkg.vm_commands.kill_qemu",
+                side_effect=lambda v: calls.append("kill"),
+            ),
+            patch(
+                "ltvm_pkg.vm_commands.launch_qemu",
+                side_effect=lambda v: calls.append("launch"),
+            ),
+            patch(
+                "ltvm_pkg.vm_commands.provision_vm_ssh",
+                side_effect=lambda v, t, **kw: calls.append("prov"),
+            ),
+            patch(
+                "ltvm_pkg.vm_commands._seed_kdump_boot",
+                side_effect=lambda v: calls.append("seed"),
+            ),
+        ):
+            with vm_commands._with_vm_stopped(vm, "for test"):
+                calls.append("inside")
+        assert calls == ["kill", "inside", "launch", "prov", "seed"]
+
+    def test_restart_after_inner_exception(self) -> None:
+        """Even when the block raises, the VM is restarted."""
+        vm = self._vm()
+        relaunch_called = {"n": 0}
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.kill_qemu"),
+            patch(
+                "ltvm_pkg.vm_commands.launch_qemu",
+                side_effect=lambda v: relaunch_called.__setitem__(
+                    "n", relaunch_called["n"] + 1
+                ),
+            ),
+            patch("ltvm_pkg.vm_commands.provision_vm_ssh"),
+            patch("ltvm_pkg.vm_commands._seed_kdump_boot"),
+            pytest.raises(ValueError, match="inner"),
+        ):
+            with vm_commands._with_vm_stopped(vm, "for test"):
+                raise ValueError("inner")
+        assert relaunch_called["n"] == 1
+
+    def test_get_error_printed_on_restart_SystemExit(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """If restart itself die()s (SystemExit), the inner error
+        returned by get_error() is printed before re-raising."""
+        vm = self._vm()
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.kill_qemu"),
+            patch(
+                "ltvm_pkg.vm_commands.launch_qemu",
+                side_effect=SystemExit("relaunch died"),
+            ),
+            patch("ltvm_pkg.vm_commands.provision_vm_ssh"),
+            patch("ltvm_pkg.vm_commands._seed_kdump_boot"),
+            pytest.raises(SystemExit),
+        ):
+            with vm_commands._with_vm_stopped(
+                vm,
+                "for test",
+                get_error=lambda: "inner snapshot error",
+            ):
+                pass
+        err = capsys.readouterr().err
+        assert "inner snapshot error" in err
+
+
+# ── cmd_start ────────────────────────────────────────────
+
+
+class TestCmdStart:
+    """cmd_start registers SSH name BEFORE waiting so even a wait_for_ssh
+    timeout leaves a populated /etc/hosts entry (so the user can ssh in
+    to diagnose)."""
+
+    def test_multiple_names_all_launched(self, tmp_vmdir: Path) -> None:
+        _seed_vm_files(tmp_vmdir, "a")
+        _seed_vm_files(tmp_vmdir, "b")
+        args = argparse.Namespace(names=["a", "b"])
+        with (
+            patch("ltvm_pkg.vm_commands.launch_qemu") as mock_launch,
+            patch("ltvm_pkg.vm_commands.provision_vm_ssh") as mock_prov,
+            patch("ltvm_pkg.vm_commands._seed_kdump_boot"),
+        ):
+            vm_commands.cmd_start(args)
+        assert mock_launch.call_count == 2
+        assert mock_prov.call_count == 2
+        # All provisioning calls must pass register_before_wait=True.
+        for call in mock_prov.call_args_list:
+            assert call.kwargs.get("register_before_wait") is True
+
+
+# ── cmd_nmi ──────────────────────────────────────────────
+
+
+class TestCmdNmi:
+    """cmd_nmi sets NMI-panic sysctls then injects via QMP."""
+
+    def test_not_running_returns_unreachable(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "nmi-stopped")
+        args = argparse.Namespace(name="nmi-stopped", json=False)
+        with patch("ltvm_pkg.vm_commands.is_running", return_value=False):
+            rc = vm_commands.cmd_nmi(args)
+        assert rc == 4  # EXIT_UNREACHABLE
+        assert "not running" in capsys.readouterr().err
+
+    def test_success_path(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "nmi-ok")
+        args = argparse.Namespace(name="nmi-ok", json=False)
+        r = MagicMock(returncode=0, stdout="", stderr="")
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch(
+                "ltvm_pkg.vm_commands.run_ssh", return_value=r
+            ) as mock_ssh,
+            patch("ltvm_pkg.vm_commands._qmp_nmi") as mock_nmi,
+        ):
+            rc = vm_commands.cmd_nmi(args)
+        assert rc == 0
+        # The single run_ssh call must enable all three panic sysctls.
+        cmd = mock_ssh.call_args.args[1]
+        assert "panic_on_unrecovered_nmi=1" in cmd
+        assert "panic_on_io_nmi=1" in cmd
+        assert "unknown_nmi_panic=1" in cmd
+        mock_nmi.assert_called_once()
+        assert "NMI injected" in capsys.readouterr().out
+
+    def test_sysctl_failure_reported(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "nmi-ssh")
+        args = argparse.Namespace(name="nmi-ssh", json=False)
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch(
+                "ltvm_pkg.vm_commands.run_ssh",
+                side_effect=RuntimeError("ssh gone"),
+            ),
+            patch("ltvm_pkg.vm_commands._qmp_nmi") as mock_nmi,
+        ):
+            rc = vm_commands.cmd_nmi(args)
+        assert rc != 0
+        # Must not attempt NMI injection after sysctl failure.
+        mock_nmi.assert_not_called()
+        assert "failed to set NMI panic sysctls" in capsys.readouterr().err
+
+    def test_nmi_injection_failure_reported(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "nmi-qmp")
+        args = argparse.Namespace(name="nmi-qmp", json=False)
+        r = MagicMock(returncode=0, stdout="", stderr="")
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.run_ssh", return_value=r),
+            patch(
+                "ltvm_pkg.vm_commands._qmp_nmi",
+                side_effect=RuntimeError("qmp busted"),
+            ),
+        ):
+            rc = vm_commands.cmd_nmi(args)
+        assert rc != 0
+        assert "failed to inject NMI" in capsys.readouterr().err
+
+
+# ── _qmp_nmi ─────────────────────────────────────────────
+
+
+class TestQmpNmi:
+    """_qmp_nmi speaks the QMP protocol: drain greeting, negotiate caps,
+    send inject-nmi, skip events, wait for return/error response."""
+
+    def _fake_socket(self, frames: list[bytes]) -> Any:
+        """Build a context-manager socket whose recv() drains `frames`."""
+        sock = MagicMock()
+        recv_chunks = list(frames)
+
+        def _recv(n: int) -> bytes:
+            if not recv_chunks:
+                return b""
+            return recv_chunks.pop(0)
+
+        sock.recv.side_effect = _recv
+        sock.sendall = MagicMock()
+        sock.settimeout = MagicMock()
+        sock.connect = MagicMock()
+        # Context-manager protocol
+        sock.__enter__ = lambda self_: self_
+        sock.__exit__ = lambda self_, *a: False
+        return sock
+
+    def test_happy_path_no_error(self, tmp_path: Path) -> None:
+        qmp = tmp_path / "q.qmp"
+        # greeting, cap response, inject-nmi response
+        frames = [
+            b'{"QMP": {"version": "8"}}\n',
+            b'{"return": {}}\n',
+            b'{"return": {}}\n',
+        ]
+        sock = self._fake_socket(frames)
+        with patch(
+            "socket.socket", return_value=sock
+        ):
+            # Must not raise.
+            vm_commands._qmp_nmi(qmp)
+        # Sent two commands: qmp_capabilities + inject-nmi
+        sent = [call.args[0] for call in sock.sendall.call_args_list]
+        assert any(b"qmp_capabilities" in s for s in sent)
+        assert any(b"inject-nmi" in s for s in sent)
+
+    def test_skips_events_before_response(self, tmp_path: Path) -> None:
+        """QEMU may emit async events (NMI, RESET) before the return
+        frame; _qmp_nmi must skip them and wait for return/error."""
+        qmp = tmp_path / "q.qmp"
+        frames = [
+            b'{"QMP": {"version": "8"}}\n',
+            b'{"return": {}}\n',  # capabilities ack
+            b'{"event": "NMI"}\n',  # async event
+            b'{"event": "RESET"}\n',  # another async event
+            b'{"return": {}}\n',  # the real response
+        ]
+        sock = self._fake_socket(frames)
+        with patch("socket.socket", return_value=sock):
+            vm_commands._qmp_nmi(qmp)  # must complete
+
+    def test_error_response_raises(self, tmp_path: Path) -> None:
+        qmp = tmp_path / "q.qmp"
+        frames = [
+            b'{"QMP": {"version": "8"}}\n',
+            b'{"return": {}}\n',
+            b'{"error": {"desc": "inject-nmi not supported"}}\n',
+        ]
+        sock = self._fake_socket(frames)
+        with (
+            patch("socket.socket", return_value=sock),
+            pytest.raises(RuntimeError, match="inject-nmi not supported"),
+        ):
+            vm_commands._qmp_nmi(qmp)
+
+    def test_socket_closed_before_greeting_raises(
+        self, tmp_path: Path
+    ) -> None:
+        qmp = tmp_path / "q.qmp"
+        sock = self._fake_socket([])  # empty -> recv returns b""
+        with (
+            patch("socket.socket", return_value=sock),
+            pytest.raises(RuntimeError, match="closed before greeting"),
+        ):
+            vm_commands._qmp_nmi(qmp)
+
+
+# ── cmd_snapshot ─────────────────────────────────────────
+
+
+class TestCmdSnapshot:
+    """cmd_snapshot creates a tag on the overlay; --delete removes one."""
+
+    def test_create_with_explicit_tag(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "snap-ok")
+        args = argparse.Namespace(name="snap-ok", tag="v1", delete=None)
+        run_ok = MagicMock(returncode=0, stdout="", stderr="")
+        with (
+            patch(
+                "ltvm_pkg.vm_commands.is_running", return_value=False
+            ),
+            patch(
+                "ltvm_pkg.vm_commands.run", return_value=run_ok
+            ) as mock_run,
+        ):
+            vm_commands.cmd_snapshot(args)
+        # qemu-img snapshot -c v1 <overlay>
+        cmd = mock_run.call_args.args[0]
+        assert "snapshot" in cmd and "-c" in cmd and "v1" in cmd
+        assert "snapshot 'v1' created" in capsys.readouterr().out
+
+    def test_create_failure_dies(self, tmp_vmdir: Path) -> None:
+        _seed_vm_files(tmp_vmdir, "snap-fail")
+        args = argparse.Namespace(name="snap-fail", tag="v1", delete=None)
+        run_fail = MagicMock(returncode=1, stdout="", stderr="disk busy")
+        with (
+            patch(
+                "ltvm_pkg.vm_commands.is_running", return_value=False
+            ),
+            patch("ltvm_pkg.vm_commands.run", return_value=run_fail),
+            pytest.raises(SystemExit),
+        ):
+            vm_commands.cmd_snapshot(args)
+
+    def test_delete_tag(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "snap-del")
+        args = argparse.Namespace(name="snap-del", tag=None, delete="v1")
+        run_ok = MagicMock(returncode=0, stdout="", stderr="")
+        with (
+            patch(
+                "ltvm_pkg.vm_commands.is_running", return_value=False
+            ),
+            patch(
+                "ltvm_pkg.vm_commands.run", return_value=run_ok
+            ) as mock_run,
+        ):
+            vm_commands.cmd_snapshot(args)
+        cmd = mock_run.call_args.args[0]
+        assert "-d" in cmd and "v1" in cmd
+        assert "snapshot 'v1' deleted" in capsys.readouterr().out
+
+
+# ── cmd_restore ──────────────────────────────────────────
+
+
+class TestCmdRestore:
+    """cmd_restore verifies the tag exists before stopping the VM."""
+
+    _SNAP_LIST_V1 = (
+        "Snapshot list:\n"
+        "ID        TAG               VM SIZE                DATE       VM CLOCK     ICOUNT\n"
+        "1         v1                0 B 2024-01-01 12:00:00   00:00:00.000          0\n"
+    )
+
+    def test_no_tag_lists_snapshots(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "list-snap")
+        args = argparse.Namespace(name="list-snap", tag=None)
+        run_ok = MagicMock(returncode=0, stdout="", stderr="")
+        with patch(
+            "ltvm_pkg.vm_commands.run", return_value=run_ok
+        ) as mock_run:
+            vm_commands.cmd_restore(args)
+        # -l means list; capture_output=False so the user sees output
+        cmd = mock_run.call_args.args[0]
+        assert "snapshot" in cmd and "-l" in cmd
+        assert "snapshots for list-snap" in capsys.readouterr().out
+
+    def test_missing_tag_dies_before_stop(
+        self, tmp_vmdir: Path
+    ) -> None:
+        """A bad tag dies BEFORE we stop the VM -- a stopped VM with a
+        failed restore is worse than a running VM with an error."""
+        _seed_vm_files(tmp_vmdir, "res-bad")
+        args = argparse.Namespace(name="res-bad", tag="nope")
+        run_ok = MagicMock(
+            returncode=0, stdout=self._SNAP_LIST_V1, stderr=""
+        )
+        with (
+            patch(
+                "ltvm_pkg.vm_commands.is_running", return_value=True
+            ),
+            patch("ltvm_pkg.vm_commands.run", return_value=run_ok),
+            patch("ltvm_pkg.vm_commands.kill_qemu") as mock_kill,
+            pytest.raises(SystemExit),
+        ):
+            vm_commands.cmd_restore(args)
+        mock_kill.assert_not_called()
+
+    def test_valid_tag_applies(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "res-ok")
+        args = argparse.Namespace(name="res-ok", tag="v1")
+        run_ok = MagicMock(
+            returncode=0, stdout=self._SNAP_LIST_V1, stderr=""
+        )
+        with (
+            patch(
+                "ltvm_pkg.vm_commands.is_running", return_value=False
+            ),
+            patch(
+                "ltvm_pkg.vm_commands.run", return_value=run_ok
+            ) as mock_run,
+        ):
+            vm_commands.cmd_restore(args)
+        # Second run call is the apply (-a)
+        apply_cmd = mock_run.call_args_list[-1].args[0]
+        assert "-a" in apply_cmd and "v1" in apply_cmd
+        assert "restored res-ok to 'v1'" in capsys.readouterr().out
+
+
+# ── cmd_list rendering ───────────────────────────────────
+
+
+class TestCmdListRendering:
+    """Human-readable rendering of VM rows + totals line."""
+
+    def test_text_output_contains_vm_row_and_totals(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        v = VMInfo(
+            name="row-a",
+            ip="10.0.0.5",
+            pid=42,
+            vcpus=4,
+            mem=2048,
+            mdt_disks=1,
+            ost_disks=2,
+            creator="bob",
+        )
+        v.save()
+        args = argparse.Namespace(json=False)
+        with patch(
+            "ltvm_pkg.vm_commands.is_running",
+            side_effect=lambda vm: vm.pid > 0,
+        ):
+            vm_commands.cmd_list(args)
+        out = capsys.readouterr().out
+        assert "row-a" in out
+        assert "10.0.0.5" in out
+        assert "running" in out
+        assert "mdt=1 ost=2" in out
+        assert "by=bob" in out
+        # totals line
+        assert "1 running, 0 stopped" in out
+        assert "vcpus: 4/" in out
+        assert "mem: 2048M/" in out
