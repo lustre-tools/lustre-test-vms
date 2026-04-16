@@ -514,7 +514,34 @@ def install_qemu(host: HostInfo, force: bool = False) -> None:
     log.info("Installing QEMU build dependencies...")
     if host.pkg_mgr == "dnf":
         _run(["dnf", "install", "-y", "epel-release"])
-        _run(["dnf", "config-manager", "--set-enabled", "crb"])
+        # The repo providing extra build deps (glib2-devel, pixman-devel,
+        # etc.) has different names per EL major version:
+        #   EL8  -> "powertools" (or "PowerTools" on early 8.x releases)
+        #   EL9+ -> "crb"
+        # See beads issue lustre_test_vms_v2-xr3. We code defensively:
+        # try the expected name for the detected EL major first, then
+        # fall back to the other known spellings so this works on any
+        # Rocky/RHEL/Alma 8/9/10 host without needing an EL8 test rig.
+        el_major = host.version.split(".", 1)[0] if host.version else ""
+        if el_major == "8":
+            crb_candidates = ["powertools", "PowerTools", "crb"]
+        else:
+            crb_candidates = ["crb", "powertools", "PowerTools"]
+        for repo_name in crb_candidates:
+            r = _run(
+                ["dnf", "config-manager", "--set-enabled", repo_name],
+                check=False,
+                quiet=True,
+            )
+            if r.returncode == 0:
+                log.info("Enabled repo %s", repo_name)
+                break
+        else:
+            log.warning(
+                "Could not enable CRB/PowerTools repo; tried %s. "
+                "Build deps may fail to install.",
+                ", ".join(crb_candidates),
+            )
         _pkg_install(
             host,
             "gcc",
