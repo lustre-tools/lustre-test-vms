@@ -840,6 +840,14 @@ def cmd_create(args: argparse.Namespace) -> None:
 def cmd_start(args: argparse.Namespace) -> None:
     for name in args.names:
         vm = VMInfo.load(name)
+        # Short-circuit when already running: launch_qemu also detects
+        # this and prints "already running" to stderr, but the
+        # subsequent provision/seed/"started" calls here would still
+        # run, producing a contradictory "already running ... started"
+        # log.  Gate the whole post-launch sequence on a real launch.
+        if is_running(vm):
+            print(f"{name}: already running")
+            continue
         launch_qemu(vm)
         # register_before_wait: populate /etc/hosts BEFORE waiting for
         # SSH so a wait_for_ssh timeout doesn't leave a zombie VM

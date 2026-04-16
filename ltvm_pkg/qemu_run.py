@@ -121,26 +121,28 @@ def _check_memory_for_launch(vm: VMInfo) -> None:
 def is_running(vm: VMInfo) -> bool:
     """True iff vm.pid is alive AND points at a qemu process for this VM.
 
-    A bare `os.kill(pid, 0)` check is unsafe across host reboots: PIDs
-    get reused, and a long-stopped VM's PID might now be a shell, an
-    editor, or another VM.  Without this validation, cmd_doctor sees
-    the alien process as "still running", refuses to clean up, and
-    cmd_ensure takes the "already running" branch instead of relaunching.
-    Read /proc/<pid>/comm to confirm it's a qemu binary.
+    We check /proc/<pid>/comm directly rather than `os.kill(pid, 0)`:
+
+      * /proc/<pid>/comm is world-readable on standard Linux so an
+        unprivileged `ltvm list` correctly sees a root-owned qemu
+        as running.  `os.kill(pid, 0)` against another user's pid
+        returns EPERM (OSError), which previously made `ltvm list`
+        claim "stopped" for every VM to a non-root caller.
+      * The /proc read doubles as the PID-reuse guard the old
+        implementation added os.kill for: if pid was reused by an
+        unrelated process, comm won't start with "qemu-system" and
+        we correctly return False.  cmd_doctor / cmd_ensure keep
+        working across host reboots.
+
+    The Linux comm field is truncated to 15 chars (TASK_COMM_LEN-1)
+    so we substring-match "qemu-system" rather than equality-test.
     """
     if vm.pid <= 0:
         return False
     try:
-        os.kill(vm.pid, 0)
-    except (OSError, ProcessLookupError):
-        return False
-    try:
         comm = Path(f"/proc/{vm.pid}/comm").read_text().strip()
-    except (OSError, FileNotFoundError):
+    except OSError:
         return False
-    # qemu reports as "qemu-system-x86" / "qemu-system-aarch64" / etc.
-    # The Linux comm field is truncated to 15 chars (TASK_COMM_LEN-1),
-    # so we substring-match rather than equality-test.
     return comm.startswith("qemu-system")
 
 
