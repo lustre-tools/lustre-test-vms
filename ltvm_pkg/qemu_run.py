@@ -169,6 +169,7 @@ def launch_qemu(vm: VMInfo) -> None:
     # VMs' cmdline is byte-identical to the pre-feature path.
     extra_nics = vm.extra_nics()
     fc_nics_fragment = ""
+    fc_nic_ips_fragment = ""
     if extra_nics:
         # Replace the ':' in 'passthrough:0000:00:02.0' with ';' on the
         # cmdline so the CSV separator stays unambiguous.  rc.local
@@ -179,12 +180,20 @@ def launch_qemu(vm: VMInfo) -> None:
             for (_idx, nic_type, _tap, _mac) in extra_nics
         ]
         fc_nics_fragment = f" fc_nics={','.join(cmdline_types)}"
+        # Extra-NIC IPs.  Same index order as fc_nics; i.e. the Nth
+        # entry in fc_nic_ips is the IP that rc.local should assign
+        # to eth{N+1}.  Empty IPs (shouldn't happen on a freshly
+        # created VM but may on an old .info file) become bare commas
+        # so rc.local can count positions.
+        if vm.nic_ips:
+            fc_nic_ips_fragment = f" fc_nic_ips={','.join(vm.nic_ips)}"
     boot_args = (
         f"console={console} reboot=k panic=1 crashkernel={crashkernel} "
         f"net.ifnames=0 biosdevname=0 "
         f"root=/dev/vda rw fc_ip={vm.ip} fc_gw={GATEWAY} "
         f"fc_name={vm.name}"
         f"{fc_nics_fragment}"
+        f"{fc_nic_ips_fragment}"
     )
 
     # Recreate TAP and flush any stale ARP entry for this IP.  Also

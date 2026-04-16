@@ -167,47 +167,85 @@ def extra_mac_for_name(name: str, idx: int) -> str:
 
 
 def _used_ips(exclude_name: str) -> set[str]:
-    used = set()
+    """Return every IP currently in use by any VM on this host.
+
+    Scans both the primary mgmt IP (``VMInfo.ip``) and any per-extra-NIC
+    IPs (``VMInfo.nic_ips``) so a multi-NIC VM's addresses don't collide
+    with another VM's mgmt or extras.
+    """
+    used: set[str] = set()
     for n in VMInfo.all_names():
         if n == exclude_name:
             continue
         try:
-            used.add(VMInfo.load(n).ip)
+            vm = VMInfo.load(n)
         except VMNotFound:
-            pass
+            continue
+        if vm.ip:
+            used.add(vm.ip)
+        used.update(ip for ip in vm.nic_ips if ip)
     return used
 
 
 @contextmanager
-def alloc_ip(name: str, explicit_ip: str | None = None) -> Iterator[str]:
-    """Context manager that allocates a unique IP for *name* under an exclusive
-    lock held until the ``with`` block exits (i.e. until VMInfo.save() returns).
+def alloc_ip(
+    name: str,
+    count: int = 1,
+    explicit_ip: str | None = None,
+) -> Iterator[list[str]]:
+    """Context manager that allocates *count* unique IPs for *name* under
+    an exclusive lock held until the ``with`` block exits.
+
+    Returns a list of IPs of length *count*.  Element 0 is the mgmt IP
+    (eth0); remaining elements are for extra NICs (eth1, eth2, ...).
+
+    ``explicit_ip`` (optional) pins the mgmt IP; extras are still
+    auto-allocated.  Pass None to auto-allocate all IPs.
 
     Usage::
 
-        with alloc_ip(name) as ip:
-            vm = VMInfo(..., ip=ip, ...)
+        with alloc_ip(name, count=1 + len(extras)) as ips:
+            vm = VMInfo(..., ip=ips[0], nic_ips=ips[1:], ...)
             vm.save()   # lock released after this block
     """
+    if count < 1:
+        raise ValueError(f"alloc_ip count must be >= 1, got {count}")
     with _ip_alloc_lock():
+        used = _used_ips(name)
+        ips: list[str] = []
         if explicit_ip:
-            used = _used_ips(name)
             if explicit_ip in used:
                 die(f"IP {explicit_ip} already used by another VM")
-            yield explicit_ip
-            return
+            ips.append(explicit_ip)
+            used.add(explicit_ip)
 
+        # Deterministic starting octet so ltvm create returns a stable
+        # IP for the same name across re-creates (matches pre-multi-IP
+        # behaviour).  Scan forward until we have `count` free octets.
         base_octet = (
             int(hashlib.md5(name.encode()).hexdigest()[:4], 16) % 244
         ) + 10
-        used = _used_ips(name)
-        for delta in range(244):
-            octet = ((base_octet - 10 + delta) % 244) + 10
-            ip = f"{SUBNET}.{octet}"
-            if ip not in used:
-                yield ip
-                return
-        die(f"No free IP addresses available in {SUBNET}.0/24")
+        need = count - len(ips)
+        if need > 0:
+            # Wider scan window than 244 deltas is pointless -- the /24
+            # only has 244 usable host addresses -- but we walk the full
+            # range so a heavily-populated host still finds free slots
+            # (including wrap-around past the hash seed).
+            delta = 0
+            while need > 0 and delta < 244:
+                octet = ((base_octet - 10 + delta) % 244) + 10
+                ip = f"{SUBNET}.{octet}"
+                if ip not in used:
+                    ips.append(ip)
+                    used.add(ip)
+                    need -= 1
+                delta += 1
+            if need > 0:
+                die(
+                    f"No free IP addresses available in {SUBNET}.0/24 "
+                    f"(need {count}, short by {need})"
+                )
+        yield ips
 
 
 def reload_dns() -> None:

@@ -14,6 +14,7 @@ FC_IP=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_ip= | cut -d= -f2)
 FC_GW=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_gw= | cut -d= -f2)
 FC_NAME=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_name= | cut -d= -f2)
 FC_NICS=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_nics= | cut -d= -f2)
+FC_NIC_IPS=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_nic_ips= | cut -d= -f2)
 
 if [ -n "${FC_IP}" ]; then
     ip addr add ${FC_IP}/24 dev eth0 2>/dev/null
@@ -46,6 +47,11 @@ fi
 if [ -n "${FC_NICS}" ]; then
     idx=1
     IFS=',' read -ra _nic_entries <<< "${FC_NICS}"
+    # Parallel array of per-extra-NIC IPs (fc_nic_ips=), indexed 0-based
+    # against fc_nics; i.e. _nic_ips[0] is the IP for eth1.  Absent on
+    # older images / older .info files -> empty array -> no address
+    # assignment, just bring the iface up (same as the old behaviour).
+    IFS=',' read -ra _nic_ips <<< "${FC_NIC_IPS:-}"
     for entry in "${_nic_entries[@]}"; do
         # Split type[;arg] -- ';' is the cmdline-safe arg separator.
         nic_type="${entry%%;*}"
@@ -57,8 +63,15 @@ if [ -n "${FC_NICS}" ]; then
             nic_arg=""
         fi
         ifname="eth${idx}"
+        nic_ip="${_nic_ips[$((idx - 1))]:-}"
         if ip link show "${ifname}" >/dev/null 2>&1; then
             ip link set "${ifname}" up 2>/dev/null || true
+            if [ -n "${nic_ip}" ]; then
+                # Same /24 as mgmt -- no separate route needed, the
+                # existing default via fc_gw covers traffic to peers.
+                ip addr add "${nic_ip}/24" dev "${ifname}" 2>/dev/null \
+                    || true
+            fi
         else
             echo "rc.local: warning: ${ifname} not present for" \
                  "--nic ${nic_type} (is the NIC wired in QEMU?)" >&2
@@ -70,11 +83,7 @@ if [ -n "${FC_NICS}" ]; then
                      "${ifname}" >&2
         else
             # No hook present for this type.  That's fine for plain
-            # 'tcp' NICs (no extra setup needed) and for any type whose
-            # hook hasn't been published yet (--nic softroce is
-            # rejected at CLI level until -r55 lands).  Softroce /
-            # passthrough hook scripts come from those follow-up
-            # issues; see the TODO above.
+            # 'tcp' NICs (no extra setup needed).
             :
         fi
         idx=$((idx + 1))

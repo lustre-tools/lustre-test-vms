@@ -447,10 +447,18 @@ def _allocate_and_persist_vm(
     file.  Returns the saved VMInfo.  The lock is released on exit.
     """
     name = args.name
-    # Allocate an IP under a file lock so that concurrent creates cannot
-    # race and claim the same address.  The lock is held until vm.save()
-    # commits the .info file, at which point the IP is visible to peers.
-    with alloc_ip(name, explicit_ip=getattr(args, "ip", None) or None) as ip:
+    # Allocate IPs for the mgmt NIC + every extra --nic under a file
+    # lock so that concurrent creates cannot race and claim the same
+    # addresses.  The lock is held until vm.save() commits the .info
+    # file, at which point the IPs are visible to peers.
+    total_ips = 1 + len(extra_nic_types)
+    with alloc_ip(
+        name,
+        count=total_ips,
+        explicit_ip=getattr(args, "ip", None) or None,
+    ) as ips:
+        ip = ips[0]
+        nic_ips = ips[1:]
         # Re-check existence under the alloc_ip lock: the earlier check
         # at the top of the function is unsynchronized so two concurrent
         # `ltvm create <same name>` could both pass it.
@@ -481,6 +489,7 @@ def _allocate_and_persist_vm(
             creator=os.environ.get("SUDO_USER", "") or "root",
             variant=variant,
             nics=list(extra_nic_types),
+            nic_ips=list(nic_ips),
             # passthrough_drivers is filled in below, inside the launch
             # umbrella, after we've actually bound each BDF to vfio-pci.
             passthrough_drivers={},

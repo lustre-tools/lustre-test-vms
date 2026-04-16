@@ -146,27 +146,35 @@ def tmp_vmdir(tmp_path: Path) -> Path:
 
 
 class TestAllocIp:
-    """alloc_ip avoids collisions and respects explicit IPs."""
+    """alloc_ip avoids collisions and respects explicit IPs.
+
+    alloc_ip yields a list of length ``count`` (default 1); element 0
+    is the mgmt IP, remaining elements are for extra --nic NICs.
+    """
 
     def test_first_vm_gets_an_ip(self, tmp_vmdir: Path) -> None:
         """With no peers, alloc_ip picks a hash-derived IP in the subnet."""
-        with vm_net.alloc_ip("first-vm") as ip:
+        with vm_net.alloc_ip("first-vm") as ips:
+            assert len(ips) == 1
+            ip = ips[0]
             assert ip.startswith("192.168.100.")
             octet = int(ip.rsplit(".", 1)[1])
             assert 10 <= octet < 254
 
     def test_collision_skips_to_next_free(self, tmp_vmdir: Path) -> None:
         """A peer holding the hash-derived IP forces alloc_ip to walk."""
-        # Pre-seed a VM holding the IP alloc_ip would normally give "repeat"
-        with vm_net.alloc_ip("repeat") as first:
+        with vm_net.alloc_ip("repeat") as first_list:
+            first = first_list[0]
             blocker = VMInfo(name="blocker", ip=first)
             blocker.save()
-        with vm_net.alloc_ip("repeat") as second:
-            assert second != first
+        with vm_net.alloc_ip("repeat") as second_list:
+            assert second_list[0] != first
 
     def test_explicit_ip_respected(self, tmp_vmdir: Path) -> None:
-        with vm_net.alloc_ip("explicit", explicit_ip="192.168.100.77") as ip:
-            assert ip == "192.168.100.77"
+        with vm_net.alloc_ip(
+            "explicit", explicit_ip="192.168.100.77"
+        ) as ips:
+            assert ips == ["192.168.100.77"]
 
     def test_explicit_ip_in_use_dies(self, tmp_vmdir: Path) -> None:
         """Explicit IP conflict with a live VM errors loudly."""
@@ -180,19 +188,64 @@ class TestAllocIp:
         """Re-allocating the same IP to the same VM name is a no-op, not error."""
         existing = VMInfo(name="me", ip="192.168.100.99")
         existing.save()
-        with vm_net.alloc_ip("me", explicit_ip="192.168.100.99") as ip:
-            assert ip == "192.168.100.99"
+        with vm_net.alloc_ip("me", explicit_ip="192.168.100.99") as ips:
+            assert ips == ["192.168.100.99"]
 
     def test_returns_unique_ips_for_many_names(self, tmp_vmdir: Path) -> None:
         """Allocate 10 VMs; all IPs should be distinct and in-subnet."""
         ips = []
         for i in range(10):
-            with vm_net.alloc_ip(f"vm{i}") as ip:
+            with vm_net.alloc_ip(f"vm{i}") as a:
+                ip = a[0]
                 ips.append(ip)
                 VMInfo(name=f"vm{i}", ip=ip).save()
         assert len(set(ips)) == 10
         for ip in ips:
             assert ip.startswith("192.168.100.")
+
+    def test_count_gt_1_returns_distinct_ips(self, tmp_vmdir: Path) -> None:
+        """count=N allocates N distinct IPs all in-subnet."""
+        with vm_net.alloc_ip("multinic", count=4) as ips:
+            assert len(ips) == 4
+            assert len(set(ips)) == 4
+            for ip in ips:
+                assert ip.startswith("192.168.100.")
+
+    def test_count_gt_1_skips_peers_nic_ips(self, tmp_vmdir: Path) -> None:
+        """_used_ips must include nic_ips, not just mgmt IP.  Otherwise
+        two multi-NIC VMs could collide on an extra-NIC IP."""
+        peer = VMInfo(
+            name="peer",
+            ip="192.168.100.50",
+            nic_ips=["192.168.100.51", "192.168.100.52"],
+        )
+        peer.save()
+        with vm_net.alloc_ip("mine", count=3) as ips:
+            for ip in ips:
+                assert ip not in {
+                    "192.168.100.50",
+                    "192.168.100.51",
+                    "192.168.100.52",
+                }
+            assert len(set(ips)) == 3
+
+    def test_explicit_ip_with_count_gt_1_pins_mgmt_only(
+        self, tmp_vmdir: Path
+    ) -> None:
+        """When both explicit_ip and count>1 are given, explicit pins
+        the mgmt slot; extras are auto-allocated and distinct."""
+        with vm_net.alloc_ip(
+            "hybrid", count=3, explicit_ip="192.168.100.200"
+        ) as ips:
+            assert ips[0] == "192.168.100.200"
+            assert len(ips) == 3
+            assert len(set(ips)) == 3
+            assert "192.168.100.200" not in ips[1:]
+
+    def test_count_zero_rejected(self, tmp_vmdir: Path) -> None:
+        with pytest.raises(ValueError):
+            with vm_net.alloc_ip("x", count=0):
+                pass
 
 
 # ── _atomic_write ────────────────────────────────────────

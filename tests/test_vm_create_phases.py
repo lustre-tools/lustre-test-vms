@@ -110,8 +110,15 @@ def _create_env(tmp_vmdir: Path, *, run_rc: int = 0, meta: dict | None = None,
     arts = _make_arts(tmp_vmdir)
 
     @contextmanager
-    def fake_alloc(name: str, explicit_ip: str | None = None) -> Iterator[str]:
-        yield explicit_ip or "192.168.100.50"
+    def fake_alloc(
+        name: str,
+        count: int = 1,
+        explicit_ip: str | None = None,
+    ) -> Iterator[list[str]]:
+        # Mgmt IP honours explicit_ip; extras are synthesised per index.
+        mgmt = explicit_ip or "192.168.100.50"
+        extras = [f"192.168.100.{60 + i}" for i in range(count - 1)]
+        yield [mgmt, *extras]
 
     run_rc_mock = MagicMock(returncode=run_rc, stdout="", stderr="")
 
@@ -219,8 +226,15 @@ class TestCreateKernelResolution:
         arts = _make_arts(tmp_vmdir)
 
         @contextmanager
-        def fake_alloc(name: str, explicit_ip: str | None = None) -> Iterator[str]:
-            yield "192.168.100.51"
+        def fake_alloc(
+            name: str,
+            count: int = 1,
+            explicit_ip: str | None = None,
+        ) -> Iterator[list[str]]:
+            yield [
+                explicit_ip or "192.168.100.51",
+                *[f"192.168.100.{60 + i}" for i in range(count - 1)],
+            ]
 
         run_ok = MagicMock(returncode=0, stdout="", stderr="")
         with (
@@ -448,8 +462,15 @@ class TestCreateRollback:
         arts = _make_arts(tmp_vmdir)
 
         @contextmanager
-        def fake_alloc(name: str, explicit_ip: str | None = None) -> Iterator[str]:
-            yield "192.168.100.60"
+        def fake_alloc(
+            name: str,
+            count: int = 1,
+            explicit_ip: str | None = None,
+        ) -> Iterator[list[str]]:
+            yield [
+                explicit_ip or "192.168.100.60",
+                *[f"192.168.100.{70 + i}" for i in range(count - 1)],
+            ]
 
         run_ok = MagicMock(returncode=0, stdout="", stderr="")
         with (
@@ -493,8 +514,15 @@ class TestCreateRollback:
         arts = _make_arts(tmp_vmdir)
 
         @contextmanager
-        def fake_alloc(name: str, explicit_ip: str | None = None) -> Iterator[str]:
-            yield "192.168.100.61"
+        def fake_alloc(
+            name: str,
+            count: int = 1,
+            explicit_ip: str | None = None,
+        ) -> Iterator[list[str]]:
+            yield [
+                explicit_ip or "192.168.100.61",
+                *[f"192.168.100.{80 + i}" for i in range(count - 1)],
+            ]
 
         run_ok = MagicMock(returncode=0, stdout="", stderr="")
 
