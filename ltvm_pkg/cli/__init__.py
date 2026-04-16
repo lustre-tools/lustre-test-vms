@@ -103,30 +103,17 @@ from ltvm_pkg.cli.targets import (  # noqa: E402
     cmd_targets,
     cmd_validate,
 )
-
-
-# ------------------------------------------------------------------
-# Runtime: VM management
-# ------------------------------------------------------------------
-
-
-def _vm_call(fn: Any, ns: argparse.Namespace, use_json: bool) -> int:
-    """Call a vm_commands function, catching SystemExit and VMNotFound.
-
-    Honors the return code of the wrapped function so handlers like
-    cmd_doctor can signal "issues found" via a non-zero exit.
-    """
-    from ltvm_pkg.vm_state import VMNotFound
-
-    try:
-        rc = fn(ns)
-        return rc if isinstance(rc, int) else EXIT_OK
-    except SystemExit as e:
-        return int(e.code) if e.code is not None else EXIT_ERROR
-    except VMNotFound as e:
-        return _error(str(e), use_json)
-    except FileNotFoundError as e:
-        return _error(str(e), use_json)
+from ltvm_pkg.cli.vm import (  # noqa: E402
+    _vm_call,
+    cmd_console_log,
+    cmd_crash_collect,
+    cmd_list,
+    cmd_nmi,
+    cmd_restore,
+    cmd_snapshot,
+    cmd_vm_start,
+    cmd_vm_stop,
+)
 
 
 def cmd_create(args: argparse.Namespace) -> int:
@@ -147,68 +134,6 @@ def cmd_destroy(args: argparse.Namespace) -> int:
     from ltvm_pkg.vm_commands import cmd_destroy as _destroy
 
     return _vm_call(_destroy, args, use_json)
-
-
-def cmd_vm_start(args: argparse.Namespace) -> int:
-    use_json = args.json
-    err = _require_root(use_json)
-    if err is not None:
-        return err
-    from ltvm_pkg.vm_commands import cmd_start as _start
-
-    return _vm_call(_start, args, use_json)
-
-
-def cmd_vm_stop(args: argparse.Namespace) -> int:
-    use_json = args.json
-    err = _require_root(use_json)
-    if err is not None:
-        return err
-    from ltvm_pkg.vm_commands import cmd_stop as _stop
-
-    return _vm_call(_stop, args, use_json)
-
-
-def cmd_list(args: argparse.Namespace) -> int:
-    use_json = args.json
-    from ltvm_pkg.vm_commands import cmd_list as _list
-
-    return _vm_call(_list, args, use_json)
-
-
-def cmd_console_log(args: argparse.Namespace) -> int:
-    use_json = args.json
-    from ltvm_pkg.vm_commands import cmd_console_log as _log
-
-    return _vm_call(_log, args, use_json)
-
-
-def cmd_crash_collect(args: argparse.Namespace) -> int:
-    use_json = args.json
-    from ltvm_pkg.vm_commands import cmd_crash_collect as _crash_collect
-
-    return _vm_call(_crash_collect, args, use_json)
-
-
-def cmd_nmi(args: argparse.Namespace) -> int:
-    use_json = args.json
-    from ltvm_pkg.vm_commands import cmd_nmi as _nmi
-
-    return _vm_call(_nmi, args, use_json)
-
-
-def cmd_snapshot(args: argparse.Namespace) -> int:
-    use_json = args.json
-    from ltvm_pkg.vm_commands import cmd_snapshot as _snapshot
-
-    return _vm_call(_snapshot, args, use_json)
-
-
-def cmd_restore(args: argparse.Namespace) -> int:
-    use_json = args.json
-    from ltvm_pkg.vm_commands import cmd_restore as _restore
-
-    return _vm_call(_restore, args, use_json)
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
