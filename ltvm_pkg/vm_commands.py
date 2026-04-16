@@ -284,11 +284,8 @@ _VM_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # pointer at the tracking issue.  Downstream code (launch_qemu,
 # rc.local, etc.) must only see `tcp` values from this list until those
 # issues land.
-_NIC_TYPES_IMPLEMENTED = ("tcp",)
-_NIC_TYPES_RESERVED = {
-    "softroce": "lustre_test_vms_v2-r55",
-    "passthrough": "lustre_test_vms_v2-5a0",
-}
+_NIC_TYPES_IMPLEMENTED = ("tcp", "softroce", "passthrough")
+_NIC_TYPES_RESERVED: dict[str, str] = {}
 _NIC_TYPES_ALL = _NIC_TYPES_IMPLEMENTED + tuple(_NIC_TYPES_RESERVED)
 
 
@@ -318,6 +315,9 @@ def parse_nic_spec(raw: str) -> tuple[str, str]:
     return nic_type, nic_arg
 
 
+_BDF_RE = re.compile(r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F]$")
+
+
 def validate_nic_spec(raw: str) -> str:
     """Validate a ``--nic`` spec and return the normalised type string.
 
@@ -326,6 +326,11 @@ def validate_nic_spec(raw: str) -> str:
     (lowercased, arg preserved for types that need it).  The returned
     string is what gets stored in ``VMInfo.nics`` and threaded onto the
     kernel cmdline as ``fc_nics=<csv>``.
+
+    ``passthrough`` requires a PCIe BDF arg (``domain:bus:device.function``,
+    e.g. ``0000:85:00.1``).  We syntax-check the BDF here; whether the
+    device actually exists / is bindable is checked at create time in
+    ``cmd_create`` so errors surface before VM state is written.
     """
     nic_type, nic_arg = parse_nic_spec(raw)
     if nic_type in _NIC_TYPES_RESERVED:
@@ -334,6 +339,18 @@ def validate_nic_spec(raw: str) -> str:
             f"--nic {nic_type!r} is not supported yet; that backend "
             f"lands in {issue}. For this issue use --nic tcp."
         )
+    if nic_type == "passthrough":
+        if not nic_arg:
+            die(
+                "--nic passthrough requires a PCIe BDF arg, "
+                "e.g. --nic passthrough:0000:85:00.1"
+            )
+        if not _BDF_RE.match(nic_arg):
+            die(
+                f"--nic passthrough arg {nic_arg!r} is not a valid "
+                f"PCIe BDF (expected domain:bus:device.function like "
+                f"0000:85:00.1)"
+            )
     # Implemented types: fold back to canonical storage form.
     if nic_arg:
         return f"{nic_type}:{nic_arg}"
@@ -429,6 +446,26 @@ def cmd_create(args: argparse.Namespace) -> None:
     raw_nics = getattr(args, "nic", None) or []
     extra_nic_types = [validate_nic_spec(n) for n in raw_nics]
 
+    # Passthrough NICs: pre-flight checks (no side effects) so a bad
+    # spec or a missing IOMMU fails before we touch VM state on disk.
+    # The actual vfio bind happens later in the launch block, inside
+    # the rollback umbrella so a failed create rebinds the device.
+    passthrough_bdfs = [
+        spec.split(":", 1)[1] for spec in extra_nic_types
+        if spec.startswith("passthrough:")
+    ]
+    if passthrough_bdfs:
+        from ltvm_pkg import vfio as _vfio
+        if not _vfio.iommu_enabled():
+            die(
+                "passthrough requires host IOMMU; boot with "
+                "intel_iommu=on (or amd_iommu=on) on the host kernel cmdline "
+                "and ensure /sys/kernel/iommu_groups/ is non-empty."
+            )
+        for bdf in passthrough_bdfs:
+            if not (Path("/sys/bus/pci/devices") / bdf).is_dir():
+                die(f"passthrough device {bdf!r} not found in /sys/bus/pci/devices")
+
     os_target = getattr(args, "os", "")
     explicit_image = getattr(args, "image", "")
     explicit_kernel = getattr(args, "kernel", "")
@@ -513,6 +550,9 @@ def cmd_create(args: argparse.Namespace) -> None:
             creator=os.environ.get("SUDO_USER", "") or "root",
             variant=variant,
             nics=list(extra_nic_types),
+            # passthrough_drivers is filled in below, inside the launch
+            # umbrella, after we've actually bound each BDF to vfio-pci.
+            passthrough_drivers={},
         )
 
         # Create overlay + backing disks.  If any step fails partway,
@@ -596,6 +636,18 @@ def cmd_create(args: argparse.Namespace) -> None:
     # the VM running with no obvious indication.  Catch SystemExit too
     # so we can re-raise after cleanup.
     try:
+        # Bind any passthrough devices to vfio-pci and record the from-
+        # driver for destroy-time rebind.  Inside the rollback umbrella
+        # so a launch failure restores host networking.
+        if passthrough_bdfs:
+            from ltvm_pkg import vfio as _vfio
+            for bdf in passthrough_bdfs:
+                try:
+                    from_drv = _vfio.bind_to_vfio(bdf)
+                except _vfio.VfioError as e:
+                    die(f"passthrough {bdf}: {e}")
+                vm.passthrough_drivers[bdf] = from_drv or ""
+            vm.save()
         launch_qemu(vm)
         provision_vm_ssh(vm, SSH_TIMEOUT)
         _seed_kdump_boot(vm)
@@ -640,6 +692,20 @@ def cmd_create(args: argparse.Namespace) -> None:
                 f"  rollback: unregister_ssh_name failed: {e}",
                 file=sys.stderr,
             )
+        # Rebind any vfio'd devices back to their original drivers so
+        # the host's network state is unchanged from a failed create.
+        if vm.passthrough_drivers:
+            from ltvm_pkg import vfio as _vfio
+            for bdf, drv in vm.passthrough_drivers.items():
+                if not drv:
+                    continue
+                try:
+                    _vfio.rebind(bdf, drv)
+                except Exception as e:
+                    print(
+                        f"  rollback: rebind {bdf} -> {drv} failed: {e}",
+                        file=sys.stderr,
+                    )
         raise
 
     if args.json:
@@ -707,11 +773,33 @@ def _destroy_vm_artifacts(name: str) -> None:
 def cmd_destroy(args: argparse.Namespace) -> None:
     for name in args.names:
         existed = (SOCKETS / f"{name}.info").exists()
+        passthrough_rebinds: dict[str, str] = {}
         try:
             vm = VMInfo.load(name)
+            # Capture before kill so we still know what to rebind even
+            # if the QMP socket is gone or kill_qemu raises partway.
+            passthrough_rebinds = dict(vm.passthrough_drivers)
             kill_qemu(vm)
         except VMNotFound:
             pass
+
+        # Rebind any passthrough devices to their original drivers
+        # BEFORE clearing .info so a mid-destroy interruption can still
+        # be diagnosed (.info holds the BDF -> from-driver map).  Run
+        # in finally so a kill_qemu exception above doesn't strand a
+        # vfio-bound device.
+        if passthrough_rebinds:
+            from ltvm_pkg import vfio as _vfio
+            for bdf, drv in passthrough_rebinds.items():
+                if not drv:
+                    continue
+                try:
+                    _vfio.rebind(bdf, drv)
+                except Exception as e:
+                    print(
+                        f"destroy {name}: rebind {bdf} -> {drv} failed: {e}",
+                        file=sys.stderr,
+                    )
 
         # Wrap artifact teardown in try/finally so a SIGINT (Ctrl-C)
         # between artifact cleanup and DNS cleanup still removes the

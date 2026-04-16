@@ -98,23 +98,34 @@ class TestValidateNicSpec:
     def test_tcp_passes(self) -> None:
         assert vm_commands.validate_nic_spec("tcp") == "tcp"
 
-    def test_softroce_rejected_with_r55_hint(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        with pytest.raises(SystemExit):
-            vm_commands.validate_nic_spec("softroce")
-        err = capsys.readouterr().err
-        assert "softroce" in err
-        assert "lustre_test_vms_v2-r55" in err
+    def test_softroce_passes(self) -> None:
+        """softroce is implemented: fc_nics=softroce reaches the guest,
+        rc.local runs setup-nic-softroce.sh, setup-lnet-config.sh emits
+        the matching o2ib0(rxe0) line into /etc/modprobe.d/lnet.conf."""
+        assert vm_commands.validate_nic_spec("softroce") == "softroce"
 
-    def test_passthrough_rejected_with_5a0_hint(
+    def test_passthrough_accepts_valid_bdf(self) -> None:
+        """passthrough requires a BDF arg; the canonical form round-trips."""
+        assert (
+            vm_commands.validate_nic_spec("passthrough:0000:85:00.1")
+            == "passthrough:0000:85:00.1"
+        )
+
+    def test_passthrough_rejects_empty_bdf(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit):
-            vm_commands.validate_nic_spec("passthrough:0000:00:02.0")
+            vm_commands.validate_nic_spec("passthrough")
         err = capsys.readouterr().err
-        assert "passthrough" in err
-        assert "lustre_test_vms_v2-5a0" in err
+        assert "requires a PCIe BDF arg" in err
+
+    def test_passthrough_rejects_malformed_bdf(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit):
+            vm_commands.validate_nic_spec("passthrough:not-a-bdf")
+        err = capsys.readouterr().err
+        assert "not a valid" in err
 
     def test_unknown_type_rejected(self) -> None:
         with pytest.raises(SystemExit):
@@ -372,26 +383,6 @@ class TestCmdCreateValidation:
     def test_invalid_name_dies(self, tmp_vmdir: Path) -> None:
         with pytest.raises(SystemExit):
             vm_commands.cmd_create(_create_args(name="bad name"))
-
-    def test_nic_softroce_rejected_early(self, tmp_vmdir: Path) -> None:
-        """--nic softroce dies before touching the filesystem.
-
-        The whole point of validating --nic at CLI entry is that a bad
-        spec fails without leaving behind any partial VM state.
-        """
-        with pytest.raises(SystemExit):
-            vm_commands.cmd_create(
-                _create_args(name="co1-sroce", nic=["softroce"])
-            )
-
-    def test_nic_passthrough_rejected_early(self, tmp_vmdir: Path) -> None:
-        with pytest.raises(SystemExit):
-            vm_commands.cmd_create(
-                _create_args(
-                    name="co1-pt",
-                    nic=["passthrough:0000:00:02.0"],
-                )
-            )
 
 
 # ── cmd_destroy ──────────────────────────────────────────

@@ -208,21 +208,29 @@ def launch_qemu(vm: VMInfo) -> None:
     # shape as a per-type dispatch so those follow-ups slot in without
     # reworking this loop.
     for _idx, _nic_type, _tap, _mac in extra_nics:
-        if _nic_type == "tcp":
+        # Strip the ':arg' suffix for dispatch -- 'passthrough:BDF'
+        # still needs a TAP-less path; the BDF is only read in the
+        # later qemu-args loop.
+        _base_type = _nic_type.split(":", 1)[0]
+        if _base_type in ("tcp", "softroce"):
+            # softroce presents to QEMU exactly like tcp (a virtio-net
+            # on the bridge); the rxe layer is built inside the guest
+            # at boot via setup-nic-softroce.sh.
             run(
                 ["ip", "tuntap", "add", "dev", _tap, "mode", "tap"],
                 check=True,
             )
             run(["ip", "link", "set", _tap, "master", BRIDGE], check=True)
             run(["ip", "link", "set", _tap, "up"], check=True)
+        elif _base_type == "passthrough":
+            # No host TAP: the VF is attached directly to the guest
+            # via vfio-pci.  The host-side bind-to-vfio happened in
+            # cmd_create; launch_qemu only emits the QEMU flag below.
+            pass
         else:
-            # Unreachable under the current CLI parser (validate_nic_spec
-            # rejects everything except 'tcp').  Fail loud instead of
-            # silently skipping -- a missing case here would produce a
-            # VM that boots but is missing an expected NIC.
             die(
-                f"internal error: launch_qemu saw unimplemented NIC type "
-                f"{_nic_type!r} on VM {vm.name!r}; expected 'tcp' only"
+                f"internal error: launch_qemu saw unknown NIC type "
+                f"{_nic_type!r} on VM {vm.name!r}"
             )
 
     if not vm.kernel:
@@ -308,9 +316,22 @@ def launch_qemu(vm: VMInfo) -> None:
     # host=<BDF>` with no -netdev / no TAP.  The current CLI parser
     # rejects both, so those branches aren't emitted today -- but the
     # loop shape is what lets them slot in without reworking.
+    has_passthrough = any(
+        n.split(":", 1)[0] == "passthrough" for n in vm.nics
+    )
+    if has_passthrough:
+        # vfio-pci pins guest memory; QEMU needs -mem-prealloc up-front
+        # so DMA translations are stable at launch time.  Harmless for
+        # VMs without passthrough but we scope it to avoid the RAM
+        # commit cost on the common case.
+        qemu_args += ["-mem-prealloc"]
+
     for _idx, _nic_type, _tap, _mac in extra_nics:
+        _base_type = _nic_type.split(":", 1)[0]
         _netdev_id = f"net{_idx}"
-        if _nic_type == "tcp":
+        if _base_type in ("tcp", "softroce"):
+            # softroce's QEMU surface is identical to tcp; see the
+            # TAP-create loop above.
             qemu_args += [
                 "-netdev",
                 f"tap,id={_netdev_id},ifname={_tap},"
@@ -318,10 +339,22 @@ def launch_qemu(vm: VMInfo) -> None:
                 "-device",
                 f"{net_driver},netdev={_netdev_id},mac={_mac}",
             ]
+        elif _base_type == "passthrough":
+            # Parse the BDF out of 'passthrough:<BDF>'.
+            _bdf = _nic_type.split(":", 1)[1]
+            # pcie-root-port gives the vfio'd device a dedicated slot;
+            # q35 and aarch64 virt both expose a PCIe root complex.
+            # Chassis numbers must be unique per root port.
+            qemu_args += [
+                "-device",
+                f"pcie-root-port,id=rp{_idx},chassis={_idx}",
+                "-device",
+                f"vfio-pci,host={_bdf},bus=rp{_idx}",
+            ]
         else:
             die(
-                f"internal error: launch_qemu saw unimplemented NIC type "
-                f"{_nic_type!r} on VM {vm.name!r}; expected 'tcp' only"
+                f"internal error: launch_qemu saw unknown NIC type "
+                f"{_nic_type!r} on VM {vm.name!r}"
             )
 
     total_disks = vm.mdt_disks + vm.ost_disks

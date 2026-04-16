@@ -389,6 +389,13 @@ class VMInfo:
     # list, so existing single-NIC VMs behave exactly as before.
     nics: list[str] = field(default_factory=list)
 
+    # For passthrough NICs: which host driver owned each BDF before we
+    # bound it to vfio-pci.  Populated by cmd_create after
+    # vfio.bind_to_vfio(); consumed by cmd_destroy to rebind the device
+    # to its original driver.  Serialised as BDF=drv|BDF=drv in the
+    # .info file.  Empty when no passthrough NICs are attached.
+    passthrough_drivers: dict[str, str] = field(default_factory=dict)
+
     @property
     def info_path(self) -> Path:
         return SOCKETS / f"{self.name}.info"
@@ -468,6 +475,10 @@ class VMInfo:
             # would ambiguate.  '|' is not a valid character in any
             # accepted NIC type or PCIe BDF.
             f"NICS={'|'.join(self.nics)}\n"
+            # BDF=driver pairs for passthrough NICs so destroy can
+            # rebind.  Empty unless the VM has passthrough NICs.
+            f"PASSTHROUGH_DRIVERS="
+            f"{'|'.join(f'{bdf}={drv}' for bdf, drv in self.passthrough_drivers.items())}\n"
         )
         _atomic_write(self.info_path, text)
 
@@ -562,6 +573,15 @@ class VMInfo:
         nics_raw = vals.get("NICS", "")
         nics_list = [s for s in nics_raw.split("|") if s]
 
+        # PASSTHROUGH_DRIVERS is BDF=drv|BDF=drv|... (empty when no
+        # passthrough NICs).  Missing on older .info files.
+        pt_raw = vals.get("PASSTHROUGH_DRIVERS", "")
+        pt_drivers: dict[str, str] = {}
+        for entry in pt_raw.split("|"):
+            if "=" in entry:
+                bdf, drv = entry.split("=", 1)
+                pt_drivers[bdf] = drv
+
         return VMInfo(
             name=vals.get("NAME", name),
             ip=vals.get("IP", ""),
@@ -586,6 +606,7 @@ class VMInfo:
             creator=vals.get("CREATOR", ""),
             variant=vals.get("VARIANT", "base"),
             nics=nics_list,
+            passthrough_drivers=pt_drivers,
         )
 
     @staticmethod
