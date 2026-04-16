@@ -53,7 +53,7 @@ RUN set -eux; \
 # scans for the MOFED-OFED kernel source tree.
 RUN cd /opt/mofed-src/current/RPMS && \
     ls *.rpm \
-      | grep -vE '^(kmod-|kernel-mft-mlnx-|mlnx-ofed-)' \
+      | grep -vE '^(kmod-|kernel-mft-mlnx-|mlnx-ofed-|mlnx-fw-updater)' \
       | xargs dnf install -y --allowerasing --nogpgcheck --setopt=install_weak_deps=False \
     && dnf clean all
 
