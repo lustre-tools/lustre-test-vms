@@ -500,6 +500,29 @@ def _chown_disks_to_sudo_user(vm: VMInfo) -> None:
             pass
 
 
+def _launch_and_wait(vm: VMInfo, passthrough_bdfs: list[str]) -> None:
+    """Bind any passthrough devices to vfio-pci, launch QEMU, wait
+    for SSH and seed the kdump boot.  The caller wraps this in an
+    except/_rollback_launch_failure block so a launch failure restores
+    host networking state.
+    """
+    # Bind any passthrough devices to vfio-pci and record the from-
+    # driver for destroy-time rebind.  Inside the rollback umbrella
+    # so a launch failure restores host networking.
+    if passthrough_bdfs:
+        from ltvm_pkg import vfio as _vfio
+        for bdf in passthrough_bdfs:
+            try:
+                from_drv = _vfio.bind_to_vfio(bdf)
+            except _vfio.VfioError as e:
+                die(f"passthrough {bdf}: {e}")
+            vm.passthrough_drivers[bdf] = from_drv or ""
+        vm.save()
+    launch_qemu(vm)
+    provision_vm_ssh(vm, SSH_TIMEOUT)
+    _seed_kdump_boot(vm)
+
+
 def _rollback_launch_failure(vm: VMInfo) -> None:
     """Unwind the post-vm.save() phase on failure: preserve QEMU log,
     kill QEMU, destroy artifacts, unregister SSH name, rebind any
@@ -726,21 +749,7 @@ def cmd_create(args: argparse.Namespace) -> None:
     # the VM running with no obvious indication.  Catch SystemExit too
     # so we can re-raise after cleanup.
     try:
-        # Bind any passthrough devices to vfio-pci and record the from-
-        # driver for destroy-time rebind.  Inside the rollback umbrella
-        # so a launch failure restores host networking.
-        if passthrough_bdfs:
-            from ltvm_pkg import vfio as _vfio
-            for bdf in passthrough_bdfs:
-                try:
-                    from_drv = _vfio.bind_to_vfio(bdf)
-                except _vfio.VfioError as e:
-                    die(f"passthrough {bdf}: {e}")
-                vm.passthrough_drivers[bdf] = from_drv or ""
-            vm.save()
-        launch_qemu(vm)
-        provision_vm_ssh(vm, SSH_TIMEOUT)
-        _seed_kdump_boot(vm)
+        _launch_and_wait(vm, passthrough_bdfs)
     except BaseException:
         _rollback_launch_failure(vm)
         raise
