@@ -239,7 +239,13 @@ def build_parser() -> argparse.ArgumentParser:
     force_compat_arg.add_argument(
         "--force-compat",
         action="store_true",
-        help="Override a Lustre-tree compatibility refusal (not errors)",
+        help=(
+            "Override a Lustre-tree compatibility refusal (not errors).  "
+            "Only affects paths that actually invoke the compat gate: "
+            "build commands always, and deploy-lustre only when it "
+            "rebuilds from source (not bundled snapshots or "
+            "--userspace-only, which rely on prior-vetted artifacts)."
+        ),
     )
 
     p = argparse.ArgumentParser(

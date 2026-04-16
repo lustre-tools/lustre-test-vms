@@ -504,7 +504,16 @@ def cmd_build_image(args: argparse.Namespace) -> int:
 
     with_lustre: str | None = None
     if not args.no_lustre:
-        lustre_tree = Path(args.lustre_tree) if args.lustre_tree else Path(os.getcwd())
+        # Resolve to an absolute path so a ``--lustre-tree ./rel`` passed
+        # from a subdirectory lands on the same staging dir that
+        # ``cmd_build_lustre`` writes to (which goes through
+        # ``_resolve_lustre_tree`` -> ``.resolve()``).  Without this,
+        # the two sides compute different staging keys and the image
+        # build refuses to find staging the lustre build just produced.
+        lustre_tree = (
+            Path(args.lustre_tree).resolve() if args.lustre_tree
+            else Path(os.getcwd()).resolve()
+        )
         candidate = staging_path(
             lustre_tree, args.target, arch=tc.arch,
             kernel=resolved_kernel, variant=tc.variant_name,
@@ -1003,9 +1012,15 @@ def _find_release_url(
     if mode == "bootable":
         prefix = f"bootable-{target}{arch_match}"
         suffix = ".zst"
+        # Bootable publish tags them as ``bootable-<target>-<arch>-<kver>[-<variant>]``,
+        # NOT ``<target>-<arch>-...`` like the ecosystem path -- the two
+        # release namespaces are intentionally separate (see cmd_publish
+        # docstring).  Filter tags accordingly or we'd never match.
+        tag_prefix = f"bootable-{target}"
     else:
         prefix = f"manifest-{target}{arch_match}"
         suffix = ".json"
+        tag_prefix = target
 
     variant_tail = (
         f"-{variant}{suffix}" if variant != "base" else suffix
@@ -1017,7 +1032,7 @@ def _find_release_url(
     # to end with a kver-looking token (digits/dots) before suffix.
     for rel in releases:
         tag = rel.get("tag_name", "")
-        if tag != target and not tag.startswith(target + "-"):
+        if tag != tag_prefix and not tag.startswith(tag_prefix + "-"):
             continue
         if filter_str and filter_str not in tag:
             continue
@@ -2602,6 +2617,10 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         return r.stdout.strip() == ""
 
     if userspace_only:
+        # No compat gate here: --userspace-only installs userspace RPMs
+        # only, never triggers a Lustre rebuild.  The staging was
+        # vetted when it was originally built.  --force-compat is a
+        # no-op on this branch by design.
         if not staging.is_dir():
             return _error(
                 f"No staging for {target} -- run: ltvm build lustre "
@@ -2616,6 +2635,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         # the snapshot's DESTDIR layout, NOT a Lustre source tree, so
         # falling through to `ltvm build lustre --lustre-tree <snapshot>`
         # would error out with "not a Lustre source tree".
+        # --force-compat is a no-op on this branch: the snapshot was
+        # compat-gated by the publisher at package time.
         if not use_json:
             print("  Using bundled staging, skipping source build")
     else:

@@ -691,6 +691,12 @@ def cmd_cluster_list(args: argparse.Namespace) -> None:
         except ClusterNotFound:
             # Race: .cluster file disappeared between all_names() and load().
             continue
+        except (RuntimeError, ValueError) as e:
+            # Corrupt or malformed cluster file -- flag it and keep
+            # listing the rest rather than crashing.  Better to see
+            # "clusterA: <BROKEN: ...>" than to get nothing at all.
+            print(f"{cname}: <BROKEN: {e}>")
+            continue
         nodes = cluster.get_nodes()
         node_summary = []
         for n in nodes:
