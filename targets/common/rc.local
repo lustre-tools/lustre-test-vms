@@ -95,3 +95,18 @@ if [ -x /usr/local/sbin/setup-lnet-config.sh ] && \
     /usr/local/sbin/setup-lnet-config.sh /etc/modprobe.d/lnet.conf \
         2>/dev/null || true
 fi
+
+# Resolve '@ib-of-eth<N>)' placeholders the emitter left for any
+# 'passthrough' NIC entries.  Must run AFTER the per-NIC hook loop
+# above (so softroce rxe links exist) and AFTER the initial emitter
+# call (so there's a file to rewrite).  The resolver is a no-op when
+# FC_NICS contains no passthrough entries, when lnet.conf is absent
+# or operator-authored, or when the non-rxe ibdev count doesn't
+# match -- see setup-lnet-passthrough-resolve.sh.
+if [ -x /usr/local/sbin/setup-lnet-passthrough-resolve.sh ]; then
+    FC_NICS="${FC_NICS}" \
+        /usr/local/sbin/setup-lnet-passthrough-resolve.sh \
+            /etc/modprobe.d/lnet.conf || \
+        echo "rc.local: warning: lnet passthrough resolver" \
+             "exited non-zero" >&2
+fi
