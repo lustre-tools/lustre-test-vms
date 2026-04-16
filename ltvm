@@ -8,10 +8,25 @@ Command implementations live in ltvm_pkg/cli.py; this file owns
 argparse setup and dispatch only.
 """
 
-from __future__ import annotations
+# NOTE: this guard must use only syntax valid in Python 2.7 and 3.6,
+# because it runs before any 3.9+ syntax below is parsed.  Rocky/RHEL 8
+# ships python3 as 3.6; without this check users see a cryptic
+# SyntaxError pointing at a random line rather than a clear message.
+# No `from __future__ import annotations` in this file: that feature
+# was added in 3.7 so it would raise its own SyntaxError on 3.6 before
+# this guard runs.  PEP 585 generics (set[int], tuple[Any, ...]) work
+# natively on 3.9+, so the future import is not needed anyway.
+import sys
+if sys.version_info < (3, 9):
+    sys.stderr.write(
+        "ltvm requires Python 3.9 or newer (this is %d.%d.%d).\n"
+        "On Rocky/RHEL 8: dnf install python39 && "
+        "python3.9 ./ltvm <args>\n"
+        % sys.version_info[:3]
+    )
+    sys.exit(1)
 
 import os
-import sys
 from pathlib import Path
 
 # Self-bootstrap into the project venv when invoked via system Python
