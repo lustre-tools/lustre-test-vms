@@ -426,6 +426,69 @@ def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
     return True
 
 
+def _rollback_launch_failure(vm: VMInfo) -> None:
+    """Unwind the post-vm.save() phase on failure: preserve QEMU log,
+    kill QEMU, destroy artifacts, unregister SSH name, rebind any
+    vfio'd passthrough devices.  Each step is best-effort and logs
+    (to stderr) rather than raising -- the original exception is what
+    should surface to the caller.
+    """
+    # Best-effort cleanup of overlay/disks/.info/TAP.  If any
+    # individual cleanup step fails, swallow it -- the original
+    # exception is what we want to surface to the user.
+    # Preserve the QEMU log out-of-band first; _destroy_vm_artifacts
+    # erases it and the stderr message points users at a path that
+    # no longer exists.
+    if vm.log_path.exists():
+        try:
+            preserved = vm.log_path.with_suffix(".log.failed")
+            vm.log_path.rename(preserved)
+            print(
+                f"  QEMU log preserved at {preserved}",
+                file=sys.stderr,
+            )
+        except OSError as e:
+            print(
+                f"  rollback: preserving QEMU log failed: {e}",
+                file=sys.stderr,
+            )
+    # Log (don't swallow silently) so a later investigator can see
+    # which cleanup step failed; continue through the remaining
+    # steps regardless.
+    try:
+        kill_qemu(vm)
+    except Exception as e:
+        print(f"  rollback: kill_qemu failed: {e}", file=sys.stderr)
+    try:
+        _destroy_vm_artifacts(vm.name)
+    except Exception as e:
+        print(
+            f"  rollback: _destroy_vm_artifacts failed: {e}",
+            file=sys.stderr,
+        )
+    try:
+        unregister_ssh_name(vm.name)
+    except Exception as e:
+        print(
+            f"  rollback: unregister_ssh_name failed: {e}",
+            file=sys.stderr,
+        )
+    # Rebind any vfio'd devices back to their original drivers so
+    # the host's network state is unchanged from a failed create.
+    if vm.passthrough_drivers:
+        from ltvm_pkg import vfio as _vfio
+        for bdf, drv in vm.passthrough_drivers.items():
+            if not drv:
+                continue
+            try:
+                _vfio.rebind(bdf, drv)
+            except Exception as e:
+                print(
+                    f"  rollback: rebind {bdf} -> {drv} failed: {e}",
+                    file=sys.stderr,
+                )
+
+
 def cmd_create(args: argparse.Namespace) -> None:
     name = args.name
     _validate_vm_name(name)
@@ -670,60 +733,7 @@ def cmd_create(args: argparse.Namespace) -> None:
         provision_vm_ssh(vm, SSH_TIMEOUT)
         _seed_kdump_boot(vm)
     except BaseException:
-        # Best-effort cleanup of overlay/disks/.info/TAP.  If any
-        # individual cleanup step fails, swallow it -- the original
-        # exception is what we want to surface to the user.
-        # Preserve the QEMU log out-of-band first; _destroy_vm_artifacts
-        # erases it and the stderr message points users at a path that
-        # no longer exists.
-        if vm.log_path.exists():
-            try:
-                preserved = vm.log_path.with_suffix(".log.failed")
-                vm.log_path.rename(preserved)
-                print(
-                    f"  QEMU log preserved at {preserved}",
-                    file=sys.stderr,
-                )
-            except OSError as e:
-                print(
-                    f"  rollback: preserving QEMU log failed: {e}",
-                    file=sys.stderr,
-                )
-        # Log (don't swallow silently) so a later investigator can see
-        # which cleanup step failed; continue through the remaining
-        # steps regardless.
-        try:
-            kill_qemu(vm)
-        except Exception as e:
-            print(f"  rollback: kill_qemu failed: {e}", file=sys.stderr)
-        try:
-            _destroy_vm_artifacts(vm.name)
-        except Exception as e:
-            print(
-                f"  rollback: _destroy_vm_artifacts failed: {e}",
-                file=sys.stderr,
-            )
-        try:
-            unregister_ssh_name(vm.name)
-        except Exception as e:
-            print(
-                f"  rollback: unregister_ssh_name failed: {e}",
-                file=sys.stderr,
-            )
-        # Rebind any vfio'd devices back to their original drivers so
-        # the host's network state is unchanged from a failed create.
-        if vm.passthrough_drivers:
-            from ltvm_pkg import vfio as _vfio
-            for bdf, drv in vm.passthrough_drivers.items():
-                if not drv:
-                    continue
-                try:
-                    _vfio.rebind(bdf, drv)
-                except Exception as e:
-                    print(
-                        f"  rollback: rebind {bdf} -> {drv} failed: {e}",
-                        file=sys.stderr,
-                    )
+        _rollback_launch_failure(vm)
         raise
 
     if args.json:
