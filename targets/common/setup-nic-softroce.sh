@@ -38,8 +38,12 @@ die() {
 	exit 1
 }
 
-if [ "$#" -ne 1 ]; then
-	die "usage: $PROG <ifname>"
+# rc.local invokes every hook as `setup-nic-<type>.sh <ifname> [<arg>]`
+# (even passing an empty string when the spec has no arg), so we must
+# accept 1 OR 2 positional args.  Softroce ignores the arg; passthrough
+# uses it for the BDF.
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+	die "usage: $PROG <ifname> [<arg>]"
 fi
 
 IFNAME=$1

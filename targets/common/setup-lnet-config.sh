@@ -112,13 +112,16 @@ main() {
 	local fc_nics
 	fc_nics=$(printf '%s' "$cmdline" | parse_fc_nics)
 
-	# Default: single mgmt tcp NIC.
-	if [[ -z $fc_nics ]]; then
-		fc_nics=tcp
+	# fc_nics on the cmdline carries the *extras* (eth1+) only -- the
+	# mgmt NIC (eth0 = tcp, configured from fc_ip/fc_gw) is implicit.
+	# The emit_lnet_conf function expects every NIC listed, mgmt first,
+	# so prepend 'tcp' here.  Empty fc_nics -> just the mgmt NIC.
+	local -a nic_array=(tcp)
+	if [[ -n $fc_nics ]]; then
+		local -a _extras
+		IFS=',' read -r -a _extras <<<"$fc_nics"
+		nic_array+=("${_extras[@]}")
 	fi
-
-	local -a nic_array
-	IFS=',' read -r -a nic_array <<<"$fc_nics"
 
 	local body
 	body=$(emit_lnet_conf "${nic_array[@]}")

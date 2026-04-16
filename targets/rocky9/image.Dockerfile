@@ -40,6 +40,15 @@ COPY common/setup-network.sh   /tmp/setup-network.sh
 COPY common/setup-kdump.sh     /tmp/setup-kdump.sh
 COPY common/setup-services.sh  /tmp/setup-services.sh
 COPY common/lustre-tests-path.sh /etc/profile.d/lustre-tests-path.sh
+
+# Per-NIC hook scripts invoked by rc.local (fc_nics= dispatch).  Staged
+# at /usr/local/sbin/ so they're on PATH for root at boot time and
+# survive the /tmp cleanup at the end of the image build.  See
+# targets/common/rc.local for the dispatch logic.
+COPY common/setup-nic-softroce.sh  /usr/local/sbin/setup-nic-softroce.sh
+COPY common/setup-lnet-config.sh   /usr/local/sbin/setup-lnet-config.sh
+RUN chmod 0755 /usr/local/sbin/setup-nic-softroce.sh \
+               /usr/local/sbin/setup-lnet-config.sh
 RUN cat /etc/profile.d/lustre-tests-path.sh >> /etc/bashrc
 
 # Source-built tools: IOR, mdtest, iozone, pjdfstest, FlameGraph, drgn

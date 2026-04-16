@@ -42,6 +42,12 @@ COPY common/setup-services.sh  /tmp/setup-services.sh
 COPY common/lustre-tests-path.sh /etc/profile.d/lustre-tests-path.sh
 RUN cat /etc/profile.d/lustre-tests-path.sh >> /etc/bashrc
 
+# Per-NIC hook scripts invoked by rc.local (fc_nics= dispatch).
+COPY common/setup-nic-softroce.sh  /usr/local/sbin/setup-nic-softroce.sh
+COPY common/setup-lnet-config.sh   /usr/local/sbin/setup-lnet-config.sh
+RUN chmod 0755 /usr/local/sbin/setup-nic-softroce.sh \
+               /usr/local/sbin/setup-lnet-config.sh
+
 # Source-built tools: IOR, mdtest, iozone, pjdfstest, FlameGraph, drgn
 RUN bash /tmp/build-tools.sh
 

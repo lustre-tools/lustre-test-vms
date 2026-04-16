@@ -66,27 +66,29 @@ run_cli() {
 	printf '%s\n' "$1" | "$UUT" --stdin
 }
 
-check "cli: fc_nics=tcp" \
-	'options lnet networks="tcp0(eth0)"' \
+# fc_nics on the cmdline carries *extras* only; the mgmt NIC (eth0=tcp)
+# is implicit and prepended by main() before calling emit_lnet_conf.
+check "cli: fc_nics=tcp (one extra)" \
+	'options lnet networks="tcp0(eth0),tcp1(eth1)"' \
 	"$(run_cli 'ro fc_ip=1.2.3.4 fc_nics=tcp console=ttyS0')"
 
-check "cli: fc_nics=tcp,softroce" \
+check "cli: fc_nics=softroce" \
 	'options lnet networks="tcp0(eth0),o2ib0(rxe0)"' \
-	"$(run_cli 'fc_nics=tcp,softroce quiet')"
+	"$(run_cli 'fc_nics=softroce quiet')"
 
-check "cli: fc_nics missing -> default tcp" \
+check "cli: fc_nics missing -> mgmt tcp only" \
 	'options lnet networks="tcp0(eth0)"' \
 	"$(run_cli 'ro quiet console=ttyS0')"
 
-check "cli: fc_nics=tcp,passthrough" \
+check "cli: fc_nics=passthrough" \
 	'options lnet networks="tcp0(eth0),o2ib0(@ib-of-eth1))"' \
-	"$(run_cli 'fc_nics=tcp,passthrough')"
+	"$(run_cli 'fc_nics=passthrough')"
 
 # --- Write-to-file mode --------------------------------------------
 
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
-printf '%s\n' 'fc_nics=tcp,softroce,softroce' | "$UUT" --stdin "$tmp"
+printf '%s\n' 'fc_nics=softroce,softroce' | "$UUT" --stdin "$tmp"
 got_file=$(cat "$tmp")
 check "cli: writes to path arg" \
 	'options lnet networks="tcp0(eth0),o2ib0(rxe0),o2ib1(rxe1)"' \

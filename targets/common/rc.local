@@ -43,11 +43,6 @@ fi
 # The hook is optional; a missing hook is a warning, not an error, so
 # plain 'tcp' NICs work even without any hook files on the image.
 #
-# TODO(lustre_test_vms_v2-r55): when softroce lands, the LNet config
-# emitter (see the standalone lnet_config pure function added in that
-# issue) should be called here with the full fc_nics list so LNet knows
-# about every rxe device in one pass.  E.g.:
-#   lnet_config.emit "$FC_NICS" > /etc/modprobe.d/lnet.conf
 if [ -n "${FC_NICS}" ]; then
     idx=1
     IFS=',' read -ra _nic_entries <<< "${FC_NICS}"
@@ -84,4 +79,19 @@ if [ -n "${FC_NICS}" ]; then
         fi
         idx=$((idx + 1))
     done
+fi
+
+# --- LNet config ---------------------------------------------------
+# Compose /etc/modprobe.d/lnet.conf from fc_nics (plus the implicit
+# mgmt tcp NIC prepended by setup-lnet-config.sh) so `modprobe lnet`
+# picks up the right (net-name, interface) mappings automatically.
+# Idempotent -- setup-lnet-config.sh is a pure emitter, no state.
+#
+# Do NOT overwrite an operator- or deploy-lustre-authored lnet.conf;
+# only write when it's missing.  deploy-lustre writes lustre.conf in
+# a separate file, so the two coexist.
+if [ -x /usr/local/sbin/setup-lnet-config.sh ] && \
+   [ ! -s /etc/modprobe.d/lnet.conf ]; then
+    /usr/local/sbin/setup-lnet-config.sh /etc/modprobe.d/lnet.conf \
+        2>/dev/null || true
 fi
