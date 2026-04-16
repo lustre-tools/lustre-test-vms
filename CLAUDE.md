@@ -452,17 +452,14 @@ Notes:
 
 ## Issue Tracking
 
-This project uses `bd` (beads) for task tracking.
-
-**Sync model:** beads state is shared by exporting to
-JSONL and committing it to git -- not by `dolt push`/
-`dolt pull`. If `.beads/` has no `issues.jsonl` after
-a `git pull`, the other machine forgot to export.
+Use GitHub Issues on `lustre-tools/lustre-test-vms`.
 
 ```bash
-bd prime          # session start
-bd ready          # find available work
-bd show <id>      # view issue
-bd update <id> --claim
-bd close <id>
+gh issue list
+gh issue view <n>
+gh issue create --title "..." --body "..." --label enhancement
+gh issue close <n>
 ```
+
+Closed PRs/commits can reference issues with `Fixes #N`
+in the commit message or PR body to auto-close on merge.
