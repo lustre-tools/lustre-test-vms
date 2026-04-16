@@ -65,11 +65,12 @@ DEFAULT_VARIANT = "base"
 # forward-compat path.
 #
 # Bump history:
-#   1  initial single-tarball gzip layout (never shipped to master)
-#   2  split per-asset zstd tarballs, variant-scoped assets, image
-#      asset restricted to ext4+meta.json, lustre-artifacts nested
-#      under variant subdir.  All releases in master today are v2.
-SCHEMA_VERSION = 2
+#   1  current layout: per-(target, arch, kernel, variant) set of
+#      zstd-compressed tarballs (container + kernel + image + optional
+#      lustre) plus a manifest JSON.  Image asset carries only this
+#      variant's base.ext4 + meta.json; lustre-artifacts nest under a
+#      variant subdir for non-base variants.
+SCHEMA_VERSION = 1
 SCHEMA_NAME = "ltvm-release"
 
 
