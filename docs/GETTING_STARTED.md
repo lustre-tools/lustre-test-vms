@@ -37,7 +37,7 @@ into `output/rocky9/x86_64/`.
 Check what you have:
 
 ```bash
-ltvm status
+ltvm build status
 ```
 
 ### 2. Create a VM
@@ -244,7 +244,7 @@ current inputs (Dockerfiles, package lists, kernel config) and
 compares. If unchanged, the build is skipped.
 
 ```bash
-ltvm status          # shows current/stale for each artifact
+ltvm build status          # shows current/stale for each artifact
 ```
 
 ### Incremental Lustre Builds

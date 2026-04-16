@@ -28,9 +28,9 @@ RXE runs RDMA verbs over the regular Ethernet NIC.
 ### 1. Create two VMs
 
 ```bash
-sudo ltvm ensure co<N>-rdma-a --vcpus 2 --mem 2048 --os rocky9 \
+sudo ltvm create co<N>-rdma-a --vcpus 2 --mem 2048 --target rocky9 \
     --mdt-disks 0 --ost-disks 0
-sudo ltvm ensure co<N>-rdma-b --vcpus 2 --mem 2048 --os rocky9 \
+sudo ltvm create co<N>-rdma-b --vcpus 2 --mem 2048 --target rocky9 \
     --mdt-disks 0 --ost-disks 0
 sudo ltvm list
 ```

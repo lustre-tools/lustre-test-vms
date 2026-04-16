@@ -10,7 +10,7 @@
   - VM info: arch persisted per-VM for correct QEMU binary selection
   - Remaining: add concrete aarch64 target entries to targets.yaml, test on arm host
 
-- [ ] Nested VM testing: `ltvm setup --network` breaks outer VM connectivity
+- [ ] Nested VM testing: `ltvm install --network` breaks outer VM connectivity
   - The iptables/dnsmasq reconfiguration clobbers existing routes
   - Need to preserve the default route during bridge setup
   - Workaround: run setup steps individually, skip `--network`

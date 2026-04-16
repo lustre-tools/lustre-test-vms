@@ -8,7 +8,7 @@ deployment → Lustre operation → crash/kdump.
 
 **Server support**: rocky9 ✓  rocky8 ✗  rocky10 ✗  ubuntu2404 ✗
 
-`ubuntu2404` is `experimental`.
+`ubuntu2404` is client-only.
 Tests marked `(S)` require server support — N/A for client-only targets.
 Tests marked `(C)` are client-only targets only.
 
@@ -93,7 +93,7 @@ Work one target at a time, completing all applicable tests before moving to the 
 1. **rocky9** — server + client, all phases ✓ complete
 2. **rocky8** — client-only, all applicable phases ✓ complete
 3. **rocky10** — client-only, all applicable phases ✓ complete
-4. **ubuntu2404** — client-only, all applicable phases ✓ complete (experimental)
+4. **ubuntu2404** — client-only, all applicable phases ✓ complete
 
 `*` = kexec does not work on QEMU microvm with Ubuntu 6.8 kernel.
 NMI triggers panic + reboot but the crash kernel is not invoked,
@@ -109,16 +109,16 @@ but kexec_load fails silently on the microvm machine type.
 ```bash
 ltvm build status
 sudo ltvm list
-sudo vm.py doctor
+sudo ltvm doctor
 ```
 
 ### Phase 1: VM Creation — Default Behavior
 
 ```bash
-sudo ltvm ensure co1-default
+sudo ltvm create co1-default
 sudo ltvm list --json   # verify: vcpus=2, mem=2048, mdt_disks=1, ost_disks=2, disk=500MiB
 # 1.2: ensure on running VM
-sudo ltvm ensure co1-default   # should print "already running", exit 0
+sudo ltvm create co1-default   # should print "already running", exit 0
 # 1.6: root fs size
 ssh co1-default 'df -h /'
 sudo ltvm destroy co1-default
@@ -127,10 +127,10 @@ sudo ltvm destroy co1-default
 ### Phase 2: Disk Topology Variations
 
 ```bash
-sudo ltvm ensure co1-t1 --mdt-disks 1 --ost-disks 1
-sudo ltvm ensure co1-t3 --ost-disks 4
-sudo ltvm ensure co1-t4 --mdt-disks 2 --ost-disks 2
-sudo ltvm ensure co1-t5 --mdt-disks 0 --ost-disks 0
+sudo ltvm create co1-t1 --mdt-disks 1 --ost-disks 1
+sudo ltvm create co1-t3 --ost-disks 4
+sudo ltvm create co1-t4 --mdt-disks 2 --ost-disks 2
+sudo ltvm create co1-t5 --mdt-disks 0 --ost-disks 0
 
 for vm in co1-t1 co1-t3 co1-t4 co1-t5; do
     echo "=== $vm ===" && ssh $vm 'lsblk'
@@ -142,7 +142,7 @@ sudo ltvm destroy co1-t1 co1-t3 co1-t4 co1-t5
 ### Phase 3: Lustre — Single-node Boot and Format
 
 ```bash
-sudo ltvm ensure co1-single
+sudo ltvm create co1-single
 sudo ltvm deploy-lustre co1-single --build ~/lustre-release --mount
 ssh co1-single 'lctl dl'
 ssh co1-single 'lctl get_param osd-*.*.mntdev'
@@ -156,7 +156,7 @@ ssh co1-single 'ls /proc/fs/lustre/'
 
 ```bash
 # 4.1. Fresh deploy on new VM
-sudo ltvm ensure co1-deploy
+sudo ltvm create co1-deploy
 sudo ltvm deploy-lustre co1-deploy --build ~/lustre-release --mount
 ssh co1-deploy 'lctl dl'
 ssh co1-deploy 'lfs df /mnt/lustre'
@@ -166,12 +166,12 @@ sudo ltvm deploy-lustre co1-deploy --build ~/lustre-release --mount
 ssh co1-deploy 'lctl dl'
 
 # 4.3. 4-OST VM
-sudo ltvm ensure co1-4ost --ost-disks 4
+sudo ltvm create co1-4ost --ost-disks 4
 sudo ltvm deploy-lustre co1-4ost --build ~/lustre-release --mount
 ssh co1-4ost 'lfs df /mnt/lustre'
 
 # 4.4. Deploy without --mount, then mount manually
-sudo ltvm ensure co1-nomount
+sudo ltvm create co1-nomount
 sudo ltvm deploy-lustre co1-nomount --build ~/lustre-release
 ssh co1-nomount 'lctl dl | grep -c UP'
 ssh co1-nomount 'bash lustre/tests/llmount.sh'
@@ -216,14 +216,14 @@ Client VM mounts a Lustre filesystem served by a rocky9 server VM.
 
 ```bash
 # Server: rocky9 (already tested in phase 3)
-sudo ltvm ensure co1-server
+sudo ltvm create co1-server
 sudo ltvm deploy-lustre co1-server --build ~/lustre-release --mount
 SERVER_IP=$(sudo ltvm list --json | python3 -c \
     "import sys,json; [print(v['ip']) for v in json.load(sys.stdin)['vms'] \
     if v['name']=='co1-server']")
 
 # Client VM (target OS, no disks)
-sudo ltvm ensure co1-client --os <target> --mdt-disks 0 --ost-disks 0
+sudo ltvm create co1-client --target <target> --mdt-disks 0 --ost-disks 0
 # Deploy client-only modules and mount
 ssh co1-client "mount -t lustre ${SERVER_IP}@tcp:/lustre /mnt/lustre"
 ssh co1-client 'lsmod | grep -E "lustre|lnet"'
