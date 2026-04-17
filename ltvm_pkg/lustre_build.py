@@ -374,44 +374,57 @@ def _build_in_container(
     if kernel_changed:
         force = True
 
-    # Detect cross-compilation
+    # Detect cross-compilation.  Symmetric in both directions so an
+    # aarch64 host can cross-build x86_64 Lustre and vice versa.
     import platform
 
+    from .cross_compile import cross_info, host_deb_arch
+
     host_machine = platform.machine()
-    cross_compiling = arch == "aarch64" and host_machine != "aarch64"
+    xinfo = cross_info(arch, host_machine)
+    cross_compiling = xinfo.crossing
 
     # Build the shell script to run inside the container
     script_parts = ["set -e", "cd /lustre"]
 
-    # Install cross-compiler and cross-arch dev libraries if needed
+    # Install cross-compiler and cross-arch dev libraries if needed.
     if cross_compiling:
         script_parts.append(
-            "echo '--- Installing aarch64 cross-compiler and dev libs...'"
+            f"echo '--- Installing {xinfo.triple} cross-compiler "
+            f"and dev libs...'"
         )
+        # RHEL branch: one-shot dnf install of cross-gcc + binutils.
+        # Debian branch: install cross gcc (works regardless of host
+        # arch) AND set up multiarch for cross-arch -dev packages.
+        # Ubuntu 24.04 uses DEB822 .sources files: pin the native
+        # arch and add a separate sources file for the target arch
+        # pointing at ports.ubuntu.com for non-amd64 archs, or
+        # archive.ubuntu.com for amd64.
         script_parts.append(
-            "if command -v dnf &>/dev/null; then "
-            "dnf -y install gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu 2>&1 | tail -3; "
-            "elif command -v apt-get &>/dev/null; then "
-            # Install the cross-compiler first (amd64 package, no multiarch needed)
-            "apt-get update -qq && "
-            "apt-get install -y gcc-aarch64-linux-gnu 2>&1 | tail -3 && "
-            # Now set up multiarch for arm64 cross-dev libraries.
-            # Ubuntu 24.04 uses DEB822 .sources files; pin them to amd64
-            # and add a separate arm64 source pointing at ports.ubuntu.com
-            "dpkg --add-architecture arm64 && "
+            f"if command -v dnf &>/dev/null; then "
+            f"dnf -y install gcc-{xinfo.triple} binutils-{xinfo.triple} "
+            f"2>&1 | tail -3; "
+            f"elif command -v apt-get &>/dev/null; then "
+            f"apt-get update -qq && "
+            f"apt-get install -y gcc-{xinfo.apt_triple} 2>&1 | tail -3 && "
+            f"dpkg --add-architecture {xinfo.deb_arch} && "
             r"grep -rl '^Types:' /etc/apt/sources.list.d/*.sources 2>/dev/null "
-            r"| xargs -I{} sed -i '/^Architectures:/d; /^Types:/a Architectures: amd64' {} && "
-            "printf 'Types: deb\\n"
-            "URIs: http://ports.ubuntu.com/ubuntu-ports\\n"
-            "Suites: noble noble-updates\\n"
-            "Components: main universe\\n"
-            "Architectures: arm64\\n' > /etc/apt/sources.list.d/arm64-ports.sources && "
-            "apt-get update -qq 2>&1 | tail -3 && "
-            "apt-get install -y "
-            "libmount-dev:arm64 libyaml-dev:arm64 libselinux1-dev:arm64 "
-            "zlib1g-dev:arm64 libnl-3-dev:arm64 libnl-genl-3-dev:arm64 "
-            "libaio-dev:arm64 libkeyutils-dev:arm64 2>&1 | tail -5; "
-            "fi"
+            r"| xargs -I{} sed -i '/^Architectures:/d; /^Types:/a Architectures: "
+            + host_deb_arch(host_machine) + r"' {} && "
+            f"printf 'Types: deb\\n"
+            f"URIs: {xinfo.apt_sources_url}\\n"
+            f"Suites: noble noble-updates\\n"
+            f"Components: main universe\\n"
+            f"Architectures: {xinfo.deb_arch}\\n' "
+            f"> /etc/apt/sources.list.d/{xinfo.deb_arch}-sources.sources && "
+            f"apt-get update -qq 2>&1 | tail -3 && "
+            f"apt-get install -y "
+            f"libmount-dev:{xinfo.deb_arch} libyaml-dev:{xinfo.deb_arch} "
+            f"libselinux1-dev:{xinfo.deb_arch} zlib1g-dev:{xinfo.deb_arch} "
+            f"libnl-3-dev:{xinfo.deb_arch} libnl-genl-3-dev:{xinfo.deb_arch} "
+            f"libaio-dev:{xinfo.deb_arch} libkeyutils-dev:{xinfo.deb_arch} "
+            f"2>&1 | tail -5; "
+            f"fi"
         )
 
     if force:
@@ -454,11 +467,15 @@ def _build_in_container(
     # exact version the container has.
     cfg = "./configure --with-linux=/kernel --disable-gss --disable-crypto"
     if cross_compiling:
-        cfg += " --host=aarch64-linux-gnu"
-        cfg += " CC=aarch64-linux-gnu-gcc"
-        cfg += " ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-"
-        cfg += " PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig"
-        cfg += " PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig"
+        cfg += f" --host={xinfo.triple}"
+        cfg += f" CC={xinfo.triple}-gcc"
+        cfg += f" ARCH={xinfo.kbuild_arch} CROSS_COMPILE={xinfo.triple}-"
+        # Debian lays multiarch libs under /usr/lib/<multiarch-triple>;
+        # RHEL keeps arch-specific libs under the usual lib64/lib dirs.
+        # Set both search vars to the Debian path when crossing -- on
+        # RHEL they'll be empty search paths, which pkg-config tolerates.
+        cfg += f" PKG_CONFIG_PATH=/usr/lib/{xinfo.multiarch_triple}/pkgconfig"
+        cfg += f" PKG_CONFIG_LIBDIR=/usr/lib/{xinfo.multiarch_triple}/pkgconfig"
     if enable_server:
         cfg += " --enable-server"
     else:
@@ -491,7 +508,7 @@ fi""")
 
     make_cross = ""
     if cross_compiling:
-        make_cross = " ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-"
+        make_cross = f" ARCH={xinfo.kbuild_arch} CROSS_COMPILE={xinfo.triple}-"
     # LIBTOOLFLAGS=--silent quietens *some* libtool output (the per-file
     # compile banners).  It does NOT silence the "has not been installed
     # in <prefix>" warnings that fire when libtool relinks intra-tree
