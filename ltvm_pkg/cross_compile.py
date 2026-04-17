@@ -71,8 +71,21 @@ _ARCH_TABLE: dict[str, dict[str, str]] = {
 }
 
 
+_ARCH_ALIASES: dict[str, str] = {
+    "arm64": "aarch64",   # macOS platform.machine() reports arm64
+    "amd64": "x86_64",
+}
+
+
+def normalize_arch(arch: str) -> str:
+    """Normalize arch aliases (arm64→aarch64, amd64→x86_64)."""
+    return _ARCH_ALIASES.get(arch, arch)
+
+
 def cross_info(target_arch: str, host_arch: str) -> CrossInfo:
     """Return resolved cross-compile parameters for target + host arch."""
+    target_arch = normalize_arch(target_arch)
+    host_arch = normalize_arch(host_arch)
     if target_arch not in _ARCH_TABLE:
         raise ValueError(
             f"unknown target_arch={target_arch!r}; "
@@ -94,6 +107,7 @@ def cross_info(target_arch: str, host_arch: str) -> CrossInfo:
 
 def host_deb_arch(host_arch: str) -> str:
     """Return the Debian arch tag for a given host arch."""
+    host_arch = normalize_arch(host_arch)
     if host_arch in _ARCH_TABLE:
         return _ARCH_TABLE[host_arch]["deb_arch"]
     # Unknown host arch -- fall back to amd64 so existing defaults

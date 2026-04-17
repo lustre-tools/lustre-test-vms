@@ -865,7 +865,8 @@ class TestVariantKernelPinPropagation:
             )
         assert rc != EXIT_OK
         err = capsys.readouterr().err
-        assert "no Lustre staging" in err
+        assert "Lustre not built" in err
+        assert "--no-lustre" in err
         bi.assert_not_called()
 
 

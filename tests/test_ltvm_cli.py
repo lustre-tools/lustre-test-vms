@@ -817,7 +817,7 @@ class TestValidationGating:
         ):
             rc = _run_main(
                 [
-                    "build", "all",
+                    "build", "all", "--skip-lustre",
                     "rocky9",
                     "--lustre-tree",
                     str(lustre_tree),
@@ -847,7 +847,7 @@ class TestValidationGating:
             with pytest.raises(SystemExit) as exc:
                 _run_main(
                     [
-                        "build", "all",
+                        "build", "all", "--skip-lustre",
                         "rocky9",
                         "--lustre-tree",
                         str(lustre_tree),
@@ -879,7 +879,7 @@ class TestValidationGating:
         ):
             rc = _run_main(
                 [
-                    "build", "all",
+                    "build", "all", "--skip-lustre",
                     "rocky9",
                     "--lustre-tree",
                     str(lustre_tree),
@@ -910,7 +910,7 @@ class TestValidationGating:
         ):
             rc = _run_main(
                 [
-                    "build", "all",
+                    "build", "all", "--skip-lustre",
                     "rocky9",
                     "--lustre-tree",
                     str(lustre_tree),
@@ -939,7 +939,7 @@ class TestValidationGating:
             with pytest.raises(SystemExit) as exc:
                 _run_main(
                     [
-                        "build", "all",
+                        "build", "all", "--skip-lustre",
                         "rocky9",
                         "--lustre-tree",
                         str(lustre_tree),
@@ -1034,6 +1034,7 @@ class TestValidationGating:
                     [
                         "build", "lustre",
                         "rocky9",
+                        "--lustre-tree",
                         str(lustre_tree),
                     ],
                     capsys,
@@ -1073,6 +1074,7 @@ class TestValidationGating:
                 [
                     "build", "lustre",
                     "rocky9",
+                    "--lustre-tree",
                     str(lustre_tree),
                     "--force-compat",
                 ],
@@ -1196,7 +1198,7 @@ class TestValidationGating:
             ):
                 args = ap.Namespace(
                     vm="co1-gate-test",
-                    build=str(build_path),
+                    lustre_tree=str(build_path),
                     mount=False,
                     target=None,
                     kernel=None,
@@ -1268,7 +1270,7 @@ class TestCmdDeployBuildGating:
 
                 args = argparse.Namespace(
                     vm="co1-deploy-test",
-                    build=str(build_path),
+                    lustre_tree=str(build_path),
                     mount=False,
                     target=None,
                     kernel=None,
@@ -1320,7 +1322,7 @@ class TestCmdDeployBuildGating:
 
                 args = argparse.Namespace(
                     vm="co1-deploy-test",
-                    build=str(build_path),
+                    lustre_tree=str(build_path),
                     mount=False,
                     target=None,
                     kernel=None,
@@ -1368,7 +1370,7 @@ class TestCmdDeployBuildGating:
 
                 args = argparse.Namespace(
                     vm="co1-deploy-test",
-                    build=str(build_path),
+                    lustre_tree=str(build_path),
                     mount=False,
                     target=None,
                     kernel=None,
@@ -1533,7 +1535,7 @@ class TestKernelArgPropagation:
         assert rc != EXIT_OK
         mock_bi.assert_not_called()
         captured = capsys.readouterr()
-        assert "no Lustre staging" in captured.err
+        assert "Lustre not built" in captured.err
         assert "--no-lustre" in captured.err
 
     def test_build_all_kernel_reaches_image_builder(
@@ -1564,10 +1566,11 @@ class TestKernelArgPropagation:
         ):
             rc = _run_main(
                 [
-                    "build", "all",
+                    "build", "all", "--skip-lustre",
                     "rocky9",
                     "--kernel",
                     "5.14-rhel9.5",
+                    "--skip-lustre",
                     "--lustre-tree",
                     str(lustre_tree),
                 ],
@@ -1585,8 +1588,8 @@ class TestKernelArgPropagation:
         tmp_targets: Path,
         lustre_tree: Path,
     ) -> None:
-        """--lustre-build must run Lustre before the image so the
-        image-bake step can pick up the freshly staged Lustre."""
+        """Default build-all order: kernel → lustre → image, so the
+        image-bake step picks up the freshly staged Lustre."""
         from ltvm_pkg import cli as cli_mod
         from ltvm_pkg.lustre_compat import ValidationResult
 
@@ -1625,7 +1628,6 @@ class TestKernelArgPropagation:
                     "rocky9",
                     "--lustre-tree",
                     str(lustre_tree),
-                    "--lustre-build",
                 ],
                 capsys,
             )
@@ -1700,7 +1702,7 @@ class TestNoRootRequiredForReadCommands:
         ):
             args = argparse.Namespace(
                 vm="co1-dr-test",
-                build=str(build_path),
+                lustre_tree=str(build_path),
                 mount=False,
                 target=None,
                 kernel=None,

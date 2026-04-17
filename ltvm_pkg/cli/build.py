@@ -81,23 +81,22 @@ def _preflight_container(tc: TargetConfig, use_json: bool) -> int | None:
 
 @contextlib.contextmanager
 def _podman_machine_autostop() -> Iterator[None]:
-    """On macOS, stop the podman machine after the block if it's idle.
+    """On macOS, stop the podman machine after a successful block if idle.
 
-    Runs on normal completion and on exceptions.  No-op on non-macOS
-    hosts; bails out quietly if the podman-ps query fails or any
-    non-ltvm container is running.
+    Only stops on normal completion -- if the block raises, we leave the
+    machine running so the user can retry without waiting for a cold
+    start.  No-op on non-macOS; bails out quietly if the podman-ps query
+    fails or any non-ltvm container is running.
     """
     if not is_macos():
         yield
         return
+    yield
     try:
-        yield
-    finally:
-        try:
-            if should_stop_podman_machine_macos():
-                stop_podman_machine_macos()
-        except Exception:
-            pass
+        if should_stop_podman_machine_macos():
+            stop_podman_machine_macos()
+    except Exception:
+        pass
 
 
 def _cli_attr(name: str) -> Any:
@@ -465,12 +464,16 @@ def cmd_build_image(args: argparse.Namespace) -> int:
             build_tree = tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree"
             if not candidate.exists():
                 return _error(
-                    f"no Lustre staging at {candidate}",
+                    f"Lustre not built for {args.target} kernel "
+                    f"{resolved_kernel} -- no staging at {candidate}",
                     use_json,
                     hint=(
-                        f"run `ltvm build lustre {args.target} --kernel "
-                        f"{resolved_kernel}` first, or pass --no-lustre to "
-                        f"bake a kernel-only image"
+                        f"build Lustre first:\n"
+                        f"  ltvm build lustre {args.target} --kernel "
+                        f"{resolved_kernel} --lustre-tree <path>\n"
+                        f"or disable Lustre for a kernel-only image:\n"
+                        f"  ltvm build image {args.target} --kernel "
+                        f"{resolved_kernel} --no-lustre"
                     ),
                 )
             _cli_attr("_gate_lustre_validation")(

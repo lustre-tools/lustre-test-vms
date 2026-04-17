@@ -72,13 +72,13 @@ class TestCheckPodmanMachineMacos:
             with pytest.raises(PodmanMachineError) as exc:
                 check_podman_machine_macos()
         assert "podman machine init" in str(exc.value)
-        assert "podman machine start" in str(exc.value)
 
-    def test_machine_defined_but_not_running(self) -> None:
-        fake = MagicMock(
+    def test_machine_defined_but_not_running_auto_starts(self) -> None:
+        list_result = MagicMock(
             returncode=0,
             stdout='[{"Name": "podman-machine-default", "Running": false}]',
         )
+        start_result = MagicMock(returncode=0, stdout="", stderr="")
         with (
             patch("ltvm_pkg.host_setup.is_macos", return_value=True),
             patch(
@@ -86,12 +86,14 @@ class TestCheckPodmanMachineMacos:
                 return_value="/opt/homebrew/bin/podman",
             ),
             patch(
-                "ltvm_pkg.host_setup.subprocess.run", return_value=fake
-            ),
+                "ltvm_pkg.host_setup.subprocess.run",
+                side_effect=[list_result, start_result],
+            ) as run_mock,
         ):
-            with pytest.raises(PodmanMachineError) as exc:
-                check_podman_machine_macos()
-        assert "podman machine start" in str(exc.value)
+            check_podman_machine_macos()
+        # Second call is `podman machine start`.
+        second_call_args = run_mock.call_args_list[1].args[0]
+        assert second_call_args[:3] == ["podman", "machine", "start"]
 
     def test_running_machine_passes(self) -> None:
         fake = MagicMock(

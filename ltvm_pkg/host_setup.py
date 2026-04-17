@@ -36,12 +36,14 @@ class PodmanMachineError(RuntimeError):
 
 
 def check_podman_machine_macos() -> None:
-    """Fail fast with an actionable message if podman is unusable on macOS.
+    """Ensure podman is usable on macOS, auto-starting the machine if stopped.
 
     No-op on non-macOS hosts. On macOS, containers require a running
-    ``podman machine``, so we pre-flight that before any container build
-    to replace podman's cryptic connection error with installation /
-    start instructions.
+    ``podman machine``, so we pre-flight that before any container build.
+    If the machine exists but is stopped, we start it; the user should
+    not have to type the same command ltvm already knows it needs.
+    Raises PodmanMachineError only when podman is absent or no machine
+    has been initialized -- cases that genuinely need the user.
     """
     if not is_macos():
         return
@@ -77,19 +79,28 @@ def check_podman_machine_macos() -> None:
         except json.JSONDecodeError:
             machines = []
 
-    msg_setup = (
-        "On macOS, container builds require a running podman machine.\n"
-        "Run:\n"
-        "  podman machine init      # first time only\n"
-        "  podman machine start\n"
-        "Then retry."
-    )
-
     if not machines:
-        raise PodmanMachineError(msg_setup)
+        raise PodmanMachineError(
+            "no podman machine configured.\n"
+            "Run:\n"
+            "  podman machine init\n"
+            "Then retry."
+        )
 
-    if not any(m.get("Running") for m in machines):
-        raise PodmanMachineError(msg_setup)
+    if any(m.get("Running") for m in machines):
+        return
+
+    log.info("Starting podman machine...")
+    try:
+        subprocess.run(
+            ["podman", "machine", "start"],
+            check=True,
+            timeout=180,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        raise PodmanMachineError(
+            f"failed to start podman machine: {e}"
+        ) from e
 
 
 log = logging.getLogger(__name__)
