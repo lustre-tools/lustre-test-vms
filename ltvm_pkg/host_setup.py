@@ -552,6 +552,23 @@ def socket_vmnet_path() -> Path | None:
     return prefix / "bin" / "socket_vmnet"
 
 
+def socket_vmnet_socket_path() -> Path:
+    """Return the Unix socket path that the socket_vmnet daemon listens on.
+
+    Defaults to ``<brew-prefix>/var/run/socket_vmnet`` when socket_vmnet is
+    installed via Homebrew (per the Lima convention), falling back to
+    ``/var/run/socket_vmnet`` otherwise.  Overridable via
+    ``LTVM_VMNET_SOCKET`` for custom daemon layouts.
+    """
+    env = os.environ.get("LTVM_VMNET_SOCKET")
+    if env:
+        return Path(env)
+    prefix = _brew_socket_vmnet_prefix()
+    if prefix is not None:
+        return prefix / "var" / "run" / "socket_vmnet"
+    return Path("/var/run/socket_vmnet")
+
+
 def install_socket_vmnet_macos(force: bool = False) -> None:
     """Install socket_vmnet on macOS via Homebrew.
 
