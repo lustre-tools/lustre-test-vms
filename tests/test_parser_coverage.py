@@ -640,6 +640,7 @@ class TestListResilienceToMissingFiles:
             patch("ltvm_pkg.vm_commands.VMInfo") as MockVMInfo,
             patch("builtins.open", side_effect=_open_side),
             patch("os.cpu_count", return_value=4),
+            patch("ltvm_pkg.vm_commands.is_macos", return_value=False),
         ):
             MockVMInfo.all_names.return_value = ["co1-test"]
             MockVMInfo.load.side_effect = VMNotFound("co1-test")

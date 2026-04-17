@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, NoReturn
 
+from .host_setup import is_macos
 from .vm_state import (
     BRIDGE,
     EXIT_ERROR,
@@ -36,7 +37,24 @@ def die(msg: str, code: int = EXIT_ERROR) -> NoReturn:
 
 
 def _read_meminfo_mb(key: str) -> int:
-    """Return /proc/meminfo's <key> value in MiB, or 0 if unreadable."""
+    """Return /proc/meminfo's <key> value in MiB, or 0 if unreadable.
+
+    On macOS only MemTotal is supported, resolved via
+    ``sysctl -n hw.memsize``.  Other keys return 0.
+    """
+    if is_macos():
+        if key != "MemTotal":
+            return 0
+        try:
+            r = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return int(r.stdout.strip()) // (1024 * 1024)
+        except (OSError, subprocess.CalledProcessError, ValueError):
+            return 0
     try:
         with open("/proc/meminfo") as f:
             for line in f:
@@ -139,6 +157,20 @@ def is_running(vm: VMInfo) -> bool:
     """
     if vm.pid <= 0:
         return False
+    if is_macos():
+        try:
+            r = subprocess.run(
+                ["ps", "-p", str(vm.pid), "-o", "comm="],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return False
+        if r.returncode != 0:
+            return False
+        comm = Path(r.stdout.strip()).name
+        return comm.startswith("qemu-system")
     try:
         comm = Path(f"/proc/{vm.pid}/comm").read_text().strip()
     except OSError:

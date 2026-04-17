@@ -3,12 +3,25 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from ltvm_pkg import qemu_run
 from ltvm_pkg.vm_state import VMInfo
+
+
+@pytest.fixture(autouse=True)
+def _force_linux_host() -> Any:
+    """Existing tests assert Linux /proc behaviour; pin is_macos() off.
+
+    The qemu_run module branches on platform so host memory / is_running
+    checks can run on macOS.  These tests drive the Linux code paths;
+    without this pin they'd fail when the test runner is Darwin.
+    """
+    with patch("ltvm_pkg.qemu_run.is_macos", return_value=False):
+        yield
 
 
 @pytest.fixture

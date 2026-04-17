@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from .deploy import configure_test_disks
+from .host_setup import is_macos
 from .paths import load_meta_safe
 from .qemu_run import die, is_running, kill_qemu, launch_qemu, run
 from .vm_net import (
@@ -1009,6 +1010,28 @@ def cmd_llmount(args: argparse.Namespace) -> None:
 # ── info + observability ─────────────────────────────────
 
 
+def _host_total_mem_mb() -> int:
+    if is_macos():
+        try:
+            r = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return int(r.stdout.strip()) // (1024 * 1024)
+        except (OSError, subprocess.CalledProcessError, ValueError):
+            return 0
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) // 1024
+    except OSError:
+        pass
+    return 0
+
+
 def cmd_list(args: argparse.Namespace) -> None:
     total_vcpus = 0
     total_mem = 0
@@ -1058,13 +1081,7 @@ def cmd_list(args: argparse.Namespace) -> None:
         )
 
     host_cpus = os.cpu_count() or 1
-    with open("/proc/meminfo") as f:
-        for line in f:
-            if line.startswith("MemTotal:"):
-                host_mem_mb = int(line.split()[1]) // 1024
-                break
-        else:
-            host_mem_mb = 0
+    host_mem_mb = _host_total_mem_mb()
 
     if args.json:
         print(
