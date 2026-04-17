@@ -509,6 +509,60 @@ def _brew_qemu_prefix() -> Path | None:
     return p
 
 
+def _brew_socket_vmnet_prefix() -> Path | None:
+    """Return the Homebrew prefix for the socket_vmnet package, or None."""
+    brew = shutil.which("brew")
+    if not brew:
+        return None
+    r = _run_quiet([brew, "--prefix", "socket_vmnet"], check=False)
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    p = Path(r.stdout.strip())
+    if not (p / "bin" / "socket_vmnet").exists():
+        return None
+    return p
+
+
+def socket_vmnet_path() -> Path | None:
+    """Return the path to the socket_vmnet daemon binary, or None."""
+    prefix = _brew_socket_vmnet_prefix()
+    if prefix is None:
+        return None
+    return prefix / "bin" / "socket_vmnet"
+
+
+def install_socket_vmnet_macos(force: bool = False) -> None:
+    """Install socket_vmnet on macOS via Homebrew.
+
+    socket_vmnet (from the Lima project) runs as a privileged daemon and
+    provides vmnet-shared networking to unprivileged QEMU processes.
+    """
+    brew_prefix = _brew_socket_vmnet_prefix()
+    if brew_prefix and not force:
+        log.info(
+            "socket_vmnet already installed at %s/bin/socket_vmnet",
+            brew_prefix,
+        )
+        return
+
+    brew = shutil.which("brew")
+    if not brew:
+        raise RuntimeError(
+            "Homebrew not found. Install it from https://brew.sh, "
+            "then run: brew install socket_vmnet"
+        )
+    log.info("Installing socket_vmnet via Homebrew...")
+    _run([brew, "install", "socket_vmnet"])
+    brew_prefix = _brew_socket_vmnet_prefix()
+    if not brew_prefix:
+        raise RuntimeError(
+            "brew install socket_vmnet succeeded but socket_vmnet binary not "
+            "found in the expected Homebrew prefix. "
+            "Check: brew --prefix socket_vmnet"
+        )
+    log.info("socket_vmnet installed at %s/bin/socket_vmnet", brew_prefix)
+
+
 def install_qemu_macos(force: bool = False) -> None:
     """Install QEMU on macOS via Homebrew."""
     existing = _qemu_installed_version()
@@ -1183,12 +1237,15 @@ def _run_setup_macos(
     force: bool = False,
 ) -> None:
     all_steps = steps is None
-    active: set[str] = set(steps or ["qemu"])
+    active: set[str] = set(steps or ["qemu", "network"])
 
     log.info("Host: macOS %s (%s)", platform.mac_ver()[0], platform.machine())
 
     if "qemu" in active:
         install_qemu_macos(force=force)
+
+    if "network" in active:
+        install_socket_vmnet_macos(force=force)
 
     ltvm_script = REPO_ROOT / "ltvm"
     if ltvm_script.exists():
