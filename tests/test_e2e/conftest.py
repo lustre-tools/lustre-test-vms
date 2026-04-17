@@ -42,6 +42,33 @@ LTVM_BIN = REPO_ROOT / "ltvm"
 SOCKETS_DIR = Path("/opt/qemu-vms/sockets")
 FAILURE_CAPTURE_ROOT = Path("/tmp/test_e2e")
 
+
+def _sudo_user_home() -> Path:
+    """Return the invoking user's $HOME, even under sudo.
+
+    The e2e suite is run as root (phase-1 establishes that), which
+    makes ``Path.home()`` -> ``/root``.  Users keep their Lustre
+    checkout in ``~/lustre-release`` under their real home, so we
+    honour the usual sudo conventions: ``SUDO_USER`` is set by sudo
+    and pwd lookups give us the right home.  Falls back to
+    ``Path.home()`` for non-sudo invocations (tests would already
+    be skipped in that case, but the fallback is cheap).
+    """
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        try:
+            import pwd
+            return Path(pwd.getpwnam(sudo_user).pw_dir)
+        except (KeyError, ImportError):
+            pass
+    return Path.home()
+
+
+# The user's Lustre source checkout.  Shared across test_04/05/07 so
+# a single override point is available if a test host uses a
+# non-standard location.
+LUSTRE_TREE = _sudo_user_home() / "lustre-release"
+
 SSH_OPTS = [
     "-o", "StrictHostKeyChecking=no",
     "-o", "UserKnownHostsFile=/dev/null",
@@ -51,6 +78,9 @@ SSH_OPTS = [
 
 # Distinctive prefix so tests can't collide with hand-run dev VMs.
 VM_PREFIX = "e2e-"
+# Separate prefix for cluster names so a stray `ltvm cluster list` at
+# cleanup can't mistake a per-VM `e2e-` name for a cluster.
+CLUSTER_PREFIX = "e2e-clu-"
 
 # Keep test runtime bounded.  Create (~15s) + cloud-init boot (~15s) +
 # ssh ready is the long pole; the assertions themselves are sub-second.
@@ -202,6 +232,74 @@ def vm_name(request: pytest.FixtureRequest) -> Iterator[Callable[[str], str]]:
     finally:
         for n in minted:
             _destroy(n)
+
+
+# Map test_nodeid -> list of cluster names the test claimed.
+_TEST_CLUSTERS: dict[str, list[str]] = {}
+
+
+def _cluster_destroy(name: str) -> None:
+    """Best-effort `ltvm cluster destroy`.  Never raises.
+
+    Also wipes the .cluster state file directly afterwards so a
+    half-broken cluster (e.g. create succeeded but the state file is
+    corrupt, or destroy ran but failed to unlink it) doesn't leak
+    into the next test's `cluster list`.
+    """
+    try:
+        subprocess.run(
+            ["sudo", "-n", str(LTVM_BIN), "cluster", "destroy", name],
+            check=False, capture_output=True, text=True, timeout=180,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    # Belt-and-braces: state file is at /opt/qemu-vms/sockets/<n>.cluster.
+    try:
+        (SOCKETS_DIR / f"{name}.cluster").unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+@pytest.fixture
+def cluster_name(
+    request: pytest.FixtureRequest,
+) -> Iterator[Callable[[], tuple[str, str, str]]]:
+    """Yield a factory returning ``(cluster, mds_vm, oss_vm)`` name triples.
+
+    The cluster name is prefixed with ``e2e-clu-`` and the two
+    node names are derived from the cluster name so teardown is
+    easy to reason about: we tear down the cluster (which destroys
+    the constituent VMs), and as an extra safety net the fixture
+    explicitly destroys each VM name too in case the cluster state
+    file is gone but the VMs still exist.
+    """
+    nodeid = request.node.nodeid
+    base = request.node.name.replace("[", "-").replace("]", "")
+    base = "".join(c if c.isalnum() or c == "-" else "-" for c in base)
+    base = base[:20].strip("-")
+    minted: list[tuple[str, str, str]] = []
+
+    def _mint() -> tuple[str, str, str]:
+        suffix = _rand_suffix()
+        cname = f"{CLUSTER_PREFIX}{base}-{suffix}"
+        mds = f"{cname}-mds"
+        oss = f"{cname}-oss"
+        minted.append((cname, mds, oss))
+        _TEST_CLUSTERS.setdefault(nodeid, []).append(cname)
+        # Also register the constituent VMs under the normal VM map
+        # so the failure-capture hook grabs their console logs.
+        _TEST_VMS.setdefault(nodeid, []).extend([mds, oss])
+        return cname, mds, oss
+
+    try:
+        yield _mint
+    finally:
+        for cname, mds, oss in minted:
+            _cluster_destroy(cname)
+            # Safety: if the cluster destroy missed a node (half-state),
+            # _destroy is a no-op on missing VMs.
+            _destroy(mds)
+            _destroy(oss)
 
 
 # ---------------------------------------------------------------------------
