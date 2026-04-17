@@ -9,12 +9,17 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
+
+
+def is_macos() -> bool:
+    return platform.system() == "Darwin"
 
 
 def is_wsl2() -> bool:
@@ -490,6 +495,74 @@ def _system_qemu_has_virt() -> str | None:
     return _system_qemu_has_machine(("qemu-system-aarch64",), "virt")
 
 
+def _brew_qemu_prefix() -> Path | None:
+    """Return the Homebrew prefix for the qemu package, or None."""
+    brew = shutil.which("brew")
+    if not brew:
+        return None
+    r = _run_quiet([brew, "--prefix", "qemu"], check=False)
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    p = Path(r.stdout.strip())
+    if not (p / "bin" / "qemu-system-x86_64").exists():
+        return None
+    return p
+
+
+def install_qemu_macos(force: bool = False) -> None:
+    """Install QEMU on macOS via Homebrew."""
+    existing = _qemu_installed_version()
+    if existing and not force:
+        log.info("QEMU %s already installed", existing)
+        return
+
+    brew_prefix = _brew_qemu_prefix()
+
+    if not brew_prefix:
+        brew = shutil.which("brew")
+        if not brew:
+            raise RuntimeError(
+                "Homebrew not found. Install it from https://brew.sh, "
+                "then run: brew install qemu"
+            )
+        log.info("Installing QEMU via Homebrew...")
+        _run([brew, "install", "qemu"])
+        brew_prefix = _brew_qemu_prefix()
+        if not brew_prefix:
+            raise RuntimeError(
+                "brew install qemu succeeded but qemu-system-x86_64 not found "
+                "in the expected Homebrew prefix. Check: brew --prefix qemu"
+            )
+
+    QEMU_PREFIX.mkdir(parents=True, exist_ok=True)
+    (QEMU_PREFIX / "bin").mkdir(exist_ok=True)
+
+    for tool in ("qemu-system-x86_64", "qemu-system-aarch64", "qemu-img"):
+        src = brew_prefix / "bin" / tool
+        if src.exists():
+            link = QEMU_PREFIX / "bin" / tool
+            link.unlink(missing_ok=True)
+            link.symlink_to(src)
+
+    # Homebrew puts firmware under <prefix>/share/qemu/; we need
+    # QEMU_PREFIX/share/qemu/ to point there so QEMU finds it.
+    brew_share_qemu = brew_prefix / "share" / "qemu"
+    if brew_share_qemu.is_dir():
+        share_dir = QEMU_PREFIX / "share"
+        share_dir.mkdir(exist_ok=True)
+        share_link = share_dir / "qemu"
+        share_link.unlink(missing_ok=True)
+        share_link.symlink_to(brew_share_qemu)
+
+    ver_r = _run_quiet(
+        [str(QEMU_PREFIX / "bin" / "qemu-system-x86_64"), "--version"],
+        check=False,
+    )
+    ver_m = re.search(r"version (\d+\.\d+\.\d+)", ver_r.stdout)
+    ver = ver_m.group(1) if ver_m else "unknown"
+    log.info("Using Homebrew QEMU %s (%s)", ver, brew_prefix)
+
+
 def install_qemu(host: HostInfo, force: bool = False) -> None:
     """Install QEMU with microvm support.
 
@@ -923,6 +996,7 @@ Host {subnet}.*
 def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
     """Check existing setup.  Returns dict of results."""
     results: dict[str, Any] = {}
+    macos = is_macos()
 
     # QEMU (x86_64)
     ver = _qemu_installed_version("x86_64")
@@ -938,26 +1012,42 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
         "version": ver_arm,
     }
 
-    # KVM
-    results["kvm"] = {"available": Path("/dev/kvm").exists()}
+    if macos:
+        # macOS uses Hypervisor.framework; no /dev/kvm
+        results["kvm"] = {"available": True, "note": "Hypervisor.framework (macOS)"}
+        results["bridge"] = {"up": True, "address": None, "note": "not required on macOS"}
+        results["dnsmasq"] = {"running": True, "note": "not required on macOS"}
+        results["ssh"] = {"configured": True, "note": "not required on macOS"}
+    else:
+        # KVM
+        results["kvm"] = {"available": Path("/dev/kvm").exists()}
 
-    # Bridge
-    r = _run_quiet(["ip", "-4", "addr", "show", "fcbr0"], check=False)
-    bridge_up = r.returncode == 0
-    addr = None
-    if bridge_up:
-        m = re.search(r"inet (\S+)", r.stdout)
-        addr = m.group(1) if m else None
-    results["bridge"] = {
-        "up": bridge_up,
-        "address": addr,
-    }
+        # Bridge
+        r = _run_quiet(["ip", "-4", "addr", "show", "fcbr0"], check=False)
+        bridge_up = r.returncode == 0
+        addr = None
+        if bridge_up:
+            m = re.search(r"inet (\S+)", r.stdout)
+            addr = m.group(1) if m else None
+        results["bridge"] = {
+            "up": bridge_up,
+            "address": addr,
+        }
 
-    # dnsmasq
-    r = _run_quiet(["systemctl", "is-active", "dnsmasq"], check=False)
-    results["dnsmasq"] = {
-        "running": r.returncode == 0,
-    }
+        # dnsmasq
+        r = _run_quiet(["systemctl", "is-active", "dnsmasq"], check=False)
+        results["dnsmasq"] = {
+            "running": r.returncode == 0,
+        }
+
+        # SSH config
+        ssh_config = Path("/root/.ssh/config")
+        results["ssh"] = {
+            "configured": (
+                ssh_config.exists()
+                and SSH_BLOCK_MARKER in ssh_config.read_text()
+            ),
+        }
 
     # Scripts
     results["ltvm"] = {
@@ -986,14 +1076,6 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
     results["zstd"] = {
         "installed": zstd_path is not None,
         "version": zv,
-    }
-
-    # SSH config
-    ssh_config = Path("/root/.ssh/config")
-    results["ssh"] = {
-        "configured": (
-            ssh_config.exists() and SSH_BLOCK_MARKER in ssh_config.read_text()
-        ),
     }
 
     # Overall
@@ -1034,18 +1116,26 @@ def print_verify(results: dict[str, Any]) -> None:
     else:
         ok("QEMU aarch64: not installed (optional, for cross-arch targets)")
 
-    if results["kvm"]["available"]:
+    kvm = results["kvm"]
+    if kvm.get("note"):
+        ok(f"KVM: {kvm['note']}")
+    elif kvm["available"]:
         ok("KVM: available")
     else:
         fail("KVM: /dev/kvm not found")
 
     b = results["bridge"]
-    if b["up"]:
+    if b.get("note"):
+        ok(f"Bridge: {b['note']}")
+    elif b["up"]:
         ok(f"Bridge: fcbr0 at {b['address']}")
     else:
         fail("Bridge: fcbr0 not found")
 
-    if results["dnsmasq"]["running"]:
+    dns = results["dnsmasq"]
+    if dns.get("note"):
+        ok(f"dnsmasq: {dns['note']}")
+    elif dns["running"]:
         ok("dnsmasq: running")
     else:
         fail("dnsmasq: not running")
@@ -1068,7 +1158,10 @@ def print_verify(results: dict[str, Any]) -> None:
     else:
         fail("zstd: not installed (needed by ltvm target publish/fetch)")
 
-    if results["ssh"]["configured"]:
+    ssh = results["ssh"]
+    if ssh.get("note"):
+        ok(f"SSH config: {ssh['note']}")
+    elif ssh["configured"]:
         ok("SSH config: configured")
     else:
         fail("SSH config: not configured")
@@ -1085,6 +1178,36 @@ def print_verify(results: dict[str, Any]) -> None:
 # ------------------------------------------------------------------
 
 
+def _run_setup_macos(
+    steps: list[str] | None = None,
+    force: bool = False,
+) -> None:
+    all_steps = steps is None
+    active: set[str] = set(steps or ["qemu"])
+
+    log.info("Host: macOS %s (%s)", platform.mac_ver()[0], platform.machine())
+
+    if "qemu" in active:
+        install_qemu_macos(force=force)
+
+    ltvm_script = REPO_ROOT / "ltvm"
+    if ltvm_script.exists():
+        link = Path("/usr/local/bin/ltvm")
+        link.unlink(missing_ok=True)
+        link.symlink_to(ltvm_script)
+        log.info("ltvm installed to %s", link)
+
+    if all_steps:
+        log.info("")
+        log.info("Install complete.")
+        log.info("")
+        log.info("Note: network bridge (fcbr0) and dnsmasq are not configured")
+        log.info("on macOS -- VMs use vmnet-shared or user networking instead.")
+        log.info("")
+        log.info("Next:")
+        log.info("  ltvm target fetch rocky9")
+
+
 def run_setup(
     steps: list[str] | None = None,
     subnet: str = DEFAULT_SUBNET,
@@ -1095,6 +1218,10 @@ def run_setup(
     steps: list of step names, or None for all.
            Valid: "qemu", "network", "install", "ssh".
     """
+    if is_macos():
+        _run_setup_macos(steps=steps, force=force)
+        return
+
     if os.geteuid() != 0:
         raise RuntimeError("Must run as root")
 
