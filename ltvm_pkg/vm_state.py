@@ -73,8 +73,9 @@ def qemu_binary_for_arch(arch: str = "x86_64") -> str:
 def qemu_machine_for_arch(arch: str = "x86_64") -> str:
     """Return the -machine argument for a given arch.
 
-    Uses KVM only when the host arch matches (KVM can't accelerate a
-    different ISA).  Cross-arch VMs fall back to TCG emulation.
+    Uses the host's native accelerator only when the host arch matches
+    the guest (accelerators can't run a different ISA): KVM on Linux,
+    HVF on macOS.  Cross-arch VMs fall back to TCG emulation.
     """
     import platform
 
@@ -82,9 +83,10 @@ def qemu_machine_for_arch(arch: str = "x86_64") -> str:
     # Normalise: aarch64 == arm64, x86_64 == amd64
     host_is_x86 = host_arch in ("x86_64", "amd64")
     host_is_arm64 = host_arch in ("aarch64", "arm64")
+    native_accel = "hvf" if platform.system() == "Darwin" else "kvm"
 
     if arch == "x86_64":
-        accel = "accel=kvm" if host_is_x86 else "accel=tcg"
+        accel = f"accel={native_accel}" if host_is_x86 else "accel=tcg"
         # q35 matches the aarch64 'virt' path: PCIe root complex, full
         # device set, virtio-*-pci drivers.  Benchmarked against microvm
         # at ~+300 ms create-to-ssh (within create-path noise) with no
@@ -97,7 +99,7 @@ def qemu_machine_for_arch(arch: str = "x86_64") -> str:
         # still presents as /dev/vda to the guest.
         return f"q35,{accel}"
     if arch == "aarch64":
-        accel = "accel=kvm" if host_is_arm64 else "accel=tcg"
+        accel = f"accel={native_accel}" if host_is_arm64 else "accel=tcg"
         return f"virt,{accel},gic-version=max"
     return "virt,accel=tcg"
 
