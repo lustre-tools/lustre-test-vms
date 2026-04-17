@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
+from .cross_compile import host_podman_platform
 from .lustre_tree import kp_configs, kp_patches, kp_series, kp_targets
 from .paths import load_meta_safe
 from .podman_run import run_podman_with_cleanup
@@ -563,8 +564,13 @@ def _ensure_container_image(target_config: TargetConfig) -> str:
     base_tag = build_container_tag(target_config.name, arch, DEFAULT_VARIANT)
     base_dockerfile = target_config.target_dir / "container.Dockerfile"
 
-    _arch_to_platform = {"x86_64": "linux/amd64", "aarch64": "linux/arm64"}
-    platform = _arch_to_platform.get(arch, "linux/amd64")
+    # Build the container as the HOST arch, not the target.  The kernel
+    # build uses a cross toolchain installed in the image; running the
+    # container emulated (target arch on a cross host) would be ~10x
+    # slower and bypass the cross-compile path entirely, because
+    # uname -m inside qemu-user reports the target and the shared
+    # cross-compile-env.sh sees CROSSING=0.
+    platform = host_podman_platform()
 
     log.info("Building container image: %s", base_tag)
     cmd = [

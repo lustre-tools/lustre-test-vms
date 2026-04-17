@@ -5,9 +5,16 @@ image_build) and the shell helper in targets/common/cross-compile-env.sh.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
-from ltvm_pkg.cross_compile import cross_info, host_deb_arch
+from ltvm_pkg.cross_compile import (
+    cross_info,
+    host_deb_arch,
+    host_podman_platform,
+    podman_platform_for,
+)
 
 
 class TestCrossInfoNative:
@@ -84,3 +91,45 @@ class TestHostDebArch:
         """Safety net for odd uname -m values (e.g. arm64 alone on some
         Apple-native tooling) -- we don't want to crash downstream."""
         assert host_deb_arch("riscv64") == "amd64"
+
+
+class TestPodmanPlatformFor:
+    def test_x86_64(self) -> None:
+        assert podman_platform_for("x86_64") == "linux/amd64"
+
+    def test_aarch64(self) -> None:
+        assert podman_platform_for("aarch64") == "linux/arm64"
+
+    def test_apple_silicon_uname_form(self) -> None:
+        """platform.machine() on Apple Silicon can report ``arm64``
+        (Darwin) not ``aarch64`` (Linux).  Map it anyway."""
+        assert podman_platform_for("arm64") == "linux/arm64"
+
+    def test_amd64(self) -> None:
+        assert podman_platform_for("amd64") == "linux/amd64"
+
+    def test_unknown_defaults_to_amd64(self) -> None:
+        assert podman_platform_for("riscv64") == "linux/amd64"
+
+
+class TestHostPodmanPlatform:
+    """The core of the s3f fix: container builds pick HOST arch, not
+    target arch, so cross-compile actually fires."""
+
+    def test_host_x86_64(self) -> None:
+        with patch("ltvm_pkg.cross_compile.platform.machine",
+                   return_value="x86_64"):
+            assert host_podman_platform() == "linux/amd64"
+
+    def test_host_aarch64(self) -> None:
+        with patch("ltvm_pkg.cross_compile.platform.machine",
+                   return_value="aarch64"):
+            assert host_podman_platform() == "linux/arm64"
+
+    def test_host_arm64_darwin(self) -> None:
+        """Apple Silicon host targeting x86_64 Linux: the podman
+        platform must be linux/arm64 (native on the Mac) so the
+        container runs at full speed and the cross toolchain fires."""
+        with patch("ltvm_pkg.cross_compile.platform.machine",
+                   return_value="arm64"):
+            assert host_podman_platform() == "linux/arm64"

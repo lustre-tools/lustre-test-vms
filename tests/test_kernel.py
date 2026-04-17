@@ -493,6 +493,62 @@ class TestEnsureContainerImage:
         cmd = mock_run.call_args[0][0]
         assert dockerfile in cmd
 
+    def _platform_after(self, cmd: list[str]) -> str:
+        assert "--platform" in cmd
+        return cmd[cmd.index("--platform") + 1]
+
+    def test_native_build_uses_host_platform(self, tmp_path: Path) -> None:
+        """host == target: --platform resolves to the host arch (no
+        emulation)."""
+        cfg = self._make_target_config(tmp_path)
+        cfg.arch = "x86_64"
+        with patch(
+            "ltvm_pkg.kernel_build.subprocess.run"
+        ) as mock_run, patch(
+            "ltvm_pkg.cross_compile.platform.machine",
+            return_value="x86_64",
+        ):
+            _ensure_container_image(cfg)
+        assert self._platform_after(mock_run.call_args[0][0]) == "linux/amd64"
+
+    def test_cross_build_picks_host_not_target_platform(
+        self, tmp_path: Path
+    ) -> None:
+        """The core bead-s3f invariant: on a cross host, --platform
+        MUST be the host's platform so the container runs natively.
+        Forcing target arch here is what caused emulation to kick in
+        and silently bypassed the cross-compile code path."""
+        cfg = self._make_target_config(tmp_path)
+        cfg.arch = "x86_64"  # target
+        with patch(
+            "ltvm_pkg.kernel_build.subprocess.run"
+        ) as mock_run, patch(
+            "ltvm_pkg.cross_compile.platform.machine",
+            return_value="aarch64",  # host
+        ):
+            _ensure_container_image(cfg)
+        plat = self._platform_after(mock_run.call_args[0][0])
+        assert plat == "linux/arm64", (
+            "cross build on aarch64 host targeting x86_64 must run the "
+            "container as linux/arm64 (host-native), NOT linux/amd64 "
+            "(target/emulated) -- otherwise cross-compile-env.sh sees "
+            "HOST_ARCH == TARGET_ARCH and never sets CROSSING=1"
+        )
+
+    def test_reverse_cross_build_picks_host(self, tmp_path: Path) -> None:
+        """Symmetric case: x86_64 host targeting aarch64."""
+        cfg = self._make_target_config(tmp_path)
+        cfg.arch = "aarch64"  # target
+        with patch(
+            "ltvm_pkg.kernel_build.subprocess.run"
+        ) as mock_run, patch(
+            "ltvm_pkg.cross_compile.platform.machine",
+            return_value="x86_64",  # host
+        ):
+            _ensure_container_image(cfg)
+        plat = self._platform_after(mock_run.call_args[0][0])
+        assert plat == "linux/amd64"
+
 
 # ------------------------------------------------------------------
 # TestBuildConfigFragment

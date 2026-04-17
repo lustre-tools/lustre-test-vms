@@ -11,6 +11,7 @@ adding a new arch, update both.
 
 from __future__ import annotations
 
+import platform
 from dataclasses import dataclass
 
 
@@ -98,3 +99,31 @@ def host_deb_arch(host_arch: str) -> str:
     # Unknown host arch -- fall back to amd64 so existing defaults
     # (which predate the cross-compile refactor) keep working.
     return "amd64"
+
+
+_PODMAN_PLATFORM: dict[str, str] = {
+    "x86_64": "linux/amd64",
+    "aarch64": "linux/arm64",
+    "amd64": "linux/amd64",
+    "arm64": "linux/arm64",
+}
+
+
+def podman_platform_for(arch: str) -> str:
+    """Return the ``--platform`` value for an arch (e.g. linux/amd64)."""
+    return _PODMAN_PLATFORM.get(arch, "linux/amd64")
+
+
+def host_podman_platform() -> str:
+    """Return the ``--platform`` value for the current host arch.
+
+    Cross-arch builds run the container as the HOST so the toolchain
+    executes natively; inside the container the shared
+    ``cross-compile-env.sh`` reads ``TARGET_ARCH`` and wires up
+    ``ARCH=`` / ``CROSS_COMPILE=`` make flags against the pre-installed
+    cross toolchain.  Forcing the target platform would instead pull an
+    emulated (qemu-user) image, which is ~10x slower and masks the
+    cross-compile path entirely because ``uname -m`` inside the emulated
+    container reports the target arch.
+    """
+    return podman_platform_for(platform.machine())

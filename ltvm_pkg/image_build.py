@@ -81,12 +81,26 @@ def _is_cross_build(target_config: TargetConfig) -> bool:
 
 
 def _podman_platform(target_config: TargetConfig) -> list[str]:
-    """Return --platform flag for podman if cross-arch build needed."""
+    """Return --platform flag for podman if cross-arch build needed.
+
+    Unlike kernel_build (which flips to host arch so its cross
+    toolchain runs natively), the image build needs a target-arch
+    rootfs: the package manager inside pulls packages for whatever
+    platform the container image was resolved as.  Running the image
+    container as host arch would install host-arch binaries into the
+    ext4, which then fails to boot on the target.
+
+    Switching to a host-native builder + dnf/apt --forcearch install
+    into a target-arch sysroot is the clean fix but is non-trivial
+    across distros; tracked as a follow-up to bead s3f.  Until then
+    image cross-builds pay the emulation tax (mitigated in part by
+    `_prebuild_tools_native`, which cross-builds IOR/iozone/e2fsprogs
+    natively and COPYs them into the emulated image build).
+    """
     if not _is_cross_build(target_config):
         return []
-    _PLAT = {"aarch64": "linux/arm64", "x86_64": "linux/amd64"}
-    plat = _PLAT.get(target_config.arch)
-    return ["--platform", plat] if plat else []
+    from .cross_compile import podman_platform_for
+    return ["--platform", podman_platform_for(target_config.arch)]
 
 
 def _prebuild_tools_native(
