@@ -72,6 +72,21 @@ def _neutralize_podman_preflight() -> "object":
         yield
 
 
+@pytest.fixture(autouse=True)
+def _neutralize_container_preflight() -> "object":
+    """Suppress the build-container-exists preflight for unit tests.
+
+    Build commands short-circuit when `podman image exists <tag>` fails.
+    Most tests mock the actual build functions and don't care about
+    podman state, so treat the preflight as a pass unless a test opts
+    out by re-patching ``_preflight_container``.
+    """
+    with patch(
+        "ltvm_pkg.cli.build._preflight_container", return_value=None
+    ):
+        yield
+
+
 @pytest.fixture
 def tmp_targets(tmp_path: Path) -> Path:
     """Create a minimal targets/ tree for TargetConfig tests."""

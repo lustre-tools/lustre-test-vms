@@ -48,6 +48,32 @@ def _preflight_podman(use_json: bool) -> int | None:
     return None
 
 
+def _preflight_container(tc: TargetConfig, use_json: bool) -> int | None:
+    """Return an error code if the build container tag is missing, else None.
+
+    Keeps downstream commands from burning time on SRPM downloads / Lustre
+    tree parsing before discovering that podman will fail at `run`.
+    """
+    tag = tc.container_tag
+    try:
+        r = subprocess.run(
+            ["podman", "image", "exists", tag], capture_output=True
+        )
+    except FileNotFoundError:
+        return _error(
+            "podman not found",
+            use_json,
+            hint="install podman or run `ltvm install` to set up the host",
+        )
+    if r.returncode != 0:
+        return _error(
+            f"build container {tag} not found",
+            use_json,
+            hint=f"Run: ltvm build container {tc.name}",
+        )
+    return None
+
+
 def _cli_attr(name: str) -> Any:
     """Look up ``name`` on ``ltvm_pkg.cli`` at call time.
 
@@ -265,6 +291,10 @@ def cmd_build_kernel(args: argparse.Namespace) -> int:
     if err is not None:
         return err
 
+    err = _preflight_container(tc, use_json)
+    if err is not None:
+        return err
+
     # Deb-based targets don't need a Lustre tree for kernel builds
     lustre_tree = None
     if not tc.kernel_deb_source:
@@ -330,6 +360,10 @@ def cmd_build_mofed_kmods(args: argparse.Namespace) -> int:
             hint=f"Pass --variant mofed-24 (or whichever mofed-* is declared)",
         )
 
+    err = _preflight_container(tc, use_json)
+    if err is not None:
+        return err
+
     try:
         out_dir = build_mofed_kmods(
             tc, kernel=getattr(args, "kernel", None),
@@ -365,6 +399,10 @@ def cmd_build_image(args: argparse.Namespace) -> int:
     assert tc is not None
 
     err = _preflight_podman(use_json)
+    if err is not None:
+        return err
+
+    err = _preflight_container(tc, use_json)
     if err is not None:
         return err
 
@@ -606,25 +644,6 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
 
     container_tag = tc.container_tag
 
-    # Pre-flight: check the container exists in podman storage and give a
-    # clean, distinctive error if not.  build_lustre would otherwise raise
-    # the same condition wrapped in "Lustre build failed: ...", which buries
-    # the actionable hint.  This is the most common first-run error path,
-    # so it gets first-class treatment.
-    container_check = subprocess.run(
-        ["podman", "image", "exists", container_tag],
-        capture_output=True,
-    )
-    if container_check.returncode != 0:
-        return _error(
-            f"Build container '{container_tag}' not found in podman storage",
-            use_json,
-            hint=(
-                f"Run: ltvm build container {args.target}\n"
-                f"  Or fetch a published target: ltvm target fetch {args.target}"
-            ),
-        )
-
     try:
         meta = _cli_attr("build_lustre")(
             lustre_tree,
@@ -668,23 +687,9 @@ def cmd_build_shell(args: argparse.Namespace) -> int:
     if not mount_path.is_dir():
         return _error(f"Mount path not found: {mount_path}", use_json)
 
-    # Check container image exists
-    try:
-        result = subprocess.run(
-            ["podman", "image", "exists", tag], capture_output=True
-        )
-    except FileNotFoundError:
-        return _error(
-            "podman not found",
-            use_json,
-            hint="install podman or run `ltvm install` to set up the host",
-        )
-    if result.returncode != 0:
-        return _error(
-            f"Container image {tag} not found",
-            use_json,
-            hint=f"Run: ltvm build container {args.target}",
-        )
+    err = _preflight_container(tc, use_json)
+    if err is not None:
+        return err
 
     if not use_json:
         print(
