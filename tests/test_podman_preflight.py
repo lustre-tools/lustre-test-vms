@@ -264,3 +264,170 @@ class TestCliPreflight:
         # Either the preflight fires (EXIT_ERROR) or an earlier arg
         # validation path does; in both cases we should NOT reach EXIT_OK.
         assert rc != EXIT_OK
+
+
+from ltvm_pkg.cli.build import _preflight_container as _real_preflight_container
+
+
+class TestPreflightContainerHelper:
+    """``_preflight_container`` wraps ``podman image exists``."""
+
+    def _tc(self, tag: str = "ltvm-build-rocky9") -> Any:
+        tc = MagicMock()
+        tc.container_tag = tag
+        tc.name = "rocky9"
+        return tc
+
+    def test_pass_when_image_present(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ltvm_pkg.cli import build as build_mod
+
+        monkeypatch.setattr(
+            build_mod.subprocess,
+            "run",
+            MagicMock(return_value=MagicMock(returncode=0)),
+        )
+        assert _real_preflight_container(self._tc(), False) is None
+
+    def test_error_when_image_missing(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from ltvm_pkg.cli import build as build_mod
+
+        monkeypatch.setattr(
+            build_mod.subprocess,
+            "run",
+            MagicMock(return_value=MagicMock(returncode=1)),
+        )
+        rc = _real_preflight_container(self._tc(), False)
+        assert rc == EXIT_ERROR
+        err = capsys.readouterr().err
+        assert "ltvm-build-rocky9 not found" in err
+        assert "ltvm build container rocky9" in err
+
+    def test_error_when_podman_missing(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from ltvm_pkg.cli import build as build_mod
+
+        monkeypatch.setattr(
+            build_mod.subprocess,
+            "run",
+            MagicMock(side_effect=FileNotFoundError()),
+        )
+        rc = _real_preflight_container(self._tc(), False)
+        assert rc == EXIT_ERROR
+        assert "podman not found" in capsys.readouterr().err
+
+
+class TestCliContainerPreflight:
+    """Container preflight fires on kernel/image/lustre/shell/mofed-kmods."""
+
+    def _install_missing_container(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ltvm_pkg.cli import build as build_mod
+
+        def fake_run(*a: Any, **kw: Any) -> Any:
+            return MagicMock(returncode=1)
+
+        monkeypatch.setattr(build_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            build_mod, "_preflight_container", _real_preflight_container
+        )
+
+    def test_build_kernel_fails_fast(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._install_missing_container(monkeypatch)
+        rc = _run_main(["build", "kernel", "rocky9"])
+        assert rc == EXIT_ERROR
+        err = capsys.readouterr().err
+        assert "not found" in err
+        assert "ltvm build container rocky9" in err
+
+    def test_build_image_fails_fast(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._install_missing_container(monkeypatch)
+        rc = _run_main(["build", "image", "rocky9"])
+        assert rc == EXIT_ERROR
+        assert "ltvm build container rocky9" in capsys.readouterr().err
+
+    def test_build_lustre_fails_fast(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._install_missing_container(monkeypatch)
+        rc = _run_main(["build", "lustre", "rocky9"])
+        assert rc == EXIT_ERROR
+        assert "ltvm build container rocky9" in capsys.readouterr().err
+
+    def test_build_shell_fails_fast(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        self._install_missing_container(monkeypatch)
+        rc = _run_main(["build", "shell", "rocky9", str(tmp_path)])
+        assert rc == EXIT_ERROR
+        assert "ltvm build container rocky9" in capsys.readouterr().err
+
+    def test_build_container_skips_preflight(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`ltvm build container` must not preflight its own output."""
+        from ltvm_pkg import cli as cli_mod
+
+        self._install_missing_container(monkeypatch)
+        monkeypatch.setattr(
+            cli_mod, "_do_build_container",
+            MagicMock(return_value="ltvm-build-rocky9"),
+        )
+        rc = _run_main(["build", "container", "rocky9"])
+        assert rc == EXIT_OK
+
+    def test_build_all_skips_preflight(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """`ltvm build all` builds the container first; no preflight."""
+        from ltvm_pkg import cli as cli_mod
+
+        self._install_missing_container(monkeypatch)
+        monkeypatch.setattr(
+            cli_mod, "_do_build_container",
+            MagicMock(return_value="ltvm-build-rocky9"),
+        )
+        monkeypatch.setattr(
+            cli_mod, "_resolve_lustre_tree",
+            MagicMock(return_value=(tmp_path, None)),
+        )
+        monkeypatch.setattr(
+            cli_mod, "_gate_lustre_validation", MagicMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            cli_mod, "build_kernel", MagicMock(return_value={"ok": True}),
+        )
+        monkeypatch.setattr(
+            cli_mod, "build_image", MagicMock(return_value=tmp_path),
+        )
+        rc = _run_main(["build", "all", "rocky9"])
+        err = capsys.readouterr().err
+        assert "build container ltvm-build-rocky9 not found" not in err
+        assert rc == EXIT_OK

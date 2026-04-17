@@ -40,6 +40,9 @@ def _load_ltvm() -> Any:
 ltvm = _load_ltvm()
 
 from ltvm_pkg.cli import EXIT_ERROR, EXIT_OK  # noqa: E402
+from ltvm_pkg.cli.build import (  # noqa: E402
+    _preflight_container as _REAL_PREFLIGHT_CONTAINER,
+)
 
 
 def _run_main(argv: list[str]) -> int:
@@ -416,23 +419,28 @@ class TestCmdBuildLustre:
         hint to run `ltvm build container ...` rather than burying it in
         a 'Lustre build failed: ...' wrapper."""
         from ltvm_pkg import cli as cli_mod
+        from ltvm_pkg.cli import build as build_mod
         from ltvm_pkg.lustre_compat import ValidationResult
 
         tc = _make_tc(tmp_targets)
-        # Make build-tree exist so we get past that check.
         bt = tc.kernel_output_dir() / "build-tree"
         bt.mkdir(parents=True, exist_ok=True)
         vr = ValidationResult(
             status="ok", mode=None, kernel_version=None,
             matched_in=None, message="ok",
         )
-        # podman image exists -> non-zero (image absent).
         miss_proc = MagicMock()
         miss_proc.returncode = 1
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
             patch.object(cli_mod, "validate_target", return_value=vr),
-            patch("subprocess.run", return_value=miss_proc),
+            # Bypass the autouse conftest fixture so the real preflight
+            # fires against our stubbed `podman image exists`.
+            patch.object(
+                build_mod, "_preflight_container",
+                _REAL_PREFLIGHT_CONTAINER,
+            ),
+            patch.object(build_mod.subprocess, "run", return_value=miss_proc),
             patch.object(cli_mod, "build_lustre") as bl,
         ):
             rc = _run_main(
@@ -440,7 +448,7 @@ class TestCmdBuildLustre:
             )
         assert rc == EXIT_ERROR
         err = capsys.readouterr().err
-        assert "not found in podman storage" in err
+        assert "not found" in err
         assert "ltvm build container rocky9" in err
         assert not bl.called
 
@@ -575,12 +583,17 @@ class TestCmdBuildShell:
         """When the container image is absent in podman storage, give a
         distinct error with a build-container hint."""
         from ltvm_pkg import cli as cli_mod
+        from ltvm_pkg.cli import build as build_mod
 
         tc = _make_tc(tmp_targets)
         miss = MagicMock()
         miss.returncode = 1
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
+            patch.object(
+                build_mod, "_preflight_container",
+                _REAL_PREFLIGHT_CONTAINER,
+            ),
             patch("subprocess.run", return_value=miss),
         ):
             rc = _run_main(
@@ -588,7 +601,7 @@ class TestCmdBuildShell:
             )
         assert rc == EXIT_ERROR
         err = capsys.readouterr().err
-        assert "Container image" in err
+        assert "not found" in err
         assert "ltvm build container rocky9" in err
 
     def test_podman_not_installed_errors(
@@ -598,10 +611,15 @@ class TestCmdBuildShell:
         tmp_path: Path,
     ) -> None:
         from ltvm_pkg import cli as cli_mod
+        from ltvm_pkg.cli import build as build_mod
 
         tc = _make_tc(tmp_targets)
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
+            patch.object(
+                build_mod, "_preflight_container",
+                _REAL_PREFLIGHT_CONTAINER,
+            ),
             patch("subprocess.run", side_effect=FileNotFoundError("podman")),
         ):
             rc = _run_main(
