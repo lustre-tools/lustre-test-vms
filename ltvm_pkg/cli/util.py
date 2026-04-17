@@ -126,6 +126,20 @@ def _load_target(
     (None, exit_code) on failure."""
     TargetConfig = _cli_attr("TargetConfig")
     list_targets = _cli_attr("list_targets")
+    if name is None:
+        targets = list_targets()
+        hint = (
+            f"Available targets: {', '.join(targets)}"
+            if targets
+            else "No targets configured"
+        )
+        code = _emit_error(
+            "missing target (e.g. rocky9)",
+            use_json,
+            hint=hint,
+            code=EXIT_ERROR,
+        )
+        return None, code
     try:
         return TargetConfig(name, arch=arch, variant=variant), None
     except ValueError as e:
@@ -148,8 +162,9 @@ def _load_target_args(
     so they fold into the input hash.
     """
     variant = getattr(args, "variant", "base") or "base"
+    arch = getattr(args, "arch", None) or host_arch()
     tc, err = _load_target(
-        args.target, use_json, arch=getattr(args, "arch", None), variant=variant
+        args.target, use_json, arch=arch, variant=variant
     )
     if tc is None:
         return None, err
