@@ -779,7 +779,21 @@ def cmd_cluster_exec(args: argparse.Namespace) -> None:
         )
         raise AssertionError("unreachable")
 
-    command = shlex.join(args.command)
+    # Two idioms the user might type:
+    #   ltvm cluster exec co2 oss 'lctl dl'     -> argv=['lctl dl']
+    #   ltvm cluster exec co2 oss lctl dl       -> argv=['lctl', 'dl']
+    #
+    # shlex.join unconditionally quotes each arg, so the first form
+    # becomes "'lctl dl'" -- a single shell token the remote bash
+    # reads as a command name containing a space ("lctl dl: command
+    # not found", rc=127).  When the argv is already one pre-joined
+    # shell string (the user did the quoting), pass it verbatim;
+    # otherwise safely quote each argv element so spaces / globs /
+    # quotes inside individual args survive transport.
+    if len(args.command) == 1:
+        command = args.command[0]
+    else:
+        command = shlex.join(args.command)
     vm = VMInfo.load(matched.name)
     try:
         r = run_ssh(vm.ip, command, timeout=args.timeout)

@@ -891,6 +891,66 @@ class TestCmdClusterExecBehavior:
                 )
         mock_vm.load.assert_called_with("co1-mds")
 
+    def test_quoted_single_arg_passed_verbatim(
+        self, tmp_sockets: Path
+    ) -> None:
+        """Regression for lustre_test_vms_v2-b0h.
+
+        When the user types `ltvm cluster exec co1 oss 'lctl dl'`,
+        the shell passes a SINGLE argv element 'lctl dl'.  Previously
+        `shlex.join(['lctl dl'])` produced `"'lctl dl'"` and the
+        remote bash read the quoted string as a command name with a
+        space (rc=127, "command not found").  A one-element command
+        list is now passed verbatim; shlex.join only engages when
+        there are multiple argv elements to quote safely.
+        """
+        _save_cluster(name="co1")
+        completed = MagicMock(stdout="", stderr="", returncode=0)
+        with (
+            patch.object(vm_cluster, "VMInfo") as mock_vm,
+            patch.object(vm_cluster, "run_ssh", return_value=completed) as ssh,
+        ):
+            mock_vm.load.return_value = MagicMock(ip="10.0.0.11")
+            with pytest.raises(SystemExit):
+                vm_cluster.cmd_cluster_exec(
+                    argparse.Namespace(
+                        name="co1",
+                        target="oss",
+                        command=["lctl dl"],  # shell pre-joined
+                        timeout=60,
+                    )
+                )
+        # Exact command string reaching run_ssh must be the user's
+        # literal, NOT the double-quoted form.
+        assert ssh.call_args.args[1] == "lctl dl"
+        assert "'" not in ssh.call_args.args[1]
+
+    def test_multi_arg_still_quoted_safely(
+        self, tmp_sockets: Path
+    ) -> None:
+        """The quoted-single-arg fix must not regress the splitting
+        case where shlex.join protects args with spaces / globs.
+        `command=['echo', 'hello world']` must transport as
+        `echo 'hello world'` so the space survives the remote shell.
+        """
+        _save_cluster(name="co1")
+        completed = MagicMock(stdout="", stderr="", returncode=0)
+        with (
+            patch.object(vm_cluster, "VMInfo") as mock_vm,
+            patch.object(vm_cluster, "run_ssh", return_value=completed) as ssh,
+        ):
+            mock_vm.load.return_value = MagicMock(ip="10.0.0.11")
+            with pytest.raises(SystemExit):
+                vm_cluster.cmd_cluster_exec(
+                    argparse.Namespace(
+                        name="co1",
+                        target="oss",
+                        command=["echo", "hello world"],
+                        timeout=60,
+                    )
+                )
+        assert ssh.call_args.args[1] == "echo 'hello world'"
+
     def test_no_matching_target_dies(self, tmp_sockets: Path) -> None:
         _save_cluster(name="co1")
         with pytest.raises(SystemExit):
