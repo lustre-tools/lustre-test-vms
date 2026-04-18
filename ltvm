@@ -37,9 +37,21 @@ from pathlib import Path
 # symlink .venv/bin/python to /usr/bin/python3, so .resolve() would make
 # them equal even though running via the venv symlink path causes Python
 # to use the venv's site-packages.
+#
+# Gate on __name__ == "__main__" so pytest-side importlib.SourceFileLoader
+# loads of this script (see tests/test_build_commands.py,
+# tests/test_parser_coverage.py) don't trigger the os.execv.  Without
+# this guard, any pytest invocation whose system-python lacks argcomplete
+# would re-exec `ltvm` with pytest's argv ('ltvm tests/...'), hit the
+# argparse "invalid choice" path, and exit the whole pytest run rc=2
+# with no visible output.
 _REPO_ROOT = Path(__file__).resolve().parent
 _VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python"
-if _VENV_PY.exists() and str(_VENV_PY) != sys.executable:
+if (
+    __name__ == "__main__"
+    and _VENV_PY.exists()
+    and str(_VENV_PY) != sys.executable
+):
     try:
         import yaml  # noqa: F401
         import argcomplete  # noqa: F401

@@ -149,7 +149,9 @@ class TestFindReleaseUrl:
             ),
         ]
         with patch("ltvm_pkg.cli._gh_api", return_value=releases):
-            with pytest.raises(RuntimeError, match="No bootable release"):
+            with pytest.raises(
+                RuntimeError, match="No published bootable image"
+            ):
                 _find_release_url("rocky9", arch="x86_64", mode="bootable")
 
     def test_filter_string_filters_tag(self) -> None:
@@ -185,7 +187,7 @@ class TestFindReleaseUrl:
                     variant="mofed",
                 )
         msg = str(exc.value)
-        assert "ecosystem release" in msg
+        assert "No published artifacts" in msg
         assert "el9_5" in msg
         assert "mofed" in msg
         assert "ltvm target fetch --list" in msg
@@ -762,7 +764,7 @@ class TestCmdFetch:
             rc = cmd_fetch(args)
         assert rc == EXIT_ERROR
         err = capsys.readouterr().err
-        assert "No ecosystem release" in err
+        assert "No published artifacts" in err
 
     def test_explicit_url_skips_lookup_and_fetches(
         self,
