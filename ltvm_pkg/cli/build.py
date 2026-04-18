@@ -35,6 +35,7 @@ from ltvm_pkg.cli.util import (
     _load_target,
     _load_target_args,
     _output,
+    _print_target_header,
 )
 
 
@@ -132,6 +133,17 @@ def cmd_build_all(args: argparse.Namespace) -> int:
         kernel_build_tree=tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree",
     )
 
+    if not use_json:
+        from ltvm_pkg.cli.util import _lustre_tree_version
+
+        _print_target_header(
+            tc,
+            kernel=getattr(args, "kernel", None),
+            variant=getattr(args, "variant", None) or "base",
+            action="Building",
+            lustre_version=_lustre_tree_version(lustre_tree),
+        )
+
     results: dict[str, Any] = {}
 
     # 1. Container
@@ -217,7 +229,12 @@ def cmd_build_container(args: argparse.Namespace) -> int:
     assert tc is not None
 
     if not use_json:
-        print(f"Building container for {args.target}...")
+        _print_target_header(
+            tc,
+            kernel=getattr(args, "kernel", None),
+            variant=getattr(args, "variant", None) or "base",
+            action="Building container",
+        )
 
     try:
         tag = _cli_attr("_do_build_container")(tc)
@@ -260,8 +277,11 @@ def cmd_build_kernel(args: argparse.Namespace) -> int:
     kernel = getattr(args, "kernel", None)
 
     if not use_json:
-        k = tc.resolve_kernel(kernel)
-        print(f"Building kernel {k} for {args.target}...")
+        _print_target_header(
+            tc, kernel=kernel,
+            variant=getattr(args, "variant", None) or "base",
+            action="Building kernel",
+        )
 
     try:
         meta = _cli_attr("build_kernel")(
@@ -298,6 +318,13 @@ def cmd_build_mofed_kmods(args: argparse.Namespace) -> int:
             f"mofed-kmods only applies to a mofed variant",
             use_json,
             hint=f"Pass --variant mofed-24 (or whichever mofed-* is declared)",
+        )
+
+    if not use_json:
+        _print_target_header(
+            tc, kernel=getattr(args, "kernel", None),
+            variant=tc.variant_name,
+            action="Building MOFED kmods",
         )
 
     try:
@@ -373,11 +400,13 @@ def cmd_build_image(args: argparse.Namespace) -> int:
         with_lustre = str(lustre_tree)
 
     if not use_json:
-        extra = f" +lustre={with_lustre}" if with_lustre else ""
-        print(
-            f"Building image for {args.target} "
-            f"(kernel={resolved_kernel}){extra}..."
+        _print_target_header(
+            tc, kernel=kernel,
+            variant=getattr(args, "variant", None) or "base",
+            action="Building image",
         )
+        if with_lustre:
+            print(f"  with_lustre: {with_lustre}")
 
     try:
         path = _cli_attr("build_image")(
@@ -431,13 +460,13 @@ def _format_bytes(n: int) -> str:
 def cmd_clean(args: argparse.Namespace) -> int:
     """Remove built artifacts for a target.
 
-    By default wipes output/<target>/<arch>/ for the target's default
+    By default wipes artifacts/<target>/<arch>/ for the target's default
     arch (x86_64).  --arch narrows to a specific arch; --all-arches
-    wipes the whole output/<target>/ tree.
+    wipes the whole artifacts/<target>/ tree.
     """
     import shutil
 
-    from ltvm_pkg.target_config import OUTPUT_DIR
+    from ltvm_pkg.target_config import ARTIFACTS_DIR
 
     use_json = args.json
     target = args.target
@@ -458,11 +487,11 @@ def cmd_clean(args: argparse.Namespace) -> int:
         )
 
     if all_arches:
-        wipe_paths = [OUTPUT_DIR / target]
+        wipe_paths = [ARTIFACTS_DIR / target]
     else:
         # Use the arch actually configured in the TargetConfig (honors
         # --arch override; defaults to x86_64).
-        wipe_paths = [OUTPUT_DIR / target / tc.arch]
+        wipe_paths = [ARTIFACTS_DIR / target / tc.arch]
 
     wiped: list[dict[str, Any]] = []
     for p in wipe_paths:
@@ -559,8 +588,13 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
     jobs = getattr(args, "jobs", None)
 
     if not use_json:
+        _print_target_header(
+            tc, kernel=kernel,
+            variant=tc.variant_name,
+            action="Building Lustre",
+        )
         srv = "server+client" if enable_server else "client-only"
-        print(f"Building Lustre ({srv}) against {args.target} kernel tree...")
+        print(f"  scope: {srv}")
 
     container_tag = tc.container_tag
 

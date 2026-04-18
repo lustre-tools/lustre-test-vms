@@ -28,7 +28,7 @@ set -euo pipefail
 REPO="${REPO:-/home/paf/lustre-test-vms-v2}"
 TARGET="${TARGET:-rocky9}"
 KVER="${KVER:-5.14-rhel9.7-5.14.0-611.13.1.el9_7}"
-OUT="$REPO/output/$TARGET/x86_64"
+OUT="$REPO/artifacts/$TARGET/x86_64"
 VMLINUZ="$OUT/kernels/$KVER/vmlinuz"
 BASE_IMG="$OUT/images/$KVER/base.ext4"
 QEMU=/opt/qemu/bin/qemu-system-x86_64
@@ -137,26 +137,26 @@ SCP="sshpass -p $ROOT_PW scp -o StrictHostKeyChecking=no \
 
 echo "[5/7] inside outer VM: install deps, stage repo + /opt/qemu, configure bridge"
 
-# Stage the repo (without output/ and .git -- we'll just add the two
+# Stage the repo (without artifacts/ and .git -- we'll just add the two
 # artifacts we need) and /opt/qemu into the outer VM.  tar-over-ssh is
 # fast enough (~10s for 500 MB over the host bridge).
 $SSH "mkdir -p /ltvm /opt/qemu /opt/qemu-vms/overlays /opt/qemu-vms/sockets"
 
-echo "  staging repo -> /ltvm (excluding output/, .git)"
-(cd "$REPO" && tar --exclude=./output --exclude=./.git --exclude=./.venv -cf - .) \
+echo "  staging repo -> /ltvm (excluding artifacts/, .git)"
+(cd "$REPO" && tar --exclude=./artifacts --exclude=./.git --exclude=./.venv -cf - .) \
     | $SSH "tar -xf - -C /ltvm"
 
 echo "  staging kernel + base image for inner VM"
 # Inner VM still needs the rocky9 artifacts.  Place them under the
-# exact output/<target>/<arch> layout ltvm expects.
-$SSH "mkdir -p /ltvm/output/$TARGET/x86_64/kernels/$KVER \
-               /ltvm/output/$TARGET/x86_64/images/$KVER"
-$SCP "$VMLINUZ"  "root@$OUTER_IP:/ltvm/output/$TARGET/x86_64/kernels/$KVER/vmlinuz"
+# exact artifacts/<target>/<arch> layout ltvm expects.
+$SSH "mkdir -p /ltvm/artifacts/$TARGET/x86_64/kernels/$KVER \
+               /ltvm/artifacts/$TARGET/x86_64/images/$KVER"
+$SCP "$VMLINUZ"  "root@$OUTER_IP:/ltvm/artifacts/$TARGET/x86_64/kernels/$KVER/vmlinuz"
 $SCP "$OUT/kernels/$KVER/meta.json" \
-     "root@$OUTER_IP:/ltvm/output/$TARGET/x86_64/kernels/$KVER/meta.json"
-$SCP "$BASE_IMG" "root@$OUTER_IP:/ltvm/output/$TARGET/x86_64/images/$KVER/base.ext4"
+     "root@$OUTER_IP:/ltvm/artifacts/$TARGET/x86_64/kernels/$KVER/meta.json"
+$SCP "$BASE_IMG" "root@$OUTER_IP:/ltvm/artifacts/$TARGET/x86_64/images/$KVER/base.ext4"
 $SCP "$OUT/images/$KVER/meta.json" \
-     "root@$OUTER_IP:/ltvm/output/$TARGET/x86_64/images/$KVER/meta.json"
+     "root@$OUTER_IP:/ltvm/artifacts/$TARGET/x86_64/images/$KVER/meta.json"
 
 echo "  downloading el9 QEMU pre-built tarball inside outer VM"
 # Host's /opt/qemu is linked against Debian/Ubuntu libs (host is WSL2),

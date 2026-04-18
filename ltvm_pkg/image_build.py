@@ -681,14 +681,28 @@ def build_image(
 
     lustre_version: str | None = None
     if lustre_staging is not None:
-        first_ko = next(lustre_staging.rglob("*.ko"), None)
-        if first_ko is not None:
+        # Prefer lustre.ko: some LNet modules (ko2iblnd.ko, etc.) carry
+        # a legacy baked-in MODULE_VERSION like "2.8.0 (in-kernel)" from
+        # the in-tree-Lustre days, which has nothing to do with the
+        # version we just built.  A blind rglob pick would hit one of
+        # those first and write garbage to meta.  Walk a priority
+        # list of canonical module names and use the first that yields
+        # a sensible version string.
+        candidates = ("lustre.ko", "libcfs.ko", "obdclass.ko", "ptlrpc.ko")
+        for cand in candidates:
+            ko = next(lustre_staging.rglob(cand), None)
+            if ko is None:
+                continue
             r = subprocess.run(
-                ["modinfo", "-F", "version", str(first_ko)],
+                ["modinfo", "-F", "version", str(ko)],
                 capture_output=True, text=True,
             )
-            if r.returncode == 0 and r.stdout.strip():
-                lustre_version = r.stdout.strip().splitlines()[0]
+            v = r.stdout.strip().splitlines()[0] if r.returncode == 0 and r.stdout.strip() else ""
+            # Guard against the legacy "in-kernel" stub even if a future
+            # refactor lets it leak back in under a preferred name.
+            if v and "in-kernel" not in v:
+                lustre_version = v
+                break
 
     # Schema: see ltvm_pkg.meta_schema.ImageMeta.
     # target/input_hash are written by TargetConfig.write_meta.

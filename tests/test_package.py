@@ -144,7 +144,7 @@ def _make_fake_output(tmp: Path, variant: str = DEFAULT_VARIANT) -> Path:
     Layout follows TargetConfig: base variant uses the pre-variant
     paths, non-base nests under <variant>/.
     """
-    out = tmp / "output" / "rocky9" / "x86_64"
+    out = tmp / "artifacts" / "rocky9" / "x86_64"
     variant_seg = "" if variant == DEFAULT_VARIANT else f"/{variant}"
 
     # Kernel (variant-independent).

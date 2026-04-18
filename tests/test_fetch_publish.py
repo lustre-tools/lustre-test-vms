@@ -44,7 +44,7 @@ def _tc(tmp_targets: Path) -> Any:
 
     with (
         patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-        patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+        patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
         patch.object(
             cfg,
             "TARGETS_YAML",
@@ -224,7 +224,7 @@ class TestReleaseStatus:
     def test_no_releases_yields_dashes(self, tmp_targets: Path) -> None:
         import ltvm_pkg.target_config as cfg
 
-        with patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"):
+        with patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"):
             local, remote = _release_status("rocky9", "x86_64", [])
         assert local == "-"
         assert remote == "-"
@@ -234,21 +234,21 @@ class TestReleaseStatus:
     ) -> None:
         import ltvm_pkg.target_config as cfg
 
-        with patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"):
+        with patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"):
             local, remote = _release_status("rocky9", "x86_64", None)
         assert remote == "?"
 
     def test_local_tag_is_trimmed(self, tmp_targets: Path) -> None:
         import ltvm_pkg.target_config as cfg
 
-        out = tmp_targets / "output"
+        out = tmp_targets / "artifacts"
         tag_dir = out / "rocky9" / "x86_64"
         tag_dir.mkdir(parents=True, exist_ok=True)
         (tag_dir / ".ltvm-release-tag").write_text(
             "rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre\n"
         )
 
-        with patch.object(cfg, "OUTPUT_DIR", out):
+        with patch.object(cfg, "ARTIFACTS_DIR", out):
             local, remote = _release_status("rocky9", "x86_64", [])
         assert local == "5.14.0-611.13.1.el9_7_lustre"
 
@@ -256,14 +256,14 @@ class TestReleaseStatus:
         """A locally-cached mofed tag must not satisfy a base query."""
         import ltvm_pkg.target_config as cfg
 
-        out = tmp_targets / "output"
+        out = tmp_targets / "artifacts"
         tag_dir = out / "rocky9" / "x86_64"
         tag_dir.mkdir(parents=True, exist_ok=True)
         (tag_dir / ".ltvm-release-tag").write_text(
             "rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre-mofed\n"
         )
 
-        with patch.object(cfg, "OUTPUT_DIR", out):
+        with patch.object(cfg, "ARTIFACTS_DIR", out):
             local, _ = _release_status(
                 "rocky9", "x86_64", [], variant="base"
             )
@@ -274,14 +274,14 @@ class TestReleaseStatus:
     ) -> None:
         import ltvm_pkg.target_config as cfg
 
-        out = tmp_targets / "output"
+        out = tmp_targets / "artifacts"
         tag_dir = out / "rocky9" / "x86_64"
         tag_dir.mkdir(parents=True, exist_ok=True)
         (tag_dir / ".ltvm-release-tag").write_text(
             "rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre\n"
         )
 
-        with patch.object(cfg, "OUTPUT_DIR", out):
+        with patch.object(cfg, "ARTIFACTS_DIR", out):
             local, _ = _release_status(
                 "rocky9", "x86_64", [], variant="mofed"
             )
@@ -301,7 +301,7 @@ class TestReleaseStatus:
                 ],
             },
         ]
-        with patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"):
+        with patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"):
             _, remote = _release_status(
                 "rocky9", "x86_64", releases, variant="mofed"
             )
@@ -321,7 +321,7 @@ class TestReleaseStatus:
                 ],
             },
         ]
-        with patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"):
+        with patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"):
             _, remote = _release_status(
                 "rocky9", "x86_64", releases, kernel_signature="el9_5"
             )
@@ -773,13 +773,13 @@ class TestCmdFetch:
     ) -> None:
         import ltvm_pkg.target_config as cfg
 
-        target_dir = tmp_targets / "output" / "rocky9" / "x86_64"
+        target_dir = tmp_targets / "artifacts" / "rocky9" / "x86_64"
         target_dir.mkdir(parents=True, exist_ok=True)
         url = "https://x/releases/download/rocky9-x86_64-foo/manifest.json"
 
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(cli_mod, "fetch_target", return_value=target_dir) as ft,
             patch.object(cli_mod, "_gh_api") as ga,
         ):
@@ -814,7 +814,7 @@ class TestCmdFetch:
         """Same release tag on disk: no fetch, no error, success."""
         import ltvm_pkg.target_config as cfg
 
-        out = tmp_targets / "output"
+        out = tmp_targets / "artifacts"
         target_dir = out / "rocky9" / "x86_64"
         target_dir.mkdir(parents=True, exist_ok=True)
         (target_dir / ".ltvm-release-tag").write_text("rocky9-x86_64-cached\n")
@@ -822,7 +822,7 @@ class TestCmdFetch:
 
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
-            patch.object(cfg, "OUTPUT_DIR", out),
+            patch.object(cfg, "ARTIFACTS_DIR", out),
             patch.object(cli_mod, "fetch_target") as ft,
         ):
             args = _ns(
@@ -851,7 +851,7 @@ class TestCmdFetch:
         """--replace + same tag refuses unless --force overrides."""
         import ltvm_pkg.target_config as cfg
 
-        out = tmp_targets / "output"
+        out = tmp_targets / "artifacts"
         target_dir = out / "rocky9" / "x86_64"
         target_dir.mkdir(parents=True, exist_ok=True)
         (target_dir / ".ltvm-release-tag").write_text("rocky9-x86_64-same\n")
@@ -859,7 +859,7 @@ class TestCmdFetch:
 
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
-            patch.object(cfg, "OUTPUT_DIR", out),
+            patch.object(cfg, "ARTIFACTS_DIR", out),
             patch.object(cli_mod, "fetch_target") as ft,
         ):
             args = _ns(
@@ -889,7 +889,7 @@ class TestCmdFetch:
     ) -> None:
         import ltvm_pkg.target_config as cfg
 
-        out = tmp_targets / "output"
+        out = tmp_targets / "artifacts"
         target_dir = out / "rocky9" / "x86_64"
         target_dir.mkdir(parents=True, exist_ok=True)
         (target_dir / ".ltvm-release-tag").write_text("rocky9-x86_64-same\n")
@@ -907,7 +907,7 @@ class TestCmdFetch:
 
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
-            patch.object(cfg, "OUTPUT_DIR", out),
+            patch.object(cfg, "ARTIFACTS_DIR", out),
             patch.object(
                 cli_mod, "fetch_target", side_effect=_fake_fetch
             ) as ft,
@@ -939,7 +939,7 @@ class TestCmdFetch:
         fresh fetch doesn't silently mix two releases' files."""
         import ltvm_pkg.target_config as cfg
 
-        out = tmp_targets / "output"
+        out = tmp_targets / "artifacts"
         target_dir = out / "rocky9" / "x86_64"
         target_dir.mkdir(parents=True, exist_ok=True)
         (target_dir / ".ltvm-release-tag").write_text(
@@ -952,7 +952,7 @@ class TestCmdFetch:
 
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
-            patch.object(cfg, "OUTPUT_DIR", out),
+            patch.object(cfg, "ARTIFACTS_DIR", out),
             patch.object(cli_mod, "fetch_target") as ft,
             patch.object(
                 cli_mod,
@@ -992,7 +992,7 @@ class TestCmdFetch:
         """--replace explicitly consents to overwriting a local copy."""
         import ltvm_pkg.target_config as cfg
 
-        out = tmp_targets / "output"
+        out = tmp_targets / "artifacts"
         target_dir = out / "rocky9" / "x86_64"
         target_dir.mkdir(parents=True, exist_ok=True)
         (target_dir / ".ltvm-release-tag").write_text(
@@ -1009,7 +1009,7 @@ class TestCmdFetch:
 
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
-            patch.object(cfg, "OUTPUT_DIR", out),
+            patch.object(cfg, "ARTIFACTS_DIR", out),
             patch.object(
                 cli_mod, "fetch_target", side_effect=_fake_fetch
             ) as ft,
@@ -1042,7 +1042,7 @@ class TestCmdFetch:
         url = "https://x/releases/download/rocky9-x86_64-foo/manifest.json"
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cli_mod,
                 "fetch_target",
@@ -1094,7 +1094,7 @@ class TestCmdFetch:
 
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cli_mod,
                 "fetch_target",
@@ -1131,7 +1131,7 @@ class TestCmdFetch:
 
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch(
                 "ltvm_pkg.release_package.fetch_bootable",
                 return_value=Path("/fake/disk.qcow2"),
@@ -1171,7 +1171,7 @@ class TestCmdFetch:
 
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch(
                 "ltvm_pkg.release_package.fetch_bootable",
                 return_value=Path("/fake/disk.qcow2"),
@@ -1205,7 +1205,7 @@ class TestCmdFetch:
 
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch(
                 "ltvm_pkg.release_package.fetch_bootable",
                 side_effect=RuntimeError("disk corrupt"),
@@ -1244,7 +1244,7 @@ def _tc_factory(tmp_targets: Path):
     def _make(name: str, **kw: Any) -> Any:
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cfg,
                 "TARGETS_YAML",
@@ -1281,7 +1281,7 @@ class TestCmdPublish:
 
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cli_mod, "package_target", return_value=assets
             ) as pt,
@@ -1311,7 +1311,7 @@ class TestCmdPublish:
         assert "Tag: rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre" in out
         # Recorded the tag locally for fetch idempotency.
         tag_file = (
-            tmp_targets / "output" / "rocky9" / "x86_64"
+            tmp_targets / "artifacts" / "rocky9" / "x86_64"
             / ".ltvm-release-tag"
         )
         assert tag_file.exists()

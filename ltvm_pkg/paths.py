@@ -51,7 +51,7 @@ def find_ltvm_root() -> Path:
       2. /usr/local/bin/ltvm symlink target's parent (the install path).
       3. This file's grandparent (the source-tree fallback).
 
-    Build outputs land under <root>/output/, and the runtime later reads
+    Build outputs land under <root>/artifacts/, and the runtime later reads
     them from the same path -- so target_config.py (build side) and
     vm_state.py (runtime side) MUST agree on this resolution.
     """

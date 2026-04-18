@@ -31,7 +31,7 @@ cat SUGGESTED-AGENTS.md >> ~/lustre-release/CLAUDE.md
   `image.Dockerfile` + `packages-os.txt`.
 - `ltvm_pkg/` -- Python package; `cli.py` dispatches, rest
   is implementation.  `ltvm` script at repo root is the CLI.
-- `output/<target>/<arch>/{container,kernels/<kver>,images/<kver>[/<variant>]}/`
+- `artifacts/<target>/<arch>/{container,kernels/<kver>,images/<kver>[/<variant>]}/`
   -- gitignored build artifacts with a `meta.json` each.
 - `docs/` -- operator notes (e.g. releasing prebuilt QEMU).
 
@@ -71,7 +71,7 @@ target's slice: `lustre/kernel_patches/`
 then merges [targets/common/kernel-config.fragment](targets/common/kernel-config.fragment)
 (plus the per-target `kernels.config` from `targets.yaml`)
 and builds vmlinux/vmlinuz/modules/build-tree inside the
-build container.  SRPMs cache under `output/<target>/<arch>/cache/`
+build container.  SRPMs cache under `artifacts/<target>/<arch>/cache/`
 with a Rocky-vault fallback for older minors.
 
 ### Image

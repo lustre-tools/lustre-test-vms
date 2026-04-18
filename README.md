@@ -65,7 +65,7 @@ targets/
     image.Dockerfile        # VM rootfs image
     packages-os.txt         # OS-specific packages
 
-output/                     # persistent build artifacts (gitignored)
+artifacts/                  # persistent build artifacts (gitignored)
   rocky9/x86_64/            # arch always nested (even for x86_64)
     container/
       image.tar

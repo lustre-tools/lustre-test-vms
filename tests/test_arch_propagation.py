@@ -6,7 +6,7 @@ state didn't propagate cleanly through every layer:
   - reconfigure stamps weren't arch-qualified (autogen+configure skipped
     on arch switch, producing corrupt cross-arch artifacts)
   - cmd_deploy/cmd_cluster_deploy built TargetConfig() without vm.arch
-  - cmd_deploy used Path(__file__).parent.parent instead of OUTPUT_DIR
+  - cmd_deploy used Path(__file__).parent.parent instead of ARTIFACTS_DIR
   - ccache volume wasn't arch-qualified
 
 The tests below pin those properties so future refactors can't quietly
@@ -294,7 +294,7 @@ class TestExtraConfigureQuoting:
 
 class TestDeployBundledSnapshotPath:
     """cmd_deploy's bundled-snapshot lookup must honor LTVM_ROOT and
-    arch.  The previous Path(__file__).parent.parent / "output" / target
+    arch.  The previous Path(__file__).parent.parent / "artifacts" / target
     hardcoded the source-tree layout and ignored arch."""
 
     def test_aarch64_lookup_uses_arch_subdir(self, tmp_path: Path) -> None:

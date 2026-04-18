@@ -149,7 +149,7 @@ class TestImageStalenessUpstream:
         except (ValueError, FileNotFoundError):
             pytest.skip("rocky9 target not available")
         # Redirect output_dir into our tmp_path
-        tc.output_dir = tmp_path / "output"
+        tc.output_dir = tmp_path / "artifacts"
         tc.output_dir.mkdir()
         return tc
 

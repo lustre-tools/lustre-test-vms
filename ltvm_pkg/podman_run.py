@@ -36,10 +36,12 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-# Grace period between `podman kill --signal TERM` and the KILL
-# escalation.  2s is plenty for podman to forward TERM to the
-# container's init and for the container runtime to tear down.
-_GRACE_SECONDS = 2.0
+# Grace period between initial cleanup attempt and the nuclear
+# `podman rm -f` fallback.  Kept short because the container's PID 1
+# (bash waiting on make children) typically ignores SIGTERM -- there's
+# no graceful shutdown to wait for, and a long grace just extends the
+# user-visible hang after Ctrl+C.
+_GRACE_SECONDS = 0.5
 
 
 def run_podman_with_cleanup(
@@ -131,6 +133,29 @@ def run_podman_with_cleanup(
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    def _force_remove_container() -> None:
+        """Last-resort guaranteed cleanup.
+
+        ``podman rm -f`` sends SIGKILL to the container's PID 1 and
+        waits for the runtime to tear down the namespace.  We call
+        this after the TERM/KILL dance so even if the podman-run
+        process is already gone (so our killpg hit no one) the
+        conmon-owned container still gets cleaned up.
+        """
+        cid = _read_cid()
+        if not cid:
+            return
+        try:
+            subprocess.run(
+                ["podman", "rm", "-f", cid],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
             )
         except (OSError, subprocess.SubprocessError):
             pass

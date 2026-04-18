@@ -15,8 +15,8 @@ def _make_target_config(
     kver: str = "5.14.0-1.el9.x86_64",
 ) -> MagicMock:
     """Return a MagicMock TargetConfig with a populated on-disk layout."""
-    image_dir = tmp_path / "output" / name / "x86_64" / "images" / kernel_name
-    kernel_dir = tmp_path / "output" / name / "x86_64" / "kernels" / kernel_name
+    image_dir = tmp_path / "artifacts" / name / "x86_64" / "images" / kernel_name
+    kernel_dir = tmp_path / "artifacts" / name / "x86_64" / "kernels" / kernel_name
     image_dir.mkdir(parents=True)
     (kernel_dir / "build-tree" / "include" / "config").mkdir(parents=True)
 

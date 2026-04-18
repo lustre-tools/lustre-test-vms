@@ -141,7 +141,7 @@ def _patch_cfg_paths(tmp_targets: Path) -> Any:
 
     es = ExitStack()
     es.enter_context(patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"))
-    es.enter_context(patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"))
+    es.enter_context(patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"))
     es.enter_context(
         patch.object(
             cfg, "TARGETS_YAML",
@@ -316,7 +316,7 @@ def _seed_image_meta(
     """Seed a minimal image meta.json on disk.
 
     Mirrors the real layout:
-        output/<target>/<arch>/images/<kernel>/[<variant>/]meta.json
+        artifacts/<target>/<arch>/images/<kernel>/[<variant>/]meta.json
     Callers control whether the image declares Lustre (`with_lustre`
     and `lustre_version` -- None mimics the --no-lustre build path).
     Also seeds the paired kernel meta so cmd_targets sees the kernel
@@ -324,12 +324,12 @@ def _seed_image_meta(
     meta, not the image meta).
     """
     kdir = (
-        tmp_targets / "output" / target / "x86_64" / "kernels" / kernel
+        tmp_targets / "artifacts" / target / "x86_64" / "kernels" / kernel
     )
     kdir.mkdir(parents=True, exist_ok=True)
     (kdir / "meta.json").write_text("{}")
     img_dir = (
-        tmp_targets / "output" / target / "x86_64" / "images" / kernel
+        tmp_targets / "artifacts" / target / "x86_64" / "images" / kernel
     )
     if variant and variant != "base":
         img_dir = img_dir / variant
@@ -378,13 +378,13 @@ class TestCmdTargetsLustreMissing:
         # rhel9.5 base row: lustre present
         assert by_key[("5.14-rhel9.5", "base")]["lustre_missing"] is False
 
-    def test_text_yes_star_marker(
+    def test_text_check_star_marker(
         self,
         capsys: pytest.CaptureFixture[str],
         variant_targets: Path,
     ) -> None:
-        """The Local column shows `yes*` for no-lustre images and the
-        legend footer explains it.  `yes` (plain) for good images."""
+        """The Local column shows `\u2713*` for no-lustre images and the
+        legend footer explains it.  `\u2713` (plain) for good images."""
         _seed_image_meta(
             variant_targets, "rocky9", "5.14-rhel9.7",
             with_lustre=None, lustre_version=None,
@@ -393,10 +393,10 @@ class TestCmdTargetsLustreMissing:
                 patch.object(cli, "_gh_api", side_effect=Exception("net")):
             cmd_targets(_ns(json=False))
         out = capsys.readouterr().out
-        # `yes*` (Local column) for the no-lustre row.
-        assert "yes*" in out
+        # `✓*` (Local column) for the no-lustre row.
+        assert "\u2713*" in out
         # Legend footer must explain the marker so the user can act.
-        assert "yes* = image does NOT have Lustre baked in" in out
+        assert "\u2713* = image does NOT have Lustre baked in" in out
 
     def test_text_no_marker_when_lustre_present(
         self,
@@ -411,7 +411,7 @@ class TestCmdTargetsLustreMissing:
                 patch.object(cli, "_gh_api", side_effect=Exception("net")):
             cmd_targets(_ns(json=False))
         out = capsys.readouterr().out
-        assert "yes*" not in out  # no false positive
+        assert "\u2713*" not in out  # no false positive
 
 
 class TestCmdTargetsTextOutput:
@@ -438,24 +438,26 @@ class TestCmdTargetsTextOutput:
         # The old 'Kernel' header would mean somebody reverted the merge.
         assert "Kernel" not in first_line.split("Variants")[0]
 
-    def test_default_yes_only_once_per_target(
+    def test_default_check_only_once_per_target(
         self,
         capsys: pytest.CaptureFixture[str],
         variant_targets: Path,
     ) -> None:
-        """``yes`` in the Default column must appear once -- on the
+        """``\u2713`` in the Default column must appear once -- on the
         default kernel's header row, not on any variant row."""
         with _patch_cfg_paths(variant_targets), \
                 patch.object(cli, "_gh_api", side_effect=Exception("no net")):
             cmd_targets(_ns(json=False))
         out = capsys.readouterr().out
-        # Lines that end with "yes" (Default? column).  Strip trailing ws.
+        # Lines that end with "\u2713" (Default? column).  Variant rows
+        # can carry a \u2713 in the Local column too, but the Default?
+        # check sits at the end of the line.
         yes_lines = [
-            ln for ln in out.splitlines() if ln.rstrip().endswith("yes")
+            ln for ln in out.splitlines() if ln.rstrip().endswith("\u2713")
         ]
         assert len(yes_lines) == 1, (
-            f"expected exactly one 'yes' marker; got {len(yes_lines)}: "
-            f"{yes_lines}"
+            f"expected exactly one '\u2713' default marker; got "
+            f"{len(yes_lines)}: {yes_lines}"
         )
         # And it should be on the *kernel header* row -- which holds
         # the kernel name unindented in the Variants column, not a
@@ -608,7 +610,7 @@ class TestCmdTargetShow:
         an unbuilt kernel reports built=False."""
         # Pre-populate kernel meta for the default kernel only.
         kdir = (
-            variant_targets / "output" / "rocky9" / "x86_64"
+            variant_targets / "artifacts" / "rocky9" / "x86_64"
             / "kernels" / "5.14-rhel9.7"
         )
         kdir.mkdir(parents=True)
@@ -954,7 +956,7 @@ class TestCmdTargetExport:
         tmp_path: Path,
     ) -> None:
         """When --output is not passed, the export defaults to
-        ``output/<target>/<arch>/images/<kernel>/bootable-<kernel>.<ext>``.
+        ``artifacts/<target>/<arch>/images/<kernel>/bootable-<kernel>.<ext>``.
         The path the CLI passes to export_image must match that
         layout, otherwise ``ltvm target list`` won't find the file
         for accounting."""
@@ -962,7 +964,7 @@ class TestCmdTargetExport:
         # path so the post-export stat() succeeds.
         kname = "5.14-rhel9.7"
         img_dir = (
-            variant_targets / "output" / "rocky9" / "x86_64"
+            variant_targets / "artifacts" / "rocky9" / "x86_64"
             / "images" / kname
         )
         img_dir.mkdir(parents=True)
@@ -994,7 +996,7 @@ class TestCmdTargetExport:
         not .qcow2."""
         kname = "5.14-rhel9.7"
         img_dir = (
-            variant_targets / "output" / "rocky9" / "x86_64"
+            variant_targets / "artifacts" / "rocky9" / "x86_64"
             / "images" / kname
         )
         img_dir.mkdir(parents=True)

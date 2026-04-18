@@ -988,7 +988,7 @@ class TestCmdDeployKernelMismatch:
         vm.os_id = "rocky9"
         # vm.kernel is a path-like value -- the parent dir name is the
         # kernel key. Mirror what create writes: <kerndir>/vmlinux.
-        vm.kernel = "/fake/output/rocky9/x86_64/kernels/5.14-rhel9.5/vmlinux"
+        vm.kernel = "/fake/artifacts/rocky9/x86_64/kernels/5.14-rhel9.5/vmlinux"
         vm.save()
 
         captured: dict = {}
@@ -1027,7 +1027,7 @@ class TestCmdDeployKernelMismatch:
 
         vm = _make_vm(name="co1-fwd", ip="10.0.0.22")
         vm.os_id = "rocky9"
-        vm.kernel = "/fake/output/rocky9/x86_64/kernels/5.14-rhel9.5/vmlinux"
+        vm.kernel = "/fake/artifacts/rocky9/x86_64/kernels/5.14-rhel9.5/vmlinux"
         vm.save()
 
         run_calls: list = []

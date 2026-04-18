@@ -1342,7 +1342,7 @@ def cmd_crash_collect(args: argparse.Namespace) -> int:
 
     print(f"vmcore: {local_vmcore}")
 
-    # Resolve vmlinux: prefer the freshly-built vmlinux from output/, then
+    # Resolve vmlinux: prefer the freshly-built vmlinux from artifacts/, then
     # look next to vm.kernel (which usually points to vmlinuz).  We always
     # prefer vmlinux over vmlinuz because drgn needs full debug symbols.
     if not vm.os_id:

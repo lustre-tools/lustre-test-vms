@@ -53,7 +53,7 @@ def _make_tc(tmp_targets: Path, *, variant: str = "base") -> Any:
 
     with (
         patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-        patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+        patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
         patch.object(
             cfg,
             "TARGETS_YAML",
@@ -868,7 +868,7 @@ class TestCmdStatusFormat:
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cfg, "TARGETS_YAML",
                 tmp_targets / "targets" / "targets.yaml",
@@ -913,7 +913,7 @@ class TestCmdStatusFormat:
         # Build a real TargetConfig to drive image_output_dir math.
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cfg, "TARGETS_YAML",
                 tmp_targets / "targets" / "targets.yaml",
@@ -923,12 +923,12 @@ class TestCmdStatusFormat:
 
         # Pre-create a kernel dir + a mofed-24 variant base.ext4.
         kdir = (
-            tmp_targets / "output" / "rocky9" / "x86_64" / "kernels"
+            tmp_targets / "artifacts" / "rocky9" / "x86_64" / "kernels"
             / "5.14-rhel9.5-5.14.0-503.26.1"
         )
         kdir.mkdir(parents=True)
         variant_image = (
-            tmp_targets / "output" / "rocky9" / "x86_64" / "images"
+            tmp_targets / "artifacts" / "rocky9" / "x86_64" / "images"
             / "5.14-rhel9.5-5.14.0-503.26.1" / "mofed-24" / "base.ext4"
         )
         variant_image.parent.mkdir(parents=True)
@@ -979,7 +979,7 @@ class TestCmdStatusFormat:
             import ltvm_pkg.target_config as cfg
             with (
                 patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-                patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+                patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
                 patch.object(
                     cfg, "TARGETS_YAML",
                     tmp_targets / "targets" / "targets.yaml",
@@ -1026,7 +1026,7 @@ class TestCmdCleanScoping:
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(cli_mod, "TargetConfig", cfg.TargetConfig),
             patch.object(
                 cfg, "TARGETS_YAML",
@@ -1047,11 +1047,11 @@ class TestCmdCleanScoping:
         capsys: pytest.CaptureFixture[str],
         tmp_targets: Path,
     ) -> None:
-        """`--arch aarch64` wipes only output/<target>/aarch64/."""
+        """`--arch aarch64` wipes only artifacts/<target>/aarch64/."""
         import ltvm_pkg.cli as cli_mod
         import ltvm_pkg.target_config as cfg
 
-        out = tmp_targets / "output"
+        out = tmp_targets / "artifacts"
         (out / "rocky9" / "x86_64").mkdir(parents=True, exist_ok=True)
         (out / "rocky9" / "x86_64" / "keep.txt").write_text("keep")
         (out / "rocky9" / "aarch64").mkdir(parents=True)
@@ -1059,7 +1059,7 @@ class TestCmdCleanScoping:
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", out),
+            patch.object(cfg, "ARTIFACTS_DIR", out),
             patch.object(cli_mod, "TargetConfig", cfg.TargetConfig),
             patch.object(
                 cfg, "TARGETS_YAML",
@@ -1095,13 +1095,13 @@ class TestCmdCleanScoping:
         import ltvm_pkg.cli as cli_mod
         import ltvm_pkg.target_config as cfg
 
-        out = tmp_targets / "output"
+        out = tmp_targets / "artifacts"
         (out / "rocky9" / "x86_64").mkdir(parents=True, exist_ok=True)
         (out / "rocky9" / "x86_64" / "f.txt").write_text("x")
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", out),
+            patch.object(cfg, "ARTIFACTS_DIR", out),
             patch.object(cli_mod, "TargetConfig", cfg.TargetConfig),
             patch.object(
                 cfg, "TARGETS_YAML",

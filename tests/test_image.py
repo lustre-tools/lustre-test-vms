@@ -14,7 +14,7 @@ def _make_target_config(tmp_path: Path, name: str = "rocky9") -> MagicMock:
     """Return a MagicMock TargetConfig with sensible defaults."""
     tc = MagicMock()
     tc.name = name
-    tc.output_dir = tmp_path / "output" / name
+    tc.output_dir = tmp_path / "artifacts" / name
     tc.image_output_dir.return_value = tc.output_dir / "image"
     tc.is_stale.return_value = False
     return tc

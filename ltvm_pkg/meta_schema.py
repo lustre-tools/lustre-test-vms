@@ -1,4 +1,4 @@
-"""Typed schemas for output/**/meta.json files.
+"""Typed schemas for artifacts/**/meta.json files.
 
 Each build artifact type (container, kernel, image) writes a meta.json
 alongside its output.  The schema varies by artifact, which made it easy

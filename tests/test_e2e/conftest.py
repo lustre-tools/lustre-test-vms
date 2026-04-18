@@ -98,10 +98,10 @@ def _rocky9_image_built() -> bool:
     We look directly at the on-disk artefact tree rather than parsing
     the text `ltvm target list` (whose layout is fixed-width with
     optional remote column -- fragile to parse).  An image dir under
-    output/rocky9/<arch>/images/ containing a 'base' variant with a
+    artifacts/rocky9/<arch>/images/ containing a 'base' variant with a
     populated meta.json indicates a built base image.
     """
-    images = REPO_ROOT / "output" / "rocky9"
+    images = REPO_ROOT / "artifacts" / "rocky9"
     if not images.exists():
         return False
     # Look for any .../images/*/base/meta.json OR

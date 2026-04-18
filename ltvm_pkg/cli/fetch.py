@@ -67,6 +67,13 @@ def cmd_package(args: argparse.Namespace) -> int:
     kernel = getattr(args, "kernel", None)
     variant = getattr(args, "variant", None) or "base"
 
+    if not use_json:
+        from ltvm_pkg.cli.util import _print_target_header
+
+        _print_target_header(
+            tc, kernel=kernel, variant=variant, action="Packaging"
+        )
+
     # Bundling Lustre is mandatory by default.  The publisher's whole
     # job is to ship something a fetcher can immediately deploy from --
     # a "kernel-only" package without Lustre forces every consumer to
@@ -397,6 +404,24 @@ def _list_releases(
     return result
 
 
+def _native_arch() -> str:
+    """Return the host machine's arch in ltvm's canonical naming.
+
+    Maps ``amd64`` -> ``x86_64`` and ``arm64`` -> ``aarch64`` so the
+    result is comparable to the ``arch`` field in ``targets.yaml``.
+    Unknown values fall through so a pass-through-and-let-lookup-fail
+    surfaces a useful error rather than a silent wrong default.
+    """
+    import platform
+
+    m = platform.machine().lower()
+    if m in ("x86_64", "amd64"):
+        return "x86_64"
+    if m in ("aarch64", "arm64"):
+        return "aarch64"
+    return m or "x86_64"
+
+
 def _lookup_release_date(release_tag: str) -> str:
     """Return ``YYYY-MM-DD`` for ``release_tag``, or ``""`` on failure.
 
@@ -445,46 +470,98 @@ def _compare_dates(local: str, remote: str) -> str:
     return ""
 
 
+def _dry_run_report(
+    url: str,
+    *,
+    target: str,
+    arch: str,
+    variant: str,
+    mode: str,
+    use_json: bool,
+    existing_tag: str = "",
+    release_tag: str = "",
+) -> None:
+    """Print (or JSON-emit) what a fetch would do without doing it.
+
+    Shared by the ecosystem and bootable paths.  ``existing_tag`` /
+    ``release_tag`` are ecosystem-only; the bootable path leaves them
+    as the empty-string defaults because it doesn't track them.
+    """
+    if use_json:
+        payload: dict[str, Any] = {
+            "dry_run": True,
+            "target": target,
+            "arch": arch,
+            "variant": variant,
+            "mode": mode,
+            "url": url,
+        }
+        if release_tag:
+            payload["release_tag"] = release_tag
+        if existing_tag:
+            payload["existing_tag"] = existing_tag
+        print(json.dumps(payload, indent=2))
+        return
+
+    print("Dry run -- no files will be downloaded or modified.")
+    print(f"  url:        {url}")
+    if release_tag:
+        print(f"  release:    {release_tag}")
+    if existing_tag:
+        if existing_tag == release_tag:
+            print(f"  local tag:  {existing_tag} (already up to date)")
+        else:
+            print(f"  local tag:  {existing_tag} (would be replaced)")
+
+
 def cmd_fetch(args: argparse.Namespace) -> int:
     use_json = args.json
     url = getattr(args, "url", None)
     target = getattr(args, "target", None)
     filt = getattr(args, "filter", None)
-    arch = getattr(args, "arch", None) or "x86_64"
+    # Default arch to the native host arch so `ltvm target fetch rocky9`
+    # picks x86_64 on an Intel host and aarch64 on an ARM host without
+    # the user having to remember --arch.  Explicit --arch still wins.
+    arch = getattr(args, "arch", None) or _native_arch()
     kernel = getattr(args, "kernel", None)
     variant = getattr(args, "variant", None) or "base"
     image_mode = bool(getattr(args, "image", False))
+    dry_run = bool(getattr(args, "dry_run", False))
 
-    # Validate --kernel against the target's declared kernels (if both
-    # are given).  This is user-friendly: it catches typos before we
-    # make a round trip to GitHub.
+    # Load TargetConfig whenever a target is named.  We need it for
+    # kernel validation (pre-existing), for resolving the default
+    # kernel (used in the description), and for printing os/mode
+    # details.  Without a target (e.g. `--list` across all targets)
+    # we just skip the lookup.
+    tc = None
     kernel_signature: str | None = None
-    if kernel:
-        if not target:
-            return _error(
-                "--kernel requires a target (e.g. ltvm target fetch rocky9 "
-                "--kernel 5.14-rhel9.5)",
-                use_json,
-            )
+    if kernel and not target:
+        return _error(
+            "--kernel requires a target (e.g. ltvm target fetch rocky9 "
+            "--kernel 5.14-rhel9.5)",
+            use_json,
+        )
+    if target:
         tc, err = _load_target(target, use_json, arch=arch)
         if err is not None:
             return err
         assert tc is not None
-        declared = tc.declared_kernels()
-        if kernel not in declared:
-            return _error(
-                f"--kernel {kernel!r} not in targets.yaml kernels.available "
-                f"for {target}",
-                use_json,
-                hint=f"Available: {', '.join(declared)}",
-            )
-        kernel_signature = _kernel_release_signature(kernel)
-        if kernel_signature is None and not use_json:
-            print(
-                f"warning: could not derive release signature from "
-                f"--kernel {kernel!r}; falling back to first match.",
-                file=sys.stderr,
-            )
+        if kernel:
+            declared = tc.declared_kernels()
+            if kernel not in declared:
+                return _error(
+                    f"--kernel {kernel!r} not in targets.yaml "
+                    f"kernels.available for {target}",
+                    use_json,
+                    hint=f"Available: {', '.join(declared)}",
+                )
+            kernel_signature = _kernel_release_signature(kernel)
+            if kernel_signature is None and not use_json:
+                print(
+                    f"warning: could not derive release signature from "
+                    f"--kernel {kernel!r}; falling back to first match.",
+                    file=sys.stderr,
+                )
 
     # --list: show available releases
     if getattr(args, "list", False):
@@ -506,7 +583,18 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     if not target:
         return _error("target required (e.g. ltvm target fetch rocky9)", use_json)
 
-    from ltvm_pkg.target_config import OUTPUT_DIR
+    from ltvm_pkg.target_config import ARTIFACTS_DIR
+
+    # Print a target-description header so the user can see exactly
+    # what they're about to pull (OS, arch, kernel, mode, variant)
+    # before the bytes start flying.  JSON mode stays quiet -- the
+    # result envelope is the machine-readable contract.
+    assert tc is not None
+    if not use_json:
+        from ltvm_pkg.cli.util import _print_target_header
+        _print_target_header(
+            tc, kernel=kernel, variant=variant, action="Fetching"
+        )
 
     # Bootable mode: fetch a single qcow2.zst asset, no manifest, no
     # ecosystem.  Handled up-front so we skip all the tag/ecosystem
@@ -532,9 +620,16 @@ def cmd_fetch(args: argparse.Namespace) -> int:
             except RuntimeError as e:
                 return _error(str(e), use_json)
 
+        if dry_run:
+            _dry_run_report(
+                url, target=target, arch=arch, variant=variant,
+                mode="bootable", use_json=use_json,
+            )
+            return EXIT_OK
+
         try:
             path = fetch_bootable(
-                target, url, OUTPUT_DIR, arch=arch, variant=variant
+                target, url, ARTIFACTS_DIR, arch=arch, variant=variant
             )
         except Exception as e:
             return _error(f"Fetch bootable failed: {e}", use_json)
@@ -575,12 +670,25 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         release_tag = url.split("/releases/download/")[1].split("/")[0]
     else:
         release_tag = ""
-    tag_file = OUTPUT_DIR / target / arch / ".ltvm-release-tag"
+    tag_file = ARTIFACTS_DIR / target / arch / ".ltvm-release-tag"
     replace = bool(getattr(args, "replace", False))
     force = bool(getattr(args, "force", False))
     existing_tag = (
         tag_file.read_text().strip() if tag_file.exists() else ""
     )
+
+    if dry_run:
+        # Early return so --dry-run ALWAYS reports the resolved URL,
+        # even in the no-op "already up to date" and divergent-tag
+        # cases below.  Users expect --dry-run to show what fetch
+        # sees, not get short-circuited by idempotency checks.
+        _dry_run_report(
+            url, target=target, arch=arch, variant=variant,
+            mode="ecosystem", use_json=use_json,
+            existing_tag=existing_tag, release_tag=release_tag,
+        )
+        return EXIT_OK
+
     if release_tag and existing_tag == release_tag:
         # Same tag already on disk.  Without --replace: no-op success.
         # With --replace but no --force: refuse, because the "clean
@@ -596,7 +704,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         if not replace:
             if not use_json:
                 print(f"  Already up to date ({release_tag})")
-            result = {"target": target, "path": str(OUTPUT_DIR / target / arch)}
+            result = {"target": target, "path": str(ARTIFACTS_DIR / target / arch)}
             _output(result, use_json)
             return EXIT_OK
     elif release_tag and existing_tag and existing_tag != release_tag:
@@ -633,12 +741,20 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                 ),
             )
 
+    if dry_run:
+        _dry_run_report(
+            url, target=target, arch=arch, variant=variant,
+            mode="ecosystem", use_json=use_json,
+            existing_tag=existing_tag, release_tag=release_tag,
+        )
+        return EXIT_OK
+
     # --replace: wipe the target's output dir so a partial or
     # mismatched prior fetch doesn't leave stale files behind the
     # new extraction.  The reference directory is target/arch, not
-    # target/, because per-arch fetches share output/<target>/.
+    # target/, because per-arch fetches share artifacts/<target>/.
     if replace:
-        target_out = OUTPUT_DIR / target / arch
+        target_out = ARTIFACTS_DIR / target / arch
         if target_out.exists():
             if not use_json:
                 print(f"  Removing existing {target_out}...")
@@ -650,7 +766,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
     try:
         target_dir = _cli_attr("fetch_target")(
-            target, url, OUTPUT_DIR, arch=arch, variant=variant
+            target, url, ARTIFACTS_DIR, arch=arch, variant=variant
         )
         # Record the release tag so repeat fetches are instant
         tag_file.parent.mkdir(parents=True, exist_ok=True)
@@ -788,6 +904,14 @@ def cmd_publish(args: argparse.Namespace) -> int:
     image_mode = bool(getattr(args, "image", False))
     tag = getattr(args, "tag", None)
 
+    if not use_json:
+        from ltvm_pkg.cli.util import _print_target_header
+
+        action = "Publishing bootable" if image_mode else "Publishing"
+        _print_target_header(
+            tc, kernel=kernel, variant=variant, action=action
+        )
+
     if image_mode:
         from ltvm_pkg.release_package import package_bootable
 
@@ -909,11 +1033,12 @@ def cmd_publish(args: argparse.Namespace) -> int:
         print(f"  Published: {url}")
 
     # Record the release tag locally so subsequent `ltvm fetch` knows
-    # the artifacts already on disk match this release.
-    from ltvm_pkg.target_config import OUTPUT_DIR
-
-    arch = getattr(args, "arch", None) or "x86_64"
-    tag_file = OUTPUT_DIR / args.target / arch / ".ltvm-release-tag"
+    # the artifacts already on disk match this release.  Use
+    # ``tc.output_dir`` rather than the module-level ARTIFACTS_DIR so a
+    # test that patches TargetConfig automatically gets the redirected
+    # path -- otherwise the write lands on the real filesystem while
+    # the rest of the publish flow is mocked.
+    tag_file = tc.output_dir / ".ltvm-release-tag"
     tag_file.parent.mkdir(parents=True, exist_ok=True)
     tag_file.write_text(tag + "\n")
 
@@ -936,7 +1061,7 @@ def cmd_publish(args: argparse.Namespace) -> int:
 def cmd_delete(args: argparse.Namespace) -> int:
     """Delete a target's artifacts.
 
-    Default mode wipes local ``output/<target>/<arch>/`` (same as
+    Default mode wipes local ``artifacts/<target>/<arch>/`` (same as
     ``ltvm target clean``).  ``--remote`` instead deletes the published
     GitHub release -- tag is either explicit (``--tag``) or resolved
     via the same lookup ``fetch`` uses (target + optional
@@ -946,10 +1071,65 @@ def cmd_delete(args: argparse.Namespace) -> int:
 
     use_json = args.json
     remote = bool(getattr(args, "remote", False))
+    yes = bool(getattr(args, "yes", False))
 
     if not remote:
-        from ltvm_pkg.cli.build import cmd_clean as _cmd_clean
+        from ltvm_pkg.cli.build import (
+            _dir_size_bytes,
+            _format_bytes,
+            cmd_clean as _cmd_clean,
+        )
+        from ltvm_pkg.target_config import ARTIFACTS_DIR
 
+        target = args.target
+        all_arches = bool(getattr(args, "all_arches", False))
+        arch_flag = getattr(args, "arch", None)
+        tc, err = _load_target(target, use_json, arch=arch_flag)
+        if err is not None:
+            return err
+        assert tc is not None
+        if all_arches and arch_flag:
+            return _error(
+                "--arch and --all-arches are mutually exclusive", use_json
+            )
+        preview_paths = (
+            [ARTIFACTS_DIR / target]
+            if all_arches
+            else [ARTIFACTS_DIR / target / tc.arch]
+        )
+        existing = [(p, _dir_size_bytes(p)) for p in preview_paths if p.exists()]
+        if not existing:
+            for p in preview_paths:
+                print(f"nothing to delete at {p}")
+            return EXIT_OK
+        if not use_json:
+            from ltvm_pkg.cli.util import _print_target_header
+
+            _print_target_header(
+                tc,
+                kernel=getattr(args, "kernel", None),
+                variant=getattr(args, "variant", None) or "base",
+                action="Deleting",
+            )
+            for p, sz in existing:
+                print(f"  {p} ({_format_bytes(sz)})")
+            total = sum(sz for _, sz in existing)
+            print(f"  total: {_format_bytes(total)}")
+        if not yes:
+            if use_json:
+                return _error(
+                    "--yes required to delete in --json mode",
+                    use_json,
+                    hint=f"Would delete: "
+                    f"{', '.join(str(p) for p, _ in existing)}",
+                )
+            try:
+                reply = input("Proceed? [y/N]: ").strip().lower()
+            except EOFError:
+                reply = ""
+            if reply not in ("y", "yes"):
+                print("aborted")
+                return EXIT_ERROR
         return _cmd_clean(args)
 
     target = args.target
@@ -960,8 +1140,7 @@ def cmd_delete(args: argparse.Namespace) -> int:
     kernel = getattr(args, "kernel", None)
     variant = getattr(args, "variant", None) or "base"
     image_mode = bool(getattr(args, "image", False))
-    arch = getattr(args, "arch", None) or "x86_64"
-    yes = bool(getattr(args, "yes", False))
+    arch = getattr(args, "arch", None) or _native_arch()
     cleanup_tag = bool(getattr(args, "cleanup_tag", False))
 
     if not tag:
@@ -999,16 +1178,26 @@ def cmd_delete(args: argparse.Namespace) -> int:
             )
         tag = url.split(marker, 1)[1].split("/", 1)[0]
 
+    if not use_json:
+        from ltvm_pkg.cli.util import _print_target_header
+
+        tc, err = _load_target(target, use_json, arch=arch)
+        if err is None and tc is not None:
+            _print_target_header(
+                tc,
+                kernel=kernel,
+                variant=variant,
+                action="Deleting remote",
+            )
+        extra = " (and git tag)" if cleanup_tag else ""
+        print(f"  release tag: {tag}{extra}")
+
     if not yes:
         return _error(
             f"refusing to delete remote release {tag!r} without --yes",
             use_json,
             hint="re-run with --yes to confirm",
         )
-
-    if not use_json:
-        extra = " (and git tag)" if cleanup_tag else ""
-        print(f"Deleting GitHub release{extra}: {tag}")
 
     cmd = [
         "gh", "release", "delete", tag,

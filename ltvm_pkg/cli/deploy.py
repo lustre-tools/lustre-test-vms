@@ -92,7 +92,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         build_path = Path(build_arg).resolve()
     else:
         # Use tc.output_dir (arch-qualified) instead of a hand-built
-        # ltvm_root/output/<target>/ path so the bundled-snapshot lookup
+        # ltvm_root/artifacts/<target>/ path so the bundled-snapshot lookup
         # honors LTVM_ROOT and the /usr/local/bin/ltvm symlink resolution
         # AND finds the correct arch-qualified subdirectory.
         packaged = (

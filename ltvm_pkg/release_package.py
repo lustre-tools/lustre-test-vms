@@ -614,12 +614,12 @@ def package_target(
         )
 
     if dest_dir is None:
-        # Scope staging under output/publish/<target>-<arch>-<variant>/
+        # Scope staging under artifacts/publish/<target>-<arch>-<variant>/
         # so two concurrent `ltvm target publish` runs for different
         # variants of the same target don't clobber each other's
         # kernel-*.tar.zst (kernel assets are variant-independent and
         # therefore share an asset name).  Keeping staging out of
-        # output/ itself also stops packaging litter from ending up
+        # artifacts/ itself also stops packaging litter from ending up
         # next to build artifacts.
         dest_dir = (
             output_dir.parent.parent / "publish"
@@ -628,9 +628,9 @@ def package_target(
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    # Relative-to-output-root paths for tar entries so extraction lands
-    # back at output/<target>/<arch>/... verbatim.
-    tar_base = output_dir.parent.parent  # == OUTPUT_DIR
+    # Relative-to-artifacts-root paths for tar entries so extraction
+    # lands back at artifacts/<target>/<arch>/... verbatim.
+    tar_base = output_dir.parent.parent  # == ARTIFACTS_DIR
     assets: dict[str, Path] = {}
 
     # ---- container asset ----
@@ -817,17 +817,26 @@ def package_bootable(
 
 
 def _download(url: str, dest: Path, *, quiet: bool = False) -> None:
-    """Fetch ``url`` to ``dest`` with curl; fail loudly on non-2xx."""
-    flags = [
-        "-fSL",
+    """Fetch ``url`` to ``dest`` with curl; fail loudly on non-2xx.
+
+    On KeyboardInterrupt (Ctrl+C) the partial ``dest`` file is removed
+    before re-raising so a subsequent retry doesn't see a truncated
+    file masquerading as a full download.
+    """
+    # -s silences curl's default throughput table (we print our own
+    # "Fetching..." lines above); -S keeps error messages visible.
+    # --progress-bar is the ###... bar for asset downloads.
+    if quiet:
+        flags = ["-fsSL"]
+    else:
+        flags = ["-fSL", "--progress-bar"]
+    flags += [
         "--connect-timeout", "15",
         "--max-time", "1800",
         "--retry", "3",
         "--retry-delay", "5",
         "--retry-all-errors",
     ]
-    if not quiet:
-        flags.append("--progress-bar")
     try:
         r = subprocess.run(
             ["curl", *flags, "-o", str(dest), url],
@@ -836,7 +845,17 @@ def _download(url: str, dest: Path, *, quiet: bool = False) -> None:
         )
     except FileNotFoundError:
         raise RuntimeError("curl not found -- run `sudo ltvm install`")
+    except KeyboardInterrupt:
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        raise
     if r.returncode != 0:
+        try:
+            dest.unlink()
+        except OSError:
+            pass
         raise RuntimeError(f"Download failed (rc={r.returncode}): {url}")
 
 

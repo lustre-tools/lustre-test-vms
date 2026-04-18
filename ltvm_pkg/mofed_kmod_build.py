@@ -8,7 +8,7 @@ mlnx_add_kernel_support.sh inside the mofed builder container), and
 caches them per-kernel so the image build can install them.
 
 Output layout:
-    output/<target>/<arch>/kernels/<kver>/mofed-kmods/<mofed-version>/
+    artifacts/<target>/<arch>/kernels/<kver>/mofed-kmods/<mofed-version>/
         kmod-mlnx-ofa_kernel-<...>.rpm
         kmod-mlnx-ofa_kernel-modules-<...>.rpm
         ...

@@ -20,7 +20,7 @@ dev = [
 [tool.ruff]
 # ltvm is Python despite lacking .py extension
 extend-include = ["ltvm"]
-exclude = ["output/"]
+exclude = ["artifacts/"]
 # Format targets 80; lint allows up to 100
 line-length = 80
 

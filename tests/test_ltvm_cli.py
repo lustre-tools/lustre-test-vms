@@ -286,7 +286,7 @@ class TestCmdStatus:
         # Build a real TargetConfig against tmp_targets so it won't raise
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cfg,
                 "TARGETS_YAML",
@@ -327,7 +327,7 @@ class TestCmdStatusJson:
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cfg,
                 "TARGETS_YAML",
@@ -363,14 +363,14 @@ class TestCmdStatusJson:
         """build-status enumerates one image entry per built kernel dir."""
         import ltvm_pkg.target_config as cfg
 
-        # Pre-populate two built kernel dirs under output/rocky9/x86_64/kernels/
-        kernels = tmp_targets / "output" / "rocky9" / "x86_64" / "kernels"
+        # Pre-populate two built kernel dirs under artifacts/rocky9/x86_64/kernels/
+        kernels = tmp_targets / "artifacts" / "rocky9" / "x86_64" / "kernels"
         (kernels / "5.14-rhel9.7-5.14.0-611.13.1").mkdir(parents=True)
         (kernels / "5.14-rhel9.5-5.14.0-503.26.1").mkdir(parents=True)
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cfg,
                 "TARGETS_YAML",
@@ -467,7 +467,7 @@ class TestCmdValidate:
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cfg,
                 "TARGETS_YAML",
@@ -697,7 +697,7 @@ class TestValidationGating:
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cfg,
                 "TARGETS_YAML",
@@ -1401,7 +1401,7 @@ class TestKernelArgPropagation:
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cfg,
                 "TARGETS_YAML",
@@ -1722,11 +1722,11 @@ class TestCmdClean:
     def test_clean_wipes_target_arch_dir(
         self, capsys: pytest.CaptureFixture[str], tmp_targets: Path
     ) -> None:
-        """`ltvm target clean rocky9` removes output/rocky9/x86_64/ but not other arches."""
+        """`ltvm target clean rocky9` removes artifacts/rocky9/x86_64/ but not other arches."""
         import ltvm_pkg.cli as cli_mod
         import ltvm_pkg.target_config as cfg
 
-        out = tmp_targets / "output"
+        out = tmp_targets / "artifacts"
         (out / "rocky9" / "x86_64" / "kernels" / "foo").mkdir(parents=True)
         (out / "rocky9" / "x86_64" / "kernels" / "foo" / "vmlinux").write_bytes(
             b"x" * 1024
@@ -1736,7 +1736,7 @@ class TestCmdClean:
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", out),
+            patch.object(cfg, "ARTIFACTS_DIR", out),
             patch.object(cli_mod, "TargetConfig", cfg.TargetConfig),
             patch.object(
                 cfg,
@@ -1763,7 +1763,7 @@ class TestCmdClean:
         import ltvm_pkg.cli as cli_mod
         import ltvm_pkg.target_config as cfg
 
-        out = tmp_targets / "output"
+        out = tmp_targets / "artifacts"
         (out / "rocky9" / "x86_64").mkdir(parents=True, exist_ok=True)
         (out / "rocky9" / "x86_64" / "a").write_text("a")
         (out / "rocky9" / "aarch64").mkdir(parents=True)
@@ -1771,7 +1771,7 @@ class TestCmdClean:
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", out),
+            patch.object(cfg, "ARTIFACTS_DIR", out),
             patch.object(cli_mod, "TargetConfig", cfg.TargetConfig),
             patch.object(
                 cfg,
@@ -1796,11 +1796,11 @@ class TestCmdClean:
         import ltvm_pkg.cli as cli_mod
         import ltvm_pkg.target_config as cfg
 
-        out = tmp_targets / "output"
+        out = tmp_targets / "artifacts"
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", out),
+            patch.object(cfg, "ARTIFACTS_DIR", out),
             patch.object(cli_mod, "TargetConfig", cfg.TargetConfig),
             patch.object(
                 cfg,
@@ -1874,7 +1874,7 @@ class TestFetchKernelFlag:
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(cli_mod, "TargetConfig", cfg.TargetConfig),
             patch.object(
                 cfg,
@@ -1911,7 +1911,7 @@ class TestCmdTargetsPerKernelRows:
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(cli_mod, "TargetConfig", cfg.TargetConfig),
             patch.object(
                 cfg,

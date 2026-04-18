@@ -104,15 +104,36 @@ def _error(msg: str, use_json: bool, hint: str | None = None) -> int:
 
 
 def _load_target(
-    name: str,
+    name: str | None,
     use_json: bool,
     arch: str | None = None,
     variant: str = "base",
 ) -> tuple[_TargetConfig | None, int | None]:
     """Load a TargetConfig, returning (config, None) or
-    (None, exit_code) on failure."""
+    (None, exit_code) on failure.
+
+    Handles the "no target given" case explicitly: ``_reconcile_target_args``
+    resolves positional vs --target but leaves ``args.target`` as ``None``
+    when neither was supplied.  Without this guard, ``TargetConfig(None)``
+    crashes with ``TypeError: PosixPath / NoneType`` deep inside __init__,
+    which is useless to the user.
+    """
     TargetConfig = _cli_attr("TargetConfig")
     list_targets = _cli_attr("list_targets")
+    if not name:
+        targets = list_targets()
+        hint = (
+            f"Available targets: {', '.join(targets)}"
+            if targets
+            else "No targets configured"
+        )
+        code = _emit_error(
+            "target required (pass a positional target or --target)",
+            use_json,
+            hint=hint,
+            code=EXIT_NOT_FOUND,
+        )
+        return None, code
     try:
         return TargetConfig(name, arch=arch, variant=variant), None
     except ValueError as e:
@@ -184,6 +205,115 @@ def _artifact_label(status_dict: dict[str, Any]) -> str:
     if stale:
         return "stale"
     return "current"
+
+
+def _local_lustre_version(
+    tc: _TargetConfig, kernel: str | None, variant: str
+) -> str | None:
+    """Read the baked Lustre version from the target's image meta.
+
+    Returns ``None`` when no image is on disk (pre-fetch / pre-build)
+    or when the image was built with ``--no-lustre``.  Used by
+    :func:`_print_target_header` so the header reflects what's
+    currently sitting in ``artifacts/<target>/``.
+    """
+    try:
+        img_dir = tc.image_output_dir(kernel, variant=variant)
+    except Exception:
+        return None
+    meta_path = img_dir / "meta.json"
+    meta = load_meta_safe(meta_path)
+    if not isinstance(meta, dict):
+        return None
+    v = meta.get("lustre_version")
+    if not isinstance(v, str) or not v:
+        return None
+    # Reject the historical "2.8.0 (in-kernel)" stub: LNet modules like
+    # ko2iblnd.ko carry a legacy MODULE_VERSION from the in-tree-Lustre
+    # era, and an older image_build scan picked whichever .ko rglob
+    # returned first.  Show "?" instead of known-wrong data so the
+    # header doesn't lie.  Newer builds scan lustre.ko first and avoid
+    # writing this value at all.
+    if "in-kernel" in v:
+        return None
+    return v
+
+
+def _lustre_tree_version(tree: Path | str) -> str | None:
+    """Read the Lustre version from a source tree.
+
+    Prefers ``LUSTRE-VERSION-FILE`` (generated, present in release
+    tarballs and after a build) over the ``LUSTRE-VERSION-GEN`` script
+    so we don't fork a subprocess on every header print.  Returns
+    ``None`` if the tree has neither.
+    """
+    tree = Path(tree)
+    vf = tree / "LUSTRE-VERSION-FILE"
+    if vf.is_file():
+        try:
+            text = vf.read_text().strip()
+        except OSError:
+            return None
+        # Format: "LUSTRE_VERSION = 2.17.51_dirty"
+        _, _, val = text.partition("=")
+        val = val.strip()
+        if val:
+            return val
+    gen = tree / "LUSTRE-VERSION-GEN"
+    if gen.is_file():
+        import subprocess
+
+        try:
+            r = subprocess.run(
+                [str(gen)],
+                cwd=str(tree),
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    return None
+
+
+def _print_target_header(
+    tc: _TargetConfig,
+    kernel: str | None = None,
+    variant: str = "base",
+    action: str = "Target",
+    lustre_version: str | None = None,
+) -> None:
+    """Print a two-line target-description header.
+
+    Shared by ``target fetch`` / ``build all`` / ``target delete``
+    (and anything else that wants to show the user what target
+    they're about to operate on).  ``action`` lets callers pick the
+    lead verb -- "Fetching", "Building", "Deleting", "Target".
+
+    ``lustre_version`` may be passed explicitly (e.g. a fetch has
+    just resolved the release's manifest); otherwise the helper
+    falls back to whatever is baked into the target's local image
+    meta.  ``?`` is shown when nothing is known, so the field is
+    always present and never silently missing.
+
+    Callers suppress this in ``--json`` mode; the helper just prints.
+    """
+    # Prefer the short/user-facing kernel name (as declared in
+    # targets.yaml) over ``tc.resolve_kernel()`` -- resolve_kernel
+    # returns the on-disk ``<short>-<uname>`` directory name when the
+    # artifact is already built, which is noisy in a header.
+    short = kernel or tc.default_kernel
+    if lustre_version is None:
+        lustre_version = _local_lustre_version(tc, kernel, variant)
+    lv = lustre_version or "?"
+    print(
+        f"{action}: {tc.name} ({tc.os_name} {tc.os_version}, "
+        f"{tc.arch}, {tc.lustre_mode.value})"
+    )
+    print(f"  kernel={short}  variant={variant}  lustre={lv}")
 
 
 def _require_root(use_json: bool, hint: str = "") -> int | None:

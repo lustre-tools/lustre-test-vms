@@ -1,4 +1,4 @@
-output/
+artifacts/
 *.pyc
 __pycache__/
 .venv/

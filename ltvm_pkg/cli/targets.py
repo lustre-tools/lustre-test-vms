@@ -65,14 +65,14 @@ def _release_status(
     in _find_release_url so `target list`, `target fetch`, and
     `target show` agree on what's available.)
     """
-    from ltvm_pkg.target_config import OUTPUT_DIR
+    from ltvm_pkg.target_config import ARTIFACTS_DIR
 
     prefix = f"{target}-{arch}-"
 
     def _trim(tag: str) -> str:
         return tag[len(prefix):] if tag.startswith(prefix) else tag
 
-    tag_file = OUTPUT_DIR / target / arch / ".ltvm-release-tag"
+    tag_file = ARTIFACTS_DIR / target / arch / ".ltvm-release-tag"
     if tag_file.exists():
         raw_local = tag_file.read_text().strip()
         if kernel_signature and kernel_signature not in raw_local:
@@ -345,7 +345,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
 
     hdr = (
         f"{'Local':<6} {'Remote':<7} {'Target':<12} {'Arch':<8} "
-        f"{'Variants':<30} {'Mode':<16} Default?"
+        f"{'Variants':<30} {'Lustre Type':<16} Default?"
     )
     print(hdr)
     print("-" * len(hdr))
@@ -361,7 +361,12 @@ def cmd_targets(args: argparse.Namespace) -> int:
             prev_key = None
             prev_kernel_key = None
             continue
-        default_mark = "yes" if r["is_default"] else ""
+        # Checkmark stands in for "yes" in the Local / Remote /
+        # Default? columns -- one glyph reads faster than a three-
+        # letter word and keeps the columns uniformly narrow.  The
+        # suffix markers (!, *) still stack on top (e.g. ✓!, ✓*, ✓*!).
+        CHECK = "\u2713"
+        default_mark = CHECK if r["is_default"] else ""
         is_header = r["variant"] is None
 
         if is_header:
@@ -369,7 +374,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
             local_col = "-"
             remote_col = "-"
         else:
-            local_col = "yes" if r["built"] else "-"
+            local_col = CHECK if r["built"] else "-"
             remote_raw = r["remote_release"]
             if remote_raw == "?":
                 remote_col = "?"
@@ -377,21 +382,21 @@ def cmd_targets(args: argparse.Namespace) -> int:
             elif remote_raw == "-":
                 remote_col = "-"
             else:
-                remote_col = "yes"
+                remote_col = CHECK
             if (
                 r["built"]
                 and r["local_release"] not in ("-", "?")
                 and remote_raw not in ("-", "?")
                 and r["local_release"] != remote_raw
             ):
-                local_col = "yes!"
+                local_col = f"{CHECK}!"
                 has_behind = True
-            # 'yes*' -> image is built but has no Lustre baked in.
+            # '✓*' -> image is built but has no Lustre baked in.
             # A VM created from this image can't mount Lustre until
-            # `ltvm deploy-lustre` installs it.  Stacks with the 'yes!'
-            # behind marker so `yes*!` is possible when the image is
+            # `ltvm deploy-lustre` installs it.  Stacks with the '✓!'
+            # behind marker so '✓*!' is possible when the image is
             # both no-lustre AND out-of-date.
-            if r.get("lustre_missing") and local_col.startswith("yes"):
+            if r.get("lustre_missing") and local_col.startswith(CHECK):
                 local_col = f"{local_col}*" if "*" not in local_col else local_col
                 has_no_lustre = True
 
@@ -434,12 +439,12 @@ def cmd_targets(args: argparse.Namespace) -> int:
             print("? github unreachable -- remote status unknown")
         if has_behind:
             print(
-                "yes! = local copy differs from latest release -- "
+                "\u2713! = local copy differs from latest release -- "
                 "`sudo ltvm target fetch --replace <target>` to refresh"
             )
         if has_no_lustre:
             print(
-                "yes* = image does NOT have Lustre baked in.  Lustre "
+                "\u2713* = image does NOT have Lustre baked in.  Lustre "
                 "must be installed (`ltvm deploy-lustre`) before this "
                 "image can use Lustre, or rebuild with `ltvm build "
                 "image <target> --lustre-tree <path>` (drop "
@@ -547,12 +552,20 @@ def cmd_target_export(args: argparse.Namespace) -> int:
         return terr
     assert tc is not None
 
+    from ltvm_pkg.cli.util import _print_target_header
     from ltvm_pkg.image_export import export_image
 
     kernel = getattr(args, "kernel", None)
     kernel_name = tc.resolve_kernel(kernel)
     fmt = args.format
     ext = "qcow2" if fmt == "qcow2" else "raw"
+
+    if not use_json:
+        _print_target_header(
+            tc, kernel=kernel,
+            variant=getattr(args, "variant", None) or "base",
+            action="Exporting",
+        )
     if args.output:
         out = Path(args.output).expanduser().resolve()
     else:
@@ -613,16 +626,19 @@ def cmd_validate(args: argparse.Namespace) -> int:
         return err
     assert tc is not None
 
+    # Default to cwd like every other --lustre-tree consumer does
+    # (see _resolve_lustre_tree).  Previously this defaulted to
+    # ~/lustre-release, which disagreed with `build all / kernel /
+    # image / lustre`, `target package / publish` and surprised users
+    # who had ``cd``'d into their tree.
     lustre_arg = getattr(args, "lustre_tree", None)
-    if lustre_arg is None:
-        default = Path.home() / "lustre-release"
-        lustre_arg = str(default)
     lustre_tree, err_msg = _cli_attr("_resolve_lustre_tree")(lustre_arg)
     if err_msg:
         return _error(
             err_msg,
             use_json,
-            hint="Pass --lustre-tree /path/to/lustre-release",
+            hint="Run from a Lustre tree, or pass "
+            "--lustre-tree /path/to/lustre-release",
         )
     assert lustre_tree is not None
 

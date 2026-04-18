@@ -52,7 +52,7 @@ class TestTargetConfigUnknown:
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cfg,
                 "TARGETS_YAML",
@@ -80,7 +80,7 @@ class TestTargetConfigUnknown:
         _write_targets_yaml(tmp_targets / "targets", data)
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cfg,
                 "TARGETS_YAML",
@@ -152,7 +152,7 @@ class TestResolveKernel:
         self, tmp_targets: Path
     ) -> None:
         tc = _make_config(tmp_targets)
-        kernels = tmp_targets / "output" / "rocky9" / "x86_64" / "kernels"
+        kernels = tmp_targets / "artifacts" / "rocky9" / "x86_64" / "kernels"
         full = "5.14-rhel9.7-5.14.0-611.13.1.el9_7_lustre"
         (kernels / full).mkdir(parents=True)
         assert tc.resolve_kernel("5.14-rhel9.7") == full
@@ -162,13 +162,13 @@ class TestKernelOutputDir:
     def test_default_path(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
         expected = (
-            tmp_targets / "output" / "rocky9" / "x86_64" / "kernels" / "5.14-rhel9.7"
+            tmp_targets / "artifacts" / "rocky9" / "x86_64" / "kernels" / "5.14-rhel9.7"
         )
         assert tc.kernel_output_dir() == expected
 
     def test_custom_kernel_path(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
-        expected = tmp_targets / "output" / "rocky9" / "x86_64" / "kernels" / "custom"
+        expected = tmp_targets / "artifacts" / "rocky9" / "x86_64" / "kernels" / "custom"
         assert tc.kernel_output_dir("custom") == expected
 
 
@@ -179,7 +179,7 @@ class TestAvailableKernels:
 
     def test_with_kernels(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
-        kernels = tmp_targets / "output" / "rocky9" / "x86_64" / "kernels"
+        kernels = tmp_targets / "artifacts" / "rocky9" / "x86_64" / "kernels"
         (kernels / "5.14-rhel9.7").mkdir(parents=True)
         (kernels / "5.14-rhel9.6").mkdir(parents=True)
         result = tc.available_kernels()
@@ -187,7 +187,7 @@ class TestAvailableKernels:
 
     def test_ignores_files(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
-        kernels = tmp_targets / "output" / "rocky9" / "x86_64" / "kernels"
+        kernels = tmp_targets / "artifacts" / "rocky9" / "x86_64" / "kernels"
         kernels.mkdir(parents=True)
         (kernels / "stray-file.txt").write_text("ignore me")
         (kernels / "real-kernel").mkdir()
@@ -200,14 +200,14 @@ class TestOutputDirs:
         # Default: paired with the target's default kernel.
         assert (
             tc.image_output_dir()
-            == tmp_targets / "output" / "rocky9" / "x86_64" / "images" / "5.14-rhel9.7"
+            == tmp_targets / "artifacts" / "rocky9" / "x86_64" / "images" / "5.14-rhel9.7"
         )
 
     def test_image_output_dir_explicit_kernel(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
         assert (
             tc.image_output_dir("5.14-rhel9.5")
-            == tmp_targets / "output" / "rocky9" / "x86_64" / "images" / "5.14-rhel9.5"
+            == tmp_targets / "artifacts" / "rocky9" / "x86_64" / "images" / "5.14-rhel9.5"
         )
 
     def test_image_output_dir_distinct_per_kernel(
@@ -225,7 +225,7 @@ class TestOutputDirs:
         tc = _make_config(tmp_targets, arch="aarch64")
         assert tc.image_output_dir("5.14-rhel9.7") == (
             tmp_targets
-            / "output"
+            / "artifacts"
             / "rocky9"
             / "aarch64"
             / "images"
@@ -239,7 +239,7 @@ class TestOutputDirs:
     def test_container_output_dir(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
         assert tc.container_output_dir() == (
-            tmp_targets / "output" / "rocky9" / "x86_64" / "container"
+            tmp_targets / "artifacts" / "rocky9" / "x86_64" / "container"
         )
 
 
@@ -283,7 +283,7 @@ class TestInputHash:
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cfg,
                 "TARGETS_YAML",
@@ -305,7 +305,7 @@ class TestInputHash:
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cfg,
                 "TARGETS_YAML",
@@ -370,7 +370,7 @@ class TestWriteMeta:
         tc = _make_config(tmp_targets)
         tc.write_meta("container", build_date="2024-01-01")
         meta_path = (
-            tmp_targets / "output" / "rocky9" / "x86_64" / "container" / "meta.json"
+            tmp_targets / "artifacts" / "rocky9" / "x86_64" / "container" / "meta.json"
         )
         assert meta_path.exists()
         data = json.loads(meta_path.read_text())
@@ -383,7 +383,7 @@ class TestWriteMeta:
         tc.write_meta("kernel", kernel="5.14-rhel9.7", version="5.14.0")
         meta_path = (
             tmp_targets
-            / "output"
+            / "artifacts"
             / "rocky9"
             / "x86_64"
             / "kernels"
@@ -399,7 +399,7 @@ class TestWriteMeta:
         tc.write_meta("image")
         meta_path = (
             tmp_targets
-            / "output"
+            / "artifacts"
             / "rocky9"
             / "x86_64"
             / "images"
@@ -549,7 +549,7 @@ class TestIsStaleCorruption:
         assert tc.is_stale("container") is False
         # Corrupt the file mid-flight
         meta_file = (
-            tmp_targets / "output" / "rocky9" / "x86_64" / "container" / "meta.json"
+            tmp_targets / "artifacts" / "rocky9" / "x86_64" / "container" / "meta.json"
         )
         meta_file.write_text("{garbage")
         # Must not raise
@@ -564,12 +564,12 @@ class TestOutputDirEnvOverride:
 
         import ltvm_pkg.target_config as cfg
 
-        monkeypatch.setenv("LTVM_OUTPUT_DIR", str(tmp_path))
+        monkeypatch.setenv("LTVM_ARTIFACTS_DIR", str(tmp_path))
         importlib.reload(cfg)
         try:
-            assert cfg.OUTPUT_DIR == tmp_path
+            assert cfg.ARTIFACTS_DIR == tmp_path
         finally:
-            monkeypatch.delenv("LTVM_OUTPUT_DIR", raising=False)
+            monkeypatch.delenv("LTVM_ARTIFACTS_DIR", raising=False)
             importlib.reload(cfg)
 
     def test_default_when_env_unset(
@@ -579,10 +579,10 @@ class TestOutputDirEnvOverride:
 
         import ltvm_pkg.target_config as cfg
 
-        monkeypatch.delenv("LTVM_OUTPUT_DIR", raising=False)
+        monkeypatch.delenv("LTVM_ARTIFACTS_DIR", raising=False)
         importlib.reload(cfg)
         try:
-            assert cfg.OUTPUT_DIR == cfg.REPO_ROOT / "output"
+            assert cfg.ARTIFACTS_DIR == cfg.REPO_ROOT / "artifacts"
         finally:
             importlib.reload(cfg)
 
@@ -593,12 +593,12 @@ class TestOutputDirEnvOverride:
 
         import ltvm_pkg.target_config as cfg
 
-        monkeypatch.setenv("LTVM_OUTPUT_DIR", str(tmp_path))
+        monkeypatch.setenv("LTVM_ARTIFACTS_DIR", str(tmp_path))
         importlib.reload(cfg)
         try:
-            assert isinstance(cfg.OUTPUT_DIR, Path)
+            assert isinstance(cfg.ARTIFACTS_DIR, Path)
         finally:
-            monkeypatch.delenv("LTVM_OUTPUT_DIR", raising=False)
+            monkeypatch.delenv("LTVM_ARTIFACTS_DIR", raising=False)
             importlib.reload(cfg)
 
 
@@ -667,7 +667,7 @@ class TestVariants:
     def test_container_output_dir_variant(self, tmp_targets: Path) -> None:
         self._yaml_with_variant(tmp_targets, {"mofed": {}})
         tc = _make_config(tmp_targets)
-        base_dir = tmp_targets / "output" / "rocky9" / "x86_64" / "container"
+        base_dir = tmp_targets / "artifacts" / "rocky9" / "x86_64" / "container"
         assert tc.container_output_dir() == base_dir
         assert tc.container_output_dir("base") == base_dir
         assert tc.container_output_dir("mofed") == base_dir / "mofed"
@@ -677,7 +677,7 @@ class TestVariants:
         tc = _make_config(tmp_targets)
         base_dir = (
             tmp_targets
-            / "output"
+            / "artifacts"
             / "rocky9"
             / "x86_64"
             / "images"
@@ -694,7 +694,7 @@ class TestVariants:
         self._yaml_with_variant(tmp_targets, {"mofed": {}})
         tc = _make_config(tmp_targets)
         base_meta = (
-            tmp_targets / "output" / "rocky9" / "x86_64" / "container" / "meta.json"
+            tmp_targets / "artifacts" / "rocky9" / "x86_64" / "container" / "meta.json"
         )
         assert tc.meta_path("container") == base_meta
         assert tc.meta_path("container", variant="mofed") == (
@@ -829,7 +829,7 @@ class TestVariants:
         meta = json.loads(
             (
                 tmp_targets
-                / "output"
+                / "artifacts"
                 / "rocky9"
                 / "x86_64"
                 / "container"
@@ -848,7 +848,7 @@ class TestVariants:
         meta = json.loads(
             (
                 tmp_targets
-                / "output"
+                / "artifacts"
                 / "rocky9"
                 / "x86_64"
                 / "container"
@@ -931,7 +931,7 @@ class TestVariantKernelPin:
         self._pin_yaml(tmp_targets, "5.14-rhel9.5")
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cfg, "TARGETS_YAML",
                 tmp_targets / "targets" / "targets.yaml",
@@ -948,7 +948,7 @@ class TestVariantKernelPin:
         self._pin_yaml(tmp_targets, "5.14-rhel9.5")
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cfg, "TARGETS_YAML",
                 tmp_targets / "targets" / "targets.yaml",
@@ -968,7 +968,7 @@ class TestVariantKernelPin:
         self._pin_yaml(tmp_targets, "5.14-rhel9.5")
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-            patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
                 cfg, "TARGETS_YAML",
                 tmp_targets / "targets" / "targets.yaml",

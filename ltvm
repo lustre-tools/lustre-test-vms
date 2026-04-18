@@ -277,7 +277,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ltvm",
         description="Lustre test VM infrastructure CLI",
-        parents=[common],
         formatter_class=_HideSuppressedSubcommands,
     )
     p.add_argument(
@@ -353,21 +352,29 @@ def build_parser() -> argparse.ArgumentParser:
         dest="build_action", metavar="<action>"
     )
 
+    def _add_build_all_args(sp: argparse.ArgumentParser) -> None:
+        """Attach the `build all` / `target build` argument shape.
+
+        Factored out so both entry points share one definition --
+        adding an option in one place keeps both spellings in sync.
+        """
+        _add_target_arg(sp, required=True)
+        sp.add_argument(
+            "--lustre-tree", help="Path to Lustre source tree (default: cwd)"
+        )
+        sp.add_argument(
+            "--lustre-build",
+            action="store_true",
+            help="Also build Lustre against the target kernel",
+        )
+        sp.set_defaults(func=cmd_build_all)
+
     bap = build_sub.add_parser(
         "all",
         parents=[common, kernel_arg, force_arg, force_compat_arg, variant_arg],
         help="Build container + kernel + image from scratch",
     )
-    _add_target_arg(bap, required=True)
-    bap.add_argument(
-        "--lustre-tree", help="Path to Lustre source tree (default: cwd)"
-    )
-    bap.add_argument(
-        "--lustre-build",
-        action="store_true",
-        help="Also build Lustre against the target kernel",
-    )
-    bap.set_defaults(func=cmd_build_all)
+    _add_build_all_args(bap)
 
     bcp = build_sub.add_parser(
         "container",
@@ -531,6 +538,18 @@ def build_parser() -> argparse.ArgumentParser:
     _add_target_arg(tshp, required=True)
     tshp.set_defaults(func=cmd_target_show)
 
+    # `target build` is an alias for `build all`: same args, same
+    # handler.  Both spellings are supported because users reach for
+    # either one (target-first vs. verb-first) -- keep them truly
+    # interchangeable by sharing the argument-attach helper above.
+    tbp = target_sub.add_parser(
+        "build",
+        parents=[common, kernel_arg, force_arg, force_compat_arg, variant_arg],
+        help="Build container + kernel + image from scratch "
+        "(alias for `build all`)",
+    )
+    _add_build_all_args(tbp)
+
     tcp = target_sub.add_parser(
         "clean",
         parents=[common],
@@ -541,7 +560,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--all-arches",
         action="store_true",
         default=False,
-        help="Wipe every arch under output/<target>/",
+        help="Wipe every arch under artifacts/<target>/",
     )
     tcp.set_defaults(func=cmd_clean)
 
@@ -563,7 +582,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--all-arches",
         action="store_true",
         default=False,
-        help="(local only) Wipe every arch under output/<target>/",
+        help="(local only) Wipe every arch under artifacts/<target>/",
     )
     tdp.add_argument(
         "--tag",
@@ -614,7 +633,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_target_arg(tvp, required=True)
     tvp.add_argument(
         "--lustre-tree",
-        help="Path to Lustre source tree (default: ~/lustre-release)",
+        help="Path to Lustre source tree (default: cwd)",
     )
     tvp.set_defaults(func=cmd_validate)
 
@@ -670,7 +689,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--image",
         action="store_true",
         help="Fetch only a standalone bootable qcow2 (ignores the "
-        "ecosystem assets).  Lands under output/<target>/<arch>/bootable/.",
+        "ecosystem assets).  Lands under artifacts/<target>/<arch>/bootable/.",
+    )
+    tfp.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="Resolve the release and print what would be fetched, "
+        "but do not download or modify any files.",
     )
     tfp.set_defaults(func=cmd_fetch)
 
@@ -684,7 +710,7 @@ def build_parser() -> argparse.ArgumentParser:
     tep.add_argument(
         "--output", "-o", default=None,
         help="Output file (default: "
-        "output/<target>/<arch>/images/<kernel>/bootable-<kernel>.<ext>)",
+        "artifacts/<target>/<arch>/images/<kernel>/bootable-<kernel>.<ext>)",
     )
     tep.add_argument(
         "--format", choices=["qcow2", "raw"], default="qcow2",
@@ -724,7 +750,7 @@ def build_parser() -> argparse.ArgumentParser:
     tpkp.add_argument(
         "--output",
         default=None,
-        help="Output directory for tarball (default: output/)",
+        help="Output directory for tarball (default: artifacts/)",
     )
     _tpkp_variant = tpkp.add_argument(
         "--variant",
@@ -776,7 +802,7 @@ def build_parser() -> argparse.ArgumentParser:
     tpbp.add_argument(
         "--output",
         default=None,
-        help="Staging dir for packaged assets (default: output/)",
+        help="Staging dir for packaged assets (default: artifacts/)",
     )
     tpbp.set_defaults(func=cmd_publish)
 
@@ -1199,7 +1225,7 @@ def main() -> int:
         pass
     args = parser.parse_args()
 
-    level = logging.DEBUG if args.verbose else logging.INFO
+    level = logging.DEBUG if getattr(args, "verbose", False) else logging.INFO
     logging.basicConfig(level=level, format="%(name)s: %(message)s")
 
     if not args.command:

@@ -48,7 +48,7 @@ def _make_config(
 
     with (
         patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
-        patch.object(cfg, "OUTPUT_DIR", tmp_targets / "output"),
+        patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
         patch.object(
             cfg,
             "TARGETS_YAML",
@@ -88,7 +88,7 @@ def tmp_targets(tmp_path: Path) -> Path:
     _write_targets_yaml(tmp_path / "targets")
 
     # Also create output dir
-    (tmp_path / "output" / "rocky9").mkdir(parents=True)
+    (tmp_path / "artifacts" / "rocky9").mkdir(parents=True)
 
     return tmp_path
 

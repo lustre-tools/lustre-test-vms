@@ -34,11 +34,29 @@ from .paths import find_ltvm_root, load_meta_safe
 
 REPO_ROOT = find_ltvm_root()
 TARGETS_DIR = REPO_ROOT / "targets"
-OUTPUT_DIR = (
-    Path(os.environ["LTVM_OUTPUT_DIR"])
-    if "LTVM_OUTPUT_DIR" in os.environ
-    else REPO_ROOT / "output"
-)
+
+
+def _resolve_artifacts_dir() -> Path:
+    """Resolve the artifacts-cache directory.
+
+    Honors ``LTVM_ARTIFACTS_DIR`` or defaults to ``<repo>/artifacts``.
+    If the legacy ``<repo>/output`` directory exists and the new
+    location does not, it is renamed in place so prior caches are
+    preserved across the rename.
+    """
+    if "LTVM_ARTIFACTS_DIR" in os.environ:
+        return Path(os.environ["LTVM_ARTIFACTS_DIR"])
+    new = REPO_ROOT / "artifacts"
+    legacy = REPO_ROOT / "output"
+    if not new.exists() and legacy.is_dir():
+        try:
+            legacy.rename(new)
+        except OSError:
+            return legacy
+    return new
+
+
+ARTIFACTS_DIR = _resolve_artifacts_dir()
 TARGETS_YAML = TARGETS_DIR / "targets.yaml"
 
 _DEFAULTS = {
@@ -200,7 +218,7 @@ class TargetConfig:
         name: Target name from targets.yaml (e.g. rocky9).
         arch: Optional architecture override.  When given, replaces the
               target's default arch.  Output is always routed to
-              output/<target>/<arch>/ regardless of arch -- the layout
+              artifacts/<target>/<arch>/ regardless of arch -- the layout
               is uniform so cross-arch builds never collide and code
               paths don't need an x86_64 special case.
     """
@@ -245,7 +263,7 @@ class TargetConfig:
         if arch is not None:
             self._data["arch"] = arch
 
-        self.output_dir = OUTPUT_DIR / name / str(self._data["arch"])
+        self.output_dir = ARTIFACTS_DIR / name / str(self._data["arch"])
 
         status = self._data.get("status", "working")
         if status not in ("working", "experimental"):

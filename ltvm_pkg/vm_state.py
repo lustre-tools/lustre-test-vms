@@ -132,17 +132,17 @@ def resolve_os_artifacts(
 ) -> OSArtifacts:
     """Return image, kernel paths and defaults for a target OS.
 
-    Looks in output/<os>/ in the repo (from fetch or build).
+    Looks in artifacts/<os>/ in the repo (from fetch or build).
     No separate install step needed.
 
     ``kernel`` may be:
       - None: use the target's default kernel and its paired image.
       - a kernel name (short or full, e.g. ``5.14-rhel9.7`` or
         ``5.14-rhel9.7-5.14.0-611.13.1.el9_7_lustre``): resolved to the
-        matching kernel dir under output/<os>/kernels/.
+        matching kernel dir under artifacts/<os>/kernels/.
 
     To use an out-of-tree vmlinuz, symlink or copy it into
-    output/<os>/kernels/<name>/vmlinuz and pass the name.
+    artifacts/<os>/kernels/<name>/vmlinuz and pass the name.
     """
     # Resolve target config via the single TargetConfig source of truth
     # rather than re-parsing targets.yaml here.  TargetConfig owns
@@ -281,8 +281,8 @@ def resolve_os_artifacts(
 
     # ── Step 2: Locate the image paired with this kernel. ──
     # Layout:
-    #   output/<os>[/<arch>]/images/<kernel-dirname>/base.ext4         (base)
-    #   output/<os>[/<arch>]/images/<kernel-dirname>/<variant>/base.ext4  (variant)
+    #   artifacts/<os>[/<arch>]/images/<kernel-dirname>/base.ext4         (base)
+    #   artifacts/<os>[/<arch>]/images/<kernel-dirname>/<variant>/base.ext4  (variant)
     base_img_dir = output_dir / "images" / kernel_dirname
     img_dir = base_img_dir if variant == "base" else base_img_dir / variant
     img = img_dir / "base.ext4"

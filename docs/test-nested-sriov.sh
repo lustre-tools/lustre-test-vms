@@ -11,7 +11,7 @@
 #   4. Bind one VF to vfio-pci as the ltvm `--nic passthrough` prep.
 #
 # Requires: /dev/kvm (nested), passwordless sudo, the rocky9 ltvm
-# artifacts in output/ already built, and fcbr0 bridge up from
+# artifacts in artifacts/ already built, and fcbr0 bridge up from
 # `ltvm install`.  Uses 192.168.100.99 -- pick another free IP if it
 # clashes with an active VM (check `ltvm list`).
 #
@@ -22,7 +22,7 @@ set -euo pipefail
 REPO="${REPO:-/home/paf/lustre-test-vms-v2}"
 TARGET="${TARGET:-rocky9}"
 KVER="${KVER:-5.14-rhel9.7-5.14.0-611.13.1.el9_7}"
-OUT="$REPO/output/$TARGET/x86_64"
+OUT="$REPO/artifacts/$TARGET/x86_64"
 VMLINUZ="$OUT/kernels/$KVER/vmlinuz"
 BASE_IMG="$OUT/images/$KVER/base.ext4"
 QEMU=/opt/qemu/bin/qemu-system-x86_64
