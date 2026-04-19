@@ -367,6 +367,12 @@ def build_parser() -> argparse.ArgumentParser:
             action="store_true",
             help="Also build Lustre against the target kernel",
         )
+        sp.add_argument(
+            "-y", "--yes",
+            action="store_true",
+            default=False,
+            help="Skip the interactive 'Proceed?' confirmation",
+        )
         sp.set_defaults(func=cmd_build_all)
 
     bap = build_sub.add_parser(
@@ -1257,4 +1263,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        # Shell convention for Ctrl-C termination.
+        sys.stderr.write("\naborted\n")
+        sys.exit(130)

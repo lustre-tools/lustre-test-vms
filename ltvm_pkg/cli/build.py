@@ -143,6 +143,14 @@ def cmd_build_all(args: argparse.Namespace) -> int:
             action="Building",
             lustre_version=_lustre_tree_version(lustre_tree),
         )
+        if not getattr(args, "yes", False) and sys.stdin.isatty():
+            try:
+                reply = input("Proceed? [Y/n]: ").strip().lower()
+            except EOFError:
+                reply = ""
+            if reply and reply not in ("y", "yes"):
+                print("aborted")
+                return EXIT_ERROR
 
     results: dict[str, Any] = {}
 
