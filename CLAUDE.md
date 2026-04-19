@@ -1,8 +1,9 @@
 # lustre-test-vms-v2 -- Agent and Developer Reference
 
 Build infrastructure for Lustre development/testing using
-QEMU microVMs. Produces three cacheable artifacts per
-target OS: build container, kernel, and VM base image.
+QEMU microVMs. Produces four cacheable artifacts per
+target OS: build container, kernel, VM base image, and
+Lustre staging (userland + modules per kernel).
 
 ## LLM: Getting the User Set Up
 
@@ -28,28 +29,36 @@ cat SUGGESTED-AGENTS.md >> ~/lustre-release/CLAUDE.md
 - `targets/` -- `targets.yaml` (source of truth), shared
   `common/` files (kernel fragment, package lists, setup
   scripts), and per-target dirs with `container.Dockerfile` +
-  `image.Dockerfile` + `packages-os.txt`.
-- `ltvm_pkg/` -- Python package; `cli.py` dispatches, rest
+  `image.Dockerfile` + `packages-os.txt`.  Per-target
+  `variants/` dirs hold optional overlay Dockerfiles.
+- `ltvm_pkg/` -- Python package; `cli/` subpackage holds
+  per-area dispatch (`build.py`, `targets.py`, `vm.py`,
+  `cluster.py`, `deploy.py`, `fetch.py`, `setup.py`), rest
   is implementation.  `ltvm` script at repo root is the CLI.
 - `artifacts/<target>/<arch>/{container,kernels/<kver>,images/<kver>[/<variant>]}/`
   -- gitignored build artifacts with a `meta.json` each.
-- `docs/` -- operator notes (e.g. releasing prebuilt QEMU).
+- `docs/` -- operator notes (getting started, releasing
+  prebuilt QEMU, nested virtualization, SoftRoCE setup,
+  system test plan).
 
 ## Quick Start
 
 ```bash
-ltvm install
+sudo ./ltvm install
 ltvm target fetch rocky9
 ltvm build status
 ```
 
 ## Artifacts
 
-Three cacheable artifacts per (target, arch, variant):
-**build container**, **kernel**, **VM base image**.  Each
-tracks an `input_hash` in its `meta.json`; `ltvm build
-status` reports staleness.  Images are keyed per-kernel
-(so multiple kernel minors can coexist).
+Four cacheable artifacts per (target, arch, variant):
+**build container**, **kernel**, **VM base image**, and
+**Lustre staging** (userland + modules per kernel,
+written into the Lustre tree's `.ltvm-staging/`).  The
+first three each track an `input_hash` in their
+`meta.json`; `ltvm build status` reports staleness.
+Images are keyed per-kernel (so multiple kernel minors
+can coexist).
 
 ```bash
 ltvm build container rocky9
@@ -58,7 +67,11 @@ ltvm build image rocky9                          # default kernel
 ltvm build image rocky9 --kernel 5.14-rhel9.5    # specific kernel
 ltvm build all rocky9 --lustre-tree ~/lustre-release  # stale only
 ltvm build all rocky9 --force                    # everything
+ltvm build mofed-kmods rocky9 --variant mofed-24 # MOFED kmods per variant
 ```
+
+All build commands accept `--arch <arch>` to override
+the target's configured architecture (e.g. `aarch64`).
 
 ### Kernel build inputs (from Lustre tree)
 
@@ -165,6 +178,15 @@ the short name to `kernels.available` -- no Dockerfile
 changes needed as long as the Lustre tree has the
 `.target` / `.series` / `.config` for it.
 
+### Variants
+
+A target may declare `variants:` in `targets.yaml` --
+overlay Dockerfiles (under `targets/<name>/variants/`)
+that layer on top of the base container/image, pinned
+to a specific kernel.  See rocky9's `mofed-24` for the
+canonical example: an overlay container/image pair plus
+a kernel pin and `params:` consumed by the Dockerfile.
+
 ## Development
 
 ### Interactive container shell
@@ -246,5 +268,13 @@ gh issue list / view <n> / create --title ... --body ...
 
 ## See Also
 
+- [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) --
+  first-time setup walkthrough.
 - [docs/RELEASING.md](docs/RELEASING.md) -- rebuilding the
   pre-built QEMU tarballs.
+- [docs/NESTED_VIRTUALIZATION.md](docs/NESTED_VIRTUALIZATION.md)
+  -- running ltvm under a nested hypervisor.
+- [docs/SOFTROCE_SETUP.md](docs/SOFTROCE_SETUP.md) -- LNet
+  o2iblnd over SoftRoCE.
+- [docs/SYSTEM_TEST_PLAN.md](docs/SYSTEM_TEST_PLAN.md) --
+  end-to-end test matrix.

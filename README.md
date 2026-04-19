@@ -43,63 +43,9 @@ ltvm deploy-lustre co1-single --build ~/lustre-release --mount
 | Target | Server | Client | Status |
 |--------|--------|--------|--------|
 | Rocky 9 | yes | yes | working |
-| Rocky 8 | no | yes | working |
+| Rocky 8 | yes | yes | working |
 | Rocky 10 | yes | yes | working |
 | Ubuntu 24.04 | no | yes | working |
-
-## Repository layout
-
-```
-targets/
-  common/                   # shared package lists + config
-    packages-base.txt       # packages for all targets
-    packages-server.txt     # server-only packages
-    packages-dev.txt        # build-time deps (in container)
-    packages-test.txt       # test runtime deps (IOR, dbench, etc.)
-    packages-debug.txt      # debug/profiling tools
-    kernel-config.fragment  # config overrides for all kernels
-    rc.local                # VM first-boot setup
-  targets.yaml              # all target metadata + kernel defaults
-  rocky9/
-    container.Dockerfile    # build container (GCC, e2fsprogs-wc)
-    image.Dockerfile        # VM rootfs image
-    packages-os.txt         # OS-specific packages
-
-artifacts/                  # persistent build artifacts (gitignored)
-  rocky9/x86_64/            # arch always nested (even for x86_64)
-    container/
-      image.tar
-      meta.json
-    kernels/
-      5.14-rhel9.7-5.14.0-611...   # resolved kernel dirs (per kver)
-        vmlinux
-        vmlinuz
-        modules/
-        build-tree/
-        meta.json
-    images/
-      5.14-rhel9.7-5.14.0-611...   # per-kernel image
-        base.ext4
-        meta.json
-    cache/                  # downloaded SRPMs
-
-ltvm_pkg/                   # Python package (CLI + implementation)
-  cli.py                    # cmd_* handlers
-  target_config.py          # targets.yaml parsing, staleness detection
-  kernel_build.py           # kernel build (SRPM + patches + config)
-  image_build.py            # VM image builder (rootless mke2fs -d)
-  lustre_build.py           # containerized Lustre build + staging
-  lustre_compat.py          # Lustre/kernel compatibility gate
-  release_package.py        # package / fetch / publish to GitHub
-  host_setup.py             # sudo ltvm install flow
-  vm_state.py               # VMInfo, ClusterInfo, paths, constants
-  vm_net.py                 # TAP, bridge, DNS, SSH registry
-  vm_commands.py            # single-VM CLI handlers
-  vm_cluster.py             # multi-node cluster management
-  qemu_run.py               # QEMU launch / lifecycle
-
-ltvm                        # main CLI entry point (argparse dispatch only)
-```
 
 ## ltvm commands
 
@@ -138,7 +84,9 @@ ltvm build status               Staleness table (one row per built kernel)
 ```
 ltvm target list                List configured targets + local/remote status
 ltvm target show <target>       Detailed view of one target
+ltvm target build <target>      Container + kernel + image (alias for build all)
 ltvm target clean <target>      Remove built artifacts
+ltvm target delete <target>     Delete artifacts (local; --remote for GitHub release)
 ltvm target validate <target>   Read-only Lustre/kernel compat check
 ltvm target fetch <target>      Download latest release tarballs
 ltvm target export <target>     Bake a bootable qcow2/raw (no ltvm runtime)
