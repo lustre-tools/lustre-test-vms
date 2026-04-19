@@ -27,14 +27,41 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import signal
 import subprocess
+import sys
 import tempfile
+import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+# podman machine on macOS occasionally drops its socket while tearing
+# down a container that `podman run --rm` was waiting on.  The inner
+# workload exits 0, artifacts are on disk, and then podman's own
+# removal / wait API call hits EOF and the outer command returns
+# non-zero (126).  We detect that shape post-hoc and let the caller
+# decide whether to treat it as success.
+_CLEANUP_EOF_MARKERS = (
+    re.compile(r"Removing container.*EOF", re.IGNORECASE),
+    re.compile(r"wait for container.*EOF", re.IGNORECASE),
+)
+
+
+def _stderr_matches_cleanup_eof(stderr: str) -> bool:
+    """True when *stderr* looks like a podman cleanup EOF symptom.
+
+    Matches when the text contains 'EOF' alongside either
+    'Removing container' or 'wait for container'.  Robust to minor
+    message drift across podman versions.
+    """
+    if not stderr or "EOF" not in stderr:
+        return False
+    return any(m.search(stderr) for m in _CLEANUP_EOF_MARKERS)
 
 # Grace period between `podman kill --signal TERM` and the KILL
 # escalation.  2s is plenty for podman to forward TERM to the
@@ -98,11 +125,14 @@ def run_podman_with_cleanup(
         if not any(c == "--ulimit" or c.startswith("--ulimit=") for c in cmd):
             # Kernel kbuild opens thousands of file descriptors walking
             # Kconfig / generated headers; podman machine on macOS
-            # defaults to ~1024 and the build aborts with
-            # "Too many open files.  Stop.".  Raise the soft+hard limit
-            # to the value podman itself recommends for long-running
-            # container workloads.
-            injected += ["--ulimit", "nofile=1048576:1048576"]
+            # defaults to ~1024 and the build aborts with "Too many
+            # open files.  Stop.".  Keep the bump modest so it stays
+            # within rootless podman's RLIMIT_NOFILE hard cap -- raising
+            # beyond that fails with "OCI permission denied" (crun
+            # can't setrlimit above the container's inherited hard
+            # limit).  64k is ~16x the worst observed kbuild usage and
+            # comfortably below the rootless cap on macOS machines.
+            injected += ["--ulimit", "nofile=65536:65536"]
         if injected:
             final_cmd = [cmd[0], cmd[1], *injected, *cmd[2:]]
 
@@ -111,6 +141,16 @@ def run_podman_with_cleanup(
     # tear the container down gracefully.
     popen_kwargs = dict(kwargs)
     popen_kwargs.setdefault("start_new_session", True)
+
+    # Tee stderr into a bounded ring buffer so we can inspect it
+    # post-hoc for the podman-machine cleanup-EOF symptom (exit 126
+    # after the inner workload succeeded).  Only enabled when the
+    # caller hasn't asked for their own stderr handling.
+    tee_thread: threading.Thread | None = None
+    tee_buffer: deque[str] | None = None
+    if "stderr" not in popen_kwargs and "capture_output" not in popen_kwargs:
+        popen_kwargs["stderr"] = subprocess.PIPE
+        tee_buffer = deque(maxlen=200)
 
     proc: subprocess.Popen[Any] | None = None
     signal_received: list[int] = []
@@ -171,6 +211,14 @@ def run_podman_with_cleanup(
     prev_term = signal.signal(signal.SIGTERM, _handler)
     try:
         proc = subprocess.Popen(final_cmd, **popen_kwargs)
+        proc_stderr = getattr(proc, "stderr", None)
+        if tee_buffer is not None and proc_stderr is not None:
+            tee_thread = threading.Thread(
+                target=_tee_stderr,
+                args=(proc_stderr, sys.stderr, tee_buffer),
+                daemon=True,
+            )
+            tee_thread.start()
         try:
             returncode = proc.wait()
         except KeyboardInterrupt:
@@ -179,6 +227,8 @@ def run_podman_with_cleanup(
             # yet.  Same cleanup path.
             _handler(signal.SIGINT, None)
             returncode = proc.wait()
+        if tee_thread is not None:
+            tee_thread.join(timeout=1.0)
     finally:
         signal.signal(signal.SIGINT, prev_int)
         signal.signal(signal.SIGTERM, prev_term)
@@ -196,12 +246,51 @@ def run_podman_with_cleanup(
         # 128 + signum matches what the shell reports.
         raise SystemExit(128 + sig)
 
-    if check and returncode != 0:
-        raise subprocess.CalledProcessError(returncode, final_cmd)
-
-    # subprocess.CompletedProcess fields we can reasonably fill in:
-    # stdout/stderr are None unless the caller passed capture args,
-    # which we don't support (these builds stream to the terminal).
-    return subprocess.CompletedProcess(
-        args=final_cmd, returncode=returncode, stdout=None, stderr=None
+    tail_stderr = "".join(tee_buffer) if tee_buffer is not None else ""
+    cleanup_eof = (
+        returncode != 0 and _stderr_matches_cleanup_eof(tail_stderr)
     )
+
+    # cleanup_eof suppresses check=True's CalledProcessError -- callers
+    # must inspect `result.cleanup_eof` and verify expected artifacts
+    # exist before treating it as success.
+    if check and returncode != 0 and not cleanup_eof:
+        err = subprocess.CalledProcessError(returncode, final_cmd)
+        err.stderr = tail_stderr
+        raise err
+
+    result = subprocess.CompletedProcess(
+        args=final_cmd,
+        returncode=returncode,
+        stdout=None,
+        stderr=tail_stderr if tee_buffer is not None else None,
+    )
+    result.cleanup_eof = cleanup_eof  # type: ignore[attr-defined]
+    return result
+
+
+def _tee_stderr(
+    src: Any,
+    dst: Any,
+    ring: deque[str],
+) -> None:
+    """Copy *src* to *dst* while recording lines into *ring*."""
+    try:
+        for raw in iter(src.readline, b""):
+            try:
+                line = raw.decode("utf-8", errors="replace")
+            except AttributeError:
+                line = raw
+            ring.append(line)
+            try:
+                dst.write(line)
+                dst.flush()
+            except (OSError, ValueError):
+                pass
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            src.close()
+        except OSError:
+            pass

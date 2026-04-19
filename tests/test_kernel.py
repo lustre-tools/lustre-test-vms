@@ -12,8 +12,10 @@ from ltvm_pkg.kernel_build import (
     SrpmNotFoundError,
     _build_config_fragment,
     _ensure_container_image,
+    _kernel_outputs_complete,
     _list_lustre_kernel_targets,
     _lustre_target_family,
+    _run_kernel_podman,
     _shell_var,
     _srpm_fallback_urls,
     apply_srpm_override,
@@ -709,3 +711,100 @@ class TestApplySrpmOverride:
     def test_invalid_override_raises(self) -> None:
         with pytest.raises(ValueError, match="must be '<lnxmaj>-<lnxrel>'"):
             apply_srpm_override(self._TI, "nohyphen", "6.12-rhel10.0")
+
+
+class TestKernelOutputsComplete:
+    """Artifact presence check used by the cleanup-EOF tolerance path."""
+
+    def _make_complete(self, base: Path) -> None:
+        (base / "vmlinux").write_bytes(b"\x7fELF")
+        (base / "vmlinuz").write_bytes(b"MZ")
+        bt = base / "build-tree"
+        bt.mkdir()
+        (bt / ".config").write_text("CONFIG_FOO=y\n")
+        mod = base / "modules" / "lib" / "modules" / "6.1.0"
+        mod.mkdir(parents=True)
+        (mod / "kernel.ko").write_bytes(b"x")
+
+    def test_complete(self, tmp_path: Path) -> None:
+        self._make_complete(tmp_path)
+        assert _kernel_outputs_complete(tmp_path)
+
+    def test_missing_vmlinux(self, tmp_path: Path) -> None:
+        self._make_complete(tmp_path)
+        (tmp_path / "vmlinux").unlink()
+        assert not _kernel_outputs_complete(tmp_path)
+
+    def test_missing_build_tree_config(self, tmp_path: Path) -> None:
+        self._make_complete(tmp_path)
+        (tmp_path / "build-tree" / ".config").unlink()
+        assert not _kernel_outputs_complete(tmp_path)
+
+    def test_no_modules(self, tmp_path: Path) -> None:
+        self._make_complete(tmp_path)
+        import shutil as _sh
+        _sh.rmtree(tmp_path / "modules")
+        (tmp_path / "modules").mkdir()
+        assert not _kernel_outputs_complete(tmp_path)
+
+
+class TestRunKernelPodman:
+    """Wrapper that tolerates cleanup EOF when outputs are on disk."""
+
+    def _populate_outputs(self, base: Path) -> None:
+        (base / "vmlinux").write_bytes(b"\x7fELF")
+        (base / "vmlinuz").write_bytes(b"MZ")
+        bt = base / "build-tree"
+        bt.mkdir()
+        (bt / ".config").write_text("CONFIG_FOO=y\n")
+        mod = base / "modules" / "lib" / "modules" / "6.1.0"
+        mod.mkdir(parents=True)
+        (mod / "kernel.ko").write_bytes(b"x")
+
+    def test_cleanup_eof_with_outputs_is_success(
+        self, tmp_path: Path
+    ) -> None:
+        self._populate_outputs(tmp_path)
+        fake = MagicMock()
+        fake.returncode = 126
+        fake.cleanup_eof = True
+        with patch(
+            "ltvm_pkg.kernel_build.run_podman_with_cleanup", return_value=fake
+        ):
+            _run_kernel_podman(["podman", "run", "foo"], tmp_path)
+
+    def test_cleanup_eof_without_outputs_raises(
+        self, tmp_path: Path
+    ) -> None:
+        import subprocess as _subprocess
+
+        fake = MagicMock()
+        fake.returncode = 126
+        fake.cleanup_eof = True
+        with patch(
+            "ltvm_pkg.kernel_build.run_podman_with_cleanup", return_value=fake
+        ):
+            with pytest.raises(_subprocess.CalledProcessError):
+                _run_kernel_podman(["podman", "run", "foo"], tmp_path)
+
+    def test_nonzero_without_eof_raises(self, tmp_path: Path) -> None:
+        import subprocess as _subprocess
+
+        self._populate_outputs(tmp_path)
+        fake = MagicMock()
+        fake.returncode = 2
+        fake.cleanup_eof = False
+        with patch(
+            "ltvm_pkg.kernel_build.run_podman_with_cleanup", return_value=fake
+        ):
+            with pytest.raises(_subprocess.CalledProcessError):
+                _run_kernel_podman(["podman", "run", "foo"], tmp_path)
+
+    def test_success_returns(self, tmp_path: Path) -> None:
+        fake = MagicMock()
+        fake.returncode = 0
+        fake.cleanup_eof = False
+        with patch(
+            "ltvm_pkg.kernel_build.run_podman_with_cleanup", return_value=fake
+        ):
+            _run_kernel_podman(["podman", "run", "foo"], tmp_path)

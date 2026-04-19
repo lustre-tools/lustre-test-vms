@@ -26,7 +26,10 @@ from unittest.mock import patch
 
 import pytest
 
-from ltvm_pkg.podman_run import run_podman_with_cleanup
+from ltvm_pkg.podman_run import (
+    _stderr_matches_cleanup_eof,
+    run_podman_with_cleanup,
+)
 
 
 class TestHappyPath:
@@ -70,8 +73,11 @@ class TestCidfileInjection:
         # --cidfile lands right after `podman run`
         assert cmd[:2] == ["podman", "run"]
         assert idx == 2
-        # downstream args are preserved in order
-        assert cmd[idx + 2 :] == ["--rm", "busybox", "true"]
+        # downstream args are preserved in order; --ulimit is injected
+        # between --cidfile and the original tail
+        assert cmd[-3:] == ["--rm", "busybox", "true"]
+        assert "--ulimit" in cmd
+        assert cmd[cmd.index("--ulimit") + 1] == "nofile=65536:65536"
 
     def test_non_run_subcommand_passthrough(self) -> None:
         captured: list[list[str]] = []
@@ -143,3 +149,81 @@ class TestSignalHandling:
                 run_podman_with_cleanup(["sleep", "30"])
         finally:
             t.join()
+
+
+class TestCleanupEofDetection:
+    """Pattern matcher for podman-machine cleanup-EOF symptom.
+
+    The tee/ring-buffer machinery in run_podman_with_cleanup is
+    exercised indirectly by the build-site tests (kernel/lustre/
+    mofed); here we just verify the standalone pattern matcher and
+    the post-hoc flagging on CompletedProcess.
+    """
+
+    def test_removing_container_eof_matches(self) -> None:
+        stderr = (
+            "=== Kernel build complete ===\n"
+            "ERRO[1569] Removing container 428f5: "
+            "Delete 'http://d/v5.8.2/libpod/containers/428f5?"
+            "force=false&volumes=true': EOF\n"
+        )
+        assert _stderr_matches_cleanup_eof(stderr)
+
+    def test_wait_for_container_eof_matches(self) -> None:
+        stderr = (
+            "Error: wait for container: "
+            "Post 'http://d/v5.8.2/libpod/containers/x/wait': EOF\n"
+        )
+        assert _stderr_matches_cleanup_eof(stderr)
+
+    def test_plain_error_does_not_match(self) -> None:
+        assert not _stderr_matches_cleanup_eof("make: *** [vmlinux] Error 1")
+
+    def test_eof_without_container_context_does_not_match(self) -> None:
+        assert not _stderr_matches_cleanup_eof("unexpected EOF in stream")
+
+    def test_empty_stderr_does_not_match(self) -> None:
+        assert not _stderr_matches_cleanup_eof("")
+
+    def test_nonzero_with_cleanup_eof_suppresses_check(
+        self, tmp_path: Path
+    ) -> None:
+        eof = (
+            "ERRO[1569] Removing container 428f5: Delete "
+            "'http://d/v5.8.2/libpod/containers/428f5?"
+            "force=false&volumes=true': EOF\n"
+            "Error: wait for container: Post "
+            "'http://d/.../wait': EOF\n"
+        )
+        script = tmp_path / "run.sh"
+        script.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s' {repr(eof)} >&2\n"
+            "exit 126\n"
+        )
+        script.chmod(0o755)
+
+        # check=True should NOT raise -- cleanup_eof suppresses it.
+        r = run_podman_with_cleanup([str(script)], check=True)
+        assert r.returncode == 126
+        assert getattr(r, "cleanup_eof", False) is True
+        assert "EOF" in (r.stderr or "")
+
+    def test_nonzero_without_cleanup_eof_still_raises(
+        self, tmp_path: Path
+    ) -> None:
+        script = tmp_path / "run.sh"
+        script.write_text(
+            "#!/bin/sh\n"
+            "echo 'make: *** [vmlinux] Error 1' >&2\n"
+            "exit 2\n"
+        )
+        script.chmod(0o755)
+
+        with pytest.raises(subprocess.CalledProcessError):
+            run_podman_with_cleanup([str(script)], check=True)
+
+    def test_success_has_no_cleanup_eof(self) -> None:
+        r = run_podman_with_cleanup(["true"])
+        assert r.returncode == 0
+        assert getattr(r, "cleanup_eof", False) is False

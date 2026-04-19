@@ -33,6 +33,46 @@ INNER_SCRIPT = Path(__file__).parent / "kernel-build-inner.sh"
 INNER_SCRIPT_DEB = Path(__file__).parent / "kernel-build-inner-deb.sh"
 
 
+def _kernel_outputs_complete(kernel_out: Path) -> bool:
+    """Return True when a kernel build's expected outputs are on disk.
+
+    Checked: vmlinux, vmlinuz, build-tree/.config, and at least one
+    .ko under modules/.
+    """
+    if not (kernel_out / "vmlinux").exists():
+        return False
+    if not (kernel_out / "vmlinuz").exists():
+        return False
+    if not (kernel_out / "build-tree" / ".config").exists():
+        return False
+    modules_dir = kernel_out / "modules"
+    return modules_dir.is_dir() and next(modules_dir.rglob("*.ko"), None) is not None
+
+
+def _run_kernel_podman(
+    container_cmd: list[str], kernel_out: Path
+) -> None:
+    """Run a kernel-build podman container, tolerating cleanup EOF.
+
+    When podman exits non-zero after the inner build succeeded (macOS
+    podman-machine socket drops during container removal), we treat
+    the build as a success if the expected kernel outputs are on disk.
+    Genuine failures still propagate as ``CalledProcessError``.
+    """
+    r = run_podman_with_cleanup(container_cmd, check=True)
+    if r.returncode == 0:
+        return
+    if getattr(r, "cleanup_eof", False) and _kernel_outputs_complete(kernel_out):
+        log.warning(
+            "Kernel build finished but podman cleanup exited %d with an "
+            "EOF (macOS podman-machine socket drop).  Artifacts are on "
+            "disk; treating as success.",
+            r.returncode,
+        )
+        return
+    raise subprocess.CalledProcessError(r.returncode, container_cmd)
+
+
 # ------------------------------------------------------------------
 # Lustre target file parsing
 # ------------------------------------------------------------------
@@ -831,7 +871,7 @@ def _build_kernel_deb(
             jobs,
             deb_source,
         )
-        run_podman_with_cleanup(container_cmd, check=True)
+        _run_kernel_podman(container_cmd, kernel_out)
 
     return _finalize_kernel_build(
         target_config,
@@ -994,7 +1034,7 @@ def _build_kernel_srpm(
         ]
 
         log.info("Starting kernel build in container (j%d)...", jobs)
-        run_podman_with_cleanup(container_cmd, check=True)
+        _run_kernel_podman(container_cmd, kernel_out)
 
     # extra_hash MUST match what was used in the is_stale check above,
     # otherwise the persisted hash and the next-run input_hash diverge

@@ -672,8 +672,17 @@ fi""")
     print(f"--- Building in container (j{jobs})...")
     r = run_podman_with_cleanup(cmd)
     if r.returncode != 0:
-        _show_configure_log(lustre_tree)
-        raise RuntimeError(f"Container build failed (rc={r.returncode})")
+        has_ko = any((host_staging / "lib" / "modules").rglob("*.ko")) \
+            if (host_staging / "lib" / "modules").is_dir() else False
+        if getattr(r, "cleanup_eof", False) and has_ko:
+            print(
+                f"--- WARNING: Lustre build finished but podman cleanup "
+                f"exited {r.returncode} with an EOF (macOS podman-machine "
+                f"socket drop).  Artifacts are on disk; treating as success."
+            )
+        else:
+            _show_configure_log(lustre_tree)
+            raise RuntimeError(f"Container build failed (rc={r.returncode})")
 
     # Chown the lustre tree back to the real user after the build.
     # The container's root mapped to host root in the bind mount, so

@@ -188,9 +188,18 @@ def build_mofed_kmods(
     ]
     r = run_podman_with_cleanup(cmd)
     if r.returncode != 0:
-        raise RuntimeError(
-            f"MOFED kmod build failed (rc={r.returncode})"
-        )
+        have_rpms = any(out_dir.glob("*.rpm"))
+        if getattr(r, "cleanup_eof", False) and have_rpms:
+            log.warning(
+                "MOFED kmod build finished but podman cleanup exited %d "
+                "with an EOF (macOS podman-machine socket drop).  RPMs "
+                "are on disk; treating as success.",
+                r.returncode,
+            )
+        else:
+            raise RuntimeError(
+                f"MOFED kmod build failed (rc={r.returncode})"
+            )
 
     rpms = sorted(p.name for p in out_dir.glob("*.rpm"))
     if not rpms:
