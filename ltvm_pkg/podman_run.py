@@ -150,8 +150,11 @@ def run_podman_with_cleanup(
         if not cid:
             return
         try:
+            # --time 0 skips the default 10s stop-timeout -- we've
+            # already sent SIGKILL via `podman kill` above, so there's
+            # no graceful shutdown to wait for.
             subprocess.run(
-                ["podman", "rm", "-f", cid],
+                ["podman", "rm", "-f", "--time", "0", cid],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -167,18 +170,22 @@ def run_podman_with_cleanup(
             return
         signal_received.append(signum)
         log.warning(
-            "Received signal %s, killing container and podman child...",
+            "Received signal %s, tearing down container...",
             signum,
         )
-        _kill_container("TERM")
+        # `podman rm -f --time 0` is the only reliable cleanup:
+        # conmon has typically daemonized into its own session by the
+        # time we run, so `killpg` on our podman-run child doesn't
+        # reach it; `podman kill --signal KILL` merely asks conmon to
+        # SIGKILL PID 1, which can race with an in-flight runc action
+        # and leave the container alive.  `rm -f` talks to podman's
+        # own DB and forcibly tears everything down.
+        _force_remove_container()
         if proc is not None:
-            # Give podman a chance to forward TERM to its managed
-            # container and exit cleanly before we escalate.
             deadline = time.monotonic() + _GRACE_SECONDS
             while proc.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.05)
             if proc.poll() is None:
-                _kill_container("KILL")
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError, OSError):
