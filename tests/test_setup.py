@@ -12,8 +12,12 @@ import pytest
 from ltvm_pkg.host_setup import (
     SSH_BLOCK_MARKER,
     HostInfo,
+    _check_stale_ltvm_launcher,
+    _install_ltvm_launcher,
+    _ltvm_launcher_needs_write,
     _network_already_configured,
     _qemu_installed_version,
+    _render_ltvm_launcher,
     _translate_pkgs,
     check_kvm,
     check_prerequisites,
@@ -949,3 +953,219 @@ class TestShouldStopPodmanMachineMacos:
             return_value=self._completed(0, "not json"),
         ):
             assert should_stop_podman_machine_macos() is False
+
+
+# ------------------------------------------------------------------
+# TestLtvmLauncher
+# ------------------------------------------------------------------
+
+
+class TestRenderLtvmLauncher:
+    def test_contains_shebang(self) -> None:
+        text = _render_ltvm_launcher("/opt/homebrew/bin/python3.13", "/r/ltvm")
+        assert text.startswith("#!/bin/sh\n")
+
+    def test_exec_line_pins_python_and_script(self) -> None:
+        text = _render_ltvm_launcher(
+            "/opt/homebrew/bin/python3.13",
+            "/Users/me/repo/ltvm",
+        )
+        assert (
+            "exec '/opt/homebrew/bin/python3.13' '/Users/me/repo/ltvm' \"$@\"\n"
+            in text
+        )
+
+    def test_different_python_produces_different_text(self) -> None:
+        a = _render_ltvm_launcher("/usr/bin/python3.11", "/r/ltvm")
+        b = _render_ltvm_launcher("/opt/homebrew/bin/python3.13", "/r/ltvm")
+        assert a != b
+
+
+class TestInstallLtvmLauncher:
+    def _make_repo_ltvm(self, tmp_path: Path) -> Path:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        script = repo / "ltvm"
+        script.write_text("#!/usr/bin/env python3\n")
+        script.chmod(0o755)
+        return script
+
+    def test_writes_wrapper_when_missing(self, tmp_path: Path) -> None:
+        script = self._make_repo_ltvm(tmp_path)
+        link = tmp_path / "bin" / "ltvm"
+        link.parent.mkdir()
+
+        def fake_sudo(cmd: list, **kw: object) -> subprocess.CompletedProcess:
+            # Simulate `install -m 0755 <tmp> <dest>` by copying.
+            src, dst = cmd[-2], cmd[-1]
+            Path(dst).write_text(Path(src).read_text())
+            Path(dst).chmod(0o755)
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        with (
+            patch(
+                "ltvm_pkg.host_setup.sys.executable",
+                "/opt/homebrew/bin/python3.13",
+            ),
+            patch("ltvm_pkg.host_setup._sudo_run", side_effect=fake_sudo) as sr,
+        ):
+            wrote = _install_ltvm_launcher(link, script)
+
+        assert wrote is True
+        sr.assert_called_once()
+        text = link.read_text()
+        assert text.startswith("#!/bin/sh\n")
+        assert (
+            f"exec '/opt/homebrew/bin/python3.13' '{script.resolve()}' \"$@\"\n"
+            in text
+        )
+
+    def test_idempotent_no_rewrite(self, tmp_path: Path) -> None:
+        """Existing identical wrapper -> no sudo call, returns False."""
+        script = self._make_repo_ltvm(tmp_path)
+        link = tmp_path / "bin" / "ltvm"
+        link.parent.mkdir()
+
+        python = "/opt/homebrew/bin/python3.13"
+        link.write_text(_render_ltvm_launcher(python, str(script.resolve())))
+        link.chmod(0o755)
+
+        with (
+            patch("ltvm_pkg.host_setup.sys.executable", python),
+            patch("ltvm_pkg.host_setup._sudo_run") as sr,
+        ):
+            wrote = _install_ltvm_launcher(link, script)
+
+        assert wrote is False
+        sr.assert_not_called()
+
+    def test_changed_python_triggers_rewrite(self, tmp_path: Path) -> None:
+        """A different sys.executable than last install -> rewrite."""
+        script = self._make_repo_ltvm(tmp_path)
+        link = tmp_path / "bin" / "ltvm"
+        link.parent.mkdir()
+        link.write_text(
+            _render_ltvm_launcher("/usr/bin/python3.11", str(script.resolve()))
+        )
+        link.chmod(0o755)
+
+        def fake_sudo(cmd: list, **kw: object) -> subprocess.CompletedProcess:
+            src, dst = cmd[-2], cmd[-1]
+            Path(dst).write_text(Path(src).read_text())
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        with (
+            patch(
+                "ltvm_pkg.host_setup.sys.executable",
+                "/opt/homebrew/bin/python3.13",
+            ),
+            patch("ltvm_pkg.host_setup._sudo_run", side_effect=fake_sudo) as sr,
+        ):
+            wrote = _install_ltvm_launcher(link, script)
+
+        assert wrote is True
+        sr.assert_called_once()
+        assert "/opt/homebrew/bin/python3.13" in link.read_text()
+        assert "/usr/bin/python3.11" not in link.read_text()
+
+    def test_replaces_symlink(self, tmp_path: Path) -> None:
+        """A pre-existing symlink (old install layout) is replaced by a file."""
+        script = self._make_repo_ltvm(tmp_path)
+        link = tmp_path / "bin" / "ltvm"
+        link.parent.mkdir()
+        link.symlink_to(script)
+
+        def fake_sudo(cmd: list, **kw: object) -> subprocess.CompletedProcess:
+            src, dst = cmd[-2], cmd[-1]
+            dst_p = Path(dst)
+            if dst_p.is_symlink() or dst_p.exists():
+                dst_p.unlink()
+            dst_p.write_text(Path(src).read_text())
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        with (
+            patch(
+                "ltvm_pkg.host_setup.sys.executable",
+                "/opt/homebrew/bin/python3.13",
+            ),
+            patch("ltvm_pkg.host_setup._sudo_run", side_effect=fake_sudo),
+        ):
+            wrote = _install_ltvm_launcher(link, script)
+
+        assert wrote is True
+        assert not link.is_symlink()
+        assert link.read_text().startswith("#!/bin/sh\n")
+
+
+class TestLtvmLauncherNeedsWrite:
+    def test_missing_link_needs_write(self, tmp_path: Path) -> None:
+        script = tmp_path / "ltvm"
+        script.write_text("x")
+        link = tmp_path / "bin" / "ltvm"
+        with patch(
+            "ltvm_pkg.host_setup.sys.executable", "/opt/homebrew/bin/python3.13"
+        ):
+            assert _ltvm_launcher_needs_write(link, script) is True
+
+    def test_symlink_needs_write(self, tmp_path: Path) -> None:
+        script = tmp_path / "ltvm"
+        script.write_text("x")
+        link = tmp_path / "ltvm-link"
+        link.symlink_to(script)
+        with patch(
+            "ltvm_pkg.host_setup.sys.executable", "/opt/homebrew/bin/python3.13"
+        ):
+            assert _ltvm_launcher_needs_write(link, script) is True
+
+    def test_matching_wrapper_no_write(self, tmp_path: Path) -> None:
+        script = tmp_path / "ltvm"
+        script.write_text("x")
+        link = tmp_path / "bin"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        python = "/opt/homebrew/bin/python3.13"
+        link.write_text(_render_ltvm_launcher(python, str(script.resolve())))
+        with patch("ltvm_pkg.host_setup.sys.executable", python):
+            assert _ltvm_launcher_needs_write(link, script) is False
+
+
+class TestCheckStaleLtvmLauncher:
+    def test_missing_link_silent(self, tmp_path: Path) -> None:
+        link = tmp_path / "ltvm"
+        with patch("ltvm_pkg.host_setup.log") as mock_log:
+            _check_stale_ltvm_launcher(link)
+        mock_log.warning.assert_not_called()
+
+    def test_symlink_silent(self, tmp_path: Path) -> None:
+        """Old-style symlink: not our wrapper, don't complain."""
+        target = tmp_path / "ltvm"
+        target.write_text("x")
+        link = tmp_path / "ltvm-link"
+        link.symlink_to(target)
+        with patch("ltvm_pkg.host_setup.log") as mock_log:
+            _check_stale_ltvm_launcher(link)
+        mock_log.warning.assert_not_called()
+
+    def test_live_python_silent(self, tmp_path: Path) -> None:
+        """Wrapper pointing at an existing Python -> no warning."""
+        script = tmp_path / "ltvm"
+        script.write_text("x")
+        python = tmp_path / "python"
+        python.write_text("")
+        link = tmp_path / "bin-ltvm"
+        link.write_text(_render_ltvm_launcher(str(python), str(script)))
+        with patch("ltvm_pkg.host_setup.log") as mock_log:
+            _check_stale_ltvm_launcher(link)
+        mock_log.warning.assert_not_called()
+
+    def test_dead_python_warns(self, tmp_path: Path) -> None:
+        script = tmp_path / "ltvm"
+        script.write_text("x")
+        dead = tmp_path / "does-not-exist"
+        link = tmp_path / "bin-ltvm"
+        link.write_text(_render_ltvm_launcher(str(dead), str(script)))
+        with patch("ltvm_pkg.host_setup.log") as mock_log:
+            _check_stale_ltvm_launcher(link)
+        mock_log.warning.assert_called_once()
+        args = mock_log.warning.call_args[0]
+        assert "stale" in args[0]
+        assert str(dead) in args

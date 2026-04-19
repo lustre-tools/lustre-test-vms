@@ -14,6 +14,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -1650,6 +1651,90 @@ def print_verify(results: dict[str, Any]) -> None:
 
 
 # ------------------------------------------------------------------
+# ltvm launcher wrapper
+# ------------------------------------------------------------------
+
+
+def _render_ltvm_launcher(python: str, script: str) -> str:
+    """Render the /usr/local/bin/ltvm wrapper script text.
+
+    Pins the Python interpreter so PATH drift on the host (e.g. an older
+    /usr/bin/python3 shadowing a brew python) can't send ltvm through a
+    Python that fails its own 3.10 floor check.
+    """
+    return (
+        "#!/bin/sh\n"
+        f"exec '{python}' '{script}' \"$@\"\n"
+    )
+
+
+def _desired_ltvm_launcher(repo_ltvm: Path) -> str:
+    return _render_ltvm_launcher(sys.executable, str(repo_ltvm.resolve()))
+
+
+def _ltvm_launcher_needs_write(link: Path, repo_ltvm: Path) -> bool:
+    """True if ``link`` isn't already our exact wrapper for ``repo_ltvm``."""
+    desired = _desired_ltvm_launcher(repo_ltvm)
+    try:
+        if link.is_symlink() or not link.exists():
+            return True
+        return link.read_text() != desired
+    except OSError:
+        return True
+
+
+def _install_ltvm_launcher(link: Path, repo_ltvm: Path) -> bool:
+    """Install a shell wrapper at ``link`` that exec()s the repo's ltvm
+    under the Python currently executing this code.
+
+    Returns True if a write was performed, False if the existing wrapper
+    was already identical (no sudo rewrite needed).
+    """
+    if not _ltvm_launcher_needs_write(link, repo_ltvm):
+        return False
+
+    desired = _desired_ltvm_launcher(repo_ltvm)
+    with tempfile.NamedTemporaryFile(
+        mode="w", prefix="ltvm-launcher.", delete=False
+    ) as tf:
+        tf.write(desired)
+        tmp_path = tf.name
+    try:
+        _sudo_run(["install", "-m", "0755", tmp_path, str(link)])
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+    log.info("ltvm launcher installed to %s -> %s", link, sys.executable)
+    return True
+
+
+def _check_stale_ltvm_launcher(link: Path) -> None:
+    """Warn if ``link`` is a wrapper pinning a Python that no longer exists.
+
+    Happens after a Homebrew Python version change or a pyenv cleanup:
+    the old wrapper still points at a binary that's gone, so any `ltvm`
+    invocation fails with a cryptic /bin/sh exec error before Python runs.
+    """
+    try:
+        if not link.exists() or link.is_symlink():
+            return
+        text = link.read_text()
+    except OSError:
+        return
+    m = re.search(r"^exec '([^']+)'", text, flags=re.MULTILINE)
+    if not m:
+        return
+    pinned = m.group(1)
+    if Path(pinned).exists():
+        return
+    log.warning(
+        "stale ltvm launcher at %s points to missing Python %s; "
+        "re-run `./ltvm install` to repin it.",
+        link,
+        pinned,
+    )
+
+
+# ------------------------------------------------------------------
 # Top-level orchestration
 # ------------------------------------------------------------------
 
@@ -1672,10 +1757,11 @@ def _run_setup_macos(
 
     ltvm_script = REPO_ROOT / "ltvm"
     link = Path("/usr/local/bin/ltvm")
-    need_symlink = ltvm_script.exists() and not (
-        link.is_symlink() and link.resolve() == ltvm_script.resolve()
+    _check_stale_ltvm_launcher(link)
+    need_launcher = ltvm_script.exists() and _ltvm_launcher_needs_write(
+        link, ltvm_script
     )
-    if "qemu" in active or need_symlink:
+    if "qemu" in active or need_launcher:
         _sudo_prime(
             "Installing ltvm on macOS needs sudo for /opt/qemu and "
             f"{link}"
@@ -1691,12 +1777,11 @@ def _run_setup_macos(
     if "podman" in active:
         install_podman_macos(force=force)
 
-    if need_symlink:
-        _sudo_run(["rm", "-f", str(link)])
-        _sudo_run(["ln", "-s", str(ltvm_script), str(link)])
-        log.info("ltvm installed to %s", link)
-    elif ltvm_script.exists():
-        log.info("ltvm already symlinked at %s", link)
+    if ltvm_script.exists():
+        if need_launcher:
+            _install_ltvm_launcher(link, ltvm_script)
+        else:
+            log.info("ltvm launcher already current at %s", link)
 
     if all_steps:
         log.info("")
@@ -1750,13 +1835,12 @@ def run_setup(
     if "ssh" in active:
         setup_ssh(subnet=subnet)
 
-    # Always symlink ltvm to PATH
+    # Always install the ltvm launcher in PATH
     ltvm_script = REPO_ROOT / "ltvm"
     if ltvm_script.exists():
         link = Path("/usr/local/bin/ltvm")
-        link.unlink(missing_ok=True)
-        link.symlink_to(ltvm_script)
-        log.info("ltvm installed to %s", link)
+        _check_stale_ltvm_launcher(link)
+        _install_ltvm_launcher(link, ltvm_script)
 
         # Some distros (Rocky 9, RHEL) ship sudoers with secure_path that
         # excludes /usr/local/bin, so `sudo ltvm` would fail with "command
