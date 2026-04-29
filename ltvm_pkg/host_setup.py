@@ -1566,10 +1566,44 @@ def setup_network(host: HostInfo, subnet: str = DEFAULT_SUBNET) -> None:
                 "check package manager errors above"
             )
 
-    # sysctl: enable IP forwarding
+    # sysctl: enable IP forwarding (+ disable bridge netfilter if the
+    # br_netfilter module is loadable).  Fresh kernels in nested VMs
+    # (notably UTM Ubuntu) don't auto-load br_netfilter, so the
+    # bridge-nf-call-* sysctls in our conf reference /proc paths that
+    # don't exist yet and `sysctl -p` fails.  Try to load the module +
+    # persist; if it's genuinely unavailable (WSL2, minimal containers,
+    # chroots), drop the bridge lines from the conf -- there's no
+    # bridge<->iptables interaction to disable in that case anyway.
+    try:
+        br_netfilter_ok = (
+            subprocess.run(
+                ["modprobe", "br_netfilter"],
+                capture_output=True,
+                text=True,
+            ).returncode == 0
+        )
+    except FileNotFoundError:
+        br_netfilter_ok = False
+
+    if br_netfilter_ok:
+        Path("/etc/modules-load.d").mkdir(parents=True, exist_ok=True)
+        Path("/etc/modules-load.d/br_netfilter.conf").write_text(
+            "br_netfilter\n"
+        )
+
     sysctl_src = HOST_CONFIG_DIR / "99-qemu-vms.conf"
+    sysctl_text = sysctl_src.read_text()
+    if not br_netfilter_ok and not Path("/proc/sys/net/bridge").exists():
+        log.warning(
+            "br_netfilter not loadable; skipping bridge-nf-call sysctls"
+        )
+        sysctl_text = "".join(
+            line + "\n"
+            for line in sysctl_text.splitlines()
+            if "bridge-nf-call" not in line
+        )
     sysctl_dst = Path("/etc/sysctl.d/99-qemu-vms.conf")
-    sysctl_dst.write_text(sysctl_src.read_text())
+    sysctl_dst.write_text(sysctl_text)
     _run(["sysctl", "-p", str(sysctl_dst)])
 
     # Generate bridge service with correct subnet
