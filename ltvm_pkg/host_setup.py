@@ -204,10 +204,11 @@ def _run(
     check: bool = True,
     quiet: bool = False,
     cwd: str | Path | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command, return CompletedProcess."""
     log.debug("run: %s", " ".join(str(c) for c in cmd))
-    r = subprocess.run(cmd, capture_output=quiet, text=True, cwd=cwd)
+    r = subprocess.run(cmd, capture_output=quiet, text=True, cwd=cwd, env=env)
     if check and r.returncode != 0:
         raise RuntimeError(
             f"Command failed (rc={r.returncode}): "
@@ -1043,11 +1044,102 @@ def _podman_machine_memory(name: str) -> int | None:
         return None
 
 
+LTVM_PODMAN_PROVIDER = "applehv"
+"""podman machine backend ltvm pins on macOS.
+
+applehv is Apple's native Hypervisor.framework: built into macOS, needs no
+helper binary, and works on Intel and Apple Silicon.  The alternative,
+libkrun, drives the VM through a separate ``krunkit`` executable and exists
+only to add GPU passthrough -- which ltvm's build VM never uses.  Recent
+podman / Podman Desktop default to libkrun on Apple Silicon, and a krunkit
+that is missing or (typically when installed via Homebrew) only half-working
+kills ``podman machine start`` with the opaque::
+
+    Error: krunkit exited unexpectedly with exit code 2
+
+Pinning applehv sidesteps that whole failure mode.
+"""
+
+_PODMAN_PROVIDER_CONF = (
+    Path.home() / ".config" / "containers" / "containers.conf.d"
+    / "ltvm-machine-provider.conf"
+)
+
+
+def _pin_podman_provider_applehv() -> None:
+    """Make applehv podman's durable default machine provider.
+
+    Writes a ``containers.conf.d`` drop-in -- the persistent, shell-
+    independent equivalent of ``export CONTAINERS_MACHINE_PROVIDER=applehv``
+    -- so every podman invocation (ltvm's and the user's own) agrees on the
+    backend.  Best-effort: a failure here is logged, not fatal, since the
+    init/start paths also pass the provider via the environment.
+    """
+    body = (
+        "# Managed by ltvm.  Pin podman machine to Apple's native\n"
+        "# Hypervisor.framework backend; libkrun/krunkit is GPU-only and a\n"
+        "# frequent source of 'krunkit exited unexpectedly' start failures.\n"
+        "# Delete this file to let podman choose its own default again.\n"
+        "[machine]\n"
+        f'provider = "{LTVM_PODMAN_PROVIDER}"\n'
+    )
+    try:
+        if (
+            _PODMAN_PROVIDER_CONF.is_file()
+            and _PODMAN_PROVIDER_CONF.read_text() == body
+        ):
+            return
+        _PODMAN_PROVIDER_CONF.parent.mkdir(parents=True, exist_ok=True)
+        _PODMAN_PROVIDER_CONF.write_text(body)
+        log.info(
+            "Pinned podman machine provider to %s (%s)",
+            LTVM_PODMAN_PROVIDER, _PODMAN_PROVIDER_CONF,
+        )
+    except OSError as e:
+        log.warning(
+            "could not pin podman provider to %s: %s",
+            LTVM_PODMAN_PROVIDER, e,
+        )
+
+
+def _podman_provider_env(
+    provider: str = LTVM_PODMAN_PROVIDER,
+) -> dict[str, str]:
+    """os.environ with CONTAINERS_MACHINE_PROVIDER forced to *provider*."""
+    return dict(os.environ, CONTAINERS_MACHINE_PROVIDER=provider)
+
+
+def _podman_machine_init_applehv() -> None:
+    log.info(
+        "Initializing podman machine on the %s backend "
+        "(podman machine init --memory=%s)...",
+        LTVM_PODMAN_PROVIDER, PODMAN_MACHINE_MEMORY_MIB,
+    )
+    _run(
+        ["podman", "machine", "init",
+         "--memory", str(PODMAN_MACHINE_MEMORY_MIB)],
+        env=_podman_provider_env(),
+    )
+
+
+def _default_or_first(
+    machines: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    for m in machines:
+        if m.get("Default"):
+            return m
+    return machines[0] if machines else None
+
+
 def install_podman_macos(force: bool = False) -> bool:
     """Install podman on macOS and ensure a podman machine is running.
 
     Returns True if this call started (or initialized+started) the machine,
     False if it was already running.  Idempotent and safe to re-run.
+
+    ltvm pins the applehv backend (see :data:`LTVM_PODMAN_PROVIDER`): on
+    Apple Silicon podman otherwise defaults to libkrun, whose krunkit helper
+    routinely fails to start, and ltvm never needs its GPU support.
     """
     if not shutil.which("podman"):
         brew = shutil.which("brew")
@@ -1061,20 +1153,40 @@ def install_podman_macos(force: bool = False) -> bool:
     elif not force:
         log.info("podman already installed")
 
+    # Make applehv the durable default before touching any machine, so this
+    # call -- and every later podman command -- targets the same backend.
+    _pin_podman_provider_applehv()
+
     machines = _podman_machine_list_macos()
-    if not machines:
-        log.info(
-            "Initializing podman machine "
-            f"(podman machine init --memory={PODMAN_MACHINE_MEMORY_MIB})..."
-        )
-        _run([
-            "podman", "machine", "init",
-            "--memory", str(PODMAN_MACHINE_MEMORY_MIB),
-        ])
+    # Machines ltvm can drive as-is: applehv, or anything not *explicitly*
+    # libkrun (older podman may omit VMType -- never destroy what we cannot
+    # positively identify as the broken backend).
+    libkrun = [m for m in machines if m.get("VMType") == "libkrun"]
+    usable = [m for m in machines if m.get("VMType") != "libkrun"]
+
+    if not usable:
+        # The only machine(s) present are on libkrun -- the backend that
+        # fails to start without a working krunkit -- so retire them and
+        # build an applehv replacement.  When a usable machine also exists
+        # we skip this entirely and leave any libkrun machine untouched.
+        for m in libkrun:
+            nm = m.get("Name") or "podman-machine-default"
+            log.warning(
+                "Retiring podman machine '%s' on the libkrun provider; ltvm "
+                "pins applehv.  Re-create it yourself if you need libkrun.",
+                nm,
+            )
+            prov_env = _podman_provider_env("libkrun")
+            _run(["podman", "machine", "stop", nm],
+                 check=False, env=prov_env)
+            _run(["podman", "machine", "rm", "--force", nm],
+                 check=False, env=prov_env)
+        _podman_machine_init_applehv()
         machines = _podman_machine_list_macos()
+        usable = [m for m in machines if m.get("VMType") != "libkrun"]
     else:
         # Bump under-provisioned machines so cross kernel builds don't OOM.
-        for m in machines:
+        for m in usable:
             name = m.get("Name") or "podman-machine-default"
             mem = _podman_machine_memory(name)
             if mem is None or mem >= PODMAN_MACHINE_MEMORY_MIB:
@@ -1085,21 +1197,25 @@ def install_podman_macos(force: bool = False) -> bool:
             )
             running = bool(m.get("Running"))
             if running:
-                _run(["podman", "machine", "stop", name])
+                _run(["podman", "machine", "stop", name],
+                     env=_podman_provider_env())
             _run([
                 "podman", "machine", "set", name,
                 "--memory", str(PODMAN_MACHINE_MEMORY_MIB),
-            ])
+            ], env=_podman_provider_env())
             if running:
-                _run(["podman", "machine", "start", name])
+                _run(["podman", "machine", "start", name],
+                     env=_podman_provider_env())
                 m["Running"] = True
 
-    if any(m.get("Running") for m in machines):
+    target = _default_or_first(usable)
+    if target is not None and target.get("Running"):
         log.info("podman machine already running")
         return False
 
+    name = (target.get("Name") if target else None) or "podman-machine-default"
     log.info("Starting podman machine (podman machine start)...")
-    _run(["podman", "machine", "start"])
+    _run(["podman", "machine", "start", name], env=_podman_provider_env())
     return True
 
 

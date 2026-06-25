@@ -700,9 +700,10 @@ class TestPrintVerify:
 
 
 class TestInstallPodmanMacos:
-    """Covers the four install_podman_macos branches on macOS.
+    """Covers the install_podman_macos branches on macOS.
 
-    Uses mocks for brew + podman so no real binaries are invoked.
+    Uses mocks for brew + podman so no real binaries are invoked, and
+    stubs the containers.conf.d provider pin so nothing touches ~/.config.
     """
 
     def _completed(
@@ -736,6 +737,7 @@ class TestInstallPodmanMacos:
 
         with (
             patch("ltvm_pkg.host_setup.shutil.which", side_effect=which),
+            patch("ltvm_pkg.host_setup._pin_podman_provider_applehv"),
             patch(
                 "ltvm_pkg.host_setup._run",
                 side_effect=lambda c, **kw: fake_run(c, **kw),
@@ -769,6 +771,7 @@ class TestInstallPodmanMacos:
                 "ltvm_pkg.host_setup.shutil.which",
                 return_value="/opt/homebrew/bin/podman",
             ),
+            patch("ltvm_pkg.host_setup._pin_podman_provider_applehv"),
             patch(
                 "ltvm_pkg.host_setup._run",
                 side_effect=lambda c, **kw: fake_run(c, **kw),
@@ -805,6 +808,7 @@ class TestInstallPodmanMacos:
                 "ltvm_pkg.host_setup.shutil.which",
                 return_value="/opt/homebrew/bin/podman",
             ),
+            patch("ltvm_pkg.host_setup._pin_podman_provider_applehv"),
             patch(
                 "ltvm_pkg.host_setup._run",
                 side_effect=lambda c, **kw: fake_run(c, **kw),
@@ -840,6 +844,7 @@ class TestInstallPodmanMacos:
                 "ltvm_pkg.host_setup.shutil.which",
                 return_value="/opt/homebrew/bin/podman",
             ),
+            patch("ltvm_pkg.host_setup._pin_podman_provider_applehv"),
             patch(
                 "ltvm_pkg.host_setup._run",
                 side_effect=lambda c, **kw: fake_run(c, **kw),
@@ -854,6 +859,84 @@ class TestInstallPodmanMacos:
         assert started is False
         assert not any("machine" in c and "init" in c for c in run_calls)
         assert not any("machine" in c and "start" in c for c in run_calls)
+
+    def test_libkrun_machine_recreated(self) -> None:
+        """A lone libkrun machine is retired and rebuilt on applehv."""
+        from ltvm_pkg.host_setup import install_podman_macos
+
+        run_calls: list[list[str]] = []
+
+        def fake_run(cmd, **kw):
+            run_calls.append(list(cmd))
+            if "machine" in cmd and "list" in cmd:
+                return self._completed(
+                    0,
+                    '[{"Name": "podman-machine-default",'
+                    ' "VMType": "libkrun", "Running": false}]',
+                )
+            return self._completed(0, "")
+
+        with (
+            patch("ltvm_pkg.host_setup._pin_podman_provider_applehv"),
+            patch(
+                "ltvm_pkg.host_setup.shutil.which",
+                return_value="/opt/homebrew/bin/podman",
+            ),
+            patch(
+                "ltvm_pkg.host_setup._run",
+                side_effect=lambda c, **kw: fake_run(c, **kw),
+            ),
+            patch(
+                "ltvm_pkg.host_setup.subprocess.run",
+                side_effect=lambda c, **kw: fake_run(c, **kw),
+            ),
+        ):
+            started = install_podman_macos()
+
+        assert started is True
+        # Retire the libkrun machine, then init + start applehv.
+        assert any("machine" in c and "rm" in c for c in run_calls)
+        assert any("machine" in c and "init" in c for c in run_calls)
+        assert any("machine" in c and "start" in c for c in run_calls)
+
+    def test_applehv_present_keeps_libkrun(self) -> None:
+        """A usable applehv machine is used; a libkrun one is left alone."""
+        from ltvm_pkg.host_setup import install_podman_macos
+
+        run_calls: list[list[str]] = []
+
+        def fake_run(cmd, **kw):
+            run_calls.append(list(cmd))
+            if "machine" in cmd and "list" in cmd:
+                return self._completed(
+                    0,
+                    '[{"Name": "podman-machine-default",'
+                    ' "VMType": "applehv", "Running": true},'
+                    ' {"Name": "krun", "VMType": "libkrun",'
+                    ' "Running": false}]',
+                )
+            return self._completed(0, "")
+
+        with (
+            patch("ltvm_pkg.host_setup._pin_podman_provider_applehv"),
+            patch(
+                "ltvm_pkg.host_setup.shutil.which",
+                return_value="/opt/homebrew/bin/podman",
+            ),
+            patch(
+                "ltvm_pkg.host_setup._run",
+                side_effect=lambda c, **kw: fake_run(c, **kw),
+            ),
+            patch(
+                "ltvm_pkg.host_setup.subprocess.run",
+                side_effect=lambda c, **kw: fake_run(c, **kw),
+            ),
+        ):
+            started = install_podman_macos()
+
+        assert started is False               # applehv default already running
+        assert not any("rm" in c for c in run_calls)
+        assert not any("machine" in c and "init" in c for c in run_calls)
 
     def test_no_brew_raises(self) -> None:
         """If podman missing and Homebrew also missing: RuntimeError."""

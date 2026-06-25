@@ -38,6 +38,33 @@ ltvm build lustre rocky9 --lustre-tree ~/lustre-release   # incremental, fast
 ltvm deploy-lustre co1-single --lustre-tree ~/lustre-release --mount
 ```
 
+## Running on macOS (Apple Silicon)
+
+ltvm runs on an Apple Silicon Mac, building/running aarch64 artifacts in
+a podman-managed Linux VM + QEMU microvms. A few things differ from Linux:
+
+- **Do not use `sudo`** for `./ltvm install` on macOS -- run it as your
+  user; it prompts for sudo internally only where it needs it (e.g.
+  `/opt/qemu`, `/usr/local/bin/ltvm`).
+- **Install Python deps first** with [uv](https://docs.astral.sh/uv/);
+  the system Python lacks PyYAML. `./ltvm` auto-uses `.venv/` when present.
+- **podman backend is pinned to `applehv`** (Apple's Hypervisor.framework).
+  `./ltvm install` forces the applehv machine provider; ltvm has no use for
+  the GPU-only libkrun backend.
+
+```bash
+git clone git@github.com:lustre-tools/lustre-test-vms.git
+cd lustre-test-vms
+
+brew install uv && uv sync              # Python deps into .venv/
+./ltvm install                          # NO sudo -- prompts internally
+ltvm doctor                             # sanity-check the host
+
+ltvm target fetch rocky9 --arch aarch64 --kernel 5.14-rhel9.5
+sudo ltvm create co1-single --kernel 5.14-rhel9.5   # VM lifecycle needs sudo
+ltvm llmount co1-single                 # mount Lustre inside the VM
+```
+
 ## Target OS support
 
 | Target | Server | Client | Status |
