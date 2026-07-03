@@ -302,10 +302,15 @@ def _list_releases(
             rel, kernel_signature, arch
         ):
             continue
+        # ltvm publishes zstd-compressed assets (.tar.zst for
+        # container/kernel/image/lustre, .qcow2.zst for bootable); the
+        # manifest .json is metadata, not a download.  The old ".tar.gz"
+        # filter predated the zstd switch and matched nothing, so
+        # `fetch --list --json` always reported an empty assets list.
         assets = [
             a["name"]
             for a in rel.get("assets", [])
-            if a["name"].endswith(".tar.gz")
+            if a["name"].endswith(".zst")
         ]
         size_mb = sum(a.get("size", 0) for a in rel.get("assets", [])) / (
             1024 * 1024
