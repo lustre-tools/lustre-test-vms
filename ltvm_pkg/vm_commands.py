@@ -1229,6 +1229,31 @@ def cmd_nmi(args: argparse.Namespace) -> int:
         return _handler_error(
             args, f"VM '{args.name}' not running", EXIT_UNREACHABLE
         )
+    # QEMU's inject-nmi and the kernel.*_nmi panic sysctls are x86-only:
+    # the aarch64 'virt' machine has no NMI device (QMP inject-nmi replies
+    # "not currently supported"), and panic_on_unrecovered_nmi /
+    # panic_on_io_nmi / unknown_nmi_panic are CONFIG_X86-gated so they
+    # don't exist on arm64.  For non-x86 guests force the crash the
+    # arch-independent way (sysrq), the same mechanism as
+    # `crash-collect --trigger`.
+    if vm.arch != "x86_64":
+        try:
+            r = run_ssh(vm.ip, "echo c > /proc/sysrq-trigger", timeout=5)
+        except subprocess.TimeoutExpired:
+            pass  # panic in flight -- ssh dying is the happy path
+        else:
+            if r.returncode != 0:
+                return _handler_error(
+                    args,
+                    f"failed to trigger crash on '{args.name}' "
+                    f"(rc={r.returncode}): "
+                    f"{(r.stderr or '').strip() or '(no stderr)'}",
+                )
+        print(
+            f"crash triggered on '{args.name}' via sysrq "
+            f"({vm.arch} has no NMI; expect panic + kdump reboot)"
+        )
+        return EXIT_OK
     # Ensure the injected NMI causes a panic.  QEMU microVM delivers
     # inject-nmi as an ISA SERR NMI (PCI system error, reason 0xff), handled
     # by mem_parity_error() which only panics when panic_on_unrecovered_nmi=1.
