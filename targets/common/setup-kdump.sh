@@ -23,7 +23,8 @@ KDUMP_COREDIR="/var/crash"
 EOF
 	systemctl enable kdump-tools 2>/dev/null || true
 else
-	# RHEL/Rocky: kexec-tools kdump service
+	# RHEL/Rocky: kdump.service (kexec-tools on el8/el9; split into
+	# kdump-utils on el10 -- see targets/rocky10/packages-os.txt).
 	cat > /etc/kdump.conf <<'EOF'
 path /var/crash
 core_collector makedumpfile -l --message-level 7 -d 1
@@ -37,5 +38,11 @@ KDUMP_COMMANDLINE_APPEND="irqpoll nr_cpus=1 reset_devices cgroup_disable=memory 
 KEXEC_ARGS=""
 KDUMP_IMG=vmlinuz
 EOF
-	systemctl enable kdump
+	# Tolerate a missing unit (e.g. a future EL minor that renames or
+	# re-splits kdump) rather than hard-failing the whole image build
+	# on step N-of-M -- mirrors the Debian branch above.  A genuinely
+	# absent package still fails loud at the dnf-install step.
+	if ! systemctl enable kdump 2>/dev/null; then
+		echo "WARNING: kdump.service not found; crash dumps disabled" >&2
+	fi
 fi
