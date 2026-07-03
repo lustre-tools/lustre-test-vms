@@ -273,9 +273,18 @@ def _stage_subtree(
         # depmod chokes ("Exec format error"), and modules fail to
         # load with "Unknown symbol" because depmod can't build the
         # dependency graph.
+        #
+        # --uid/--gid 0 --numeric-owner forces every entry (including
+        # the top-level "./") to root.  Otherwise BSD tar records the
+        # host user's uid/gid, and podman's `ADD` extraction tries to
+        # lchown the destination to that raw host uid -- which isn't
+        # mapped in the rootless podman-machine user namespace, so it
+        # fails with "lchown: invalid argument" (bites hosts whose uid
+        # falls outside the machine's subuid range, e.g. LDAP uids).
         env = {**os.environ, "COPYFILE_DISABLE": "1"}
         subprocess.run(
-            ["tar", "-C", str(src), "-czf", str(archive), "."],
+            ["tar", "--numeric-owner", "--uid", "0", "--gid", "0",
+             "-C", str(src), "-czf", str(archive), "."],
             env=env,
             check=True,
         )
@@ -683,9 +692,13 @@ def build_image(
                     # ADD lands the contents directly at the target,
                     # and COPYFILE_DISABLE=1 keeps BSD tar from
                     # emitting AppleDouble ._* sidecars.
+                    # --uid/--gid 0 --numeric-owner: force root ownership
+                    # so ADD's extraction doesn't lchown to the unmapped
+                    # host uid in the rootless userns (see _stage_subtree).
                     env = {**os.environ, "COPYFILE_DISABLE": "1"}
                     subprocess.run(
-                        ["tar", "-C", str(mod_dest), "-czf",
+                        ["tar", "--numeric-owner", "--uid", "0", "--gid",
+                         "0", "-C", str(mod_dest), "-czf",
                          str(archive), "."],
                         env=env,
                         check=True,
