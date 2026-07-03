@@ -197,25 +197,40 @@ def cmd_targets(args: argparse.Namespace) -> int:
     except Exception:
         all_releases = None
 
-    # Pick which arches to render per target.  By default show the
-    # host arch (so the user sees "is THIS built for the machine I'm
-    # sitting at"), AND every other arch that already has artifacts
-    # on disk (so a multi-arch build dir shows both).  --arch is an
-    # explicit override that pins to a single arch.
+    # Pick which arches to render per target: every arch the target
+    # actually exists for -- arches with local artifacts on disk AND
+    # arches that have a published (remote) release.  Without the remote
+    # half, a target published only for x86_64 rendered under the host
+    # arch (e.g. aarch64) with every cell dashed, hiding its real x86_64
+    # release.  --arch pins to a single arch.  A target with nothing
+    # built or published anywhere falls back to the host arch so it still
+    # shows one row inviting a local build.
     from ltvm_pkg.cli.util import host_arch
     from ltvm_pkg.target_config import ARTIFACTS_DIR
     explicit_arch = getattr(args, "arch", None)
     host_a = host_arch()
+    _KNOWN_ARCHES = ("x86_64", "aarch64")
 
     def _archs_for(target_name: str) -> list[str]:
         if explicit_arch:
             return [explicit_arch]
-        archs: set[str] = {host_a}
+        archs: set[str] = set()
+        # arches with local build artifacts
         target_root = ARTIFACTS_DIR / target_name
         if target_root.is_dir():
             for entry in target_root.iterdir():
                 if entry.is_dir() and (entry / "kernels").is_dir():
                     archs.add(entry.name)
+        # arches with a published release (tag "<target>-<arch>-...")
+        for rel in all_releases or []:
+            tag = rel.get("tag_name", "")
+            for a in _KNOWN_ARCHES:
+                if tag.startswith(f"{target_name}-{a}-"):
+                    archs.add(a)
+        # Nothing anywhere -- show the host arch so the target still
+        # lists one row (available action: build it here).
+        if not archs:
+            archs.add(host_a)
         return sorted(archs)
 
     TargetConfig = _cli_attr("TargetConfig")
