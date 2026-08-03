@@ -135,25 +135,30 @@ ltvm build all rocky9 --lustre-tree ~/lustre-release --force-compat
 ## VM Management
 
 ```bash
-ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
+sudo ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 ltvm deploy-lustre co1-single --lustre-tree ~/lustre-release --mount
 ssh co1-single 'lctl dl'
 ltvm llmount co1-single [--cleanup]   # mount / unmount
 ltvm vm console-log co1-single
 ltvm vm nmi co1-single                # inject NMI -> kdump
 ltvm vm crash-collect co1-single --mod-dir $CO/1
-ltvm destroy co1-single
+sudo ltvm destroy co1-single
 ```
 
 **Naming:** always include the checkout number: `co<N>-<role>`.
 
+**Root:** `create`, `destroy`, `start`, `stop`, `doctor`,
+`update`, `cluster create`, `cluster destroy` require root.
+`build *`, `target *`, `deploy-lustre`, `llmount`, `list`,
+`vm *`, and the remaining `cluster` actions do not.
+
 ### Clusters
 
 ```bash
-ltvm cluster create co2 mgs+mds:co2-mds:1 oss:co2-oss:3
+sudo ltvm cluster create co2 mgs+mds:co2-mds:1 oss:co2-oss:3
 ltvm cluster deploy co2 --mount
 ltvm cluster exec co2 oss 'lctl dl'
-ltvm cluster destroy co2
+sudo ltvm cluster destroy co2
 ```
 
 ## Target Configuration
