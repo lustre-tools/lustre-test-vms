@@ -159,6 +159,27 @@ def generate_local_sh(cluster: ClusterInfo, os_family: str = "rhel") -> str:
     if client_list:
         client_names = ",".join(n.name for n in client_list)
         lines.append(f"CLIENTS={client_names}")
+        # RCLIENTS is the variable the test framework actually reads.
+        #
+        # init_clients_lists() (test-framework.sh, called unconditionally
+        # from init_logging()) rebuilds CLIENTS *from* RCLIENTS:
+        #
+        #     clients="$SINGLECLIENT $HOSTNAME $RCLIENTS"
+        #     export CLIENTS=$(comma_list $clients)
+        #
+        # so a CLIENTS= set here and nothing else is overwritten with
+        # just the local node, and every remote client silently drops
+        # out.  Multi-client suites (sanityn, parallel-scale,
+        # recovery-*-scale) then run green against one client while
+        # appearing to have used the whole cluster.
+        #
+        # Tests are driven from the first client, which is the node
+        # init_clients_lists() treats as local, so the remote set is
+        # clients[1:].  Space-separated to match what hostlist_expand()
+        # and the rest of the framework expect.
+        rclients = [n.name for n in client_list[1:]]
+        if rclients:
+            lines.append('RCLIENTS="{}"'.format(" ".join(rclients)))
     lines.append("")
 
     lines.append("FSTYPE=ldiskfs")

@@ -203,6 +203,31 @@ class TestGenerateLocalSh:
         text = vm_cluster.generate_local_sh(c)
         assert "CLIENTS=co-c1,co-c2" in text
 
+    def test_rclients_excludes_test_runner(self) -> None:
+        """RCLIENTS= lists the clients other than the first.
+
+        init_clients_lists() rebuilds CLIENTS from RCLIENTS, so without
+        this the remote clients drop out of every multi-client suite.
+        """
+        c = _cluster(
+            ("co-mds", ["mgs", "mds"], 1, 0, "10.0.0.1"),
+            ("co-c1", ["client"], 0, 0, "10.0.0.3"),
+            ("co-c2", ["client"], 0, 0, "10.0.0.4"),
+            ("co-c3", ["client"], 0, 0, "10.0.0.5"),
+        )
+        text = vm_cluster.generate_local_sh(c)
+        assert 'RCLIENTS="co-c2 co-c3"' in text
+
+    def test_rclients_omitted_for_single_client(self) -> None:
+        """One client means no remote clients -- don't emit RCLIENTS."""
+        c = _cluster(
+            ("co-mds", ["mgs", "mds"], 1, 0, "10.0.0.1"),
+            ("co-c1", ["client"], 0, 0, "10.0.0.3"),
+        )
+        text = vm_cluster.generate_local_sh(c)
+        assert "CLIENTS=co-c1" in text
+        assert "RCLIENTS" not in text
+
     def test_rhel_libdir_default(self) -> None:
         c = _cluster(("n", ["mgs", "mds"], 1, 0, "10.0.0.1"))
         text = vm_cluster.generate_local_sh(c, os_family="rhel")

@@ -119,3 +119,15 @@ if [ -x /usr/local/sbin/setup-lnet-passthrough-resolve.sh ]; then
         echo "rc.local: warning: lnet passthrough resolver" \
              "exited non-zero" >&2
 fi
+
+# Disable reverse-path filtering on whatever interfaces lnet.conf ended
+# up naming.  Must run LAST in this section: after the emitter (so the
+# file exists) and after the passthrough resolver (so placeholders are
+# gone), and after the NIC loop above (so the interfaces exist and the
+# live `sysctl -w` pass actually lands).  Reads the operator's file
+# too, if they authored one -- it only ever relaxes rp_filter for
+# interfaces LNet was told to use.
+if [ -x /usr/local/sbin/setup-lnet-rp-filter.sh ]; then
+    /usr/local/sbin/setup-lnet-rp-filter.sh /etc/modprobe.d/lnet.conf || \
+        echo "rc.local: warning: lnet rp_filter setup exited non-zero" >&2
+fi

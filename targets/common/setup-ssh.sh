@@ -14,16 +14,37 @@ else
 	systemctl enable ssh
 fi
 
-# Allow root login with empty password
+# Allow root login with empty password, and raise the connection
+# concurrency limits for the Lustre test framework.
+#
+# MaxStartups: the framework fans out over pdsh and opens a burst of
+# short-lived connections on nearly every helper -- do_nodes,
+# load_modules_remote, per-facet stop/start, the client-load drivers.
+# sshd's default (10:30:100) starts randomly refusing unauthenticated
+# connections past 10 in flight, which surfaces mid-run as
+# "ssh_exchange_identification: Connection closed by remote host"
+# rather than as a clean test failure.  100:30:200 keeps the same
+# shape (drop probability ramps from 30% at the low mark to 100% at
+# the high mark) with headroom for a fan-out across every node.
+#
+# MaxSessions: pdsh opens one connection per node, but the framework
+# also multiplexes several exec channels over a single connection
+# when ControlMaster is in play.  The default of 10 is low enough to
+# stall a wide do_nodes; 100 costs nothing on an idle VM.
+SSHD_LIMITS='MaxStartups 100:30:200
+MaxSessions 100'
+
 # Use sshd_config.d if available (Ubuntu 24.04+), else append to main config
 if [[ -d /etc/ssh/sshd_config.d ]]; then
-	cat > /etc/ssh/sshd_config.d/99-ltvm.conf <<'SSHEOF'
+	cat > /etc/ssh/sshd_config.d/99-ltvm.conf <<SSHEOF
 PermitRootLogin yes
 PermitEmptyPasswords yes
+${SSHD_LIMITS}
 SSHEOF
 else
 	echo "PermitRootLogin yes"      >> /etc/ssh/sshd_config
 	echo "PermitEmptyPasswords yes" >> /etc/ssh/sshd_config
+	echo "${SSHD_LIMITS}"           >> /etc/ssh/sshd_config
 fi
 
 # Clear root password
