@@ -16,3 +16,9 @@
 # Not yet built for EPEL10 (present in EPEL8/9).
 pdsh
 pdsh-rcmd-ssh
+# Verified absent on both x86_64 and aarch64 (EPEL10, 2026-08).
+# vmtouch is in EPEL8/9; fscrypt only ever landed in EPEL9.
+# Consequence: sanity-sec/sanity.sh vmtouch tests and the conf-sanity
+# encryption tests skip on rocky10.
+vmtouch
+fscrypt

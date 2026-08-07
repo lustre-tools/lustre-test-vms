@@ -27,6 +27,39 @@ perl
 pdsh
 pdsh-rcmd-ssh
 
+# Tools individual suites probe for.  Each entry below was confirmed
+# against a `which <tool> || skip_env` guard (or an unguarded call) in
+# lustre/tests -- without them the suite either skips silently or dies
+# partway through.
+#
+# keyctl        sanity-lfsck (fscrypt key setup), sanity-pcc,
+#               sanity-krb5.  NOT guarded -- a missing keyctl is a
+#               hard failure mid-test, not a skip.
+keyutils
+# getenforce    sanity.sh gates a test on `getenforce == Disabled`.
+#               With the binary absent the check reads empty and the
+#               test skips; installing it lets the test actually run.
+#               This does NOT enable SELinux -- the images are built
+#               with mke2fs -d under fakeroot and carry no
+#               security.selinux xattrs, so enforcing mode is out of
+#               reach and sanity-selinux still skips itself.
+libselinux-utils
+# mkfs.xfs      conf-sanity: `which mkfs.xfs || skip_env`
+xfsprogs
+# vmtouch       sanity-sec, sanity.sh -- reads resident page counts
+vmtouch
+# fscrypt       conf-sanity encryption tests
+fscrypt
+# kinit/klist/kadmin  sanity-krb5, setup_kerberos.sh.  Lustre is
+#               currently built --disable-gss (lustre_build.py), so
+#               these unlock nothing today -- they're here so that
+#               flipping that switch is the only change needed.
+krb5-workstation
+# prove         pjdfstest.sh: `which prove || skip_env`.  We build
+#               pjdfstest from source in build-tools.sh, so the suite
+#               is otherwise ready to run.
+perl-Test-Harness
+
 # Filesystem / block utilities
 nfs-utils
 sg3_utils

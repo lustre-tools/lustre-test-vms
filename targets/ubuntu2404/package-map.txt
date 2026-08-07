@@ -35,6 +35,12 @@ json-c            libjson-c5
 pdsh-rcmd-ssh     -
 nfs-utils         nfs-common
 sg3_utils         sg3-utils
+libselinux-utils  selinux-utils
+krb5-workstation  krb5-user
+# Debian ships prove(1) in the perl package itself (RHEL splits it
+# into perl-Test-Harness), and perl is already on the list.
+perl-Test-Harness -
+# keyutils, xfsprogs, vmtouch and fscrypt map 1:1 -- no entry needed.
 # RDMA userspace.  Debian splits rdma-core into libibverbs1 + librdmacm1
 # + ibverbs-providers (user space provider drivers for libibverbs).
 # The rdma-core metapackage itself exists on Ubuntu and pulls the iproute2

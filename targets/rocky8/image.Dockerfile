@@ -22,7 +22,11 @@ COPY rocky8/packages-os.txt /tmp/packages-os.txt
 # Note: kernel-devel is excluded from the common lists because Lustre
 # builds on the host on EL9+.  EL8 still installs it explicitly below
 # (separate RUN step) because the EL8 build flow differs.
-# --skip-broken: numatop/bpftrace may not be available on EL8.
+# --skip-broken: numatop/bpftrace may not be available on EL8, and
+# fscrypt was never packaged for EPEL8 (it first appears in EPEL9), so
+# the conf-sanity encryption tests skip on this target.  Left to
+# --skip-broken rather than an explicit skip list so it starts being
+# installed on its own if EPEL8 ever ships it.
 RUN cat /tmp/packages-base.txt \
         /tmp/packages-test.txt \
         /tmp/packages-debug.txt \
