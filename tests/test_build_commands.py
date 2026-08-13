@@ -769,7 +769,13 @@ class TestCmdBuildShell:
         mount_arg_idx = cmd.index("-v") + 1
         assert str(tmp_path.resolve()) in cmd[mount_arg_idx]
         assert cmd[mount_arg_idx].endswith(":/src:Z")
-        assert "bash" in cmd
+        # The images set ENTRYPOINT ["/bin/bash"]; a bare trailing
+        # `bash` command would become `/bin/bash bash` and die with
+        # "cannot execute binary file", so the shell must come via an
+        # entrypoint override with the image tag as the final token.
+        ep_idx = cmd.index("--entrypoint")
+        assert cmd[ep_idx + 1] == "bash"
+        assert cmd[-1] == tc.container_tag
 
 
 # ---------------------------------------------------------------------------

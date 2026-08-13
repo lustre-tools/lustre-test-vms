@@ -900,12 +900,19 @@ def cmd_build_shell(args: argparse.Namespace) -> int:
             "run",
             "--rm",
             "-it",
+            # The build images set ENTRYPOINT ["/bin/bash"], so a
+            # trailing `bash` command arg would run `/bin/bash bash`:
+            # bash PATH-resolves the arg to the bash *binary*, tries to
+            # read it as a script, and dies with "cannot execute binary
+            # file".  Override the entrypoint instead (same pattern as
+            # mofed_kmod_build).
+            "--entrypoint",
+            "bash",
             "-v",
             f"{mount_path}:/src:Z",
             "-w",
             "/src",
             tag,
-            "bash",
         ]
     ).returncode
 
