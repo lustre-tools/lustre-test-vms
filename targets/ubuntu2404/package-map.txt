@@ -82,6 +82,7 @@ ncurses-devel         libncurses-dev
 libselinux-devel      libselinux1-dev
 zlib-devel            zlib1g-dev
 keyutils-libs-devel   libkeyutils-dev
+krb5-devel            libkrb5-dev
 fuse-devel            libfuse-dev
 pkgconf-pkg-config    pkg-config
 kernel-rpm-macros     -

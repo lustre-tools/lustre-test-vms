@@ -43,6 +43,7 @@ fuse-devel
 texinfo
 pkgconf-pkg-config
 kernel-rpm-macros
+krb5-devel
 
 # --- Optional build tools (best-effort: nasm) ---
 nasm
