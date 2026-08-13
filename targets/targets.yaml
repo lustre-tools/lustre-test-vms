@@ -40,6 +40,9 @@ targets:
     srpm_url: https://dl.rockylinux.org/pub/rocky/8/BaseOS/source/tree/Packages/k
     status: working
   rocky9:
+    configure_args:
+    - --enable-gss=yes
+    - --enable-crypto=yes
     container_image: rockylinux:9
     kernels:
       available:
