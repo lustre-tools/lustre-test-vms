@@ -255,6 +255,8 @@ def cmd_targets(args: argparse.Namespace) -> int:
                         "name": name,
                         "arch": tc.arch,
                         "status": tc.status,
+                        "os_name": tc.os_name,
+                        "os_version": tc.os_version,
                         "kernel": kname,
                         "variant": None,  # header row
                         "is_default": kname == tc.default_kernel,
@@ -379,113 +381,194 @@ def cmd_targets(args: argparse.Namespace) -> int:
             print("No targets configured.")
         return EXIT_OK
 
-    hdr = (
-        f"{'Local':<6} {'Remote':<7} {'Target':<12} {'Arch':<8} "
-        f"{'Variants':<30} {'Lustre Type':<16} Default?"
-    )
-    print(hdr)
-    print("-" * len(hdr))
-    prev_key: tuple[str, str] | None = None
-    prev_kernel_key: tuple[str, str, str] | None = None
+    # ---- Text renderer: one block per (target, arch) ----
+    #
+    # The old flat table doubled every kernel with a "base" sub-row and
+    # parked the check-mark columns four columns away from what they
+    # qualified.  Blocks read top-down instead: a header line names the
+    # target and says in words what it is; each kernel is ONE line with
+    # its status cells adjacent; non-base variants indent beneath the
+    # kernels they apply to.  "base" is the kernel line itself and is
+    # never printed as a row.
+    _MODE_HUMAN = {
+        "server_ldiskfs": "Lustre server (ldiskfs backend)",
+        "server_zfs": "Lustre server (ZFS backend)",
+        "client": "Lustre client only",
+    }
+    CHECK = "✓"
     has_experimental = False
     has_behind = False
     has_unreachable = False
     has_no_lustre = False
-    for r in rows:
-        if "kernel" not in r:
-            print(f"{r['name']:<12} {r.get('error', '')}")
-            prev_key = None
-            prev_kernel_key = None
-            continue
-        # Checkmark stands in for "yes" in the Local / Remote /
-        # Default? columns -- one glyph reads faster than a three-
-        # letter word and keeps the columns uniformly narrow.  The
-        # suffix markers (!, *) still stack on top (e.g. ✓!, ✓*, ✓*!).
-        CHECK = "\u2713"
-        default_mark = CHECK if r["is_default"] else ""
-        is_header = r["variant"] is None
 
-        if is_header:
-            # Per-kernel header row: no Local/Remote/Variants cells.
-            local_col = "-"
+    def _cells(r: dict[str, Any]) -> tuple[str, str, str]:
+        """Local / Remote / State cells for a variant row."""
+        nonlocal has_behind, has_unreachable, has_no_lustre
+        local_col = CHECK if r["built"] else "-"
+        remote_raw = r["remote_release"]
+        if remote_raw == "?":
+            remote_col = "?"
+            has_unreachable = True
+        elif remote_raw == "-":
             remote_col = "-"
         else:
-            local_col = CHECK if r["built"] else "-"
-            remote_raw = r["remote_release"]
-            if remote_raw == "?":
-                remote_col = "?"
-                has_unreachable = True
-            elif remote_raw == "-":
-                remote_col = "-"
-            else:
-                remote_col = CHECK
-            if (
-                r["built"]
-                and r["local_release"] not in ("-", "?")
-                and remote_raw not in ("-", "?")
-                and r["local_release"] != remote_raw
-            ):
-                local_col = f"{CHECK}!"
-                has_behind = True
-            # '✓*' -> image is built but has no Lustre baked in.
-            # A VM created from this image can't mount Lustre until
-            # `ltvm deploy-lustre` installs it.  Stacks with the '✓!'
-            # behind marker so '✓*!' is possible when the image is
-            # both no-lustre AND out-of-date.
-            if r.get("lustre_missing") and local_col.startswith(CHECK):
-                local_col = f"{local_col}*" if "*" not in local_col else local_col
-                has_no_lustre = True
+            remote_col = CHECK
+        if (
+            r["built"]
+            and r["local_release"] not in ("-", "?")
+            and remote_raw not in ("-", "?")
+            and r["local_release"] != remote_raw
+        ):
+            local_col = f"{CHECK}!"
+            has_behind = True
+        # '✓*' -> image is built but has no Lustre baked in.
+        # Stacks with the '✓!' behind marker.
+        if r.get("lustre_missing") and local_col.startswith(CHECK):
+            local_col = f"{local_col}*"
+            has_no_lustre = True
+        return local_col, remote_col, r.get("available", "")
 
+    # Group rows into (target, arch) blocks, preserving order.  Each
+    # block holds kernel entries; each entry holds its base row (the
+    # kernel line) and any non-base variant rows (indented lines).
+    blocks: list[dict[str, Any]] = []
+    cur_block: dict[str, Any] | None = None
+    cur_kernel: dict[str, Any] | None = None
+    for r in rows:
+        if "kernel" not in r:
+            blocks.append({"error": r})
+            cur_block = None
+            cur_kernel = None
+            continue
         key = (r["name"], r["arch"])
-        kernel_key = (r["name"], r["arch"], r["kernel"])
-        if key == prev_key:
-            name_col = ""
-            arch_col = ""
-            mode_col = ""
+        if cur_block is None or cur_block["key"] != key:
+            cur_block = {"key": key, "meta": r, "kernels": []}
+            cur_kernel = None
+            blocks.append(cur_block)
+        if r["variant"] is None:
+            cur_kernel = {"header": r, "base": None, "variants": []}
+            cur_block["kernels"].append(cur_kernel)
+            continue
+        # Variant rows normally follow their kernel's header row, but a
+        # local/remote scope filter can drop the header -- resynthesize
+        # an entry from the variant row itself in that case.
+        if cur_kernel is None or cur_kernel["header"]["kernel"] != r["kernel"]:
+            cur_kernel = {"header": r, "base": None, "variants": []}
+            cur_block["kernels"].append(cur_kernel)
+        if r["variant"] == "base":
+            cur_kernel["base"] = r
         else:
-            marker = "*" if r["status"] != "working" else ""
-            if marker:
-                has_experimental = True
-            name_col = f"{r['name']}{marker}"
-            arch_col = r["arch"]
-            mode_col = r["lustre_mode"]
-        # Kernel and variant fold into a single Variants column: a
-        # kernel-header row prints the kernel name; per-variant rows
-        # below indent with a leading tree glyph to show they're nested
-        # under that kernel.
-        if is_header:
-            variants_col = r["kernel"]
-            default_col = default_mark
-        else:
-            variants_col = f"  {r['variant']}"
-            default_col = ""
-        print(
-            f"{local_col:<6} {remote_col:<7} {name_col:<12} {arch_col:<8} "
-            f"{variants_col:<30} {mode_col:<16} "
-            f"{default_col}"
+            cur_kernel["variants"].append(r)
+
+    # Arch scoping: text output shows only the host arch by default --
+    # other arches collapse into a closing note instead of interleaving
+    # with the blocks the user actually runs here.  --all-arches (or an
+    # explicit --arch) widens the view; JSON always carries all rows.
+    all_arches = bool(getattr(args, "all_arches", False))
+    show_all = all_arches or explicit_arch is not None
+    error_blocks = [b for b in blocks if "error" in b]
+    real_blocks = [b for b in blocks if "error" not in b]
+    hidden: list[tuple[str, str]] = []
+    if not show_all:
+        kept_blocks = []
+        for blk in real_blocks:
+            if blk["key"][1] == host_a:
+                kept_blocks.append(blk)
+            else:
+                hidden.append(blk["key"])
+        real_blocks = kept_blocks
+
+    # Never interleave arches: render one section per arch, each with
+    # its own heading when more than one arch is shown.
+    arches_present = sorted({b["key"][1] for b in real_blocks})
+    sectioned = len(arches_present) > 1
+
+    ordered: list[dict[str, Any]] = list(error_blocks)
+    for a in arches_present:
+        ordered.extend(b for b in real_blocks if b["key"][1] == a)
+
+    first = True
+    prev_arch: str | None = None
+    for blk in ordered:
+        if not first:
+            print()
+        first = False
+        if "error" in blk:
+            e = blk["error"]
+            print(f"{e['name']}: {e.get('error', '')}")
+            continue
+        if sectioned and blk["key"][1] != prev_arch:
+            prev_arch = blk["key"][1]
+            print(f"===== {prev_arch} =====")
+            print()
+        meta = blk["meta"]
+        marker = "*" if meta["status"] != "working" else ""
+        if marker:
+            has_experimental = True
+        mode_h = _MODE_HUMAN.get(meta["lustre_mode"], meta["lustre_mode"])
+        os_bits = " ".join(
+            str(meta[k]) for k in ("os_name", "os_version") if meta.get(k)
         )
-        prev_key = key
-        prev_kernel_key = kernel_key
-    if (has_experimental or has_behind or has_unreachable
-            or has_no_lustre):
+        os_part = f", {os_bits}" if os_bits else ""
+        print(f"{meta['name']}{marker} ({meta['arch']}) -- {mode_h}{os_part}")
+        print(f"  {'Kernel':<28} {'Local':<7} {'Remote':<7} State")
+        for entry in blk["kernels"]:
+            hdr_row = entry["header"]
+            kname = hdr_row["kernel"]
+            is_default = (
+                hdr_row["is_default"]
+                or kname == hdr_row.get("default_kernel")
+            )
+            label = f"{kname} (default)" if is_default else kname
+            if entry["base"] is not None:
+                local_col, remote_col, state = _cells(entry["base"])
+            else:
+                # Base row filtered out by a local/remote scope: still
+                # print the kernel line as context for its variants.
+                local_col, remote_col, state = "-", "-", ""
+            print(f"  {label:<28} {local_col:<7} {remote_col:<7} {state}")
+            for vr in entry["variants"]:
+                local_col, remote_col, state = _cells(vr)
+                print(
+                    f"    {vr['variant']:<26} {local_col:<7} {remote_col:<7} "
+                    f"{state}"
+                )
+
+    print()
+    print(
+        f"Local = built on this machine, Remote = published release; "
+        f"{CHECK} yes, - no"
+    )
+    print(
+        "State: ready = usable now | fetch = prebuilt available "
+        "(`ltvm target fetch <target>`) | build = build locally "
+        "(`ltvm build all <target>`)"
+    )
+    if has_experimental:
+        print("* experimental -- may not build or boot cleanly")
+    if has_unreachable:
+        print("? github unreachable -- remote status unknown")
+    if has_behind:
+        print(
+            "✓! = local copy differs from latest release -- "
+            "`sudo ltvm target fetch --replace <target>` to refresh"
+        )
+    if has_no_lustre:
+        print(
+            "✓* = image does NOT have Lustre baked in.  Lustre "
+            "must be installed (`ltvm deploy-lustre`) before this "
+            "image can use Lustre, or rebuild with `ltvm build "
+            "image <target> --lustre-tree <path>` (drop "
+            "--no-lustre) or `ltvm target fetch <target>`."
+        )
+    if hidden:
+        other_arches = ", ".join(sorted({a for _, a in hidden}))
         print()
-        if has_experimental:
-            print("* experimental -- may not build or boot cleanly")
-        if has_unreachable:
-            print("? github unreachable -- remote status unknown")
-        if has_behind:
-            print(
-                "\u2713! = local copy differs from latest release -- "
-                "`sudo ltvm target fetch --replace <target>` to refresh"
-            )
-        if has_no_lustre:
-            print(
-                "\u2713* = image does NOT have Lustre baked in.  Lustre "
-                "must be installed (`ltvm deploy-lustre`) before this "
-                "image can use Lustre, or rebuild with `ltvm build "
-                "image <target> --lustre-tree <path>` (drop "
-                "--no-lustre) or `ltvm target fetch <target>`."
-            )
+        print(
+            f"Note: {len(hidden)} listing(s) for other arches "
+            f"({other_arches}) hidden -- "
+            f"`ltvm target list --all-arches` shows them."
+        )
     return EXIT_OK
 
 

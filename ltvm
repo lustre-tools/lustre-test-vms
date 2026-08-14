@@ -595,6 +595,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only show rows with a local build (local) or a "
         "published remote release (remote)",
     )
+    tlp.add_argument(
+        "--all-arches",
+        action="store_true",
+        help="Show every architecture in separate sections "
+        "(default: only the host arch, with a note about others; "
+        "JSON output always includes all arches)",
+    )
     tlp.set_defaults(func=cmd_targets)
 
     tshp = target_sub.add_parser(

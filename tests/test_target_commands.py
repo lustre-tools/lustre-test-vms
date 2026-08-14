@@ -176,6 +176,10 @@ def _ns(**kw: Any) -> argparse.Namespace:
         "force": False,
         "format": "qcow2",
         "output": None,
+        # Text tests exercise the full listing regardless of the arch
+        # of the machine running the suite; arch-scoping behavior has
+        # its own dedicated tests.
+        "all_arches": True,
     }
     base.update(kw)
     return argparse.Namespace(**base)
@@ -439,71 +443,66 @@ class TestCmdTargetsTextOutput:
     the convention that ``yes`` appears once per target on the
     kernel header row are easy to break unintentionally."""
 
-    def test_header_columns(
+    def test_block_header_and_columns(
         self,
         capsys: pytest.CaptureFixture[str],
         variant_targets: Path,
     ) -> None:
+        """Block layout: a per-(target, arch) header line in words,
+        then a Kernel/Local/Remote/State column line."""
         with _patch_cfg_paths(variant_targets), \
                 patch.object(cli, "_gh_api", side_effect=Exception("no net")):
             cmd_targets(_ns(json=False))
         out = capsys.readouterr().out
-        first_line = out.splitlines()[0]
-        # b458662 folded Kernel into Variants and renamed the column.
-        assert "Variants" in first_line
-        assert "Default?" in first_line
-        assert "Local" in first_line
-        assert "Remote" in first_line
-        # The old 'Kernel' header would mean somebody reverted the merge.
-        assert "Kernel" not in first_line.split("Variants")[0]
+        lines = out.splitlines()
+        # Block header: "<target> (<arch>) -- <humanized mode>, <os>"
+        assert lines[0].startswith("rocky9 (")
+        assert "Lustre server (ldiskfs backend)" in lines[0]
+        # Raw enum values must not leak into the human output.
+        assert "server_ldiskfs" not in out
+        # Column line follows the block header.
+        assert "Kernel" in lines[1]
+        assert "Local" in lines[1]
+        assert "Remote" in lines[1]
+        assert "State" in lines[1]
+        # Legend explains the columns and the State verbs.
+        assert "Local = built on this machine" in out
+        assert "State: ready" in out
 
-    def test_default_check_only_once_per_target(
+    def test_default_marked_once_in_words(
         self,
         capsys: pytest.CaptureFixture[str],
         variant_targets: Path,
     ) -> None:
-        """``\u2713`` in the Default column must appear once -- on the
-        default kernel's header row, not on any variant row."""
+        """The default kernel is marked with a literal ``(default)``
+        suffix, exactly once, on the default kernel's line."""
         with _patch_cfg_paths(variant_targets), \
                 patch.object(cli, "_gh_api", side_effect=Exception("no net")):
             cmd_targets(_ns(json=False))
         out = capsys.readouterr().out
-        # Lines that end with "\u2713" (Default? column).  Variant rows
-        # can carry a \u2713 in the Local column too, but the Default?
-        # check sits at the end of the line.
-        yes_lines = [
-            ln for ln in out.splitlines() if ln.rstrip().endswith("\u2713")
-        ]
-        assert len(yes_lines) == 1, (
-            f"expected exactly one '\u2713' default marker; got "
-            f"{len(yes_lines)}: {yes_lines}"
+        marked = [ln for ln in out.splitlines() if "(default)" in ln]
+        assert len(marked) == 1, (
+            f"expected exactly one '(default)' line; got {marked}"
         )
-        # And it should be on the *kernel header* row -- which holds
-        # the kernel name unindented in the Variants column, not a
-        # leading "  base"/"  mofed-24" indent.
-        line = yes_lines[0]
-        assert "5.14-rhel9.7" in line
-        # variant indent is two leading spaces inside the Variants
-        # column; the kernel header has no such indent.
-        assert "  base" not in line
-        assert "  mofed-24" not in line
+        assert "5.14-rhel9.7" in marked[0]
 
     def test_variants_indent_under_kernel(
         self,
         capsys: pytest.CaptureFixture[str],
         variant_targets: Path,
     ) -> None:
-        """``base`` and any declared variants render as indented rows
-        under their kernel header (9097251)."""
+        """Non-base variants render as indented lines under their
+        kernel; ``base`` is the kernel line itself and never appears
+        as a row."""
         with _patch_cfg_paths(variant_targets), \
                 patch.object(cli, "_gh_api", side_effect=Exception("no net")):
             cmd_targets(_ns(json=False))
         out = capsys.readouterr().out
-        # The Variants column shows "  base" / "  mofed-24" with a
-        # leading indent.  Search for those tokens with their indent
-        # somewhere on the line.
-        assert "  base" in out
-        assert "  mofed-24" in out
+        lines = out.splitlines()
+        mofed = [ln for ln in lines if ln.startswith("    mofed-24")]
+        assert mofed, f"expected an indented mofed-24 line: {lines}"
+        # No line renders a literal 'base' row.
+        assert not [ln for ln in lines if ln.strip().startswith("base")]
 
     def test_no_targets_prints_friendly_message(
         self,
@@ -1081,3 +1080,78 @@ class TestCmdTargetExport:
         assert payload["path"] == str(out_file)
         assert payload["size_mb"] == 2.0
         assert "kernel" in payload
+
+
+class TestCmdTargetsArchScoping:
+    """Text output shows only the host arch by default; other arches
+    collapse into a closing note.  --all-arches renders every arch in
+    separate, non-interleaved sections."""
+
+    def test_default_hides_other_arches_with_note(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        variant_targets: Path,
+    ) -> None:
+        # Anchor the target to x86_64 on disk (without this,
+        # _archs_for falls back to the host arch and nothing differs).
+        (
+            variant_targets / "artifacts" / "rocky9" / "x86_64" / "kernels"
+        ).mkdir(parents=True)
+        with _patch_cfg_paths(variant_targets), \
+                patch.object(cli, "_gh_api", side_effect=Exception("net")), \
+                patch(
+                    "ltvm_pkg.cli.util.host_arch",
+                    return_value="aarch64",
+                ):
+            cmd_targets(_ns(all_arches=False))
+        out = capsys.readouterr().out
+        # Fixture rows are x86_64; host is aarch64 -> blocks hidden
+        # (no x86_64 block header; the arch may still appear in the
+        # closing note, which is the point).
+        assert "rocky9 (x86_64)" not in out
+        assert "--all-arches" in out
+        assert "x86_64" in out  # the note names the hidden arch
+
+    def test_default_shows_host_arch_without_note(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        variant_targets: Path,
+    ) -> None:
+        with _patch_cfg_paths(variant_targets), \
+                patch.object(cli, "_gh_api", side_effect=Exception("net")), \
+                patch(
+                    "ltvm_pkg.cli.util.host_arch",
+                    return_value="x86_64",
+                ):
+            cmd_targets(_ns(all_arches=False))
+        out = capsys.readouterr().out
+        assert "rocky9 (x86_64)" in out
+        assert "--all-arches" not in out
+
+    def test_all_arches_renders_separate_sections(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        variant_targets: Path,
+    ) -> None:
+        """With artifacts on two arches, each arch gets its own
+        section heading and blocks never interleave."""
+        # Seed both arches explicitly so rocky9 lists under each.
+        for a in ("aarch64", "x86_64"):
+            (
+                variant_targets / "artifacts" / "rocky9" / a / "kernels"
+            ).mkdir(parents=True)
+        with _patch_cfg_paths(variant_targets), \
+                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+            cmd_targets(_ns(all_arches=True))
+        out = capsys.readouterr().out
+        lines = out.splitlines()
+        assert "===== aarch64 =====" in lines
+        assert "===== x86_64 =====" in lines
+        # No interleaving: every aarch64 block line precedes the
+        # x86_64 section heading.
+        x86_section = lines.index("===== x86_64 =====")
+        for i, ln in enumerate(lines):
+            if "(aarch64)" in ln:
+                assert i < x86_section, f"aarch64 block after x86_64 section: {ln}"
+            if "(x86_64)" in ln:
+                assert i > x86_section, f"x86_64 block before its section: {ln}"
