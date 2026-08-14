@@ -13,7 +13,11 @@
 # One package per line.  Comments (#) and blank lines ignored.
 # Revisit when EPEL10 ships these.
 
-# Not yet built for EPEL10 (present in EPEL8/9).
+# pdsh landed in EPEL10 (pdsh-2.36-3.el10_3) but ONLY in the 10.3 /
+# latest branches -- the epel-release on a Rocky 10.1 base pins the
+# epel 10.2 branch via 'epel-z-10', which has no pdsh on either arch
+# (verified in the 10.1 container, 2026-08).  Keep skipping until the
+# base image moves to 10.3+.
 pdsh
 pdsh-rcmd-ssh
 # Verified absent on both x86_64 and aarch64 (EPEL10, 2026-08).

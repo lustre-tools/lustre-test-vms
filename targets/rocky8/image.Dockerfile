@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=rockylinux:8.9
+ARG BASE_IMAGE=quay.io/rockylinux/rockylinux:8.10
 FROM ${BASE_IMAGE}
 
 # Rocky 8 VM base image.

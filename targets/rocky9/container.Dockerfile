@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=rockylinux:9
+ARG BASE_IMAGE=quay.io/rockylinux/rockylinux:9
 FROM ${BASE_IMAGE}
 
 # Rocky 9 build container for kernel and Lustre builds.

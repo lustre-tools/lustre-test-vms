@@ -2,25 +2,12 @@ defaults:
   arch: x86_64
   os_family: rhel
 targets:
-  rocky10:
-    container_image: quay.io/rockylinux/rockylinux:10.1
-    default_mem: 4096
-    kernels:
-      available:
-      - 6.12-rhel10.1
-      - name: 6.12-rhel10.0
-        srpm_version: 6.12.0-55.41.1.el10_0
-      config:
-        CONFIG_XEN_PVH: y
-      default: 6.12-rhel10.0
-    lustre:
-      mode: server_ldiskfs
-    os_name: rocky
-    os_version: '10.1'
-    srpm_url: https://dl.rockylinux.org/pub/rocky/10/BaseOS/source/tree/Packages/k
-    status: working
   rocky8:
-    container_image: rockylinux:8.9
+    # No configure_args (GSS/crypto stay off): legacy 4.18/el8 target;
+    # fscrypt userspace never landed in EPEL8 so the encryption tests
+    # skip here regardless (see rocky8/image.Dockerfile).  Enable like
+    # rocky9/rocky10 if a client-crypto build on el8 is ever needed.
+    container_image: quay.io/rockylinux/rockylinux:8.10
     kernels:
       available:
       - 4.18-rhel8.10
@@ -36,16 +23,17 @@ targets:
     lustre:
       mode: server_ldiskfs
     os_name: rocky
-    os_version: '8.9'
+    os_version: '8.10'
     srpm_url: https://dl.rockylinux.org/pub/rocky/8/BaseOS/source/tree/Packages/k
     status: working
   rocky9:
     configure_args:
     - --enable-gss=yes
     - --enable-crypto=yes
-    container_image: rockylinux:9
+    container_image: quay.io/rockylinux/rockylinux:9
     kernels:
       available:
+      - 5.14-rhel9.8
       - 5.14-rhel9.7
       - 5.14-rhel9.6
       - 5.14-rhel9.5
@@ -76,10 +64,37 @@ targets:
         params:
           mofed_version: 24.10-2.1.8.0
           mofed_distro: rhel9.5
-  ubuntu2404:
+  rocky10:
     configure_args:
-    - --with-o2ib=no
-    container_image: ubuntu:24.04
+    - --enable-gss=yes
+    - --enable-crypto=yes
+    container_image: quay.io/rockylinux/rockylinux:10.1
+    default_mem: 4096
+    kernels:
+      available:
+      - 6.12-rhel10.1
+      # Lustre's 6.12-rhel10.0.target declares 55.43.1.el10_0, but
+      # Rocky never mirrored that rebuild -- vault/rocky/10.0 tops out
+      # at 55.41.1 (verified 2026-08).  Do NOT "fix" this pin to
+      # 55.43.1: it does not exist on pub or vault, and the published
+      # release rocky10-aarch64-6.12.0-55.41.1.el10_0_lustre depends
+      # on this exact version.
+      - name: 6.12-rhel10.0
+        srpm_version: 6.12.0-55.41.1.el10_0
+      config:
+        CONFIG_XEN_PVH: y
+      default: 6.12-rhel10.0
+    lustre:
+      mode: server_ldiskfs
+    os_name: rocky
+    os_version: '10.1'
+    srpm_url: https://dl.rockylinux.org/pub/rocky/10/BaseOS/source/tree/Packages/k
+    status: working
+  ubuntu2404:
+    # --with-o2ib=no is NOT needed here: it has been hard-coded in the
+    # base configure line (lustre_build.py) for every target since
+    # 9653316.
+    container_image: docker.io/library/ubuntu:24.04
     kernel_deb_source: linux-source-6.8.0
     kernels:
       available:
