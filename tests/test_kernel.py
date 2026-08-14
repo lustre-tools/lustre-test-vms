@@ -302,9 +302,25 @@ class TestSrpmFallbackUrls:
         urls = _srpm_fallback_urls(
             self._PUB, "kernel-5.14.0-503.40.1.el9_5.src.rpm"
         )
+        # Letter-dir layout first (modern vaults), then the flat
+        # pre-8.5 layout with the single-letter Packages/<x>/ stripped.
         assert urls == [
-            "https://dl.rockylinux.org/vault/rocky/9.5/BaseOS/source/tree/Packages/k/kernel-5.14.0-503.40.1.el9_5.src.rpm"
+            "https://dl.rockylinux.org/vault/rocky/9.5/BaseOS/source/tree/Packages/k/kernel-5.14.0-503.40.1.el9_5.src.rpm",
+            "https://dl.rockylinux.org/vault/rocky/9.5/BaseOS/source/tree/Packages/kernel-5.14.0-503.40.1.el9_5.src.rpm",
         ]
+
+    def test_flat_layout_variant_for_old_vaults(self) -> None:
+        """vault/rocky/8.4 predates the letter-dir layout: the flat
+        Packages/ URL must be among the candidates or 4.18-rhel8.4
+        can never be downloaded."""
+        urls = _srpm_fallback_urls(
+            "https://dl.rockylinux.org/pub/rocky/8/BaseOS/source/tree/Packages/k",
+            "kernel-4.18.0-305.25.1.el8_4.src.rpm",
+        )
+        assert (
+            "https://dl.rockylinux.org/vault/rocky/8.4/BaseOS/source/tree/Packages/kernel-4.18.0-305.25.1.el8_4.src.rpm"
+            in urls
+        )
 
     def test_non_rocky_url_no_fallback(self) -> None:
         assert _srpm_fallback_urls("https://example.com/srpms", "kernel-x.src.rpm") == []

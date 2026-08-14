@@ -443,7 +443,15 @@ def _srpm_fallback_urls(base_url: str, srpm_name: str) -> list[str]:
     host, major, rest = pub.group(1), pub.group(2), pub.group(3)
     if minor.group(1) != major:
         return []
-    return [f"{host}/vault/rocky/{major}.{minor.group(2)}/{rest}/{srpm_name}"]
+    vault_base = f"{host}/vault/rocky/{major}.{minor.group(2)}/{rest}"
+    urls = [f"{vault_base}/{srpm_name}"]
+    # Vaults up to 8.4 predate the first-letter Packages/<x>/ layout:
+    # SRPMs sit directly under Packages/.  Also try the flat variant so
+    # e.g. vault/rocky/8.4/.../Packages/kernel-*.src.rpm resolves.
+    parent, _, letter = rest.rpartition("/")
+    if parent and len(letter) == 1:
+        urls.append(f"{host}/vault/rocky/{major}.{minor.group(2)}/{parent}/{srpm_name}")
+    return urls
 
 
 # ------------------------------------------------------------------
