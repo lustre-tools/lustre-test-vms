@@ -37,6 +37,8 @@ from ltvm_pkg.host_setup import (
     PodmanMachineError,
     check_podman_machine_macos,
     is_macos,
+    podman_in_use_elsewhere,
+    podman_usage_lock,
     should_stop_podman_machine_macos,
     stop_podman_machine_macos,
 )
@@ -109,10 +111,18 @@ def _podman_machine_autostop() -> Iterator[_AutostopHandle]:
     if not is_macos():
         yield handle
         return
-    yield handle
+    # Hold the shared usage lock for the whole build so a concurrent
+    # ltvm invocation's auto-stop can't stop the machine mid-build
+    # (in-flight `podman build`/pulls have no running container for
+    # the podman-ps guard to see).  Released before the stop probe --
+    # flock treats our own second fd as a conflicting owner.
+    with podman_usage_lock():
+        yield handle
     if not handle.success:
         return
     try:
+        if podman_in_use_elsewhere():
+            return  # another ltvm build is mid-flight; leave it up
         if should_stop_podman_machine_macos():
             stop_podman_machine_macos()
     except Exception:
@@ -894,27 +904,32 @@ def cmd_build_shell(args: argparse.Namespace) -> int:
             f"with {mount_path} mounted at /src..."
         )
 
-    rc = subprocess.run(
-        [
-            "podman",
-            "run",
-            "--rm",
-            "-it",
-            # The build images set ENTRYPOINT ["/bin/bash"], so a
-            # trailing `bash` command arg would run `/bin/bash bash`:
-            # bash PATH-resolves the arg to the bash *binary*, tries to
-            # read it as a script, and dies with "cannot execute binary
-            # file".  Override the entrypoint instead (same pattern as
-            # mofed_kmod_build).
-            "--entrypoint",
-            "bash",
-            "-v",
-            f"{mount_path}:/src:Z",
-            "-w",
-            "/src",
-            tag,
-        ]
-    ).returncode
+    # Hold the podman usage lock for the whole session: the shell's
+    # container is ltvm-tagged, which the auto-stop's podman-ps guard
+    # counts as "safe to stop" -- without the lock, a build finishing
+    # in another terminal would stop the machine under this shell.
+    with podman_usage_lock():
+        rc = subprocess.run(
+            [
+                "podman",
+                "run",
+                "--rm",
+                "-it",
+                # The build images set ENTRYPOINT ["/bin/bash"], so a
+                # trailing `bash` command arg would run `/bin/bash bash`:
+                # bash PATH-resolves the arg to the bash *binary*, tries
+                # to read it as a script, and dies with "cannot execute
+                # binary file".  Override the entrypoint instead (same
+                # pattern as mofed_kmod_build).
+                "--entrypoint",
+                "bash",
+                "-v",
+                f"{mount_path}:/src:Z",
+                "-w",
+                "/src",
+                tag,
+            ]
+        ).returncode
 
     return rc
 

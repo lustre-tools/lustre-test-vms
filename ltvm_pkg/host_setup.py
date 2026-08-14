@@ -7,6 +7,8 @@ and sets up SSH.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -16,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -1276,6 +1279,55 @@ def stop_podman_machine_macos() -> None:
         _run(["podman", "machine", "stop"], check=False, quiet=True)
     except OSError as e:
         log.warning("podman machine stop failed: %s", e)
+
+
+def _podman_lock_path() -> Path:
+    return Path(tempfile.gettempdir()) / f"ltvm-podman-{os.getuid()}.lock"
+
+
+@contextlib.contextmanager
+def podman_usage_lock() -> Iterator[None]:
+    """Hold a shared advisory lock while ltvm is using podman.
+
+    The macOS machine auto-stop probes this lock exclusively before
+    stopping.  The `podman ps` guard alone cannot see a concurrent
+    ltvm invocation that is mid-`podman build` or mid-pull -- image
+    builds aren't running containers -- so without the lock, a build
+    finishing in one terminal would stop the machine out from under a
+    build starting in another ("server probably quit: unexpected
+    EOF", exit 125).
+    """
+    fd = os.open(_podman_lock_path(), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def podman_in_use_elsewhere() -> bool:
+    """True if another process holds the podman usage lock.
+
+    flock treats separate fds as separate owners, so this also
+    reports True from within a ``podman_usage_lock()`` block -- the
+    auto-stop must release its own usage lock before probing.
+    """
+    try:
+        fd = os.open(_podman_lock_path(), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 def install_qemu_macos(force: bool = False) -> None:

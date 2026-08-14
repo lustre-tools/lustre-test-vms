@@ -439,3 +439,55 @@ class TestCliContainerPreflight:
         err = capsys.readouterr().err
         assert "build container ltvm-build-rocky9 not found" not in err
         assert rc == EXIT_OK
+
+
+class TestPodmanUsageLock:
+    """The advisory lock that keeps the macOS machine auto-stop from
+    yanking the machine out from under a concurrent build (in-flight
+    `podman build`/pulls have no container for the ps guard to see)."""
+
+    def test_in_use_reflects_held_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import ltvm_pkg.host_setup as hs
+
+        monkeypatch.setattr(
+            hs, "_podman_lock_path", lambda: tmp_path / "podman.lock"
+        )
+        assert hs.podman_in_use_elsewhere() is False
+        with hs.podman_usage_lock():
+            # flock treats a second fd as a distinct owner, so the
+            # probe sees our own shared hold -- exactly the behavior
+            # the auto-stop relies on for other processes.
+            assert hs.podman_in_use_elsewhere() is True
+        assert hs.podman_in_use_elsewhere() is False
+
+
+class TestAutostopConcurrency:
+    def _run_cm(self, monkeypatch: pytest.MonkeyPatch, *, in_use: bool) -> list:
+        from ltvm_pkg.cli import build as bmod
+
+        stops: list[int] = []
+        monkeypatch.setattr(bmod, "is_macos", lambda: True)
+        monkeypatch.setattr(
+            bmod, "podman_in_use_elsewhere", lambda: in_use
+        )
+        monkeypatch.setattr(
+            bmod, "should_stop_podman_machine_macos", lambda: True
+        )
+        monkeypatch.setattr(
+            bmod, "stop_podman_machine_macos", lambda: stops.append(1)
+        )
+        with bmod._podman_machine_autostop() as h:
+            h.success = True
+        return stops
+
+    def test_stop_skipped_while_other_build_in_flight(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert self._run_cm(monkeypatch, in_use=True) == []
+
+    def test_stop_fires_when_idle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert self._run_cm(monkeypatch, in_use=False) == [1]
