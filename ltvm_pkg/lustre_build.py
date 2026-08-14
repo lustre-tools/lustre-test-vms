@@ -514,44 +514,11 @@ def _build_in_container(
             f"fi"
         )
 
-    if force:
-        script_parts.append(
-            "if [ -f Makefile ]; then make distclean 2>/dev/null || true; fi"
-        )
-
-    if need_reconf or force:
-        # Remove stale .ko files from any previous build before
-        # reconfiguring.  distclean only cleans dirs the current
-        # Makefile knows about, so server .ko files survive a
-        # client-only reconfigure (and vice versa).
-        script_parts.append("find . -name '*.ko' -delete 2>/dev/null || true")
-        # Remove configure residue that poisons re-runs: conftest dirs/files
-        # and the parallel kconftest/lpb directories.
-        script_parts.append(
-            "rm -rf conftest conftest.c conftest.dir _lpb"
-            " kconftest.dir conftest.err 2>/dev/null || true"
-        )
-        # Remove stale config/compile lock dirs (*.d directories).
-        # When a previous configure was killed mid-compile, it leaves
-        # behind empty .d lock dirs that the next configure spins forever
-        # trying to acquire (the mkdir-based lock loop has no timeout).
-        # Use rmdir so legitimate non-empty .d dirs (e.g. kbuild dependency
-        # tracking) are preserved -- only empty leftovers get cleaned.
-        script_parts.append(
-            "find . -maxdepth 3 -name '*.d' -type d"
-            " -not -path '*/.git/*' -exec rmdir {} + 2>/dev/null || true"
-        )
-
-    # Run autogen.sh + configure only when needed.
+    # Build the configure command line before the cleanup block below:
+    # the flag-change check can flip need_reconf, and the cleanup keyed
+    # on it must see the final value (a flag-only reconfigure needs the
+    # same stale-.ko / conftest / lock-dir cleanup as any other).
     #
-    # autogen.sh regenerates aclocal.m4/libtool stubs with the container's
-    # toolchain.  We must re-run it when:
-    #   1. _needs_reconfigure() says so (kernel/path changed, --force)
-    #   2. The container's libtool version changed since last autogen run
-    #      (stamp file: .ltvm-container-libtool)
-    #
-    # The libtool check happens inside the container so we can compare the
-    # exact version the container has.
     # --with-o2ib=no: the build container has no OFED/rdma-core-devel
     # kernel headers, so configure's OpenIB gen2 probe fails with
     # "cannot compile with OpenIB gen2 headers" when Lustre tries to
@@ -587,6 +554,70 @@ def _build_in_container(
         # re-interpreted by the container shell.
         cfg += " " + " ".join(shlex.quote(a) for a in extra_configure)
 
+    # The kernel/server stamps don't capture configure flags, so a
+    # changed targets.yaml configure_args (or --configure) on an
+    # unchanged kernel would silently reuse the old config.status and
+    # the new flags would never take effect.  Stamp the full configure
+    # command line and reconfigure when it changes.
+    cfg_hash = hashlib.sha256(cfg.encode()).hexdigest()
+    cfg_stamp = lustre_tree / f".ltvm-configure-{_stamp_suffix(target, arch)}"
+    if not need_reconf:
+        if not cfg_stamp.exists():
+            print("  No configure-flags stamp yet, reconfiguring to record one")
+            need_reconf = True
+        elif cfg_stamp.read_text().strip() != cfg_hash:
+            print("  Configure flags changed, reconfiguring")
+            need_reconf = True
+    if need_reconf:
+        # Drop the stamp before any run that will reconfigure: if the
+        # build dies between configure and the success-path stamp
+        # write, a stale stamp would otherwise vouch for a
+        # config.status generated with DIFFERENT flags (change flags
+        # -> build fails after configure -> revert flags -> stamp
+        # matches again while config.status still carries the failed
+        # run's flags).
+        cfg_stamp.unlink(missing_ok=True)
+
+    if force:
+        script_parts.append(
+            "if [ -f Makefile ]; then make distclean 2>/dev/null || true; fi"
+        )
+
+    if need_reconf or force:
+        # Remove stale .ko files from any previous build before
+        # reconfiguring.  distclean only cleans dirs the current
+        # Makefile knows about, so server .ko files survive a
+        # client-only reconfigure (and vice versa).
+        script_parts.append("find . -name '*.ko' -delete 2>/dev/null || true")
+        # Remove configure residue that poisons re-runs: conftest dirs/files
+        # and the parallel kconftest/lpb directories.
+        script_parts.append(
+            "rm -rf conftest conftest.c conftest.dir _lpb"
+            " kconftest.dir conftest.err 2>/dev/null || true"
+        )
+        # Remove stale config/compile lock dirs (*.d directories).
+        # When a previous configure was killed mid-compile, it leaves
+        # behind empty .d lock dirs that the next configure spins forever
+        # trying to acquire (the mkdir-based lock loop has no timeout).
+        # Use rmdir so legitimate non-empty .d dirs (e.g. kbuild dependency
+        # tracking) are preserved -- only empty leftovers get cleaned.
+        script_parts.append(
+            "find . -maxdepth 3 -name '*.d' -type d"
+            " -not -path '*/.git/*' -exec rmdir {} + 2>/dev/null || true"
+        )
+
+    # Run autogen.sh + configure only when needed.
+    #
+    # autogen.sh regenerates aclocal.m4/libtool stubs with the container's
+    # toolchain.  We must re-run it when:
+    #   1. _needs_reconfigure() says so (kernel/path/configure-flags
+    #      changed, --force)
+    #   2. The container's libtool version changed since last autogen run
+    #      (stamp file: .ltvm-container-libtool)
+    #
+    # The libtool check happens inside the container so we can compare the
+    # exact version the container has.
+    #
     # Shell block: run autogen+configure when force-requested OR when the
     # container's libtool version differs from the last autogen stamp.
     force_reconf_flag = "1" if need_reconf else "0"
@@ -832,6 +863,7 @@ fi""")
     (lustre_tree / f".ltvm-server-{suffix}").write_text(
         str(enable_server) + "\n"
     )
+    (lustre_tree / f".ltvm-configure-{suffix}").write_text(cfg_hash + "\n")
     # Drop a build stamp at the staging root.  cmd_deploy uses it as
     # the reference mtime for the source-tree freshness check, so an
     # in-place rewrite of an existing .ko file under
