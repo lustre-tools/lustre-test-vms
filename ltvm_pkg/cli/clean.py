@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -157,9 +158,31 @@ def _scan_target(
         for v in tc._variants.values():
             if v.pinned_kernel:
                 protected_shorts.add(v.pinned_kernel)
-    except Exception:
-        # Target gone from yaml -> no protection, all groups off-list.
-        pass
+    except ValueError as exc:
+        if "Unknown target" in str(exc):
+            # Target gone from yaml -> no protection, all groups
+            # off-list, sweepable.
+            pass
+        else:
+            # Present in yaml but failed to load (e.g. a schema
+            # validation error).  Treating that like "gone" would strip
+            # the default-kernel/variant-pin protection and offer
+            # protected artifacts for deletion -- skip the target
+            # entirely instead.
+            print(
+                f"  WARNING: skipping {target}/{arch}: targets.yaml "
+                f"entry failed to load: {exc}",
+                file=sys.stderr,
+            )
+            return None
+    except Exception as exc:
+        # Unexpected load failure: same conservative skip.
+        print(
+            f"  WARNING: skipping {target}/{arch}: targets.yaml "
+            f"entry failed to load: {exc}",
+            file=sys.stderr,
+        )
+        return None
 
     # ---- Kernels: group by short prefix, decide what's prunable ----
     kernels_dir = arch_dir / "kernels"

@@ -292,3 +292,29 @@ class TestCmdPrune:
         )
         assert rc == EXIT_OK
         assert not only.exists()
+
+    def test_invalid_target_yaml_skipped_not_swept(
+        self,
+        tmp_targets: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A target whose targets.yaml entry fails validation must be
+        SKIPPED with a warning, not treated as gone-from-yaml: the
+        gone-path strips default-kernel protection and would offer
+        protected artifacts for deletion."""
+        import yaml as _yaml
+
+        ypath = tmp_targets / "targets" / "targets.yaml"
+        data = _yaml.safe_load(ypath.read_text())
+        data["targets"]["rocky9"]["configure_arg"] = ["--typo"]
+        ypath.write_text(_yaml.dump(data))
+
+        arch_dir = tmp_targets / "artifacts" / "rocky9" / "x86_64"
+        _make_kernel_dir(arch_dir, "5.14-rhel9.7-5.14.0-611.13.1.el9_7")
+
+        rc = _run_prune(tmp_targets, target="rocky9", use_json=True)
+        assert rc == EXIT_OK
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out)
+        assert payload["candidates"] == []
+        assert "failed to load" in captured.err

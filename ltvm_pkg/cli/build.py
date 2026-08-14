@@ -940,8 +940,14 @@ def cmd_status(args: argparse.Namespace) -> int:
     for name in targets:
         try:
             tc = TargetConfig(name)
-        except ValueError:
-            continue  # skip planned/disabled targets
+        except ValueError as exc:
+            if "not available for use" in str(exc):
+                continue  # planned/disabled targets stay hidden
+            # Schema/validation errors must stay loud: silently
+            # dropping the target here would undo the load-time
+            # unknown-key validation for the main inspection command.
+            all_status[name] = {"error": str(exc)}
+            continue
         cs = _container_status(tc)
         ks = kernel_status(tc)
         # Images are per-(kernel, variant): build one row per built
@@ -998,6 +1004,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(hdr)
         print("-" * len(hdr))
         for name, st in all_status.items():
+            if "error" in st:
+                print(f"{name:<12} CONFIG ERROR: {st['error']}")
+                continue
             c = _artifact_label(st["container"])
             k = _artifact_label(st["kernel"])
             for ims in st["images"]:

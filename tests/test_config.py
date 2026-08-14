@@ -482,6 +482,8 @@ class TestKernelOverrides:
         assert tc.kernel_overrides("nonexistent") == {}
 
     def test_invalid_entry_raises(self, tmp_targets: Path) -> None:
+        """A name-less mapping entry now fails eagerly at load time
+        (used to surface lazily on the first declared_kernels() call)."""
         data = yaml.safe_load(
             (tmp_targets / "targets" / "targets.yaml").read_text()
         )
@@ -489,9 +491,8 @@ class TestKernelOverrides:
             {"srpm_version": "5.14.0-503.11.1.el9_5"},
         ]
         _write_targets_yaml(tmp_targets / "targets", data)
-        tc = _make_config(tmp_targets)
-        with pytest.raises(ValueError, match="Invalid kernel entry"):
-            tc.declared_kernels()
+        with pytest.raises(ValueError, match="missing its 'name' key"):
+            _make_config(tmp_targets)
 
     def test_short_kernel_name_matches_mapping_entry(
         self, tmp_targets: Path
@@ -1028,3 +1029,121 @@ class TestListTargets:
         ):
             targets = cfg.list_targets()
         assert set(targets) == {"rocky9", "ubuntu2404"}
+
+
+class TestSchemaValidation:
+    """Load-time validation of targets.yaml keys.
+
+    Typos used to be silently ignored by the accessors while still
+    perturbing every artifact's input hash via base_data -- these
+    lock in the loud-failure behavior instead.
+    """
+
+    def _load(self, tmp_targets: Path, data: dict):
+        import ltvm_pkg.target_config as cfg
+
+        _write_targets_yaml(tmp_targets / "targets", data)
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            return cfg.TargetConfig("rocky9")
+
+    def _data(self) -> dict:
+        import copy
+
+        return copy.deepcopy(_ROCKY9_YAML)
+
+    def test_unknown_target_key_rejected(self, tmp_targets: Path) -> None:
+        data = self._data()
+        data["targets"]["rocky9"]["configure_arg"] = ["--enable-crypto"]
+        with pytest.raises(ValueError, match="unrecognized key.*configure_arg"):
+            self._load(tmp_targets, data)
+
+    def test_unknown_kernels_key_rejected(self, tmp_targets: Path) -> None:
+        data = self._data()
+        data["targets"]["rocky9"]["kernels"]["avaliable"] = ["5.14-rhel9.7"]
+        with pytest.raises(ValueError, match="under 'kernels'.*avaliable"):
+            self._load(tmp_targets, data)
+
+    def test_unknown_variant_key_rejected(self, tmp_targets: Path) -> None:
+        data = self._data()
+        data["targets"]["rocky9"]["variants"] = {
+            "mofed-24": {
+                "container_overlay": "rocky9/variants/x.Dockerfile",
+                "kernal": "5.14-rhel9.5",
+            }
+        }
+        with pytest.raises(ValueError, match="variant.*unrecognized key.*kernal"):
+            self._load(tmp_targets, data)
+
+    def test_kernel_entry_unknown_key_rejected(self, tmp_targets: Path) -> None:
+        data = self._data()
+        data["targets"]["rocky9"]["kernels"]["available"] = [
+            {"name": "5.14-rhel9.7", "srpm": "5.14.0-611.13.1.el9_7"},
+        ]
+        with pytest.raises(ValueError, match="kernels.available entry.*srpm"):
+            self._load(tmp_targets, data)
+
+    def test_kernel_entry_missing_name_rejected(self, tmp_targets: Path) -> None:
+        data = self._data()
+        data["targets"]["rocky9"]["kernels"]["available"] = [
+            {"srpm_version": "5.14.0-611.13.1.el9_7"},
+        ]
+        with pytest.raises(ValueError, match="missing its 'name' key"):
+            self._load(tmp_targets, data)
+
+    def test_default_not_in_available_rejected(self, tmp_targets: Path) -> None:
+        data = self._data()
+        data["targets"]["rocky9"]["kernels"]["default"] = "5.14-rhel9.9"
+        with pytest.raises(ValueError, match="kernels.default.*not in"):
+            self._load(tmp_targets, data)
+
+    def test_default_with_empty_available_ok(self, tmp_targets: Path) -> None:
+        """No available list keeps the historical implicit-default
+        behavior (minimal configs)."""
+        data = self._data()
+        del data["targets"]["rocky9"]["kernels"]["available"]
+        tc = self._load(tmp_targets, data)
+        assert tc.declared_kernels() == ["5.14-rhel9.7"]
+
+    def test_missing_os_metadata_rejected(self, tmp_targets: Path) -> None:
+        data = self._data()
+        del data["targets"]["rocky9"]["os_version"]
+        with pytest.raises(ValueError, match="missing required key.*os_version"):
+            self._load(tmp_targets, data)
+
+    def test_pinned_entry_form_accepted(self, tmp_targets: Path) -> None:
+        """The rocky10-style name+srpm_version dict entry stays valid."""
+        data = self._data()
+        data["targets"]["rocky9"]["kernels"]["available"] = [
+            "5.14-rhel9.7",
+            {"name": "5.14-rhel9.5", "srpm_version": "5.14.0-503.40.1.el9_5"},
+        ]
+        tc = self._load(tmp_targets, data)
+        assert tc.declared_kernels() == ["5.14-rhel9.7", "5.14-rhel9.5"]
+        assert tc.kernel_overrides("5.14-rhel9.5") == {
+            "srpm_version": "5.14.0-503.40.1.el9_5"
+        }
+
+    def test_kernel_config_bool_coerced(self, tmp_targets: Path) -> None:
+        """A bare yes/on/true in kernels.config loads as Python True;
+        it must become 'y', not the invalid fragment line
+        'CONFIG_FOO=True'."""
+        data = self._data()
+        data["targets"]["rocky9"]["kernels"]["config"] = {
+            "CONFIG_FOO": True,
+            "CONFIG_BAR": False,
+            "CONFIG_BAZ": "m",
+        }
+        tc = self._load(tmp_targets, data)
+        assert tc.kernel_config_overrides == {
+            "CONFIG_FOO": "y",
+            "CONFIG_BAR": "n",
+            "CONFIG_BAZ": "m",
+        }

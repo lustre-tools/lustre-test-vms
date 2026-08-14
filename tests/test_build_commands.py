@@ -1106,7 +1106,13 @@ class TestCmdStatusFormat:
 
         def _tc_factory(name: str) -> Any:
             if name == "broken":
-                raise ValueError("planned target")
+                # Realistic status-gate message: only "not available
+                # for use" errors are silently skipped; schema errors
+                # now surface as CONFIG ERROR rows instead.
+                raise ValueError(
+                    "Target 'broken' has status='planned' and is not "
+                    "available for use."
+                )
             # Real one for rocky9
             import ltvm_pkg.target_config as cfg
             with (
@@ -1252,3 +1258,34 @@ class TestCmdCleanScoping:
         assert payload["all_arches"] is False
         assert payload["wiped"][0]["removed"] is True
         assert payload["wiped"][0]["bytes"] >= 1
+
+
+class TestCmdStatusInvalidTarget:
+    def test_schema_error_shown_not_hidden(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+    ) -> None:
+        """A target failing the new load-time validation must appear as
+        a CONFIG ERROR row in build status, not silently vanish."""
+        ypath = tmp_targets / "targets" / "targets.yaml"
+        data = yaml.safe_load(ypath.read_text())
+        data["targets"]["rocky9"]["configure_arg"] = ["--typo"]
+        ypath.write_text(yaml.dump(data))
+
+        import ltvm_pkg.target_config as cfg
+
+        with (
+            patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
+            patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
+            patch.object(
+                cfg,
+                "TARGETS_YAML",
+                tmp_targets / "targets" / "targets.yaml",
+            ),
+        ):
+            rc = _run_main(["build", "status"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "CONFIG ERROR" in out
+        assert "configure_arg" in out

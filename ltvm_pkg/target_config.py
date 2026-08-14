@@ -64,6 +64,22 @@ _DEFAULTS = {
     "os_family": "rhel",
 }
 
+# Recognized targets.yaml keys.  Unknown keys fail loudly at load:
+# a misspelled key (e.g. 'configure_arg') would otherwise be silently
+# ignored by its accessor while still perturbing every artifact's
+# input hash via base_data -- the worst of both worlds.
+_KNOWN_TARGET_KEYS = frozenset({
+    "arch", "os_family", "os_name", "os_version", "container_image",
+    "configure_args", "default_mem", "kernel_deb_source", "kernels",
+    "lustre", "srpm_url", "status", "variants",
+})
+_KNOWN_KERNELS_KEYS = frozenset({"available", "config", "default"})
+_KNOWN_KERNEL_ENTRY_KEYS = frozenset({"name", "srpm_version"})
+_KNOWN_LUSTRE_KEYS = frozenset({"mode"})
+_KNOWN_VARIANT_KEYS = frozenset({
+    "container_overlay", "image_overlay", "kernel", "packages", "params",
+})
+
 _COPY_RE = re.compile(r"^\s*COPY\s+(\S+)", re.MULTILINE)
 
 DEFAULT_VARIANT = "base"
@@ -87,6 +103,16 @@ class Variant:
     ) -> None:
         self.name = name
         self._data = data or {}
+        # Typo'd variant keys are doubly silent otherwise: an unknown
+        # key is dropped by the accessors below AND ignored by
+        # hash_bytes, so e.g. a mistyped 'kernal:' pin would make the
+        # variant silently apply to every kernel.
+        unknown = set(self._data) - _KNOWN_VARIANT_KEYS
+        if unknown:
+            raise ValueError(
+                f"variant {name!r}: unrecognized key(s) in targets.yaml: "
+                f"{', '.join(sorted(unknown))}"
+            )
         co = self._data.get("container_overlay")
         io = self._data.get("image_overlay")
         # Overlay paths in YAML are relative to the repo's targets/
@@ -259,12 +285,83 @@ class TargetConfig:
         if "default" not in self._kernels:
             raise ValueError(f"target {name!r}: 'kernels.default' is required")
 
+        # Unknown-key validation: typos must fail loudly, not be
+        # silently ignored (see _KNOWN_TARGET_KEYS comment).
+        unknown = set(self._data) - _KNOWN_TARGET_KEYS
+        if unknown:
+            raise ValueError(
+                f"target {name!r}: unrecognized key(s) in targets.yaml: "
+                f"{', '.join(sorted(unknown))}"
+            )
+        unknown = set(self._kernels) - _KNOWN_KERNELS_KEYS
+        if unknown:
+            raise ValueError(
+                f"target {name!r}: unrecognized key(s) under 'kernels': "
+                f"{', '.join(sorted(unknown))}"
+            )
+        lustre_block = self._data.get("lustre")
+        if isinstance(lustre_block, dict):
+            unknown = set(lustre_block) - _KNOWN_LUSTRE_KEYS
+            if unknown:
+                raise ValueError(
+                    f"target {name!r}: unrecognized key(s) under "
+                    f"'lustre': {', '.join(sorted(unknown))}"
+                )
+        for entry in self._kernels.get("available", []):
+            if isinstance(entry, dict):
+                if "name" not in entry:
+                    raise ValueError(
+                        f"target {name!r}: kernels.available mapping "
+                        f"entry is missing its 'name' key: {entry!r}"
+                    )
+                unknown = set(entry) - _KNOWN_KERNEL_ENTRY_KEYS
+                if unknown:
+                    raise ValueError(
+                        f"target {name!r}: unrecognized key(s) on "
+                        f"kernels.available entry {entry['name']!r}: "
+                        f"{', '.join(sorted(unknown))}"
+                    )
+
+        # kernels.default must be a declared kernel: a typo'd default
+        # would otherwise become a phantom kernel that completion,
+        # fetch --kernel validation, and clean all accept, failing only
+        # deep inside a kernel build with a missing-.target error.
+        # (An empty/absent 'available' list keeps the historical
+        # behavior of the default implicitly declaring itself.)
+        avail_names = [
+            self._kernel_entry_name(e)
+            for e in self._kernels.get("available", [])
+        ]
+        if avail_names and self._kernels["default"] not in avail_names:
+            raise ValueError(
+                f"target {name!r}: kernels.default "
+                f"{self._kernels['default']!r} is not in "
+                f"kernels.available ({', '.join(avail_names)})"
+            )
+
+        # Required OS metadata: accessed unconditionally by the
+        # build/fetch header (describe_action), so a missing key would
+        # otherwise crash with a raw KeyError mid-command.
+        missing = [
+            k for k in ("os_name", "os_version", "container_image")
+            if k not in self._data
+        ]
+        if missing:
+            raise ValueError(
+                f"target {name!r}: missing required key(s) in "
+                f"targets.yaml: {', '.join(missing)}"
+            )
+
         # Resolve effective arch: CLI override > target > defaults
         if arch is not None:
             self._data["arch"] = arch
 
         self.output_dir = ARTIFACTS_DIR / name / str(self._data["arch"])
 
+        # Gate on the same 'working' fallback the status property uses
+        # (previously the gate said 'working' while the property said
+        # 'unknown').  Deliberately does NOT setdefault into _data:
+        # that would perturb input_hash for targets omitting status.
         status = self._data.get("status", "working")
         if status not in ("working", "experimental"):
             raise ValueError(
@@ -380,7 +477,9 @@ class TargetConfig:
 
     @property
     def status(self) -> str:
-        return str(self._data.get("status", "unknown"))
+        # __init__ setdefaults this to 'working', so the key is always
+        # present; keep .get for safety on hand-built instances.
+        return str(self._data.get("status", "working"))
 
     @property
     def default_mem(self) -> int:
@@ -461,8 +560,17 @@ class TargetConfig:
 
     @property
     def kernel_config_overrides(self) -> dict[str, str]:
-        """Kernel .config overrides from targets.yaml kernels.config."""
-        return dict(self._kernels.get("config", {}))
+        """Kernel .config overrides from targets.yaml kernels.config.
+
+        Values are normalized to kconfig syntax: YAML booleans (a bare
+        ``yes``/``on``/``true`` loads as Python True) become y/n
+        instead of leaking ``CONFIG_FOO=True`` into the fragment.
+        """
+        raw = self._kernels.get("config", {})
+        return {
+            k: ("y" if v is True else "n" if v is False else str(v))
+            for k, v in raw.items()
+        }
 
     def _short_kernel_name(self, name: str) -> str:
         """Return the short kernel name (e.g. "5.14-rhel9.7") from either
@@ -482,7 +590,9 @@ class TargetConfig:
         """Resolve a kernel name (short or full) to the built dir name.
 
         Kernel directories are named <lustre_target>-<full_version>
-        (e.g. 5.14-rhel9.7-5.14.0-611.13.1.el9_7_lustre).
+        (e.g. 5.14-rhel9.7-5.14.0-611.13.1.el9_7 -- no _lustre suffix;
+        that appears only in kernel.release / release tags, set by
+        kernel-build-inner.sh's EXTRAVERSION).
 
         Resolution order:
           1. If this TargetConfig is bound to a variant with a kernel
@@ -540,7 +650,8 @@ class TargetConfig:
         """Return the output directory for a kernel.
 
         Accepts short names (5.14-rhel9.7) or full names
-        (5.14-rhel9.7-5.14.0-611.13.1.el9_7_lustre).
+        (5.14-rhel9.7-5.14.0-611.13.1.el9_7 -- no _lustre suffix in
+        dir names).
         """
         return self.output_dir / "kernels" / self.resolve_kernel(kernel)
 
@@ -750,8 +861,8 @@ class TargetConfig:
             h.update(self._hash_package_lists("base", "test", "debug").encode())
             # Note: packages-server.txt is already hashed via the
             # Dockerfile COPY scan above, so we deliberately do NOT
-            # add it again here.  The `server` field in targets.yaml
-            # affects Lustre build (--enable-server) but every image
+            # add it again here.  Server-ness comes from lustre.mode
+            # (--enable-server for server_* modes) but every image
             # currently installs server packages unconditionally.
             #
             # image_build.py bakes kernel modules into the final image
