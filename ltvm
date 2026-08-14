@@ -1214,7 +1214,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--cleanup",
         action="store_true",
         default=False,
-        help="Unmount: run llmountcleanup.sh && lustre_rmmod",
+        help="Unmount: run llmountcleanup.sh && lustre_rmmod "
+        "(same as `ltvm llumount`)",
     )
     sp.add_argument(
         "--timeout",
@@ -1223,6 +1224,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Command timeout in seconds (default: 300)",
     )
     sp.set_defaults(func=cmd_llmount)
+
+    # -- llumount: unmount spelled the way Lustre spells it --
+    # (llmount.sh / llumount.sh).  Same handler as `llmount --cleanup`,
+    # which stays supported for existing scripts.
+    sp = sub.add_parser(
+        "llumount",
+        parents=[common],
+        help="Unmount Lustre inside a VM (same as llmount --cleanup)",
+    )
+    _llum_vm = sp.add_argument("vm", help="VM name")
+    _llum_vm.completer = complete_vms  # type: ignore[attr-defined]
+    sp.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        help="Command timeout in seconds (default: 300)",
+    )
+    sp.set_defaults(func=cmd_llmount, cleanup=True)
 
     # -- cluster --
     sp = sub.add_parser(

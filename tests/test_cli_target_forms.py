@@ -340,3 +340,28 @@ class TestClusterCreateTargetForms:
         assert rc != 0
         err = capsys.readouterr().err
         assert "conflict" in err.lower()
+
+
+class TestLlumountAlias:
+    """`ltvm llumount <vm>` is the unmount spelling (matching Lustre's
+    llmount.sh / llumount.sh pair); `llmount --cleanup` remains
+    supported for existing scripts."""
+
+    def test_llumount_parses_as_cleanup(self) -> None:
+        p = ltvm.build_parser()
+        args = p.parse_args(["llumount", "co1-single"])
+        assert args.vm == "co1-single"
+        assert args.cleanup is True
+        assert args.func is ltvm.cmd_llmount
+
+    def test_llmount_cleanup_still_works(self) -> None:
+        p = ltvm.build_parser()
+        args = p.parse_args(["llmount", "co1-single", "--cleanup"])
+        assert args.vm == "co1-single"
+        assert args.cleanup is True
+        assert args.func is ltvm.cmd_llmount
+
+    def test_llmount_default_is_mount(self) -> None:
+        p = ltvm.build_parser()
+        args = p.parse_args(["llmount", "co1-single"])
+        assert args.cleanup is False

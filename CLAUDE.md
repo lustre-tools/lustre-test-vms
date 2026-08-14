@@ -138,7 +138,8 @@ ltvm build all rocky9 --lustre-tree ~/lustre-release --force-compat
 sudo ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 ltvm deploy-lustre co1-single --lustre-tree ~/lustre-release --mount
 ssh co1-single 'lctl dl'
-ltvm llmount co1-single [--cleanup]   # mount / unmount
+ltvm llmount co1-single               # mount
+ltvm llumount co1-single              # unmount (= llmount --cleanup)
 ltvm vm console-log co1-single
 ltvm vm nmi co1-single                # inject NMI -> kdump
 ltvm vm crash-collect co1-single --mod-dir $CO/1
