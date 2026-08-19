@@ -227,6 +227,40 @@ while IFS= read -r line; do
 	fi
 done < /input/staging/config.fragment
 
+# ------------------------------------------------------------------
+# 4b. SBAT data (RHEL 9.8+)
+# ------------------------------------------------------------------
+# RHEL 9.8 kernels embed an SBAT (Secure Boot Advanced Targeting)
+# section in the x86 boot stub.  With CONFIG_EFI_SBAT=y plus
+# CONFIG_EFI_SBAT_FILE="kernel.sbat", arch/x86/boot/compressed/sbat.o
+# takes that file (path relative to the top of the tree) as a
+# prerequisite and .incbin's it.  kernel.spec generates it during
+# %prep from Source83 (kernel.sbat.template); we build straight from
+# the source tarball, so nothing writes it and the build dies with
+#   No rule to make target 'kernel.sbat'
+# Only the x86_64 config turns CONFIG_EFI_SBAT on, which is why
+# aarch64 builds of the same kernel are unaffected.
+if grep -q '^CONFIG_EFI_SBAT=y' .config; then
+	SBAT_FILE=$(sed -n 's/^CONFIG_EFI_SBAT_FILE="\(.*\)"$/\1/p' .config)
+	if [[ -n "$SBAT_FILE" && ! -f "$SBAT_FILE" ]]; then
+		echo "--- Generating ${SBAT_FILE} (SBAT data)..."
+		mkdir -p "$(dirname "$SBAT_FILE")"
+		SBAT_KVER="${LNXMAJ}-${LNXREL}.${TARGET_ARCH}"
+		# sbat_suffix is "rhel" for both RHEL and CentOS/Rocky.
+		SBAT_TEMPLATE=$(find "$SRPM_DIR" -name kernel.sbat.template | head -1)
+		if [[ -n "$SBAT_TEMPLATE" ]]; then
+			sed -e "s,@KVER,${SBAT_KVER}," \
+				-e "s,@SBAT_SUFFIX,rhel," \
+				"$SBAT_TEMPLATE" > "$SBAT_FILE"
+		else
+			printf '%s\n' \
+				'sbat,1,SBAT Version,sbat,1,https://github.com/rhboot/shim/blob/main/SBAT.md' \
+				"kernel.rhel,1,Red Hat,kernel-core,${SBAT_KVER},mailto:secalert@redhat.com" \
+				> "$SBAT_FILE"
+		fi
+	fi
+fi
+
 # Set EXTRAVERSION from LNXREL so kernel version matches the SRPM
 # e.g., 5.14.0 becomes 5.14.0-611.13.1.el9_7_lustre
 if [[ -n "$LNXREL" ]]; then
