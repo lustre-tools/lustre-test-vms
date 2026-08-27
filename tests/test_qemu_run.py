@@ -20,7 +20,13 @@ def _force_linux_host() -> Any:
     checks can run on macOS.  These tests drive the Linux code paths;
     without this pin they'd fail when the test runner is Darwin.
     """
-    with patch("ltvm_pkg.qemu_run.is_macos", return_value=False):
+    def routed_sudo_run(cmd, *, check=True, quiet=False):
+        return qemu_run.run(cmd, check=check, capture_output=quiet)
+
+    with (
+        patch("ltvm_pkg.qemu_run.is_macos", return_value=False),
+        patch("ltvm_pkg.qemu_run.sudo_run", side_effect=routed_sudo_run),
+    ):
         yield
 
 

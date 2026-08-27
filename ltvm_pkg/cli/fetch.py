@@ -720,7 +720,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         print("Next:")
         arch_flag = f" --arch {arch}" if arch != host_arch() else ""
         print(
-            f"  sudo ltvm create co1-test --target {target}{arch_flag} "
+            f"  ltvm create co1-test --target {target}{arch_flag} "
             f"--vcpus 2 --mdt-disks 1 --ost-disks 2"
         )
         print("  ltvm llmount co1-test")

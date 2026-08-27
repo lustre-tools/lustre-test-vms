@@ -124,6 +124,10 @@ def _create_env(tmp_vmdir: Path, *, run_rc: int = 0, meta: dict | None = None,
         yield [mgmt, *extras]
 
     run_rc_mock = MagicMock(returncode=run_rc, stdout="", stderr="")
+    m_exec = MagicMock(
+        return_value=run_rc_mock,
+        side_effect=run_side_effect,
+    )
 
     with (
         patch("ltvm_pkg.vm_commands.resolve_os_artifacts", return_value=arts),
@@ -135,9 +139,12 @@ def _create_env(tmp_vmdir: Path, *, run_rc: int = 0, meta: dict | None = None,
         ),
         patch(
             "ltvm_pkg.vm_commands.run",
-            return_value=run_rc_mock,
-            side_effect=run_side_effect,
-        ) as m_run,
+            side_effect=m_exec,
+        ),
+        patch(
+            "ltvm_pkg.vm_commands.sudo_run",
+            side_effect=m_exec,
+        ),
         patch("ltvm_pkg.vm_commands.launch_qemu") as m_launch,
         patch("ltvm_pkg.vm_commands.provision_vm_ssh") as m_prov,
         patch("ltvm_pkg.vm_commands._seed_kdump_boot") as m_seed,
@@ -150,7 +157,7 @@ def _create_env(tmp_vmdir: Path, *, run_rc: int = 0, meta: dict | None = None,
         patch.dict("os.environ", {}, clear=False),
     ):
         yield {
-            "run": m_run,
+            "run": m_exec,
             "launch": m_launch,
             "provision": m_prov,
             "seed": m_seed,
@@ -251,6 +258,7 @@ class TestCreateKernelResolution:
                 return_value="52:54:00:00:00:02",
             ),
             patch("ltvm_pkg.vm_commands.run", return_value=run_ok),
+            patch("ltvm_pkg.vm_commands.sudo_run", return_value=run_ok),
             patch("ltvm_pkg.vm_commands.launch_qemu"),
             patch("ltvm_pkg.vm_commands.provision_vm_ssh"),
             patch("ltvm_pkg.vm_commands._seed_kdump_boot"),
@@ -374,14 +382,15 @@ class TestCreateVMInfoPersistence:
         vm = VMInfo.load("co1-alice")
         assert vm.creator == "alice"
 
-    def test_creator_falls_back_to_root(self, tmp_vmdir: Path) -> None:
+    def test_creator_falls_back_to_invoking_user(self, tmp_vmdir: Path) -> None:
         with (
             _create_env(tmp_vmdir),
             patch.dict("os.environ", {}, clear=True),
+            patch("getpass.getuser", return_value="patrick"),
         ):
             vm_commands.cmd_create(_create_args(name="co1-asroot"))
         vm = VMInfo.load("co1-asroot")
-        assert vm.creator == "root"
+        assert vm.creator == "patrick"
 
     def test_default_variant_is_base(self, tmp_vmdir: Path) -> None:
         with _create_env(tmp_vmdir):
@@ -485,6 +494,7 @@ class TestCreateRollback:
                 return_value="52:54:00:00:00:03",
             ),
             patch("ltvm_pkg.vm_commands.run", return_value=run_ok),
+            patch("ltvm_pkg.vm_commands.sudo_run", return_value=run_ok),
             patch(
                 "ltvm_pkg.vm_commands.launch_qemu",
                 side_effect=RuntimeError("qemu boom"),
@@ -542,6 +552,7 @@ class TestCreateRollback:
                 return_value="52:54:00:00:00:04",
             ),
             patch("ltvm_pkg.vm_commands.run", return_value=run_ok),
+            patch("ltvm_pkg.vm_commands.sudo_run", return_value=run_ok),
             patch(
                 "ltvm_pkg.vm_commands.launch_qemu",
                 side_effect=seed_log_then_fail,

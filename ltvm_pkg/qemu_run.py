@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from .host_setup import is_macos, socket_vmnet_socket_path
+from .priv import sudo_run
 from .vm_state import (
     BRIDGE,
     EXIT_ERROR,
@@ -248,15 +249,30 @@ def launch_qemu(vm: VMInfo) -> None:
     if macos:
         vmnet_socket = str(socket_vmnet_socket_path())
     else:
+        # On Linux the TAP is created with ``user $LOGNAME`` so QEMU can
+        # attach to it without root via TUNSETIFF; the ``ip`` calls
+        # themselves still need sudo for CAP_NET_ADMIN.
+        import getpass as _getpass
+        _user = _getpass.getuser()
         for _tap in all_taps:
-            run(["ip", "link", "del", _tap], capture_output=True)
-        run(["ip", "neigh", "flush", vm.ip, "dev", BRIDGE], capture_output=True)
-        run(
-            ["ip", "tuntap", "add", "dev", vm.tap, "mode", "tap"],
-            check=True,
+            sudo_run(["ip", "link", "del", _tap], check=False, quiet=True)
+        sudo_run(
+            ["ip", "neigh", "flush", vm.ip, "dev", BRIDGE],
+            check=False, quiet=True,
         )
-        run(["ip", "link", "set", vm.tap, "master", BRIDGE], check=True)
-        run(["ip", "link", "set", vm.tap, "up"], check=True)
+        sudo_run(
+            ["ip", "tuntap", "add", "dev", vm.tap,
+             "mode", "tap", "user", _user],
+            check=True, quiet=True,
+        )
+        sudo_run(
+            ["ip", "link", "set", vm.tap, "master", BRIDGE],
+            check=True, quiet=True,
+        )
+        sudo_run(
+            ["ip", "link", "set", vm.tap, "up"],
+            check=True, quiet=True,
+        )
 
     # Extra NICs: create one TAP per declared nic.  They all join the
     # same bridge as the mgmt NIC for now (tcp only); softroce (-r55)
@@ -276,12 +292,19 @@ def launch_qemu(vm: VMInfo) -> None:
             # at boot via setup-nic-softroce.sh.
             if macos:
                 continue
-            run(
-                ["ip", "tuntap", "add", "dev", _tap, "mode", "tap"],
-                check=True,
+            sudo_run(
+                ["ip", "tuntap", "add", "dev", _tap,
+                 "mode", "tap", "user", _user],
+                check=True, quiet=True,
             )
-            run(["ip", "link", "set", _tap, "master", BRIDGE], check=True)
-            run(["ip", "link", "set", _tap, "up"], check=True)
+            sudo_run(
+                ["ip", "link", "set", _tap, "master", BRIDGE],
+                check=True, quiet=True,
+            )
+            sudo_run(
+                ["ip", "link", "set", _tap, "up"],
+                check=True, quiet=True,
+            )
         elif _base_type == "passthrough":
             # No host TAP: the VF is attached directly to the guest
             # via vfio-pci.  The host-side bind-to-vfio happened in
@@ -488,7 +511,10 @@ def launch_qemu(vm: VMInfo) -> None:
         # the L2 fabric and no per-VM host state was created here.
         if not macos:
             for _tap in all_taps:
-                run(["ip", "link", "del", _tap], capture_output=True)
+                sudo_run(
+                    ["ip", "link", "del", _tap],
+                    check=False, quiet=True,
+                )
         raise
 
     vm.update_pid(pid)
@@ -541,9 +567,12 @@ def kill_qemu(vm: VMInfo) -> None:
     # one Unix socket -- so teardown is a no-op there.
     if is_macos():
         return
-    run(["ip", "link", "del", vm.tap], capture_output=True)
+    sudo_run(["ip", "link", "del", vm.tap], check=False, quiet=True)
     for _idx, _nic_type, _tap, _mac in vm.extra_nics():
-        run(["ip", "link", "del", _tap], capture_output=True)
+        sudo_run(["ip", "link", "del", _tap], check=False, quiet=True)
     # Flush stale ARP entry so the bridge doesn't poison new VMs or
     # re-creations of this VM that may get a different MAC.
-    run(["ip", "neigh", "flush", vm.ip, "dev", BRIDGE], capture_output=True)
+    sudo_run(
+        ["ip", "neigh", "flush", vm.ip, "dev", BRIDGE],
+        check=False, quiet=True,
+    )

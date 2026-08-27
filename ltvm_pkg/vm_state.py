@@ -15,29 +15,15 @@ from pathlib import Path
 
 
 def _atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
-    """Write ``text`` to ``path`` atomically via a tempfile + rename.
+    """Write ``text`` to ``path`` atomically.
 
-    Creates the parent directory if needed, chmods the temp file before
-    rename so callers observing ``path`` see the final mode, and removes
-    the temp file on any error (including BaseException).
+    Delegates to ``priv.atomic_write`` so .info / subnet / etc.
+    writes into the root-owned ``VM_DIR`` work transparently when
+    ltvm runs as the invoking user (sudo-fallback inside the helper).
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_str = tempfile.mkstemp(
-        dir=str(path.parent),
-        prefix=f".{path.name}.",
-    )
-    tmp = Path(tmp_str)
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(text)
-        os.chmod(tmp, mode)
-        tmp.rename(path)
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
+    from .priv import atomic_write as _priv_atomic_write
+
+    _priv_atomic_write(path, text, mode=mode)
 
 # ── constants ────────────────────────────────────────────
 # Configurable via environment variables; defaults match the

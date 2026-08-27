@@ -135,7 +135,7 @@ ltvm build all rocky9 --lustre-tree ~/lustre-release --force-compat
 ## VM Management
 
 ```bash
-sudo ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
+ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 ltvm deploy-lustre co1-single --lustre-tree ~/lustre-release --mount
 ssh co1-single 'lctl dl'
 ltvm llmount co1-single               # mount
@@ -143,15 +143,16 @@ ltvm llumount co1-single              # unmount (= llmount --cleanup)
 ltvm vm console-log co1-single
 ltvm vm nmi co1-single                # inject NMI -> kdump
 ltvm vm crash-collect co1-single --mod-dir $CO/1
-sudo ltvm destroy co1-single
+ltvm destroy co1-single
 ```
 
 **Naming:** always include the checkout number: `co<N>-<role>`.
 
-**Root:** `create`, `destroy`, `start`, `stop`, `doctor`,
-`update`, `cluster create`, `cluster destroy` require root.
-`build *`, `target *`, `deploy-lustre`, `llmount`, `list`,
-`vm *`, and the remaining `cluster` actions do not.
+**Root:** Run `create`, `destroy`, `start`, `stop`, and `doctor` as
+the invoking user; they prompt once and elevate only the individual host
+operations that need it. `update`, `cluster create`, and `cluster destroy`
+still require root. `build *`, `target *`, `deploy-lustre`, `llmount`,
+`list`, `vm *`, and the remaining `cluster` actions do not.
 
 ### Clusters
 
@@ -263,10 +264,10 @@ Watch for:
 
 - **Subprocess command building.** Never interpolate into
   shell strings (`bash -c f"...{x}"`).  Use argument lists.
-- **Root-required operations.** VM lifecycle touching host
-  networking or QEMU launch (create, destroy, start, stop,
-  `vm snapshot/restore/nmi`, doctor, cluster
-  create/destroy) need root.  Read/observe (console-log,
+- **Root-required operations.** Single-VM lifecycle commands elevate
+  individual host operations internally; do not require users to invoke
+  the whole command through sudo. Cluster create/destroy still require
+  root. Read/observe (console-log,
   deploy-lustre, llmount, crash-collect, cluster
   deploy/exec/status, list) don't.  Build commands don't.
 - **`--force-compat`** silences compat *refusals* but not

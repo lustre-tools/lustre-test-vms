@@ -109,40 +109,40 @@ but kexec_load fails silently on the microvm machine type.
 ```bash
 ltvm build status
 sudo ltvm list
-sudo ltvm doctor
+ltvm doctor
 ```
 
 ### Phase 1: VM Creation — Default Behavior
 
 ```bash
-sudo ltvm create co1-default
+ltvm create co1-default
 sudo ltvm list --json   # verify: vcpus=2, mem=2048, mdt_disks=1, ost_disks=2, disk=500MiB
 # 1.2: ensure on running VM
-sudo ltvm create co1-default   # should print "already running", exit 0
+ltvm create co1-default   # should print "already running", exit 0
 # 1.6: root fs size
 ssh co1-default 'df -h /'
-sudo ltvm destroy co1-default
+ltvm destroy co1-default
 ```
 
 ### Phase 2: Disk Topology Variations
 
 ```bash
-sudo ltvm create co1-t1 --mdt-disks 1 --ost-disks 1
-sudo ltvm create co1-t3 --ost-disks 4
-sudo ltvm create co1-t4 --mdt-disks 2 --ost-disks 2
-sudo ltvm create co1-t5 --mdt-disks 0 --ost-disks 0
+ltvm create co1-t1 --mdt-disks 1 --ost-disks 1
+ltvm create co1-t3 --ost-disks 4
+ltvm create co1-t4 --mdt-disks 2 --ost-disks 2
+ltvm create co1-t5 --mdt-disks 0 --ost-disks 0
 
 for vm in co1-t1 co1-t3 co1-t4 co1-t5; do
     echo "=== $vm ===" && ssh $vm 'lsblk'
 done
 
-sudo ltvm destroy co1-t1 co1-t3 co1-t4 co1-t5
+ltvm destroy co1-t1 co1-t3 co1-t4 co1-t5
 ```
 
 ### Phase 3: Lustre — Single-node Boot and Format
 
 ```bash
-sudo ltvm create co1-single
+ltvm create co1-single
 sudo ltvm deploy-lustre co1-single --lustre-tree ~/lustre-release --mount
 ssh co1-single 'lctl dl'
 ssh co1-single 'lctl get_param osd-*.*.mntdev'
@@ -156,7 +156,7 @@ ssh co1-single 'ls /proc/fs/lustre/'
 
 ```bash
 # 4.1. Fresh deploy on new VM
-sudo ltvm create co1-deploy
+ltvm create co1-deploy
 sudo ltvm deploy-lustre co1-deploy --lustre-tree ~/lustre-release --mount
 ssh co1-deploy 'lctl dl'
 ssh co1-deploy 'lfs df /mnt/lustre'
@@ -166,18 +166,18 @@ sudo ltvm deploy-lustre co1-deploy --lustre-tree ~/lustre-release --mount
 ssh co1-deploy 'lctl dl'
 
 # 4.3. 4-OST VM
-sudo ltvm create co1-4ost --ost-disks 4
+ltvm create co1-4ost --ost-disks 4
 sudo ltvm deploy-lustre co1-4ost --lustre-tree ~/lustre-release --mount
 ssh co1-4ost 'lfs df /mnt/lustre'
 
 # 4.4. Deploy without --mount, then mount manually
-sudo ltvm create co1-nomount
+ltvm create co1-nomount
 sudo ltvm deploy-lustre co1-nomount --lustre-tree ~/lustre-release
 ssh co1-nomount 'lctl dl | grep -c UP'
 ssh co1-nomount 'bash lustre/tests/llmount.sh'
 ssh co1-nomount 'lctl dl'
 
-sudo ltvm destroy co1-deploy co1-4ost co1-nomount
+ltvm destroy co1-deploy co1-4ost co1-nomount
 ```
 
 ### Phase 5: Sanity Tests
@@ -216,14 +216,14 @@ Client VM mounts a Lustre filesystem served by a rocky9 server VM.
 
 ```bash
 # Server: rocky9 (already tested in phase 3)
-sudo ltvm create co1-server
+ltvm create co1-server
 sudo ltvm deploy-lustre co1-server --lustre-tree ~/lustre-release --mount
 SERVER_IP=$(sudo ltvm list --json | python3 -c \
     "import sys,json; [print(v['ip']) for v in json.load(sys.stdin)['vms'] \
     if v['name']=='co1-server']")
 
 # Client VM (target OS, no disks)
-sudo ltvm create co1-client --target <target> --mdt-disks 0 --ost-disks 0
+ltvm create co1-client --target <target> --mdt-disks 0 --ost-disks 0
 # Deploy client-only modules and mount
 ssh co1-client "mount -t lustre ${SERVER_IP}@tcp:/lustre /mnt/lustre"
 ssh co1-client 'lsmod | grep -E "lustre|lnet"'
@@ -234,7 +234,7 @@ ssh co1-client \
      md5sum /mnt/lustre/test.dat | tee /tmp/orig.md5 && \
      md5sum /mnt/lustre/test.dat && diff /tmp/orig.md5 -'
 
-sudo ltvm destroy co1-server co1-client
+ltvm destroy co1-server co1-client
 ```
 
 ### Phase 9: Snapshot / Restore
@@ -270,7 +270,7 @@ ssh co1-4ost \
 
 ```bash
 sudo ltvm vm nmi co1-stopped                   # expect non-zero + clear error
-sudo ltvm destroy co1-nonexistent           # expect exit 0
+ltvm destroy co1-nonexistent           # expect exit 0
 ```
 
 ---

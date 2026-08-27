@@ -824,23 +824,17 @@ class TestSeedKdumpBoot:
 
 
 class TestCmdCreateChown:
-    """cmd_create chowns overlay + data disks to SUDO_USER when invoked via sudo."""
+    """cmd_create hands sudo-created disks to the invoking user."""
 
     def _run_create(
         self, tmp_vmdir: Path, sudo_user: str | None
-    ) -> tuple[list, list]:
-        """Run cmd_create through the disk-creation path; return chown call args."""
-        chown_calls: list[tuple] = []
-        orig_chown = vm_commands.os.chown
+    ) -> list[list[str]]:
+        """Run cmd_create and return commands routed through sudo_run."""
+        sudo_calls: list[list[str]] = []
 
-        def fake_chown(path, uid, gid):
-            chown_calls.append((str(path), uid, gid))
-
-        import pwd as _pwd
-
-        fake_pw = MagicMock()
-        fake_pw.pw_uid = 1001
-        fake_pw.pw_gid = 1001
+        def fake_sudo_run(cmd, **kwargs):
+            sudo_calls.append(list(cmd))
+            return MagicMock(returncode=0, stdout="", stderr="")
 
         env = {"SUDO_USER": sudo_user} if sudo_user else {}
 
@@ -850,11 +844,15 @@ class TestCmdCreateChown:
             patch("ltvm_pkg.vm_commands.tap_for_name", return_value="tap0"),
             patch("ltvm_pkg.vm_commands.mac_for_name", return_value="AA:BB:CC:DD:EE:FF"),
             patch("ltvm_pkg.vm_commands.run") as mock_run,
+            patch(
+                "ltvm_pkg.vm_commands.sudo_run",
+                side_effect=fake_sudo_run,
+            ),
             patch("ltvm_pkg.vm_commands.launch_qemu"),
             patch("ltvm_pkg.vm_commands.provision_vm_ssh"),
             patch("ltvm_pkg.vm_commands._seed_kdump_boot"),
-            patch("ltvm_pkg.vm_commands.os.chown", side_effect=fake_chown),
             patch("ltvm_pkg.vm_commands.os.environ", env),
+            patch("getpass.getuser", return_value="patrick"),
         ):
             arts = MagicMock()
             arts.image = tmp_vmdir / "base.ext4"
@@ -880,29 +878,27 @@ class TestCmdCreateChown:
                 "ltvm_pkg.vm_commands.load_meta_safe",
                 return_value={"kernel_version": "5.14.0-test"},
             ):
-                if sudo_user:
-                    with patch("pwd.getpwnam", return_value=fake_pw):
-                        vm_commands.cmd_create(
-                            _create_args(name="co1-chown", mdt_disks=1, ost_disks=2)
-                        )
-                else:
-                    vm_commands.cmd_create(
-                        _create_args(name="co1-chown", mdt_disks=1, ost_disks=2)
-                    )
+                vm_commands.cmd_create(
+                    _create_args(name="co1-chown", mdt_disks=1, ost_disks=2)
+                )
 
-        return chown_calls
+        return sudo_calls
 
     def test_chown_called_when_sudo_user_set(self, tmp_vmdir: Path) -> None:
         calls = self._run_create(tmp_vmdir, sudo_user="alice")
-        # overlay + 3 data disks (1 mdt + 2 ost) = 4 files chowned
-        assert len(calls) == 4
-        for _, uid, gid in calls:
-            assert uid == 1001
-            assert gid == 1001
+        chowns = [cmd for cmd in calls if cmd and cmd[0] == "chown"]
+        assert len(chowns) == 1
+        assert chowns[0][1] == "alice:"
+        # command + owner + overlay + three data disks
+        assert len(chowns[0]) == 6
 
-    def test_no_chown_without_sudo_user(self, tmp_vmdir: Path) -> None:
+    def test_chown_uses_invoking_user_without_sudo_user(
+        self, tmp_vmdir: Path
+    ) -> None:
         calls = self._run_create(tmp_vmdir, sudo_user=None)
-        assert calls == []
+        chowns = [cmd for cmd in calls if cmd and cmd[0] == "chown"]
+        assert len(chowns) == 1
+        assert chowns[0][1] == "patrick:"
 
 
 # ── cmd_crash_collect: default outdir ───────────────────

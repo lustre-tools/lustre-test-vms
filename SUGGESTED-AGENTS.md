@@ -28,9 +28,9 @@ sudo ./ltvm install
 # Download pre-built kernel + image + Lustre (~1.3 GB)
 ltvm target fetch rocky9
 
-# Create and boot a single-node VM (root needed for QEMU + tap)
+# Create and boot a single-node VM (prompts once, elevates host operations)
 # create is idempotent: starts if stopped, no-ops if running
-sudo ltvm create co1-single \
+ltvm create co1-single \
     --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 
 # Mount Lustre inside the VM (Lustre is baked into fetched images)
@@ -105,11 +105,11 @@ tree is current finishes in well under a second.
 
 ```bash
 # create is idempotent: starts if stopped, no-ops if running
-sudo ltvm create co1-single \
+ltvm create co1-single \
     --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 
 # Non-default kernel -- requires matching per-kernel image
-sudo ltvm create co1-single --kernel 5.14-rhel9.5
+ltvm create co1-single --kernel 5.14-rhel9.5
 
 # Observe
 ltvm list
@@ -119,12 +119,12 @@ ltvm vm console-log co1-single
 ssh co1-single 'lctl dl'
 
 # Lifecycle
-sudo ltvm start|stop|destroy co1-single
+ltvm start|stop|destroy co1-single
 ltvm vm snapshot co1-single before-test
 ltvm vm restore co1-single before-test
 
-# Host-level infrastructure health check
-sudo ltvm doctor            # or doctor --fix
+# Host-level infrastructure health check (elevates internally as needed)
+ltvm doctor            # or doctor --fix
 ```
 
 VM names MUST encode the checkout number and role to

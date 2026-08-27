@@ -13,6 +13,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from .priv import atomic_write as _priv_atomic_write
+from .priv import sudo_run
 from .qemu_run import die, run
 from .vm_state import MARKER, ROOT_PASSWORD, SUBNET, VM_DIR, VMInfo, VMNotFound
 
@@ -99,22 +101,19 @@ def _hosts_lock() -> Iterator[None]:
 
 
 def _atomic_write(path: Path, content: str) -> None:
-    """Write content to path atomically via rename."""
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    """Write *content* to *path* atomically.
+
+    Thin wrapper over ``priv.atomic_write`` that preserves the
+    target's existing mode when the file already exists, falling
+    back to 0o644.  Sudo-elevates the write when the parent dir
+    isn't user-writable (e.g. /etc/hosts).
+    """
+    mode = 0o644
     try:
-        with os.fdopen(fd, "w") as f:
-            f.write(content)
-        try:
-            os.chmod(tmp, path.stat().st_mode)
-        except FileNotFoundError:
-            pass  # target doesn't exist yet; keep mkstemp default mode
-        os.rename(tmp, str(path))
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+        mode = path.stat().st_mode & 0o777
+    except FileNotFoundError:
+        pass
+    _priv_atomic_write(path, content, mode=mode)
 
 
 def _chown_to_real_user(path: Path) -> None:
@@ -305,24 +304,47 @@ def reload_dns() -> None:
                 f"pidfile {pid_path} unusable ({pid_err or 'missing'}) "
                 f"and pgrep -x dnsmasq returned rc={r.returncode}"
             )
+    # dnsmasq runs as root, so signalling it from an unprivileged user
+    # gets EPERM.  Try the cheap path first; fall back to ``sudo kill``.
     try:
         os.kill(pid, signal.SIGHUP)
+        return
+    except PermissionError:
+        pass
     except OSError as e:
         raise RuntimeError(
             f"failed to reload dnsmasq: kill SIGHUP {pid}: {e}"
         ) from e
+    r = sudo_run(
+        ["kill", "-HUP", str(pid)], check=False, quiet=True
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"failed to reload dnsmasq: sudo kill SIGHUP {pid} "
+            f"rc={r.returncode}: {(r.stderr or '').strip()}"
+        )
 
 
 # ── SSH name / key management ────────────────────────────
 
 
 def _real_user_ssh_dir() -> tuple[str, Path]:
-    real_user = os.environ.get("SUDO_USER", "root")
+    """Return (username, ~/.ssh) for the human invoking ltvm.
+
+    Three cases:
+      * Plain ``ltvm`` as user X -> (X, ~X/.ssh).  The common path
+        once the privilege model lets every command run as the user.
+      * ``sudo ltvm`` from user X -> (X, ~X/.ssh) via SUDO_USER, so
+        the user's own ssh config / known_hosts get the entries.
+      * Truly running as root with no SUDO_USER -> ('root', /root/.ssh).
+    """
+    real_user = os.environ.get("SUDO_USER")
+    if not real_user:
+        import getpass
+        real_user = getpass.getuser()
     if real_user == "root":
-        ssh_dir = Path("/root/.ssh")
-    else:
-        ssh_dir = Path(f"~{real_user}").expanduser() / ".ssh"
-    return real_user, ssh_dir
+        return real_user, Path("/root/.ssh")
+    return real_user, Path(f"~{real_user}").expanduser() / ".ssh"
 
 
 def register_ssh_name(name: str, ip: str) -> None:

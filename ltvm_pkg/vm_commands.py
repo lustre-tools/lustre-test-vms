@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import re
@@ -17,6 +18,7 @@ from typing import Any
 from .deploy import configure_test_disks
 from .host_setup import is_macos
 from .paths import load_meta_safe
+from .priv import sudo_run
 from .qemu_run import die, is_running, kill_qemu, launch_qemu, run
 from .vm_net import (
     HOSTS_FILE,
@@ -482,12 +484,13 @@ def _allocate_and_persist_vm(
             os_id=os_id,
             kver=kver,
             arch=os_arts.arch,
-            # Track the human who ran `sudo ltvm create`.  SUDO_USER
-            # is set when invoked via sudo (the normal path); fall
-            # back to "root" if invoked as root directly.  Surfaced
-            # in `ltvm list` so a shared host can show whose VM is
-            # whose without forcing per-user namespaces.
-            creator=os.environ.get("SUDO_USER", "") or "root",
+            # Track the invoking human.  SUDO_USER preserves the legacy
+            # ``sudo ltvm create`` path; the unified privilege model runs
+            # the command as the user and elevates only individual writes.
+            creator=(
+                os.environ.get("SUDO_USER", "")
+                or getpass.getuser()
+            ),
             variant=variant,
             nics=list(extra_nic_types),
             nic_ips=list(nic_ips),
@@ -660,6 +663,26 @@ def _checked(cmd: list[str]) -> None:
         raise
 
 
+def _sudo_checked(cmd: list[str]) -> None:
+    """``_checked`` variant that runs *cmd* under sudo.
+
+    Used for VM_DIR writes (overlay/disks/.info) since /opt/qemu-vms
+    is root-owned by ``ltvm install``.  Snapshot/restore on already-
+    chowned files keep using plain ``_checked`` so they don't gratuitously
+    sudo when the file is already user-owned.
+    """
+    r = sudo_run(cmd, check=False, quiet=True)
+    if r.returncode != 0:
+        msg = (r.stderr or "").strip() or (r.stdout or "").strip()
+        if msg:
+            raise RuntimeError(
+                f"sudo {cmd[0]} failed (rc={r.returncode}): {msg}"
+            )
+        raise RuntimeError(
+            f"sudo {cmd[0]} failed (rc={r.returncode})"
+        )
+
+
 def _create_disks(vm: VMInfo, image: str) -> None:
     """Create overlay + backing disks for *vm*.  On any failure,
     unlink everything already created (best-effort) and re-raise so
@@ -672,9 +695,24 @@ def _create_disks(vm: VMInfo, image: str) -> None:
     # VM_DIR before we get here, so we can land in a state where VM_DIR
     # exists but its subdirs don't.  Mirror that behavior so qemu-img
     # doesn't fail with a bare ENOENT.
-    vm.overlay_path.parent.mkdir(parents=True, exist_ok=True)
+    # VM_DIR/overlays may already exist (created by `ltvm install` as
+    # root), in which case mkdir is a no-op for the user.  If absent
+    # (fresh install or LTVM_VM_DIR override) we sudo to create it
+    # alongside the parent so the qemu-img writes below succeed.
+    if not vm.overlay_path.parent.exists():
+        try:
+            vm.overlay_path.parent.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            sudo_run(
+                ["mkdir", "-p", str(vm.overlay_path.parent)],
+                quiet=True,
+            )
     try:
-        _checked(
+        # Disk-image creation writes into root-owned VM_DIR, so the
+        # qemu-img and truncate calls run via sudo.  After creation we
+        # chown the artifacts to the invoking user so subsequent
+        # snapshot/restore (plain _checked) don't need sudo.
+        _sudo_checked(
             [
                 QEMU_IMG,
                 "create",
@@ -691,46 +729,51 @@ def _create_disks(vm: VMInfo, image: str) -> None:
         # Grow the qcow2 virtual disk so the VM has room for Lustre
         # modules, logs, etc.  The ext4 filesystem is resized on first
         # boot (rc.local).
-        _checked([QEMU_IMG, "resize", str(vm.overlay_path), "8G"])
+        _sudo_checked([QEMU_IMG, "resize", str(vm.overlay_path), "8G"])
 
         # Create backing disks
         total = vm.mdt_disks + vm.ost_disks
         for n in range(1, total + 1):
-            _checked(
+            _sudo_checked(
                 ["truncate", "-s", str(vm.disk_size), str(vm.disk_path(n))],
             )
     except BaseException:
-        try:
-            vm.overlay_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # Cleanup also goes through sudo since the artifacts -- if they
+        # exist -- are root-owned at this point.
+        sudo_run(
+            ["rm", "-f", str(vm.overlay_path)],
+            check=False, quiet=True,
+        )
         for n in range(1, vm.mdt_disks + vm.ost_disks + 1):
-            try:
-                vm.disk_path(n).unlink(missing_ok=True)
-            except OSError:
-                pass
+            sudo_run(
+                ["rm", "-f", str(vm.disk_path(n))],
+                check=False, quiet=True,
+            )
         raise
 
 
 def _chown_disks_to_sudo_user(vm: VMInfo) -> None:
-    """When invoked via sudo, hand ownership of the disk images to the
-    real user so snapshot/restore (which run qemu-img) work without root.
+    """Hand ownership of the disk images to the invoking user so
+    snapshot/restore (which run qemu-img without sudo) keep working.
+
+    The files were just created via ``_sudo_checked`` and are
+    therefore root-owned; sudo-chown them back.  Honors ``SUDO_USER``
+    when ltvm is itself invoked under sudo (legacy path); otherwise
+    uses ``getpass.getuser()`` (the unified-privilege path).
     """
-    sudo_user = os.environ.get("SUDO_USER")
-    if sudo_user:
-        import pwd as _pwd
-        try:
-            pw = _pwd.getpwnam(sudo_user)
-            files_to_chown = [vm.overlay_path]
-            for n in range(1, vm.mdt_disks + vm.ost_disks + 1):
-                files_to_chown.append(vm.disk_path(n))
-            for f in files_to_chown:
-                try:
-                    os.chown(f, pw.pw_uid, pw.pw_gid)
-                except OSError:
-                    pass
-        except KeyError:
-            pass
+    import getpass as _getpass
+
+    target_user = os.environ.get("SUDO_USER") or _getpass.getuser()
+    if target_user == "root":
+        return  # nothing to hand off
+
+    files = [vm.overlay_path] + [
+        vm.disk_path(n) for n in range(1, vm.mdt_disks + vm.ost_disks + 1)
+    ]
+    sudo_run(
+        ["chown", f"{target_user}:", *(str(f) for f in files)],
+        check=False, quiet=True,
+    )
 
 
 def _launch_and_wait(vm: VMInfo, passthrough_bdfs: list[str]) -> None:
@@ -914,14 +957,30 @@ def _destroy_vm_artifacts(name: str) -> None:
     Caller is responsible for killing QEMU and unregistering DNS;
     this only handles the filesystem cleanup so it can be reused
     by both cmd_destroy and the cmd_create rollback path.
+
+    Disk images themselves were chowned to the invoking user at
+    creation time so a plain unlink() works -- but their containing
+    dirs (OVERLAYS, SOCKETS) live inside root-owned VM_DIR and
+    only root has write+exec on them, so unlink fails with EACCES
+    for the user.  Fall back to ``sudo rm -f`` on PermissionError.
     """
     overlay = OVERLAYS / f"{name}.qcow2"
-    for f in [overlay] + list(OVERLAYS.glob(f"{name}-disk*.img")):
-        f.unlink(missing_ok=True)
+    targets = [overlay] + list(OVERLAYS.glob(f"{name}-disk*.img"))
     for ext in ("qmp", "pid", "info", "log"):
-        (SOCKETS / f"{name}.{ext}").unlink(missing_ok=True)
-    # Per-VM info lock file (created by VMInfo._info_lock).
-    (SOCKETS / f".{name}.info.lock").unlink(missing_ok=True)
+        targets.append(SOCKETS / f"{name}.{ext}")
+    targets.append(SOCKETS / f".{name}.info.lock")
+
+    sudo_fallback: list[Path] = []
+    for f in targets:
+        try:
+            f.unlink(missing_ok=True)
+        except PermissionError:
+            sudo_fallback.append(f)
+    if sudo_fallback:
+        sudo_run(
+            ["rm", "-f", *(str(f) for f in sudo_fallback)],
+            check=False, quiet=True,
+        )
 
 
 def cmd_destroy(args: argparse.Namespace) -> None:

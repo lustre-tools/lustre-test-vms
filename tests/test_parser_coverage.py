@@ -423,6 +423,10 @@ class TestCmdCreateIdempotence:
             patch("ltvm_pkg.vm_commands._seed_kdump_boot"),
             patch("ltvm_pkg.vm_commands.run"),
             patch(
+                "ltvm_pkg.vm_commands.sudo_run",
+                return_value=MagicMock(returncode=0, stdout="", stderr=""),
+            ),
+            patch(
                 "ltvm_pkg.vm_commands.load_meta_safe",
                 return_value={"kernel_version": "5.14.0-test"},
             ),
@@ -549,6 +553,10 @@ class TestCmdCreateIdempotence:
             patch("ltvm_pkg.vm_commands.provision_vm_ssh"),
             patch("ltvm_pkg.vm_commands._seed_kdump_boot"),
             patch("ltvm_pkg.vm_commands.run"),
+            patch(
+                "ltvm_pkg.vm_commands.sudo_run",
+                return_value=MagicMock(returncode=0, stdout="", stderr=""),
+            ),
             patch(
                 "ltvm_pkg.vm_commands.load_meta_safe",
                 return_value={"kernel_version": "5.14.0-test"},

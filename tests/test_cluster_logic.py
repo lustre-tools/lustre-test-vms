@@ -193,7 +193,7 @@ class TestGenerateLocalSh:
         assert "OSTDEV2=/dev/vde" in text
 
     def test_clients_listed(self) -> None:
-        """CLIENTS= is set to a comma-separated list of client names."""
+        """Client nodes are available to mounting and test-framework setup."""
         c = _cluster(
             ("co-mds", ["mgs", "mds"], 1, 0, "10.0.0.1"),
             ("co-oss", ["oss"], 0, 1, "10.0.0.2"),
@@ -202,6 +202,7 @@ class TestGenerateLocalSh:
         )
         text = vm_cluster.generate_local_sh(c)
         assert "CLIENTS=co-c1,co-c2" in text
+        assert 'RCLIENTS="co-c2"' in text
 
     def test_rclients_excludes_test_runner(self) -> None:
         """RCLIENTS= lists the clients other than the first.
@@ -250,6 +251,9 @@ class TestGenerateLocalSh:
         assert "FSTYPE=ldiskfs" in text
         assert "MOUNT=/mnt/lustre" in text
         assert "MOUNT2=/mnt/lustre2" in text
+        assert "DIR=${DIR:-$MOUNT}" in text
+        assert "DIR1=${DIR1:-$MOUNT1}" in text
+        assert "DIR2=${DIR2:-$MOUNT2}" in text
         assert "LOAD_MODULES_REMOTE=true" in text
 
 

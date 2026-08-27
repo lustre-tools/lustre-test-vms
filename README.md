@@ -18,7 +18,7 @@ Multiple kernel versions per target are supported (e.g., Rocky 9.5 and 9.7).
 ```bash
 sudo ./ltvm install                              # one-time host setup
 ./ltvm target fetch rocky9                       # container + kernel + image + Lustre
-sudo ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
+ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 ltvm llmount co1-single                          # mount Lustre inside the VM
 ```
 
@@ -27,7 +27,7 @@ ltvm llmount co1-single                          # mount Lustre inside the VM
 ```bash
 sudo ./ltvm install
 ltvm build all rocky9 --lustre-tree ~/lustre-release
-sudo ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
+ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 ltvm llmount co1-single
 ```
 
@@ -61,7 +61,7 @@ brew install uv && uv sync              # Python deps into .venv/
 ltvm doctor                             # sanity-check the host
 
 ltvm target fetch rocky9 --arch aarch64 --kernel 5.14-rhel9.5
-sudo ltvm create co1-single --kernel 5.14-rhel9.5   # VM lifecycle needs sudo
+ltvm create co1-single --kernel 5.14-rhel9.5   # prompts for sudo internally
 ltvm llmount co1-single                 # mount Lustre inside the VM
 ```
 

@@ -3,9 +3,9 @@ observation commands.
 
 Each cmd_* here just forwards args to the underlying vm_commands
 function through ``_vm_call``, which normalizes SystemExit and
-VMNotFound into the CLI's (int exit code) protocol.  ``_require_root``
-is applied for commands that touch host resources (networking, QEMU
-launch, snapshot/restore, NMI).
+VMNotFound into the CLI's (int exit code) protocol. Lifecycle commands
+prime sudo once and their implementation elevates only the individual
+host operations that require it.
 """
 
 from __future__ import annotations
@@ -18,14 +18,6 @@ from ltvm_pkg.cli.util import (
     EXIT_OK,
     _error,
 )
-
-
-def _require_root(*a: Any, **kw: Any) -> Any:
-    """Thunk to ltvm_pkg.cli._require_root so tests patching it on
-    the package attribute still affect cmd_* in this submodule."""
-    import ltvm_pkg.cli as _cli
-
-    return _cli._require_root(*a, **kw)
 
 
 def _vm_call(fn: Any, ns: argparse.Namespace, use_json: bool) -> int:
@@ -47,11 +39,19 @@ def _vm_call(fn: Any, ns: argparse.Namespace, use_json: bool) -> int:
         return _error(str(e), use_json)
 
 
+def _maybe_prime_sudo(reason: str, use_json: bool) -> None:
+    if use_json:
+        return
+    from ltvm_pkg.priv import sudo_prime
+
+    sudo_prime(reason)
+
+
 def cmd_vm_start(args: argparse.Namespace) -> int:
     use_json = args.json
-    err = _require_root(use_json)
-    if err is not None:
-        return err
+    _maybe_prime_sudo(
+        "ltvm start needs root for tap setup", use_json
+    )
     from ltvm_pkg.vm_commands import cmd_start as _start
 
     return _vm_call(_start, args, use_json)
@@ -59,9 +59,9 @@ def cmd_vm_start(args: argparse.Namespace) -> int:
 
 def cmd_vm_stop(args: argparse.Namespace) -> int:
     use_json = args.json
-    err = _require_root(use_json)
-    if err is not None:
-        return err
+    _maybe_prime_sudo(
+        "ltvm stop needs root for tap teardown", use_json
+    )
     from ltvm_pkg.vm_commands import cmd_stop as _stop
 
     return _vm_call(_stop, args, use_json)

@@ -27,6 +27,16 @@ from .vm_state import (
 )
 
 
+def _sudo_prefix() -> list[str]:
+    """``["sudo"]`` unless we are already root, mirroring priv.sudo_run().
+
+    Used for the per-node ``ltvm create`` / ``ltvm destroy`` children so
+    they inherit the outer SUDO_USER rather than having a nested sudo
+    overwrite it with "root".
+    """
+    return [] if os.geteuid() == 0 else ["sudo"]
+
+
 def parse_node_spec(spec: str) -> ClusterNode:
     """Parse a node spec like 'mgs+mds:myvm:1' or 'oss:myoss:3'.
 
@@ -193,7 +203,13 @@ def generate_local_sh(cluster: ClusterInfo, os_family: str = "rhel") -> str:
     lines.append('PDSH="pdsh -S -Rssh -w"')
     lines.append("LOAD_MODULES_REMOTE=true")
     lines.append("MOUNT=/mnt/lustre")
+    lines.append("MOUNT1=${MOUNT1:-$MOUNT}")
     lines.append("MOUNT2=/mnt/lustre2")
+    lines.append("MOUNT3=${MOUNT3:-${MOUNT}3}")
+    lines.append("DIR=${DIR:-$MOUNT}")
+    lines.append("DIR1=${DIR1:-$MOUNT1}")
+    lines.append("DIR2=${DIR2:-$MOUNT2}")
+    lines.append("DIR3=${DIR3:-$MOUNT3}")
     lines.append("")
 
     return "\n".join(lines) + "\n"
@@ -229,8 +245,12 @@ def _create_one_node(
     follow-up-issue hint the single-node path prints.
     """
     mgs_disk = 1 if (node.is_mgs and not node.is_mds) else 0
-    cmd = [
-        "sudo",
+    # No `sudo` prefix when already root: cluster create requires root, so
+    # a nested sudo would reset SUDO_USER to "root" in the child and the
+    # child's ~/.ssh bookkeeping would target root's home instead of the
+    # invoking user's.  (On macOS that is a hard failure -- root's home is
+    # /var/root and /root is on the read-only system volume.)
+    cmd = _sudo_prefix() + [
         "ltvm",
         "create",
         node.name,
@@ -348,7 +368,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
         # node and necessary to avoid leaking partial state.
         for node in node_specs:
             r = subprocess.run(
-                ["sudo", "ltvm", "destroy", node.name],
+                _sudo_prefix() + ["ltvm", "destroy", node.name],
                 capture_output=True,
             )
             if r.returncode != 0:
