@@ -116,6 +116,17 @@ class TestBuildParser:
         assert args.vm == "myvm"
         assert args.mount is True
 
+    @pytest.mark.parametrize("flag", ["--owner", "--owner-id"])
+    def test_create_owner_flag_aliases(self, flag: str) -> None:
+        p = ltvm.build_parser()
+        args = p.parse_args(["create", "co1-owned", flag, "session:123"])
+        assert args.owner_id == "session:123"
+
+    def test_create_owner_defaults_to_runtime_resolution(self) -> None:
+        p = ltvm.build_parser()
+        args = p.parse_args(["create", "co1-owned"])
+        assert args.owner_id is None
+
 
 # ---------------------------------------------------------------------------
 # --help exits 0

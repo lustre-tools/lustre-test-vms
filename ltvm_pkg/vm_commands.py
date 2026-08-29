@@ -53,6 +53,7 @@ from .vm_state import (
     lustre_libdir,
     resolve_os_artifacts,
 )
+from .vm_owner import resolve_owner_id
 
 
 def _handler_error(
@@ -405,6 +406,7 @@ def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
                         "action": "none",
                         "name": name,
                         "status": "already running",
+                        "owner_id": vm.owner_id,
                     }
                 )
             )
@@ -421,6 +423,7 @@ def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
                     "action": "started",
                     "name": name,
                     "status": "running",
+                    "owner_id": vm.owner_id,
                 }
             )
         )
@@ -491,6 +494,7 @@ def _allocate_and_persist_vm(
                 os.environ.get("SUDO_USER", "")
                 or getpass.getuser()
             ),
+            owner_id=args.owner_id,
             variant=variant,
             nics=list(extra_nic_types),
             nic_ips=list(nic_ips),
@@ -516,6 +520,7 @@ def _print_create_report(vm: VMInfo, args: argparse.Namespace) -> None:
                     "action": "created",
                     "name": vm.name,
                     "status": "running",
+                    "owner_id": vm.owner_id,
                 }
             )
         )
@@ -524,6 +529,7 @@ def _print_create_report(vm: VMInfo, args: argparse.Namespace) -> None:
             f"VM created: {vm.name}\n"
             f"  ip:    {vm.ip}\n"
             f"  pid:   {vm.pid}\n"
+            f"  owner: {vm.owner_id}\n"
             f"  disks: {vm.mdt_disks} MDT + {vm.ost_disks} OST"
         )
 
@@ -866,6 +872,14 @@ def cmd_create(args: argparse.Namespace) -> None:
     name = args.name
     _validate_vm_name(name)
 
+    # Resolve once in the invoking create process.  This is creation metadata,
+    # not an authorization check: an idempotent create of an existing VM keeps
+    # that VM's persisted owner unchanged.
+    try:
+        args.owner_id = resolve_owner_id(getattr(args, "owner_id", None))
+    except ValueError as e:
+        die(str(e))
+
     info_path = SOCKETS / f"{name}.info"
     if _handle_existing_vm(name, args):
         return
@@ -1162,6 +1176,7 @@ def cmd_list(args: argparse.Namespace) -> None:
                 "kver": vm.kver,
                 "os_id": vm.os_id,
                 "creator": vm.creator,
+                "owner_id": vm.owner_id,
             }
         )
 
@@ -1198,10 +1213,12 @@ def cmd_list(args: argparse.Namespace) -> None:
             # `by=` shows who created the VM (SUDO_USER at create time);
             # legacy VMs from before this field existed show `by=-`.
             creator = e.get("creator") or "-"
+            owner_id = e.get("owner_id") or "-"
             print(
                 f"{e['name']:<20} {e['ip']:<18} {e['status']:<8} "
                 f"{os_id:<8} {disks:<14} "
-                f"boot={boot:<10} deploy={deploy:<10} by={creator}"
+                f"boot={boot:<10} deploy={deploy:<10} by={creator} "
+                f"owner={owner_id}"
             )
         print("---")
         print(

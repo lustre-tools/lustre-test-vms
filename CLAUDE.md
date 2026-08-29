@@ -146,6 +146,14 @@ ltvm vm crash-collect co1-single --mod-dir $CO/1
 ltvm destroy co1-single
 ```
 
+**Owner/session metadata:** New VMs persist an advisory opaque `owner_id`.
+Agent controllers should export `LTVM_OWNER_ID=<durable-session-id>` before
+running normal create commands. `--owner ID` / `--owner-id ID` override the
+environment; otherwise LTVM uses `pid:<invoking-ltvm-pid>`. Cluster create
+resolves once and applies the same owner to every member. Discover it through
+`ltvm list --json`; legacy VMs report `owner_id: null`. See
+[docs/VM_OWNERSHIP.md](docs/VM_OWNERSHIP.md).
+
 **Naming:** always include the checkout number: `co<N>-<role>`.
 
 **Root:** Run `create`, `destroy`, `start`, `stop`, and `doctor` as

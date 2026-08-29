@@ -2342,13 +2342,16 @@ def run_setup(
 
         # Some distros (Rocky 9, RHEL) ship sudoers with secure_path that
         # excludes /usr/local/bin, so `sudo ltvm` would fail with "command
-        # not found".  Drop in a sudoers fragment to extend secure_path.
+        # not found".  Also preserve the session-scoped VM owner through
+        # `sudo ltvm cluster create`, which still requires root as a whole.
+        # Drop in a sudoers fragment for both settings.
         sudoers_d = Path("/etc/sudoers.d")
         if sudoers_d.is_dir():
             sudoers_drop = sudoers_d / "ltvm"
             sudoers_drop.write_text(
                 'Defaults secure_path="/sbin:/bin:/usr/sbin:/usr/bin:'
                 '/usr/local/sbin:/usr/local/bin"\n'
+                'Defaults env_keep += "LTVM_OWNER_ID"\n'
             )
             sudoers_drop.chmod(0o440)
             log.info("sudo secure_path extended via %s", sudoers_drop)

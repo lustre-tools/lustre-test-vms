@@ -136,6 +136,22 @@ VM names MUST include the checkout number and a descriptive role:
 `co<N>-<role>` (e.g. `co1-single`, `co2-mds`, `co2-oss`). Never bare
 names like `testvm`.
 
+### Agent/session ownership
+
+Every new VM records an advisory `owner_id` for lifecycle reconciliation.
+Controllers should export a durable session ID; normal commands need no new
+arguments and fall back to a typed per-invocation process ID:
+
+```bash
+export LTVM_OWNER_ID=patch-watcher:session-7f9c
+ltvm create co1-single
+ltvm list --json                    # each VM has owner_id (or null for legacy)
+```
+
+`--owner ID` and `--owner-id ID` override the environment for both `create`
+and `cluster create`. See [VM ownership metadata](docs/VM_OWNERSHIP.md) for the
+precedence, persistence, cluster propagation, and JSON contracts.
+
 ## More
 
 See [CLAUDE.md](CLAUDE.md) for the full developer reference, and

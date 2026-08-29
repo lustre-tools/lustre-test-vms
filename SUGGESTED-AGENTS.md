@@ -250,6 +250,17 @@ ltvm llmount <vm> [--cleanup]     Mount (or unmount) Lustre
 ltvm cluster create|deploy|exec|status|destroy <cluster> ...
 ```
 
+For agent-managed VM cleanup, launch the agent with a durable session label:
+
+```bash
+export LTVM_OWNER_ID=<controller>:<session-id>
+```
+
+Normal `ltvm create` and `ltvm cluster create` commands then persist that
+owner on every resulting VM. `--owner-id ID` overrides the environment.
+`ltvm list --json` exposes `owner_id`; older VMs have `null`. Without either
+caller-provided value, new VMs use the automatic `pid:<ltvm-pid>` fallback.
+
 Global flags: `--json`, `--verbose`, `--arch <a>`.
 `--kernel <name-or-path>` on commands that operate on a
 specific kernel.  `--force-compat` on build / publish /

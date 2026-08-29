@@ -378,6 +378,10 @@ class VMInfo:
     os_id: str = ""  # OS identifier (e.g. rocky9, ubuntu24)
     arch: str = "x86_64"  # CPU architecture (x86_64, aarch64)
     creator: str = ""  # username that created the VM (SUDO_USER, or "" for legacy)
+    # Opaque lifecycle owner/session ID.  New creates always set this from
+    # --owner-id, LTVM_OWNER_ID, or a typed pid:<n> fallback.  None preserves
+    # compatibility with .info files written before ownership was introduced.
+    owner_id: str | None = None
     variant: str = "base"  # target variant (e.g. mofed); "base" is the default
     # Extra NICs beyond the mgmt NIC (eth0), in order.  Each element is
     # a type string from the CLI: 'tcp', 'softroce', or 'passthrough:<BDF>'.
@@ -452,6 +456,10 @@ class VMInfo:
         # Atomic write via tempfile + rename so a SIGKILL mid-save
         # cannot leave a half-written .info file (which would parse
         # back as a VM with empty IP/PID/etc).
+        if self.owner_id is not None:
+            from .vm_owner import validate_owner_id
+
+            validate_owner_id(self.owner_id)
         text = (
             f"NAME={self.name}\n"
             f"IP={self.ip}\n"
@@ -474,6 +482,7 @@ class VMInfo:
             f"OS_ID={self.os_id}\n"
             f"ARCH={self.arch}\n"
             f"CREATOR={self.creator}\n"
+            f"OWNER_ID={self.owner_id or ''}\n"
             f"VARIANT={self.variant}\n"
             # NICs are joined with '|' -- a spec like
             # 'passthrough:0000:00:02.0' contains colons, so ',' or ':'
@@ -615,6 +624,7 @@ class VMInfo:
             os_id=vals.get("OS_ID", ""),
             arch=vals.get("ARCH", "x86_64"),
             creator=vals.get("CREATOR", ""),
+            owner_id=vals.get("OWNER_ID") or None,
             variant=vals.get("VARIANT", "base"),
             nics=nics_list,
             nic_ips=nic_ips_list,
@@ -670,6 +680,9 @@ class ClusterNode:
 class ClusterInfo:
     name: str
     nodes: list[dict]
+    # Copied to every member VM at create time.  None accepts cluster state
+    # written before owner metadata existed.
+    owner_id: str | None = None
 
     @property
     def path(self) -> Path:
@@ -679,7 +692,15 @@ class ClusterInfo:
         # Atomic write via tempfile + rename so a SIGKILL or disk-full
         # mid-write cannot leave a half-written .cluster file (which
         # would fail JSON parse on the next load).
-        data = {"name": self.name, "nodes": self.nodes}
+        if self.owner_id is not None:
+            from .vm_owner import validate_owner_id
+
+            validate_owner_id(self.owner_id)
+        data = {
+            "name": self.name,
+            "nodes": self.nodes,
+            "owner_id": self.owner_id,
+        }
         text = json.dumps(data, indent=2) + "\n"
         _atomic_write(self.path, text)
 
@@ -698,7 +719,11 @@ class ClusterInfo:
                 f"corrupt cluster state at {path}: {e}\n"
                 f"  remove the file and recreate the cluster with `ltvm cluster create`"
             )
-        return ClusterInfo(name=data["name"], nodes=data["nodes"])
+        return ClusterInfo(
+            name=data["name"],
+            nodes=data["nodes"],
+            owner_id=data.get("owner_id"),
+        )
 
     @staticmethod
     def all_names() -> list[str]:

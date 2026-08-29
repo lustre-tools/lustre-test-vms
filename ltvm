@@ -938,6 +938,17 @@ def build_parser() -> argparse.ArgumentParser:
             "(tracked in lustre_test_vms_v2-r55 and -5a0)."
         ),
     )
+    _vm_create_args.add_argument(
+        "--owner",
+        "--owner-id",
+        dest="owner_id",
+        default=None,
+        metavar="ID",
+        help=(
+            "Opaque lifecycle owner/session ID. Explicit value overrides "
+            "$LTVM_OWNER_ID; otherwise defaults to pid:<ltvm-pid>."
+        ),
+    )
 
     sp = sub.add_parser(
         "create",

@@ -115,8 +115,8 @@ ltvm doctor
 ### Phase 1: VM Creation — Default Behavior
 
 ```bash
-ltvm create co1-default
-sudo ltvm list --json   # verify: vcpus=2, mem=2048, mdt_disks=1, ost_disks=2, disk=500MiB
+LTVM_OWNER_ID=system-test:phase-1 ltvm create co1-default
+sudo ltvm list --json   # verify: owner_id=system-test:phase-1, vcpus=2, mem=2048, mdt_disks=1, ost_disks=2, disk=500MiB
 # 1.2: ensure on running VM
 ltvm create co1-default   # should print "already running", exit 0
 # 1.6: root fs size

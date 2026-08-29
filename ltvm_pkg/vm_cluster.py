@@ -25,6 +25,7 @@ from .vm_state import (
     VMNotFound,
     lustre_libdir,
 )
+from .vm_owner import resolve_owner_id
 
 
 def _sudo_prefix() -> list[str]:
@@ -226,6 +227,7 @@ def _create_one_node(
     arch: str | None = None,
     disk_size: str | None = None,
     nics: list[str] | None = None,
+    owner_id: str | None = None,
 ) -> tuple[str, int, str]:
     """Create a single cluster VM via ltvm subprocess.
 
@@ -265,6 +267,10 @@ def _create_one_node(
         cmd += ["--arch", arch]
     if disk_size:
         cmd += ["--disk-size", disk_size]
+    if owner_id:
+        # Pass the cluster parent's resolved value explicitly so all members
+        # share one owner even though each child has a different process PID.
+        cmd += ["--owner-id", owner_id]
     if node.mdt_disks + mgs_disk:
         cmd += ["--mdt-disks", str(node.mdt_disks + mgs_disk)]
     if node.ost_disks:
@@ -319,6 +325,10 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     # args.nic; older call sites that don't know about --nic land here
     # with the attr unset, in which case we pass an empty list through.
     nics: list[str] = list(getattr(args, "nic", None) or [])
+    try:
+        owner_id = resolve_owner_id(getattr(args, "owner_id", None))
+    except ValueError as e:
+        die(str(e))
 
     print(f"=== Creating cluster '{cluster_name}' ===")
     if os_target:
@@ -337,6 +347,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                 arch,
                 disk_size,
                 nics,
+                owner_id,
             ): node
             for node in node_specs
         }
@@ -385,6 +396,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
 
     cluster = ClusterInfo(
         name=cluster_name,
+        owner_id=owner_id,
         nodes=[
             {
                 "name": n.name,
@@ -399,6 +411,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     cluster.save()
 
     print(f"\n=== Cluster '{cluster_name}' created ===")
+    print(f"  owner: {owner_id}")
     for n in node_specs:
         print(f"  {n.name:<20} {n.ip:<18} {'+'.join(n.roles)}")
     print(
@@ -747,7 +760,8 @@ def cmd_cluster_list(args: argparse.Namespace) -> None:
             except VMNotFound:
                 running = "missing"
             node_summary.append(f"{n.name}({roles},{running})")
-        print(f"{cname}: {' '.join(node_summary)}")
+        owner = cluster.owner_id or "-"
+        print(f"{cname}: {' '.join(node_summary)} owner={owner}")
 
 
 def cmd_cluster_status(args: argparse.Namespace) -> None:
@@ -755,6 +769,7 @@ def cmd_cluster_status(args: argparse.Namespace) -> None:
     nodes = cluster.get_nodes()
 
     print(f"cluster: {cluster.name}")
+    print(f"owner:   {cluster.owner_id or '-'}")
     print(f"nodes:   {len(nodes)}")
     print()
 

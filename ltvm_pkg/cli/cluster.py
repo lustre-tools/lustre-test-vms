@@ -85,6 +85,7 @@ def cmd_cluster(args: argparse.Namespace) -> int:
         arch: str | None = None
         disk_size: str | None = None
         nics: list[str] = []
+        owner_id: str | None = None
         positional: list[str] = []
         i = 0
         while i < len(cargs):
@@ -110,12 +111,18 @@ def cmd_cluster(args: argparse.Namespace) -> int:
                 # surfaces per-node with the usual follow-up-issue hint.
                 nics.append(cargs[i + 1])
                 i += 2
+            elif (
+                cargs[i] in ("--owner", "--owner-id")
+                and i + 1 < len(cargs)
+            ):
+                owner_id = cargs[i + 1]
+                i += 2
             elif cargs[i].startswith("--"):
                 return _error(
                     f"cluster create: unknown argument '{cargs[i]}'",
                     use_json,
                     hint="valid: --vcpus, --mem, --target, --arch, "
-                    "--disk-size, --nic",
+                    "--disk-size, --nic, --owner-id",
                 )
             else:
                 positional.append(cargs[i])
@@ -163,6 +170,7 @@ def cmd_cluster(args: argparse.Namespace) -> int:
                 arch=arch,
                 disk_size=disk_size,
                 nic=nics,
+                owner_id=owner_id,
             ),
         )
 
