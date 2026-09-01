@@ -14,6 +14,7 @@ import argparse
 import contextlib
 import json
 import os
+import platform
 import shlex
 import subprocess
 import sys
@@ -58,11 +59,16 @@ def _preflight_podman(use_json: bool) -> int | None:
 
 
 def _preflight_container(tc: TargetConfig, use_json: bool) -> int | None:
-    """Return an error code if the build container tag is missing, else None.
+    """Return an error code if the build container is unusable, else None.
 
     Keeps downstream commands from burning time on SRPM downloads / Lustre
-    tree parsing before discovering that podman will fail at `run`.
+    tree parsing before discovering that podman will fail at `run`.  Build
+    containers run at the host architecture even when they cross-compile for
+    a different target, so a fetched container tagged for the target may be
+    present but still be impossible to run locally.
     """
+    from ltvm_pkg.cross_compile import normalize_arch
+
     tag = tc.container_tag
     try:
         r = subprocess.run(
@@ -79,6 +85,39 @@ def _preflight_container(tc: TargetConfig, use_json: bool) -> int | None:
             f"build container {tag} not found",
             use_json,
             hint=f"Run: ltvm build container {tc.name}",
+        )
+
+    try:
+        inspected = subprocess.run(
+            ["podman", "image", "inspect", "--format", "{{.Architecture}}", tag],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return _error(
+            "podman not found",
+            use_json,
+            hint="install podman or run `ltvm install` to set up the host",
+        )
+    actual_arch = inspected.stdout.strip()
+    if inspected.returncode != 0 or not actual_arch:
+        return _error(
+            f"could not determine architecture for build container {tag}",
+            use_json,
+            hint=f"Rebuild it: ltvm build container {tc.name} --arch {tc.arch}",
+        )
+
+    host_arch = normalize_arch(platform.machine())
+    actual_arch = normalize_arch(actual_arch)
+    if actual_arch != host_arch:
+        return _error(
+            f"build container {tag} is {actual_arch}, but this host is "
+            f"{host_arch}",
+            use_json,
+            hint=(
+                "Build containers must run natively even for cross builds. "
+                f"Rebuild it: ltvm build container {tc.name} --arch {tc.arch}"
+            ),
         )
     return None
 

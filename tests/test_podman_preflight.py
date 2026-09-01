@@ -272,12 +272,15 @@ from ltvm_pkg.cli.build import _preflight_container as _real_preflight_container
 
 
 class TestPreflightContainerHelper:
-    """``_preflight_container`` wraps ``podman image exists``."""
+    """``_preflight_container`` validates the cached image before use."""
 
-    def _tc(self, tag: str = "ltvm-build-rocky9") -> Any:
+    def _tc(
+        self, tag: str = "ltvm-build-rocky9", arch: str = "x86_64"
+    ) -> Any:
         tc = MagicMock()
         tc.container_tag = tag
         tc.name = "rocky9"
+        tc.arch = arch
         return tc
 
     def test_pass_when_image_present(
@@ -288,8 +291,14 @@ class TestPreflightContainerHelper:
         monkeypatch.setattr(
             build_mod.subprocess,
             "run",
-            MagicMock(return_value=MagicMock(returncode=0)),
+            MagicMock(
+                side_effect=[
+                    MagicMock(returncode=0),
+                    MagicMock(returncode=0, stdout="x86_64\n"),
+                ]
+            ),
         )
+        monkeypatch.setattr(build_mod.platform, "machine", lambda: "x86_64")
         assert _real_preflight_container(self._tc(), False) is None
 
     def test_error_when_image_missing(
@@ -325,6 +334,57 @@ class TestPreflightContainerHelper:
         rc = _real_preflight_container(self._tc(), False)
         assert rc == EXIT_ERROR
         assert "podman not found" in capsys.readouterr().err
+
+    def test_error_when_cached_image_is_not_host_native(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Reject a fetched AMD64 builder on an Apple Silicon host early."""
+        from ltvm_pkg.cli import build as build_mod
+
+        monkeypatch.setattr(
+            build_mod.subprocess,
+            "run",
+            MagicMock(
+                side_effect=[
+                    MagicMock(returncode=0),
+                    MagicMock(returncode=0, stdout="amd64\n"),
+                ]
+            ),
+        )
+        monkeypatch.setattr(build_mod.platform, "machine", lambda: "arm64")
+
+        rc = _real_preflight_container(self._tc(), False)
+
+        assert rc == EXIT_ERROR
+        err = capsys.readouterr().err
+        assert "ltvm-build-rocky9 is x86_64" in err
+        assert "host is aarch64" in err
+        assert "ltvm build container rocky9 --arch x86_64" in err
+
+    def test_error_when_image_architecture_cannot_be_inspected(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from ltvm_pkg.cli import build as build_mod
+
+        monkeypatch.setattr(
+            build_mod.subprocess,
+            "run",
+            MagicMock(
+                side_effect=[
+                    MagicMock(returncode=0),
+                    MagicMock(returncode=125, stdout=""),
+                ]
+            ),
+        )
+
+        rc = _real_preflight_container(self._tc(), False)
+
+        assert rc == EXIT_ERROR
+        assert "could not determine architecture" in capsys.readouterr().err
 
 
 class TestCliContainerPreflight:
@@ -374,6 +434,40 @@ class TestCliContainerPreflight:
         rc = _run_main(["build", "lustre", "rocky9"])
         assert rc == EXIT_ERROR
         assert "ltvm build container rocky9" in capsys.readouterr().err
+
+    def test_build_lustre_rejects_wrong_arch_before_running(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An AMD64 cache cannot be used by an Apple Silicon build."""
+        from ltvm_pkg import cli as cli_mod
+        from ltvm_pkg.cli import build as build_mod
+
+        monkeypatch.setattr(
+            build_mod.subprocess,
+            "run",
+            MagicMock(
+                side_effect=[
+                    MagicMock(returncode=0),
+                    MagicMock(returncode=0, stdout="amd64\n"),
+                ]
+            ),
+        )
+        monkeypatch.setattr(build_mod.platform, "machine", lambda: "arm64")
+        monkeypatch.setattr(
+            build_mod, "_preflight_container", _real_preflight_container
+        )
+        build_lustre = MagicMock()
+        monkeypatch.setattr(cli_mod, "build_lustre", build_lustre)
+
+        rc = _run_main(["build", "lustre", "rocky9", "--arch", "x86_64"])
+
+        assert rc == EXIT_ERROR
+        assert not build_lustre.called
+        assert "Rebuild it: ltvm build container rocky9 --arch x86_64" in (
+            capsys.readouterr().err
+        )
 
     def test_build_shell_fails_fast(
         self,
