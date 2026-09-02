@@ -261,6 +261,24 @@ if grep -q '^CONFIG_EFI_SBAT=y' .config; then
 	fi
 fi
 
+# ------------------------------------------------------------------
+# 4c. scripts/bin2c (RHEL 4.18 + IKCONFIG on non-x86)
+# ------------------------------------------------------------------
+# 4.18/el8 kernels generate kernel/config_data.h (CONFIG_IKCONFIG, on
+# in our fragment) by piping through scripts/bin2c -- but bin2c is
+# gated on CONFIG_BUILD_BIN2C, a promptless symbol that only x86's
+# KEXEC_FILE selects.  On aarch64 nothing selects it, olddefconfig
+# drops any attempt to force it from the fragment, and the build dies
+# with "scripts/bin2c: No such file or directory".  5.x kernels
+# .incbin the config directly and don't care.  Prebuild the tiny
+# standalone host tool so the config_data.h rule finds it.
+if grep -q '^CONFIG_IKCONFIG=y' .config \
+	&& ! grep -q '^CONFIG_BUILD_BIN2C=y' .config \
+	&& [[ -f scripts/bin2c.c && ! -x scripts/bin2c ]]; then
+	echo "--- Prebuilding scripts/bin2c (IKCONFIG without BUILD_BIN2C)..."
+	"${HOSTCC:-gcc}" -O2 -o scripts/bin2c scripts/bin2c.c
+fi
+
 # Set EXTRAVERSION from LNXREL so kernel version matches the SRPM
 # e.g., 5.14.0 becomes 5.14.0-611.13.1.el9_7_lustre
 if [[ -n "$LNXREL" ]]; then
