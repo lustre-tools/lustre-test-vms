@@ -3,10 +3,13 @@ defaults:
   os_family: rhel
 targets:
   rocky8:
-    # No configure_args (GSS/crypto stay off): legacy 4.18/el8 target;
-    # fscrypt userspace never landed in EPEL8 so the encryption tests
-    # skip here regardless (see rocky8/image.Dockerfile).  Enable like
-    # rocky9/rocky10 if a client-crypto build on el8 is ever needed.
+    configure_args:
+    - --enable-gss=yes
+    - --enable-crypto=yes
+    # Note: fscrypt userspace never landed in EPEL8 (see
+    # rocky8/image.Dockerfile), so encryption tests that drive the
+    # fscrypt tool still skip here -- but the client_encryption
+    # connect flag (sanity-sec test_54's gate) works.
     container_image: quay.io/rockylinux/rockylinux:8.10
     kernels:
       available:
