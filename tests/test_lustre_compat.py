@@ -295,17 +295,25 @@ class TestParseLdiskfsSeries:
 
 class _FakeTC:
     """Minimal stand-in for TargetConfig -- validate_target only reads
-    .default_kernel and .lustre_mode."""
+    .default_kernel, .lustre_mode and ._short_kernel_name."""
 
     def __init__(
         self,
         lustre_target: str,
         lustre_mode: LustreMode,
         kernel_deb_source: str = "",
+        declared_kernels: list[str] | None = None,
     ) -> None:
         self.default_kernel = lustre_target
         self.lustre_mode = lustre_mode
         self.kernel_deb_source = kernel_deb_source
+        self._declared = declared_kernels or [lustre_target]
+
+    def _short_kernel_name(self, name: str) -> str:
+        for short in self._declared:
+            if name == short or name.startswith(short + "-"):
+                return short
+        return name
 
 
 def _make_tree(
@@ -353,6 +361,13 @@ _TI_RHEL85 = (
     'lnxrel="348.23.1.el8"\n'
     "KERNEL_SRPM=kernel-${lnxmaj}-${lnxrel}.src.rpm\n"
     "SERIES=4.18-rhel8.5.series\n"
+)
+
+_TI_RHEL98 = (
+    'lnxmaj="5.14.0"\n'
+    'lnxrel="687.39.1.el9_8"\n'
+    "KERNEL_SRPM=kernel-${lnxmaj}-${lnxrel}.src.rpm\n"
+    "SERIES=5.14-rhel9.8.series\n"
 )
 
 _TI_RHEL97_MISMATCH = (
@@ -429,6 +444,46 @@ class TestValidateTarget:
         assert r.mode == LustreMode.SERVER_LDISKFS
         assert r.kernel_version == "5.14.0-611.13.1.el9_7"
         assert r.message
+
+    def test_non_default_kernel_judged_on_its_own_series(
+        self, tmp_path: Path
+    ) -> None:
+        """A non-default kernel must be validated against its own
+        .target.in/which_patch pair, not the target's default kernel.
+
+        Targets routinely declare several kernels (rocky9 carries both
+        rhel9.7 and rhel9.8), so validating the default while building
+        a sibling lets a genuinely mismatched kernel through the gate.
+        """
+        tree = _make_tree(
+            tmp_path,
+            which_patch=_WP_BASIC,
+            changelog=_CL_PRIMARY,
+            target_ins={
+                "5.14-rhel9.7": _TI_RHEL97,
+                # Not listed in _WP_BASIC -> must not pass as primary.
+                "5.14-rhel9.8": _TI_RHEL98,
+            },
+        )
+        tc = _FakeTC(
+            "5.14-rhel9.7",
+            LustreMode.SERVER_LDISKFS,
+            declared_kernels=["5.14-rhel9.7", "5.14-rhel9.8"],
+        )
+        r = validate_target(tc, tree, kernel="5.14-rhel9.8")
+        assert r.kernel_version == "5.14.0-687.39.1.el9_8"
+        assert r.matched_in != "which_patch_primary"
+
+        # Full cached-dir form resolves to the same short series.
+        r_full = validate_target(
+            tc, tree, kernel="5.14-rhel9.8-5.14.0-687.39.1.el9_8"
+        )
+        assert r_full.kernel_version == r.kernel_version
+
+        # Omitting kernel still validates the default.
+        r_default = validate_target(tc, tree)
+        assert r_default.kernel_version == "5.14.0-611.13.1.el9_7"
+        assert r_default.matched_in == "which_patch_primary"
 
     def test_ldiskfs_series_listed_kver_mismatch(self, tmp_path: Path) -> None:
         tree = _make_tree(

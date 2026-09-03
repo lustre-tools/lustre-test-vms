@@ -822,7 +822,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     resolved_kernel = tc.resolve_kernel(kernel)
     kbt = tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree"
     result = _cli_attr("validate_target")(
-        tc, lustre_tree, kernel_build_tree=kbt
+        tc, lustre_tree, kernel_build_tree=kbt, kernel=resolved_kernel
     )
     exit_code = _VALIDATE_EXIT[result.status]
     force = args.force_compat

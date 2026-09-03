@@ -406,17 +406,27 @@ def validate_target(
     tc: TargetConfig,
     lustre_tree: Path,
     kernel_build_tree: Path | None = None,
+    kernel: str | None = None,
 ) -> ValidationResult:
     """Decide whether ``tc`` is supported by the given Lustre tree.
 
-    Combines tc.default_kernel + tc.lustre_mode with the tree's
+    Combines the kernel under build + tc.lustre_mode with the tree's
     declarative files (.target.in, which_patch, ChangeLog).  Returns
     a ValidationResult; callers use .status to gate further action.
+
+    ``kernel`` is the kernel actually being built (short or full form);
+    it defaults to the target's default kernel.  Passing it matters for
+    every target that declares more than one kernel: validating
+    ``--kernel 5.14-rhel9.8`` against the default 5.14-rhel9.7 checks
+    the wrong .series/.target.in pair, so a genuinely incompatible
+    non-default kernel sails through the gate (and a compatible one can
+    be refused) purely because a sibling kernel is the default.
     """
     from .target_config import LustreMode
 
     mode = tc.lustre_mode
-    series = tc.default_kernel
+    # which_patch / .target.in lookups are keyed on the short name.
+    series = tc._short_kernel_name(kernel) if kernel else tc.default_kernel
 
     # .target.in is a RHEL/SLES artifact; deb-source targets have no
     # such file and get their kver from the distro source package.

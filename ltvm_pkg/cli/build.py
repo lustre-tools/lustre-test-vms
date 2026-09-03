@@ -283,6 +283,7 @@ def _cmd_build_all_body(
         lustre_tree,
         force=args.force_compat,
         kernel_build_tree=tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree",
+        kernel=resolved_kernel,
     )
 
     if not use_json:
@@ -462,6 +463,8 @@ def cmd_build_kernel(args: argparse.Namespace) -> int:
         return err
 
     with _podman_machine_autostop() as autostop:
+        kernel = getattr(args, "kernel", None)
+
         # Deb-based targets don't need a Lustre tree for kernel builds
         lustre_tree = None
         if not tc.kernel_deb_source:
@@ -475,10 +478,11 @@ def cmd_build_kernel(args: argparse.Namespace) -> int:
                 )
             assert lustre_tree is not None
             _cli_attr("_gate_lustre_validation")(
-                tc, lustre_tree, force=args.force_compat
+                tc,
+                lustre_tree,
+                force=args.force_compat,
+                kernel=tc.resolve_kernel(kernel),
             )
-
-        kernel = getattr(args, "kernel", None)
 
         if not use_json:
             _print_target_header(
@@ -638,6 +642,7 @@ def cmd_build_image(args: argparse.Namespace) -> int:
                 lustre_tree,
                 force=args.force_compat,
                 kernel_build_tree=build_tree,
+                kernel=resolved_kernel,
             )
             with_lustre = str(lustre_tree)
 
@@ -816,6 +821,7 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
             lustre_tree,
             force=args.force_compat,
             kernel_build_tree=build_tree,
+            kernel=resolved_kernel,
         )
 
         if not build_tree.is_dir():
@@ -1047,6 +1053,7 @@ def _gate_lustre_validation(
     *,
     force: bool,
     kernel_build_tree: Path | None = None,
+    kernel: str | None = None,
 ) -> None:
     """Run validate_target as a gate before producing Lustre artifacts.
 
@@ -1063,7 +1070,7 @@ def _gate_lustre_validation(
     kernel lists).
     """
     result = _cli_attr("validate_target")(
-        tc, lustre_tree, kernel_build_tree=kernel_build_tree
+        tc, lustre_tree, kernel_build_tree=kernel_build_tree, kernel=kernel
     )
     if result.status == "ok":
         return

@@ -317,6 +317,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 build_path,
                 force=args.force_compat,
                 kernel_build_tree=tc.kernel_output_dir(kernel=deploy_kernel) / "build-tree",
+                kernel=deploy_kernel,
             )
             build_cmd = [
                 "ltvm",

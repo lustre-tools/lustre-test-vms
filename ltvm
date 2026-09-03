@@ -716,6 +716,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--lustre-tree",
         help="Path to Lustre source tree (default: cwd)",
     )
+    tvp.add_argument(
+        "--kernel",
+        help="Kernel to validate (default: from targets.yaml)",
+    )
     tvp.set_defaults(func=cmd_validate)
 
     tfp = target_sub.add_parser(

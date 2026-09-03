@@ -1084,8 +1084,10 @@ class TestCmdDeployForceCompat:
 
         gate_calls: list = []
 
-        def fake_gate(tc, lustre_tree, *, force, kernel_build_tree=None):
-            gate_calls.append({"force": force})
+        def fake_gate(
+            tc, lustre_tree, *, force, kernel_build_tree=None, kernel=None
+        ):
+            gate_calls.append({"force": force, "kernel": kernel})
 
         args = _deploy_args(
             vm="co1-fc", lustre_tree=str(build_path), force_compat=True
@@ -1103,6 +1105,9 @@ class TestCmdDeployForceCompat:
 
         assert gate_calls, "_gate_lustre_validation was not called"
         assert gate_calls[0]["force"] is True
+        # The gate must be told which kernel is being deployed, not left
+        # to fall back to the target's default.
+        assert gate_calls[0]["kernel"] == "5.14-rhel9.7"
 
     def test_force_compat_does_not_silence_hard_error(
         self, tmp_sockets: Path, tmp_path: Path
