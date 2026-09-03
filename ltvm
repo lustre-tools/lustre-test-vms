@@ -1206,6 +1206,12 @@ def build_parser() -> argparse.ArgumentParser:
         "(default: bundled fetch output, else cwd)",
     )
     sp.add_argument(
+        "--build",
+        dest="lustre_tree",
+        default=None,
+        help="Alias for --lustre-tree (matches `cluster deploy`)",
+    )
+    sp.add_argument(
         "--mount", action="store_true", help="Mount filesystem after deploy"
     )
     sp.add_argument(

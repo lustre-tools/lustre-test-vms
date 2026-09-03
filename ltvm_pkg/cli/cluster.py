@@ -192,7 +192,10 @@ def cmd_cluster(args: argparse.Namespace) -> int:
         force_compat = False
         i = 1
         while i < len(cargs):
-            if cargs[i] == "--build" and i + 1 < len(cargs):
+            if (
+                cargs[i] in ("--build", "--lustre-tree")
+                and i + 1 < len(cargs)
+            ):
                 build_path = cargs[i + 1]
                 i += 2
             elif cargs[i] == "--mount":
@@ -208,8 +211,8 @@ def cmd_cluster(args: argparse.Namespace) -> int:
                 return _error(
                     f"cluster deploy: unknown argument '{cargs[i]}'",
                     use_json,
-                    hint="valid: --build PATH, --mount, --server-only, "
-                    "--force-compat",
+                    hint="valid: --build PATH (alias --lustre-tree), "
+                    "--mount, --server-only, --force-compat",
                 )
         return _call(
             _qc_deploy,

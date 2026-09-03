@@ -450,3 +450,67 @@ class TestNeedsReconfigureM4Staleness:
         now = time.time()
         self._set_mtime(tree / "configure", now)
         assert self._need(tree, bt) is False
+
+
+# ── ldiskfs staging + clock-skew helpers ──────────────────
+
+
+class TestInvalidateStaleLdiskfs:
+    """An edited patch under ldiskfs/kernel_patches/ must drop the
+    `sources` stamp, since the autoMakefile dependency list misses the
+    individual patches."""
+
+    def _make(self, tmp_path: Path) -> Path:
+        tree = tmp_path / "lustre-release"
+        (tree / "ldiskfs" / "kernel_patches" / "patches").mkdir(parents=True)
+        (tree / "ldiskfs" / "sources").write_text("")
+        (
+            tree / "ldiskfs" / "kernel_patches" / "patches" / "a.patch"
+        ).write_text("--- a\n+++ b\n")
+        return tree
+
+    def test_newer_patch_drops_stamp(self, tmp_path: Path) -> None:
+        tree = self._make(tmp_path)
+        now = time.time()
+        os.utime(tree / "ldiskfs" / "sources", (now - 100, now - 100))
+        os.utime(
+            tree / "ldiskfs" / "kernel_patches" / "patches" / "a.patch",
+            (now, now),
+        )
+        lustre_build._invalidate_stale_ldiskfs(tree)
+        assert not (tree / "ldiskfs" / "sources").exists()
+
+    def test_older_patch_keeps_stamp(self, tmp_path: Path) -> None:
+        tree = self._make(tmp_path)
+        now = time.time()
+        os.utime(tree / "ldiskfs" / "sources", (now, now))
+        os.utime(
+            tree / "ldiskfs" / "kernel_patches" / "patches" / "a.patch",
+            (now - 100, now - 100),
+        )
+        lustre_build._invalidate_stale_ldiskfs(tree)
+        assert (tree / "ldiskfs" / "sources").exists()
+
+    def test_no_stamp_no_crash(self, tmp_path: Path) -> None:
+        tree = self._make(tmp_path)
+        (tree / "ldiskfs" / "sources").unlink()
+        lustre_build._invalidate_stale_ldiskfs(tree)  # must not raise
+
+
+class TestHitClockSkew:
+    def test_fresh_log_with_marker(self, tmp_path: Path) -> None:
+        (tmp_path / "config.log").write_text(
+            "configure: error: newly created file is older than "
+            "distributed files!\n"
+        )
+        assert lustre_build._hit_clock_skew(tmp_path, time.time() - 60)
+
+    def test_stale_log_ignored(self, tmp_path: Path) -> None:
+        log = tmp_path / "config.log"
+        log.write_text("older than distributed files!\n")
+        old = time.time() - 1000
+        os.utime(log, (old, old))
+        assert not lustre_build._hit_clock_skew(tmp_path, time.time() - 60)
+
+    def test_no_log(self, tmp_path: Path) -> None:
+        assert not lustre_build._hit_clock_skew(tmp_path, time.time() - 60)

@@ -372,6 +372,48 @@ def _kernel_changed(
     return False
 
 
+def _invalidate_stale_ldiskfs(lustre_tree: Path) -> None:
+    """ldiskfs's `sources` stamp depends on the series file and the
+    kernel headers but NOT on the individual patches under
+    ldiskfs/kernel_patches/, so an edited patch never restages the
+    generated ldiskfs/*.c and the build links stale code (typically
+    surfacing as `modpost: "ldiskfs_<sym>" undefined`).  Drop the
+    stamp when any patch is newer so make restages."""
+    stamp = lustre_tree / "ldiskfs" / "sources"
+    if not stamp.is_file():
+        return
+    try:
+        stamp_m = stamp.stat().st_mtime
+        for p in (lustre_tree / "ldiskfs" / "kernel_patches").rglob("*"):
+            if p.is_file() and p.stat().st_mtime > stamp_m:
+                print(
+                    f"  ldiskfs patch {p.name} newer than staged "
+                    "sources, restaging"
+                )
+                stamp.unlink()
+                return
+    except OSError:
+        pass
+
+
+def _hit_clock_skew(lustre_tree: Path, since: float) -> bool:
+    """configure aborts with "newly created file is older than
+    distributed files!" when the host clock steps backwards mid-run
+    (WSL2 after an NTP correction, typically).  The condition is gone
+    on the next run, so it is worth exactly one automatic retry.
+    Only trust a config.log written by THIS build: the message
+    lingers in old logs."""
+    log = lustre_tree / "config.log"
+    try:
+        if log.stat().st_mtime < since:
+            return False
+        return "older than distributed files" in log.read_text(
+            errors="ignore"
+        )
+    except OSError:
+        return False
+
+
 def _build_in_container(
     lustre_tree: Path,
     build_tree: Path,
@@ -418,6 +460,7 @@ def _build_in_container(
         enable_server=enable_server,
         arch=arch,
     )
+    _invalidate_stale_ldiskfs(lustre_tree)
 
     # Detect cross-compilation.  Symmetric in both directions so an
     # aarch64 host can cross-build x86_64 Lustre and vice versa.
@@ -801,8 +844,12 @@ fi""")
     # SUDO_USER after the build so the user can git pull, edit, and
     # rerun the build without sudo if they want.
     print(f"--- Building in container (j{jobs})...")
-    r = run_podman_with_cleanup(cmd)
-    if r.returncode != 0:
+    build_start = time.time()
+    skew_retried = False
+    while True:
+        r = run_podman_with_cleanup(cmd)
+        if r.returncode == 0:
+            break
         has_ko = any((host_staging / "lib" / "modules").rglob("*.ko")) \
             if (host_staging / "lib" / "modules").is_dir() else False
         if getattr(r, "cleanup_eof", False) and has_ko:
@@ -811,9 +858,17 @@ fi""")
                 f"exited {r.returncode} with an EOF (macOS podman-machine "
                 f"socket drop).  Artifacts are on disk; treating as success."
             )
-        else:
-            _show_configure_log(lustre_tree)
-            raise RuntimeError(f"Container build failed (rc={r.returncode})")
+            break
+        if not skew_retried and _hit_clock_skew(lustre_tree, build_start):
+            skew_retried = True
+            print(
+                "--- configure hit clock skew (newly created file is "
+                "older than distributed files) -- the host clock likely "
+                "stepped backwards mid-run; retrying once"
+            )
+            continue
+        _show_configure_log(lustre_tree)
+        raise RuntimeError(f"Container build failed (rc={r.returncode})")
 
     # Chown the lustre tree back to the real user after the build.
     # The container's root mapped to host root in the bind mount, so
