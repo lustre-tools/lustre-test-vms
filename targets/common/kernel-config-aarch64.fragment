@@ -16,6 +16,14 @@ CONFIG_SERIAL_AMBA_PL011_CONSOLE=y
 # GICv3 interrupt controller (QEMU virt default)
 CONFIG_ARM_GIC_V3=y
 
+# 4K pages: RHEL 8's aarch64 config defaults to 64K pages, but Apple
+# Silicon only implements the 4K/16K translation granules -- a 64K
+# kernel hangs silently in early MMU setup under HVF (empty serial
+# log, SSH never comes up).  RHEL 9+/Ubuntu already default to 4K,
+# so this is a no-op for them.
+CONFIG_ARM64_4K_PAGES=y
+# CONFIG_ARM64_64K_PAGES is not set
+
 # PSCI for CPU hotplug / power management
 CONFIG_ARM_PSCI_FW=y
 
