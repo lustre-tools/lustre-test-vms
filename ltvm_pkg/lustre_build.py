@@ -220,6 +220,22 @@ def _needs_reconfigure(
     if not config_status.exists():
         return True
 
+    # configure is generated from configure.ac + config/*.m4 by
+    # autogen.sh (aclocal -I config).  Nothing else tracks those
+    # inputs, so an edited feature probe would otherwise never reach
+    # config.h: the build "succeeds" against the stale configure and
+    # the new HAVE_* macro silently stays undefined.
+    conf_mtime = configure_script.stat().st_mtime
+    autoconf_inputs = [
+        lustre_tree / "configure.ac",
+        lustre_tree / "autogen.sh",
+        *sorted((lustre_tree / "config").glob("*.m4")),
+    ]
+    for src in autoconf_inputs:
+        if src.exists() and src.stat().st_mtime > conf_mtime:
+            print(f"  {src.name} newer than configure, reconfiguring")
+            return True
+
     # Check if previous configure used a different kernel or server
     # flag.  Stamps are per-(target,arch) so switching targets OR
     # arches forces reconfigure even when the source tree is shared.

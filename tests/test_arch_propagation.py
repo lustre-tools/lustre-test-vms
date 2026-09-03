@@ -15,6 +15,8 @@ re-introduce the same bugs.
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -371,3 +373,80 @@ class TestCcacheVolumeArch:
         except (ValueError, FileNotFoundError):
             pytest.skip("rocky9 target not available in this checkout")
         assert native != cross
+
+
+# ── _needs_reconfigure tracks autoconf inputs ─────────────
+
+
+class TestNeedsReconfigureM4Staleness:
+    """configure must be re-generated when configure.ac or a
+    config/*.m4 probe is edited; nothing else tracks those inputs, so
+    a stale configure silently leaves new HAVE_* macros undefined."""
+
+    def _make_tree(self, tmp_path: Path) -> tuple[Path, Path]:
+        tree = tmp_path / "lustre-release"
+        (tree / "config").mkdir(parents=True)
+        (tree / "configure").write_text("#!/bin/sh\n")
+        (tree / "configure").chmod(0o755)
+        (tree / "config.status").write_text("# fake config.status\n")
+        (tree / "configure.ac").write_text("AC_INIT\n")
+        (tree / "config" / "lustre-core.m4").write_text("# probes\n")
+        kver = "5.14.0-test"
+        (tree / f".ltvm-kernel-{_stamp_suffix('rocky9', 'x86_64')}").write_text(
+            kver + "\n"
+        )
+        (tree / f".ltvm-server-{_stamp_suffix('rocky9', 'x86_64')}").write_text(
+            "True\n"
+        )
+        bt = tmp_path / "build-tree"
+        (bt / "include" / "config").mkdir(parents=True)
+        (bt / "include" / "config" / "kernel.release").write_text(kver + "\n")
+        return tree, bt
+
+    def _set_mtime(self, path: Path, when: float) -> None:
+        os.utime(path, (when, when))
+
+    def _need(self, tree: Path, bt: Path) -> bool:
+        return lustre_build._needs_reconfigure(
+            tree,
+            bt,
+            force=False,
+            target="rocky9",
+            enable_server=True,
+            arch="x86_64",
+        )
+
+    def test_fresh_configure_skips(self, tmp_path: Path) -> None:
+        """configure newer than all inputs: no reconfigure."""
+        tree, bt = self._make_tree(tmp_path)
+        now = time.time()
+        self._set_mtime(tree / "configure.ac", now - 100)
+        self._set_mtime(tree / "config" / "lustre-core.m4", now - 100)
+        self._set_mtime(tree / "configure", now)
+        assert self._need(tree, bt) is False
+
+    def test_edited_m4_reconfigures(self, tmp_path: Path) -> None:
+        """An m4 probe newer than configure forces autogen."""
+        tree, bt = self._make_tree(tmp_path)
+        now = time.time()
+        self._set_mtime(tree / "configure", now - 100)
+        self._set_mtime(tree / "config" / "lustre-core.m4", now)
+        assert self._need(tree, bt) is True
+
+    def test_edited_configure_ac_reconfigures(self, tmp_path: Path) -> None:
+        tree, bt = self._make_tree(tmp_path)
+        now = time.time()
+        self._set_mtime(tree / "configure", now - 100)
+        self._set_mtime(tree / "configure.ac", now)
+        assert self._need(tree, bt) is True
+
+    def test_missing_inputs_no_crash(self, tmp_path: Path) -> None:
+        """A tree without configure.ac or config/ must not crash and
+        must not spuriously reconfigure."""
+        tree, bt = self._make_tree(tmp_path)
+        (tree / "configure.ac").unlink()
+        (tree / "config" / "lustre-core.m4").unlink()
+        (tree / "config").rmdir()
+        now = time.time()
+        self._set_mtime(tree / "configure", now)
+        assert self._need(tree, bt) is False
