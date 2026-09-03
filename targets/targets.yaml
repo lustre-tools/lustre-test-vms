@@ -75,6 +75,7 @@ targets:
     default_mem: 4096
     kernels:
       available:
+      - 6.12-rhel10.2
       - 6.12-rhel10.1
       # Lustre's 6.12-rhel10.0.target declares 55.43.1.el10_0, but
       # Rocky never mirrored that rebuild -- vault/rocky/10.0 tops out
