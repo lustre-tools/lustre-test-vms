@@ -44,6 +44,7 @@ class KernelMeta(_BaseMeta, total=False):
     """
     kernel_version: str
     lustre_target: str
+    kernel_dir: str
     patches_applied: int
     vmlinux_bytes: int
     vmlinuz_bytes: int

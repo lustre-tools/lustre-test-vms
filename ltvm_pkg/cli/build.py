@@ -342,8 +342,16 @@ def _cmd_build_all_body(
     # (e.g. "5.14-rhel9.7" -> "5.14-rhel9.7-5.14.0-611.13.1.el9_7").
     # build_lustre re-resolves internally, but snapshot_lustre takes the
     # name as-is and looks up staging + kernel_dir directly -- so feed
-    # it the resolved full name now that the directory exists.
-    full_kernel = tc.resolve_kernel(getattr(args, "kernel", None))
+    # it the full name now that the directory exists.
+    #
+    # Take it from the build we just ran, not from a fresh
+    # resolve_kernel(): once the target has more than one minor built,
+    # resolving the short name is a guess about which dir is "latest",
+    # and guessing wrong builds Lustre against a stale build-tree --
+    # modules that then won't load on the kernel published beside them.
+    full_kernel = str(kmeta.get("kernel_dir") or "") or tc.resolve_kernel(
+        getattr(args, "kernel", None)
+    )
 
     # 3. Lustre.  Runs BEFORE the image so its per-kernel staging is in
     # place for the image-bake step to auto-inject.

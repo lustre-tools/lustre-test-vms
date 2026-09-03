@@ -157,6 +157,24 @@ class TestResolveKernel:
         (kernels / full).mkdir(parents=True)
         assert tc.resolve_kernel("5.14-rhel9.7") == full
 
+    def test_prefix_scan_picks_highest_version_not_lexical(
+        self, tmp_targets: Path
+    ) -> None:
+        """Two built minors -> the numerically newest must win.
+
+        553.155.1 is newer than 553.89.1 but sorts *before* it as a
+        string, so a lexical max returns the older kernel and the
+        Lustre build silently targets a stale build-tree.
+        """
+        tc = _make_config(tmp_targets)
+        kernels = tmp_targets / "artifacts" / "rocky9" / "x86_64" / "kernels"
+        older = "5.14-rhel9.7-5.14.0-611.89.1.el9_7"
+        newer = "5.14-rhel9.7-5.14.0-611.155.1.el9_7"
+        for d in (older, newer):
+            (kernels / d).mkdir(parents=True)
+        assert sorted([older, newer])[-1] == older  # the trap
+        assert tc.resolve_kernel("5.14-rhel9.7") == newer
+
 
 class TestKernelOutputDir:
     def test_default_path(self, tmp_targets: Path) -> None:

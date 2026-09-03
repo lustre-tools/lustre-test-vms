@@ -889,6 +889,11 @@ def _finalize_kernel_build(
     meta: dict[str, object] = {
         "kernel_version": krelease,
         "lustre_target": lustre_target,
+        # The directory this build landed in.  Callers that chain off a
+        # kernel build (build all -> lustre -> image) must use this
+        # rather than re-resolving the short name against the kernels/
+        # dir: once a second minor is present, that lookup is a guess.
+        "kernel_dir": full_name,
         "patches_applied": patches_applied,
         "vmlinux_bytes": vmlinux_size,
         "vmlinuz_bytes": vmlinuz_size,

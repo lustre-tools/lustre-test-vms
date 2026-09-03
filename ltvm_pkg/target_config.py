@@ -179,6 +179,22 @@ class Variant:
         return h.digest()
 
 
+def _kernel_dir_version_key(name: str) -> tuple:
+    """Natural-order sort key for kernel directory names.
+
+    Kernel dirs are ``<lustre_target>-<lnxmaj>-<lnxrel>``, e.g.
+    ``4.18-rhel8.10-4.18.0-553.155.1.el8_10``.  Comparing those as
+    plain strings orders 553.155.1 *below* 553.89.1, so split each
+    name into digit and non-digit runs and compare the digit runs
+    numerically.  Each chunk is tagged with its kind so an int is
+    never compared against a str when two names differ in shape.
+    """
+    return tuple(
+        (0, int(part), "") if part.isdigit() else (1, 0, part)
+        for part in re.split(r"(\d+)", name)
+    )
+
+
 def build_container_tag(
     name: str, arch: str = "x86_64", variant: str = DEFAULT_VARIANT
 ) -> str:
@@ -603,7 +619,7 @@ class TargetConfig:
           2. Else if kernel is None, use default_kernel.
           3. Exact directory match.
           4. Prefix match: scan for dirs starting with <kernel>-,
-             pick the lexicographically latest.
+             pick the highest kernel version (numeric, not lexical).
           5. Return name as-is (for new builds not yet on disk).
         """
         # Honor the variant's kernel pin first: if bound to a variant
@@ -634,15 +650,21 @@ class TargetConfig:
         if (kernels_dir / name).is_dir():
             return name
 
-        # Prefix match (short name -> full-version dir)
+        # Prefix match (short name -> full-version dir).  Must sort by
+        # numeric version, not lexically: 553.155.1 is newer than
+        # 553.89.1 but sorts *before* it as a string ('1' < '8'), so a
+        # plain sorted()[-1] hands back the older kernel once a release
+        # crosses a digit-count boundary.  That silently pointed the
+        # Lustre build at a stale build-tree, producing modules that
+        # won't load on the kernel shipped beside them.
         prefix = name + "-"
-        candidates = sorted(
+        candidates = [
             d.name
             for d in kernels_dir.iterdir()
             if d.is_dir() and d.name.startswith(prefix)
-        )
+        ]
         if candidates:
-            return candidates[-1]
+            return max(candidates, key=_kernel_dir_version_key)
 
         return name
 
