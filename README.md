@@ -67,12 +67,17 @@ ltvm llmount co1-single                 # mount Lustre inside the VM
 
 ## Target OS support
 
-| Target | Server | Client | Status |
-|--------|--------|--------|--------|
-| Rocky 9 | yes | yes | working |
-| Rocky 8 | no  | yes | working |
-| Rocky 10 | no | yes | working |
-| Ubuntu 24.04 | no | yes | working |
+Fetchable = a prebuilt release exists (`ltvm target fetch <target>`);
+buildable = declared in targets.yaml, build locally with
+`ltvm build all`.  Live view: `ltvm target list`.
+
+| Target | Arch | Lustre | Default kernel | Fetchable | Buildable only |
+|--------|------|--------|----------------|-----------|----------------|
+| rocky8 | aarch64, x86_64 | server (ldiskfs) + client | 4.18-rhel8.10 | rhel8.10 | rhel8.4 - 8.9 |
+| rocky9 | aarch64 | server (ldiskfs) + client | 5.14-rhel9.7 | rhel9.5, 9.7, 9.8 | rhel9.1 - 9.4, 9.6 |
+| rocky9 | x86_64 | server (ldiskfs) + client | 5.14-rhel9.7 | rhel9.7, 9.8 | rhel9.1 - 9.6 |
+| rocky10 | aarch64, x86_64 | server (ldiskfs) + client | 6.12-rhel10.0 | rhel10.0, 10.1 | -- |
+| ubuntu2404 | x86_64 | client only | 6.8-ubuntu2404 | 6.8-ubuntu2404 | -- |
 
 ## ltvm commands
 

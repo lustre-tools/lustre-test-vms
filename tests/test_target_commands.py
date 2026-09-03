@@ -1155,3 +1155,72 @@ class TestCmdTargetsArchScoping:
                 assert i < x86_section, f"aarch64 block after x86_64 section: {ln}"
             if "(x86_64)" in ln:
                 assert i > x86_section, f"x86_64 block before its section: {ln}"
+
+
+class TestCmdTargetsKernelPresenceFilter:
+    """Default text view hides declared kernels with nothing built or
+    published; --all-kernels restores the full declared list.  The
+    filter must NOT run when GitHub is unreachable (remote presence
+    unknowable) -- that case is covered by the legacy text tests,
+    which all mock _gh_api as raising."""
+
+    def _seed_kernel_meta(self, root: Path, kernel: str) -> None:
+        d = root / "artifacts" / "rocky9" / "x86_64" / "kernels" / kernel
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "meta.json").write_text('{"target": "rocky9"}')
+
+    def test_default_hides_absent_kernels_with_note(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        variant_targets: Path,
+    ) -> None:
+        # 9.7 built locally; 9.5 nowhere; GitHub reachable, no releases.
+        self._seed_kernel_meta(variant_targets, "5.14-rhel9.7")
+        with _patch_cfg_paths(variant_targets), \
+                patch.object(cli, "_gh_api", return_value=[]):
+            cmd_targets(_ns())
+        out = capsys.readouterr().out
+        assert "5.14-rhel9.7" in out
+        assert "5.14-rhel9.5" not in out
+        assert "--all-kernels" in out  # closing note
+
+    def test_all_kernels_shows_declared(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        variant_targets: Path,
+    ) -> None:
+        self._seed_kernel_meta(variant_targets, "5.14-rhel9.7")
+        with _patch_cfg_paths(variant_targets), \
+                patch.object(cli, "_gh_api", return_value=[]):
+            cmd_targets(_ns(all_kernels=True))
+        out = capsys.readouterr().out
+        assert "5.14-rhel9.7" in out
+        assert "5.14-rhel9.5" in out
+
+    def test_empty_block_gets_placeholder(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        variant_targets: Path,
+    ) -> None:
+        """Nothing built or published anywhere: the target block stays
+        visible with a placeholder instead of vanishing."""
+        with _patch_cfg_paths(variant_targets), \
+                patch.object(cli, "_gh_api", return_value=[]):
+            cmd_targets(_ns())
+        out = capsys.readouterr().out
+        assert "rocky9" in out
+        assert "nothing built or published" in out
+
+    def test_unreachable_skips_filter(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        variant_targets: Path,
+    ) -> None:
+        """GitHub down: all declared kernels stay visible (hiding
+        everything unbuilt would read as 'no kernels at all')."""
+        with _patch_cfg_paths(variant_targets), \
+                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+            cmd_targets(_ns())
+        out = capsys.readouterr().out
+        assert "5.14-rhel9.7" in out
+        assert "5.14-rhel9.5" in out

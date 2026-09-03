@@ -602,6 +602,13 @@ def build_parser() -> argparse.ArgumentParser:
         "(default: only the host arch, with a note about others; "
         "JSON output always includes all arches)",
     )
+    tlp.add_argument(
+        "--all-kernels",
+        action="store_true",
+        help="Show every declared kernel (default: only kernels that "
+        "are built locally or published remotely; JSON output always "
+        "includes all kernels)",
+    )
     tlp.set_defaults(func=cmd_targets)
 
     tshp = target_sub.add_parser(

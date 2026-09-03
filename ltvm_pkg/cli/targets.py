@@ -478,6 +478,43 @@ def cmd_targets(args: argparse.Namespace) -> int:
                 hidden.append(blk["key"])
         real_blocks = kept_blocks
 
+    # Kernel-presence filter: by default only kernels that exist
+    # somewhere -- built locally or published remotely -- get a row;
+    # the full declared list is theory, not state, and drowns the
+    # signal.  --all-kernels restores it.  Skipped when a local/remote
+    # scope is active (already an explicit filter) and when GitHub is
+    # unreachable (remote presence unknowable; hiding everything
+    # unbuilt would read as "no kernels at all").
+    all_kernels = bool(getattr(args, "all_kernels", False))
+    hidden_kernels = 0
+    if not all_kernels and scope is None and not gh_unreachable:
+
+        def _row_present(vr: dict[str, Any] | None) -> bool:
+            if vr is None:
+                return False
+            return bool(vr.get("built")) or (
+                vr.get("remote_release") not in (None, "-", "?")
+            )
+
+        def _present(entry: dict[str, Any]) -> bool:
+            return _row_present(entry["base"]) or any(
+                _row_present(v) for v in entry["variants"]
+            )
+
+        for blk in real_blocks:
+            kept = [e for e in blk["kernels"] if _present(e)]
+            blk["hidden_kernels"] = len(blk["kernels"]) - len(kept)
+            hidden_kernels += blk["hidden_kernels"]
+            blk["kernels"] = kept
+            # Same rule for variant rows under a surviving kernel:
+            # a variant with nothing local or remote is theory, not
+            # state (matches build status, which only rows variants
+            # that are actually built).
+            for e in kept:
+                e["variants"] = [
+                    v for v in e["variants"] if _row_present(v)
+                ]
+
     # Never interleave arches: render one section per arch, each with
     # its own heading when more than one arch is shown.
     arches_present = sorted({b["key"][1] for b in real_blocks})
@@ -511,6 +548,13 @@ def cmd_targets(args: argparse.Namespace) -> int:
         )
         os_part = f", {os_bits}" if os_bits else ""
         print(f"{meta['name']}{marker} ({meta['arch']}) -- {mode_h}{os_part}")
+        if not blk["kernels"]:
+            n = blk.get("hidden_kernels", 0)
+            print(
+                f"  (nothing built or published; {n} declared "
+                f"kernel(s) -- `ltvm target list --all-kernels`)"
+            )
+            continue
         print(f"  {'Kernel':<28} {'Local':<7} {'Remote':<7} State")
         for entry in blk["kernels"]:
             hdr_row = entry["header"]
@@ -568,6 +612,13 @@ def cmd_targets(args: argparse.Namespace) -> int:
             f"Note: {len(hidden)} listing(s) for other arches "
             f"({other_arches}) hidden -- "
             f"`ltvm target list --all-arches` shows them."
+        )
+    if hidden_kernels:
+        print()
+        print(
+            f"Note: {hidden_kernels} declared kernel(s) with no local "
+            f"build or published release hidden -- "
+            f"`ltvm target list --all-kernels` shows them."
         )
     return EXIT_OK
 
