@@ -1143,7 +1143,20 @@ def image_status(
     meta = load_meta_safe(meta_path) or {}
 
     size_mb = image_path.stat().st_size / (1024 * 1024)
-    stale = target_config.is_stale("image", kernel=kernel, variant=variant_name)
+    # build_image folds Lustre staging bytes (and MOFED kmod RPMs) into
+    # the persisted input_hash via extra_hash.  Status can't recompute
+    # those without the Lustre tree / kmod context on hand, so for an
+    # image baked with either we can't honestly compute staleness --
+    # recomputing without the extra bytes would report every such image
+    # as permanently stale.  Return the same tristate kernel_status uses
+    # (built=True, stale=None -> rendered "built (?)").
+    stale: bool | None
+    if meta.get("with_lustre") or meta.get("mofed_kmods"):
+        stale = None
+    else:
+        stale = target_config.is_stale(
+            "image", kernel=kernel, variant=variant_name
+        )
 
     return {
         "built": True,
