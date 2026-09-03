@@ -56,6 +56,11 @@ ZSTD_THREADS = "0"  # "0" = all cores
 
 DEFAULT_VARIANT = "base"
 
+# Shared with TargetConfig.resolve_kernel so the packager and the
+# builder agree on which of several built kernels is the newest --
+# a disagreement means publishing artifacts the build never produced.
+from .target_config import kernel_dir_version_key  # noqa: E402
+
 
 # Release manifest schema version.  Bump when anything about the
 # published artifact layout changes -- asset names, per-variant
@@ -292,9 +297,15 @@ def _resolve_kernel(output_dir: Path, kernel: str | None) -> tuple[str, Path]:
     ``5.14-rhel9.5-5.14.0-503.40.1.el9_5``); ``targets.yaml`` and most
     user-facing args use just the short prefix (``5.14-rhel9.5``).
     Accept either: exact match wins, then a prefix match against the
-    short name (lex-largest among matches, so the highest .elN_M
-    sibling gets picked when multiple coexist), then auto-detection
-    if no kernel was specified at all.
+    short name (highest kernel version among matches, so the newest
+    .elN_M sibling gets picked when multiple coexist), then
+    auto-detection if no kernel was specified at all.
+
+    "Highest" must be a numeric comparison, not a lexical one:
+    553.155.1 is newer than 553.89.1 but sorts before it as a string,
+    so sorted()[-1] would package the older kernel -- and the tag is
+    derived from whatever this returns, so the release would be named
+    for a kernel the operator did not ask to publish.
     """
     kernels_dir = output_dir / "kernels"
 
@@ -304,13 +315,15 @@ def _resolve_kernel(output_dir: Path, kernel: str | None) -> tuple[str, Path]:
             return kernel, exact
         if kernels_dir.is_dir():
             prefix = f"{kernel}-"
-            siblings = sorted(
+            siblings = [
                 d
                 for d in kernels_dir.iterdir()
                 if d.is_dir() and d.name.startswith(prefix)
-            )
+            ]
             if siblings:
-                chosen = siblings[-1]
+                chosen = max(
+                    siblings, key=lambda p: kernel_dir_version_key(p.name)
+                )
                 return chosen.name, chosen
         # No match -- return the exact path so the downstream "missing
         # artifacts" error names what the caller asked for.
@@ -322,17 +335,17 @@ def _resolve_kernel(output_dir: Path, kernel: str | None) -> tuple[str, Path]:
             f"Run 'ltvm build kernel <target>' to build one."
         )
 
-    candidates = sorted(
+    candidates = [
         d
         for d in kernels_dir.iterdir()
         if d.is_dir() and (d / "vmlinux").exists()
-    )
+    ]
     if not candidates:
         raise ValueError(
             f"No kernel with vmlinux found under {kernels_dir}. "
             f"Run 'ltvm build kernel <target>' to build one."
         )
-    chosen = candidates[-1]
+    chosen = max(candidates, key=lambda p: kernel_dir_version_key(p.name))
     return chosen.name, chosen
 
 

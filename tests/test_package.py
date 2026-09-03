@@ -123,6 +123,32 @@ class TestResolveKernel:
         name, _ = _resolve_kernel(tmp_path, None)
         assert name == "5.14-b"
 
+    def test_auto_detect_orders_numerically_not_lexically(
+        self, tmp_path: Path
+    ) -> None:
+        """The packaged kernel decides the release tag, so picking the
+        lexical max publishes a release named for the older kernel.
+        """
+        kernels = tmp_path / "kernels"
+        older = "4.18-rhel8.10-4.18.0-553.89.1.el8_10"
+        newer = "4.18-rhel8.10-4.18.0-553.155.1.el8_10"
+        for d in (older, newer):
+            (kernels / d).mkdir(parents=True)
+            (kernels / d / "vmlinux").write_bytes(b"")
+        assert sorted([older, newer])[-1] == older  # the trap
+        assert _resolve_kernel(tmp_path, None)[0] == newer
+
+    def test_prefix_match_orders_numerically_not_lexically(
+        self, tmp_path: Path
+    ) -> None:
+        kernels = tmp_path / "kernels"
+        older = "4.18-rhel8.10-4.18.0-553.89.1.el8_10"
+        newer = "4.18-rhel8.10-4.18.0-553.155.1.el8_10"
+        for d in (older, newer):
+            (kernels / d).mkdir(parents=True)
+        name, _ = _resolve_kernel(tmp_path, "4.18-rhel8.10")
+        assert name == newer
+
     def test_missing_kernels_dir_raises(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="No kernels/ directory"):
             _resolve_kernel(tmp_path, None)

@@ -179,7 +179,7 @@ class Variant:
         return h.digest()
 
 
-def _kernel_dir_version_key(name: str) -> tuple:
+def kernel_dir_version_key(name: str) -> tuple:
     """Natural-order sort key for kernel directory names.
 
     Kernel dirs are ``<lustre_target>-<lnxmaj>-<lnxrel>``, e.g.
@@ -664,7 +664,7 @@ class TargetConfig:
             if d.is_dir() and d.name.startswith(prefix)
         ]
         if candidates:
-            return max(candidates, key=_kernel_dir_version_key)
+            return max(candidates, key=kernel_dir_version_key)
 
         return name
 
