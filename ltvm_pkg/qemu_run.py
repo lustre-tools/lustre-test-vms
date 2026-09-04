@@ -155,13 +155,25 @@ def is_running(vm: VMInfo) -> bool:
 
     The Linux comm field is truncated to 15 chars (TASK_COMM_LEN-1)
     so we substring-match "qemu-system" rather than equality-test.
+
+    comm alone only rules out reuse by a *non-QEMU* process, which is
+    not enough: after a host reboot without `ltvm stop`, PIDs restart
+    low and so do the stale PIDs left in .info files, so VM A's stale
+    pid can land on VM B's live QEMU.  `ltvm list` then shows A
+    running, `ltvm start A` says "already running" and never boots it,
+    and `ltvm stop A` / `ltvm destroy A` SIGTERMs -- then SIGKILLs --
+    B's QEMU while tearing down A's artifacts.  QEMU is launched with
+    ``-name <vm.name>``, so the command line carries the identity;
+    check it.  If the command line can't be read we fall back to the
+    comm check rather than regress `ltvm list` for an unprivileged
+    caller.
     """
     if vm.pid <= 0:
         return False
     if is_macos():
         try:
             r = subprocess.run(
-                ["ps", "-p", str(vm.pid), "-o", "comm="],
+                ["ps", "-p", str(vm.pid), "-o", "comm=", "-o", "args="],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -170,13 +182,47 @@ def is_running(vm: VMInfo) -> bool:
             return False
         if r.returncode != 0:
             return False
-        comm = Path(r.stdout.strip()).name
-        return comm.startswith("qemu-system")
+        out = r.stdout.strip()
+        if not out:
+            return False
+        comm = Path(out.split()[0]).name
+        if not comm.startswith("qemu-system"):
+            return False
+        return _cmdline_names_vm(out.split(), vm.name, strict=False)
     try:
         comm = Path(f"/proc/{vm.pid}/comm").read_text().strip()
     except OSError:
         return False
-    return comm.startswith("qemu-system")
+    if not comm.startswith("qemu-system"):
+        return False
+    try:
+        argv = Path(f"/proc/{vm.pid}/cmdline").read_bytes()
+    except OSError:
+        # Unreadable: keep the pre-identity behavior rather than
+        # reporting a live VM as stopped.
+        return True
+    parts = [a.decode(errors="replace") for a in argv.split(b"\0") if a]
+    if not parts:
+        # Zombie or otherwise empty cmdline: no identity information,
+        # so don't call a live VM stopped.
+        return True
+    return _cmdline_names_vm(parts, vm.name, strict=True)
+
+
+def _cmdline_names_vm(argv: list[str], name: str, *, strict: bool) -> bool:
+    """True if *argv* is a QEMU invocation for the VM called *name*.
+
+    Matches the ``-name <name>`` pair launch_qemu passes.  When the
+    argv carries no ``-name`` at all we cannot tell (``strict=False``
+    for the macOS ``ps`` path, whose output may be truncated), so we
+    accept rather than declare a running VM stopped.
+    """
+    for i, arg in enumerate(argv):
+        if arg == "-name":
+            return i + 1 < len(argv) and argv[i + 1] == name
+        if arg.startswith("-name="):
+            return arg.split("=", 1)[1] == name
+    return not strict
 
 
 def launch_qemu(vm: VMInfo) -> None:

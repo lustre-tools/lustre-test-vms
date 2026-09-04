@@ -296,8 +296,24 @@ def resolve_lustre_files(
     # No Lustre-provided config -- will extract from SRPM at build time
     config_path: Path | None = _config if _config.exists() else None
 
-    # Series file
-    series_file = kp_series(lustre_tree) / target_info["series"]
+    # Series file.  A declared-but-absent series must fail loud: with
+    # patches=[] the build runs to completion and produces an
+    # *unpatched* kernel that ltvm then records as a good Lustre server
+    # kernel (no ldiskfs patches, and with no matching kernel_configs/
+    # entry it also falls back to the stock SRPM config).  This is
+    # reachable -- several .target.in files still name series files
+    # Lustre has since deleted, and _suggestion happily points users at
+    # them.
+    series_name = target_info["series"]
+    series_file = kp_series(lustre_tree) / series_name
+    if not series_name or not series_file.is_file():
+        raise FileNotFoundError(
+            f"Lustre target {lustre_target!r} declares series "
+            f"{series_name or '<empty>'!r}, but {series_file} does not "
+            f"exist.  Building would silently produce an unpatched "
+            f"kernel; pick a target whose series file this tree still "
+            f"ships."
+        )
     patches = []
     if series_file.exists():
         for line in series_file.read_text().splitlines():

@@ -121,10 +121,12 @@ class TestResolveLustreFiles:
     def test_missing_config_returns_none(self, lustre_tree: Path) -> None:
         # No Lustre-provided config for this target -- config is None
         # so the build path can extract it from the SRPM instead.
+        # Use the series the fixture ships: this test is about config
+        # resolution, and a missing series is now its own hard error.
         target_info = {
             "lnxmaj": "6.0.0",
             "lnxrel": "1.el9",
-            "series": "fake.series",
+            "series": "5.14-rhel9.7.series",
         }
         files = resolve_lustre_files(lustre_tree, "fake-target", target_info)
         assert files["config"] is None
@@ -164,8 +166,16 @@ class TestResolveLustreFiles:
         files = resolve_lustre_files(lustre_tree, "5.14-rhel9.7", target_info)
         assert len(files["patches"]) == 2
 
-    def test_nonexistent_series_file(self, lustre_tree: Path) -> None:
-        """When series file doesn't exist, patches list is empty."""
+    def test_nonexistent_series_file_raises(self, lustre_tree: Path) -> None:
+        """A declared-but-missing series file must fail loud.
+
+        Returning patches=[] let the build finish and produce an
+        *unpatched* kernel that ltvm then recorded as a good Lustre
+        server kernel -- no ldiskfs patches, and with no matching
+        kernel_configs/ entry it fell back to the stock SRPM config
+        too.  Several .target.in files in a real tree still name series
+        files Lustre has deleted, so this is reachable.
+        """
         target_info = {
             "lnxmaj": "5.14.0",
             "lnxrel": "503.26.1.el9_7",
@@ -174,8 +184,8 @@ class TestResolveLustreFiles:
         configs = lustre_tree / "lustre/kernel_patches/kernel_configs"
         (configs / "kernel-5.14.0-5.14-rhel9.7-x86_64.config").touch()
 
-        files = resolve_lustre_files(lustre_tree, "5.14-rhel9.7", target_info)
-        assert files["patches"] == []
+        with pytest.raises(FileNotFoundError, match="unpatched"):
+            resolve_lustre_files(lustre_tree, "5.14-rhel9.7", target_info)
 
 
 # ------------------------------------------------------------------

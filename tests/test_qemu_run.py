@@ -907,3 +907,48 @@ class TestLaunchQemuSocketPerms:
             f"expected os.chmod({socket_str!r}, 0o666); got {chmod_calls}"
         )
         assert chmod_for_socket[0][1] == 0o666
+
+
+class TestIsRunningPidIdentity:
+    """is_running must confirm the pid is *this* VM's qemu."""
+
+    def _vm(self, name: str, pid: int = 42) -> VMInfo:
+        return VMInfo(name=name, ip="1.2.3.4", pid=pid)
+
+    def _patch_proc(self, comm: str, cmdline: bytes) -> Any:
+        mock_path = MagicMock()
+        mock_path.return_value.read_text.return_value = comm
+        mock_path.return_value.read_bytes.return_value = cmdline
+        return patch("ltvm_pkg.qemu_run.Path", mock_path)
+
+    def test_matching_name_is_running(self) -> None:
+        with self._patch_proc(
+            "qemu-system-x86\n",
+            b"qemu-system-x86_64\x00-name\x00co1-single\x00-machine\x00microvm\x00",
+        ):
+            assert qemu_run.is_running(self._vm("co1-single")) is True
+
+    def test_other_vms_qemu_is_not_running(self) -> None:
+        """The PID-reuse case that could SIGKILL the wrong VM.
+
+        After a host reboot without `ltvm stop`, PIDs restart low and
+        so do the stale pids in .info files, so VM A's stale pid can
+        land on VM B's live qemu.  comm says "qemu-system" for both.
+        """
+        with self._patch_proc(
+            "qemu-system-x86\n",
+            b"qemu-system-x86_64\x00-name\x00co2-oss\x00-machine\x00microvm\x00",
+        ):
+            assert qemu_run.is_running(self._vm("co1-single")) is False
+
+    def test_unreadable_cmdline_keeps_prior_behavior(self) -> None:
+        """Don't report a live VM as stopped just because /proc is coy."""
+        mock_path = MagicMock()
+        mock_path.return_value.read_text.return_value = "qemu-system-x86\n"
+        mock_path.return_value.read_bytes.side_effect = PermissionError()
+        with patch("ltvm_pkg.qemu_run.Path", mock_path):
+            assert qemu_run.is_running(self._vm("co1-single")) is True
+
+    def test_non_qemu_pid_reuse_still_rejected(self) -> None:
+        with self._patch_proc("bash\n", b"bash\x00-c\x00sleep\x00"):
+            assert qemu_run.is_running(self._vm("co1-single")) is False
