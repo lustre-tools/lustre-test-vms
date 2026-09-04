@@ -30,9 +30,10 @@ targets:
     srpm_url: https://dl.rockylinux.org/pub/rocky/8/BaseOS/source/tree/Packages/k
     status: working
   rocky9:
-    configure_args:
-    - --enable-gss=yes
-    - --enable-crypto=yes
+    # No configure_args: the build container has no Kerberos v5, so
+    # --enable-gss makes configure fail with "Kerberos v5 with GSS
+    # support not found".  ltvm's base is --disable-gss
+    # --disable-crypto, which is what this target wants.
     container_image: quay.io/rockylinux/rockylinux:9
     kernels:
       available:
