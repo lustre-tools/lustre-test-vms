@@ -271,10 +271,16 @@ def _create_one_node(
         # Pass the cluster parent's resolved value explicitly so all members
         # share one owner even though each child has a different process PID.
         cmd += ["--owner-id", owner_id]
-    if node.mdt_disks + mgs_disk:
-        cmd += ["--mdt-disks", str(node.mdt_disks + mgs_disk)]
-    if node.ost_disks:
-        cmd += ["--ost-disks", str(node.ost_disks)]
+    # Always pass both counts, including zero.  Omitting a flag lets
+    # `ltvm create`'s defaults (1 MDT, 2 OST) apply, so an oss-only
+    # node silently gained an MDT-slot disk ahead of its OSTs -- which
+    # shifts every /dev/vd* letter past what generate_local_sh computes
+    # (its disk_offset assumes exactly the disks the role asked for).
+    # The result mounted fine, because the backing files are
+    # identical-size scratch images, while OSTDEV1 pointed at the
+    # spurious disk and the last real OST disk went unused.
+    cmd += ["--mdt-disks", str(node.mdt_disks + mgs_disk)]
+    cmd += ["--ost-disks", str(node.ost_disks)]
     for nic in nics or []:
         cmd += ["--nic", nic]
 
@@ -305,6 +311,25 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
         die(f"cluster '{cluster_name}' already exists")
 
     node_specs = [parse_node_spec(s) for s in args.nodes]
+
+    # Refuse to build a cluster on top of VMs that already exist.
+    # `ltvm create` is idempotent -- _handle_existing_vm starts a
+    # stopped VM and exits 0 -- so without this check the cluster
+    # silently adopts them.  That matters because the failure path
+    # below destroys every name in node_specs: one node failing to
+    # come up would delete a pre-existing VM (overlay and data disks
+    # included) that this command never created.  `cluster destroy`
+    # would do the same later.  Adopting is also wrong on its own
+    # terms, since an existing VM won't have the disk layout the role
+    # implies.
+    taken = [n.name for n in node_specs if (SOCKETS / f"{n.name}.info").exists()]
+    if taken:
+        die(
+            f"VM(s) already exist: {', '.join(taken)}\n"
+            f"cluster create would adopt them, and would destroy them "
+            f"if another node failed.\n"
+            f"Destroy them first, or pick different node names."
+        )
 
     mgs_count = sum(1 for n in node_specs if n.is_mgs)
     if mgs_count == 0:

@@ -1022,3 +1022,59 @@ class TestCmdClusterSshBehavior:
         assert argv[-1] == "uptime"
         # And the SSH target is root@<ip>.
         assert any(a == "root@10.0.0.11" for a in argv)
+
+
+class TestClusterNodeDiskArgs:
+    """`cluster create` must state disk counts explicitly."""
+
+    def test_zero_counts_are_passed_not_omitted(self) -> None:
+        """An oss-only node must not inherit `ltvm create`'s defaults.
+
+        Omitting --mdt-disks when the count is 0 lets create's default
+        of 1 apply, putting an unrequested disk ahead of the OSTs.
+        Every /dev/vd* letter then shifts past what generate_local_sh
+        computed, so OSTDEV1 names the spurious disk and the last real
+        OST disk is never used -- silently, since the backing files are
+        identical scratch images that mount fine.
+        """
+        from ltvm_pkg import vm_cluster
+
+        node = vm_cluster.parse_node_spec("oss:co9-oss:3")
+        with patch.object(vm_cluster.subprocess, "run") as run:
+            run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            vm_cluster._create_one_node(node, vcpus=2, mem=None)
+        argv = run.call_args.args[0]
+        assert "--mdt-disks" in argv
+        assert argv[argv.index("--mdt-disks") + 1] == "0"
+        assert argv[argv.index("--ost-disks") + 1] == "3"
+
+
+class TestClusterCreateRefusesExistingVMs:
+    def test_existing_node_vm_aborts_before_creating(
+        self, tmp_path: Path
+    ) -> None:
+        """Never adopt a VM this command did not create.
+
+        `ltvm create` is idempotent, so an existing VM is silently
+        adopted -- and the failure path destroys every node in the
+        spec, deleting a VM (and its data disks) the cluster never
+        created.
+        """
+        from ltvm_pkg import vm_cluster
+
+        (tmp_path / "co9-oss.info").write_text("NAME=co9-oss\n")
+        with (
+            patch.object(vm_cluster, "SOCKETS", tmp_path),
+            patch.object(vm_cluster.subprocess, "run") as run,
+            pytest.raises(SystemExit),
+        ):
+            vm_cluster.cmd_cluster_create(
+                argparse.Namespace(
+                    name="co9",
+                    nodes=["mgs+mds:co9-mds:1", "oss:co9-oss:3"],
+                    vcpus=2, mem=None, os=None, arch=None,
+                    disk_size=None, nic=None,
+                )
+            )
+        # Aborted before spawning any `ltvm create`/`ltvm destroy`.
+        assert not run.called
