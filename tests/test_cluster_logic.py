@@ -315,3 +315,40 @@ class TestClusterInfoRoleQueries:
         assert [n.name for n in c.oss_nodes()] == ["b"]
         assert [n.name for n in c.client_nodes()] == ["c", "d"]
         assert c.mgs_node().name == "a"
+
+
+class TestGenerateLocalShRunas:
+    """The generated local.sh replaces Lustre's own cfg/local.sh, so it
+    has to restate RUNAS_ID/RUNAS_GID/RUNAS.  Without them sanity.sh
+    dies in check_runas_id() during setup ("check_runas_id_ret requires
+    myRUNAS argument") and every suite aborts before its first test."""
+
+    def _text(self) -> str:
+        c = _cluster(
+            ("co2-mds", ["mgs", "mds"], 1, 0, "10.0.0.10"),
+            ("co2-oss", ["oss"], 0, 3, "10.0.0.11"),
+        )
+        return vm_cluster.generate_local_sh(c)
+
+    def test_defines_runas_triple(self) -> None:
+        text = self._text()
+        assert "RUNAS_ID=${RUNAS_ID:-500}" in text
+        assert "RUNAS_GID=${RUNAS_GID:-$RUNAS_ID}" in text
+        assert 'RUNAS=${RUNAS:-"runas -u $RUNAS_ID -g $RUNAS_GID"}' in text
+
+    def test_non_root_branch_blanks_runas(self) -> None:
+        """Mirrors lustre/tests/cfg/local.sh: a non-root run drives the
+        tests as itself, so RUNAS must be empty rather than `runas`."""
+        text = self._text()
+        assert "if [ $UID -ne 0 ]; then" in text
+        assert 'RUNAS=""' in text
+
+    def test_runas_is_valid_shell(self) -> None:
+        """The whole file gets sourced by the test framework."""
+        import subprocess
+
+        r = subprocess.run(
+            ["bash", "-n"], input=self._text(), text=True,
+            capture_output=True,
+        )
+        assert r.returncode == 0, r.stderr

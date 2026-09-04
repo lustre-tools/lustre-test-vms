@@ -213,6 +213,25 @@ def generate_local_sh(cluster: ClusterInfo, os_family: str = "rhel") -> str:
     lines.append("DIR3=${DIR3:-$MOUNT3}")
     lines.append("")
 
+    # This file *replaces* Lustre's own cfg/local.sh, so anything the
+    # stock file defines and the framework then reads has to be
+    # restated here.  RUNAS_ID/RUNAS_GID/RUNAS are the ones that bite:
+    # sanity.sh calls check_runas_id() during setup, which dies with
+    # "check_runas_id_ret requires myRUNAS argument" when RUNAS is
+    # empty -- so every suite aborts before its first test.  Values and
+    # the non-root branch mirror lustre/tests/cfg/local.sh; uid 500 is
+    # the `runas` user baked into the ltvm images.
+    lines.append("if [ $UID -ne 0 ]; then")
+    lines.append('\tRUNAS_ID="$UID"')
+    lines.append("\tRUNAS_GID=$(id -g $USER)")
+    lines.append('\tRUNAS=""')
+    lines.append("else")
+    lines.append("\tRUNAS_ID=${RUNAS_ID:-500}")
+    lines.append("\tRUNAS_GID=${RUNAS_GID:-$RUNAS_ID}")
+    lines.append('\tRUNAS=${RUNAS:-"runas -u $RUNAS_ID -g $RUNAS_GID"}')
+    lines.append("fi")
+    lines.append("")
+
     return "\n".join(lines) + "\n"
 
 
