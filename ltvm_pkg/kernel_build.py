@@ -21,6 +21,54 @@ from typing import TYPE_CHECKING, TypedDict
 from .cross_compile import host_podman_platform
 
 
+def archive_outgoing_vmlinux(kernel_out: Path, keep: int = 1) -> str | None:
+    """Preserve the vmlinux a rebuild is about to overwrite.
+
+    Kernel artifact directories are keyed on kernel VERSION, which is
+    the identity releases and `ltvm fetch` refer to, so a rebuild of
+    the same version lands in the same directory and replaces
+    vmlinux in place.  Any VM still running the previous build then
+    has a kernel whose debug binary no longer exists, and its vmcores
+    cannot be resolved: drgn matches on the GNU build ID, which
+    changes on every rebuild even when the version string does not.
+
+    Keep the outgoing one as vmlinux-<build id> so those dumps stay
+    analysable, pruning to the newest `keep` archives so this cannot
+    grow without bound (a vmlinux is a few hundred MB).
+
+    Returns the archived build ID, or None if there was nothing to
+    keep.
+    """
+    current = kernel_out / "vmlinux"
+    if not current.exists():
+        return None
+    build_id = elf_build_id(current)
+    if not build_id:
+        return None
+
+    archived = kernel_out / f"vmlinux-{build_id}"
+    if archived.exists():
+        # already kept from an earlier rebuild of this same build
+        current.unlink()
+    else:
+        current.rename(archived)
+        log.info("kept previous vmlinux as %s", archived.name)
+
+    # prune oldest archives beyond `keep`
+    olds = sorted(
+        kernel_out.glob("vmlinux-*"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in olds[keep:]:
+        try:
+            stale.unlink()
+            log.info("pruned old vmlinux %s", stale.name)
+        except OSError:
+            pass
+    return build_id
+
+
 def elf_build_id(path) -> str | None:
     """GNU build ID of an ELF file, or None if it cannot be read.
 
@@ -1152,6 +1200,9 @@ def _build_kernel_srpm(
     # Prepare output directory (use full name)
     kernel_out = target_config.output_dir / "kernels" / full_name
     kernel_out.mkdir(parents=True, exist_ok=True)
+    # The build below replaces vmlinux in place; keep the outgoing one
+    # so vmcores from VMs still running it remain analysable.
+    archived_build_id = archive_outgoing_vmlinux(kernel_out)
 
     # Prepare staging area with patches and config
     with tempfile.TemporaryDirectory(prefix="ltvm-kbuild-") as staging_str:
@@ -1214,6 +1265,14 @@ def _build_kernel_srpm(
 
         log.info("Starting kernel build in container (j%d)...", jobs)
         _run_kernel_podman(container_cmd, kernel_out)
+
+    # A rebuild that reproduced the same binary makes the archive a
+    # duplicate of the new vmlinux; drop it rather than keep a few
+    # hundred MB of the same bytes twice.
+    if archived_build_id and elf_build_id(
+        kernel_out / "vmlinux"
+    ) == archived_build_id:
+        (kernel_out / f"vmlinux-{archived_build_id}").unlink(missing_ok=True)
 
     # extra_hash MUST match what was used in the is_stale check above,
     # otherwise the persisted hash and the next-run input_hash diverge

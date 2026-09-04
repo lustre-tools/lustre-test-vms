@@ -1581,17 +1581,30 @@ def cmd_crash_collect(args: argparse.Namespace) -> int:
         and vmlinux_build_id
         and running_build_id != vmlinux_build_id
     ):
-        print(
-            f"warning: {vmlinux} does not match this vmcore\n"
-            f"  vmcore kernel build ID:  {running_build_id}\n"
-            f"  vmlinux  build ID:       {vmlinux_build_id}\n"
-            "  Same kernel version, different build -- the kernel was\n"
-            "  rebuilt after this VM booted, overwriting vmlinux in\n"
-            "  place.  Symbol-aware triage cannot work with it; read\n"
-            "  vmcore-dmesg.txt in the crash dir instead, or recreate\n"
-            "  the VM so it runs the current kernel.",
-            file=sys.stderr,
-        )
+        # A rebuild of the same kernel version replaces vmlinux in
+        # place but archives the outgoing one as vmlinux-<build id>
+        # (kernel_build.archive_outgoing_vmlinux); prefer that when it
+        # is the build this vmcore came from.
+        archived = vmlinux.parent / f"vmlinux-{running_build_id}"
+        if archived.exists():
+            print(
+                f"note: {vmlinux.name} is from a later build; using "
+                f"{archived.name}, which matches this vmcore"
+            )
+            vmlinux = archived
+            vmlinux_build_id = running_build_id
+        else:
+            print(
+                f"warning: {vmlinux} does not match this vmcore\n"
+                f"  vmcore kernel build ID:  {running_build_id}\n"
+                f"  vmlinux  build ID:       {vmlinux_build_id}\n"
+                "  Same kernel version, different build -- the kernel\n"
+                "  was rebuilt after this VM booted.  Symbol-aware\n"
+                "  triage cannot work with it; read vmcore-dmesg.txt in\n"
+                "  the crash dir instead, or recreate the VM so it runs\n"
+                "  the current kernel.",
+                file=sys.stderr,
+            )
     # Record what this dump was paired with, so the mismatch is still
     # diagnosable later when artifacts have moved on again.
     try:

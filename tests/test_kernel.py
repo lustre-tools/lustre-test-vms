@@ -834,3 +834,61 @@ class TestRunKernelPodman:
             "ltvm_pkg.kernel_build.run_podman_with_cleanup", return_value=fake
         ):
             _run_kernel_podman(["podman", "run", "foo"], tmp_path)
+
+
+class TestArchiveOutgoingVmlinux:
+    """A rebuild must not destroy the vmlinux a running VM needs."""
+
+    def _mk(self, tmp_path, build_id):
+        """Minimal ELF carrying a GNU build-id note is overkill here;
+        patch elf_build_id instead and just create the file."""
+        v = tmp_path / "vmlinux"
+        v.write_bytes(b"kernel-" + build_id.encode())
+        return v
+
+    def test_archives_previous_build(self, tmp_path):
+        from unittest.mock import patch
+        from ltvm_pkg import kernel_build
+
+        self._mk(tmp_path, "aaaa")
+        with patch.object(kernel_build, "elf_build_id", return_value="aaaa"):
+            got = kernel_build.archive_outgoing_vmlinux(tmp_path)
+        assert got == "aaaa"
+        assert (tmp_path / "vmlinux-aaaa").exists()
+        assert not (tmp_path / "vmlinux").exists()
+
+    def test_no_vmlinux_is_a_noop(self, tmp_path):
+        from ltvm_pkg import kernel_build
+        assert kernel_build.archive_outgoing_vmlinux(tmp_path) is None
+
+    def test_prunes_to_keep_limit(self, tmp_path):
+        import os, time
+        from unittest.mock import patch
+        from ltvm_pkg import kernel_build
+
+        # two pre-existing archives, one clearly older
+        old = tmp_path / "vmlinux-old"
+        new = tmp_path / "vmlinux-new"
+        old.write_bytes(b"x")
+        new.write_bytes(b"x")
+        past = time.time() - 10000
+        os.utime(old, (past, past))
+
+        self._mk(tmp_path, "cccc")
+        with patch.object(kernel_build, "elf_build_id", return_value="cccc"):
+            kernel_build.archive_outgoing_vmlinux(tmp_path, keep=1)
+
+        # newest archive survives, older ones pruned
+        remaining = sorted(p.name for p in tmp_path.glob("vmlinux-*"))
+        assert remaining == ["vmlinux-cccc"], remaining
+
+    def test_same_build_id_not_duplicated(self, tmp_path):
+        from unittest.mock import patch
+        from ltvm_pkg import kernel_build
+
+        (tmp_path / "vmlinux-dddd").write_bytes(b"already-kept")
+        self._mk(tmp_path, "dddd")
+        with patch.object(kernel_build, "elf_build_id", return_value="dddd"):
+            kernel_build.archive_outgoing_vmlinux(tmp_path)
+        assert (tmp_path / "vmlinux-dddd").read_bytes() == b"already-kept"
+        assert not (tmp_path / "vmlinux").exists()
