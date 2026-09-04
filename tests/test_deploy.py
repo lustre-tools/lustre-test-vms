@@ -959,9 +959,10 @@ class TestCmdDeployVariantPropagation:
         # TargetConfig must be invoked with variant=mofed-24
         kwargs = tc_mock.call_args.kwargs
         assert kwargs.get("variant") == "mofed-24"
-        # Staging path is .../mofed-24/ (variant trailing dir).
-        assert captured["staging"].name == "mofed-24"
-        assert captured["staging"].parent.name == "5.14-rhel9.7"
+        # Staging is the variant's own dir, a sibling of the base
+        # kernel dir rather than nested inside it.
+        assert captured["staging"].name == "5.14-rhel9.7__mofed-24"
+        assert captured["staging"].parent.name == "x86_64"
 
 
 class TestCmdDeployKernelMismatch:

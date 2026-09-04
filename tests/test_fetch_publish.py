@@ -84,6 +84,46 @@ class TestFindReleaseUrl:
             ],
         }
 
+    def test_bootable_variant_asset_is_found(self) -> None:
+        """A published variant bootable image must be fetchable.
+
+        package_bootable names it
+        bootable-<t>-<arch>-<kver>-<variant>.qcow2.zst, so the variant
+        is not adjacent to the trailing .zst.  Matching a
+        `-<variant>.zst` tail meant these could never be located --
+        publish would succeed and fetch would report none published.
+        """
+        name = (
+            "bootable-rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre"
+            "-mofed-24.qcow2.zst"
+        )
+        releases = [
+            self._rel("bootable-rocky9-x86_64-5.14.0-611.13.1.el9_7", name)
+        ]
+        with patch("ltvm_pkg.cli._gh_api", return_value=releases):
+            url = _find_release_url(
+                "rocky9", arch="x86_64", variant="mofed-24", mode="bootable"
+            )
+        assert url.endswith(name)
+
+    def test_bootable_base_rejects_variant_asset(self) -> None:
+        """mofed-24's trailing '24' must not read as a kver.
+
+        The base-variant guard asked whether the last dashed segment
+        held a digit; for `-mofed-24` that segment is `24`, so a base
+        bootable lookup accepted the MOFED image.
+        """
+        releases = [
+            self._rel(
+                "bootable-rocky9-x86_64-5.14.0-611.13.1.el9_7",
+                "bootable-rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre"
+                "-mofed-24.qcow2.zst",
+            )
+        ]
+        with patch("ltvm_pkg.cli._gh_api", return_value=releases):
+            with pytest.raises(RuntimeError, match="No published"):
+                _find_release_url("rocky9", arch="x86_64", mode="bootable")
+
     def test_base_picks_manifest_without_variant_suffix(self) -> None:
         """A base lookup must not silently grab a -mofed manifest."""
         releases = [

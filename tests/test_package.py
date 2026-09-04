@@ -382,11 +382,12 @@ class TestSnapshotLustreVariant:
         kdir = out / "kernels" / "5.14-rhel9.7"
 
         tree = tmp_path / "lustre-release"
-        # Staging is variant-keyed: mofed nests under a /mofed subdir
-        # so a base build for the same kernel coexists.
+        # Staging is variant-keyed: mofed sits in a sibling dir beside
+        # the base one so a base build for the same kernel coexists
+        # (nested, the base build's `rm -rf /staging/*` deleted it).
         staging = (
             tree / ".ltvm-staging" / "rocky9" / "x86_64"
-            / "5.14-rhel9.7" / "mofed"
+            / "5.14-rhel9.7__mofed"
         )
         modules = staging / "lib" / "modules" / "5.14.0-611.test" / "extra"
         modules.mkdir(parents=True)

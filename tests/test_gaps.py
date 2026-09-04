@@ -255,9 +255,16 @@ class TestStagingPath:
         assert p_default == p_base
         assert "mofed" not in p_base.parts
 
-    def test_variant_nests_under_kernel(self, tmp_path: Path) -> None:
-        """Non-base variant appends a <variant>/ subdir so base and
-        MOFED Lustre builds for the same kernel can coexist."""
+    def test_variant_is_a_sibling_of_the_base_kernel_dir(
+        self, tmp_path: Path
+    ) -> None:
+        """Non-base variants sit beside the base dir, not inside it.
+
+        Nesting defeated the coexistence it existed for: the build
+        clears its DESTDIR with `rm -rf /staging/*`, which for a base
+        build is the parent of a nested variant dir -- so building base
+        deleted the variant's staging outright.
+        """
         from ltvm_pkg.lustre_build import staging_path
 
         p_base = staging_path(
@@ -266,7 +273,10 @@ class TestStagingPath:
         p_mofed = staging_path(
             tmp_path, "rocky9", kernel="5.14-rhel9.7", variant="mofed"
         )
-        assert p_mofed == p_base / "mofed"
+        assert p_mofed.parent == p_base.parent
+        assert p_mofed == p_base.parent / "5.14-rhel9.7__mofed"
+        # The base wipe must not be able to reach the variant.
+        assert p_base not in p_mofed.parents
 
 
 # ── lustre_build.read_staging_meta ───────────────────────────────────────────

@@ -166,14 +166,24 @@ def staging_path(
     `ltvm build lustre` runs against different kernels would silently
     clobber each other's userland.
 
-    ``variant`` adds a trailing subdir for non-base variants so a
-    MOFED-linked Lustre build (``ko2iblnd`` against ``mlx_compat``)
-    can coexist with a base build for the same kernel instead of
-    clobbering it.  Base-variant paths are left unchanged to match
-    the pre-variant layout.
+    ``variant`` gets a *sibling* directory (``<kernel>__<variant>``)
+    for non-base variants so a MOFED-linked Lustre build (``ko2iblnd``
+    against ``mlx_compat``) can coexist with a base build for the same
+    kernel instead of clobbering it.  Base-variant paths are left
+    unchanged to match the pre-variant layout.
+
+    The variant directory used to nest *inside* the base one, which
+    defeated the coexistence it was there for: the build script clears
+    its DESTDIR with ``rm -rf /staging/*``, and for a base build
+    /staging is the parent -- so building base after a variant deleted
+    the variant's whole staging tree (a 10-15 minute MOFED build), and
+    lustre_status had to filter variant subdirs back out of the base
+    tree's .ko count.  As siblings, neither can reach the other.
     """
     base = Path(lustre_tree) / ".ltvm-staging" / target / arch / kernel
-    return base if variant == "base" else base / variant
+    if variant == "base":
+        return base
+    return base.parent / f"{kernel}__{variant}"
 
 
 class BuildResult(TypedDict):
@@ -1033,24 +1043,10 @@ def lustre_status(
             lustre_tree, target, arch=arch, kernel=kernel, variant=variant
         )
         if host_staging.is_dir():
-            # rglob catches this variant's .ko files.  For the "base"
-            # variant we additionally need to exclude any sibling
-            # variant subdirs (e.g. mofed/) that happen to live under
-            # the same kernel root -- those aren't part of the base
-            # staging tree.
-            sibling_variants = (
-                {
-                    d.name for d in host_staging.iterdir()
-                    if d.is_dir()
-                    and (d / ".ltvm-staging-meta.json").exists()
-                }
-                if variant == "base"
-                else set()
-            )
-            ko_count = sum(
-                1 for p in host_staging.rglob("*.ko")
-                if p.relative_to(host_staging).parts[0] not in sibling_variants
-            )
+            # Variants live in sibling directories (<kernel>__<variant>),
+            # not under this one, so every .ko here belongs to this
+            # variant's staging tree.
+            ko_count = len(list(host_staging.rglob("*.ko")))
         else:
             ko_count = 0
 

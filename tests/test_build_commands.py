@@ -925,9 +925,12 @@ class TestVariantKernelPinPropagation:
         tc = _make_tc(tmp_targets, variant="mofed-24")
         # Pre-populate matching staging dir under the pinned kernel.
         lt = tmp_path / "tree"
+        # Variant staging is a sibling of the base kernel dir, not
+        # nested inside it (nested, the base build's `rm -rf
+        # /staging/*` deleted it).
         staging = (
             lt / ".ltvm-staging" / "rocky9" / "x86_64"
-            / "5.14-rhel9.5" / "mofed-24"
+            / "5.14-rhel9.5__mofed-24"
         )
         staging.mkdir(parents=True)
         with (

@@ -204,19 +204,26 @@ def _check_zstd() -> None:
 
 
 def _tar_zstd(
-    base_dir: Path, entries: list[str], out: Path
+    base_dir: Path,
+    entries: list[str],
+    out: Path,
+    exclude: list[str] | None = None,
 ) -> None:
     """Create ``out``.tar.zst containing *entries* relative to
     ``base_dir``.  Uses ``tar --use-compress-program`` so we get a
     single-pass pipeline with no intermediate uncompressed tarball.
+
+    ``exclude`` paths are also relative to ``base_dir`` (tar applies
+    --exclude after -C).
     """
     _check_zstd()
     compress_prog = (
         f"zstd -{ZSTD_LEVEL} -T{ZSTD_THREADS} --long={ZSTD_LONG}"
     )
-    cmd = [
-        "tar",
-        f"--use-compress-program={compress_prog}",
+    cmd = ["tar", f"--use-compress-program={compress_prog}"]
+    for pat in exclude or []:
+        cmd += ["--exclude", pat]
+    cmd += [
         "-cf",
         str(out),
         "-C",
@@ -224,6 +231,21 @@ def _tar_zstd(
         *entries,
     ]
     subprocess.run(cmd, check=True)
+
+
+def _declared_variant_names(target_name: str, arch: str) -> list[str]:
+    """Non-base variant names declared for this target, or [].
+
+    Used to keep a base-variant asset from swallowing the variant
+    subdirectories nested inside it.  Unknown/synthetic target names
+    yield [], matching _declared_default_kernel.
+    """
+    from .target_config import TargetConfig
+
+    try:
+        return TargetConfig(target_name, arch=arch).declared_variants()
+    except (ValueError, KeyError, FileNotFoundError):
+        return []
 
 
 def _untar_zstd(tarball: Path, dest: Path) -> None:
@@ -726,10 +748,22 @@ def package_target(
     assets: dict[str, Path] = {}
 
     # ---- container asset ----
+    # For the base variant container_dir is container/, which also
+    # hosts the nested container/<variant>/ dirs -- same shape as the
+    # image asset below.  Without the filter a base publish carries the
+    # MOFED builder too (roughly doubling the asset), and a base fetch
+    # then extracts container/<variant>/meta.json, which makes
+    # `ltvm build status --variant <v>` report the variant container as
+    # built when fetch only ever `podman load`ed the base one.
     cont_rel = paths["container_dir"].relative_to(tar_base)
     cont_asset = dest_dir / _container_asset_name(target_name, arch, variant)
     print(f"  [container] {cont_asset.name}")
-    _tar_zstd(tar_base, [str(cont_rel)], cont_asset)
+    cont_exclude = (
+        [f"{cont_rel}/{v}" for v in _declared_variant_names(target_name, arch)]
+        if variant == DEFAULT_VARIANT
+        else []
+    )
+    _tar_zstd(tar_base, [str(cont_rel)], cont_asset, exclude=cont_exclude)
     assets["container"] = cont_asset
 
     # ---- kernel asset (variant-independent; same bytes for all variants) ----
@@ -787,7 +821,19 @@ def package_target(
             target_name, arch, kver, variant
         )
         print(f"  [lustre]    {lus_asset.name}")
-        _tar_zstd(tar_base, [str(lustre_rel)], lus_asset)
+        # Same nesting as the container and image assets: for base,
+        # lustre-artifacts/ contains lustre-artifacts/<variant>/.
+        lus_exclude = (
+            [
+                f"{lustre_rel}/{v}"
+                for v in _declared_variant_names(target_name, arch)
+            ]
+            if variant == DEFAULT_VARIANT
+            else []
+        )
+        _tar_zstd(
+            tar_base, [str(lustre_rel)], lus_asset, exclude=lus_exclude
+        )
         assets["lustre"] = lus_asset
 
     # ---- manifest ----

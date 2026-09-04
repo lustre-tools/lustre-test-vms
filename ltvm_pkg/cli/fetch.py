@@ -231,14 +231,33 @@ def _find_release_url(
         suffix = ".json"
         tag_prefix = target
 
-    variant_tail = (
-        f"-{variant}{suffix}" if variant != "base" else suffix
-    )
-    # For base variant we need to reject names that have any variant
-    # suffix (e.g. `-mofed.json`); otherwise a base lookup could grab
-    # a mofed asset.  We check by stripping the suffix and looking for
-    # a '-' in what remains after the kver.  Simpler: require the name
-    # to end with a kver-looking token (digits/dots) before suffix.
+    # Decide the variant from the asset's *stem* rather than matching a
+    # tail against the whole name.  Two reasons:
+    #
+    #  - bootable assets are named <...>-<kver>[-<variant>].<ext>.zst,
+    #    so the variant is not adjacent to the trailing .zst; matching
+    #    `-<variant>.zst` meant a published variant bootable image
+    #    could never be found.
+    #  - the old base-variant rejection asked whether the last dashed
+    #    segment contains a digit.  rocky9's only declared variant is
+    #    `mofed-24`, whose last segment is `24` -- so a base lookup
+    #    happily accepted a MOFED asset.
+    #
+    # Comparing against the variants the target actually declares is
+    # exact, and needs no guessing about which tokens look like a kver.
+    from ltvm_pkg.release_package import _declared_variant_names
+
+    known_variants = _declared_variant_names(target, arch)
+
+    def _asset_stem(name: str) -> str:
+        """Asset name minus its format/compression extensions."""
+        stem = name[: -len(suffix)] if name.endswith(suffix) else name
+        if mode == "bootable":
+            # ...<kver>[-<variant>].qcow2 / .raw
+            dot = stem.rfind(".")
+            if dot > 0:
+                stem = stem[:dot]
+        return stem
     for rel in releases:
         tag = rel.get("tag_name", "")
         if tag != tag_prefix and not tag.startswith(tag_prefix + "-"):
@@ -253,19 +272,25 @@ def _find_release_url(
             name = asset.get("name", "")
             if not name.startswith(prefix):
                 continue
-            if not name.endswith(variant_tail):
+            if not name.endswith(suffix):
                 continue
+            stem = _asset_stem(name)
             if variant == "base":
-                # Reject names whose tail before the suffix ends with
-                # a non-numeric `-<variant>` segment.  The kver
-                # always ends in digits.dots; variant segments are
-                # letters.
-                stem = name[:-len(suffix)]
-                last_seg = stem.rsplit("-", 1)[-1]
-                if last_seg and not any(
-                    ch.isdigit() for ch in last_seg
-                ):
+                # A base lookup must not pick up a variant's asset.
+                # Two complementary rules, because neither alone is
+                # enough: an exact match against the variants this
+                # target declares (catches mofed-24, whose trailing
+                # segment "24" the heuristic below reads as a kver),
+                # plus a heuristic for variants we don't know about
+                # (a kver's last segment always carries a digit, a
+                # name like "-mofed" does not).
+                if any(stem.endswith(f"-{v}") for v in known_variants):
                     continue
+                last_seg = stem.rsplit("-", 1)[-1]
+                if last_seg and not any(ch.isdigit() for ch in last_seg):
+                    continue
+            elif not stem.endswith(f"-{variant}"):
+                continue
             if kernel_signature and kernel_signature not in name:
                 continue
             return str(asset["browser_download_url"])
