@@ -162,3 +162,7 @@ precedence, persistence, cluster propagation, and JSON contracts.
 See [CLAUDE.md](CLAUDE.md) for the full developer reference, and
 [SUGGESTED-AGENTS.md](SUGGESTED-AGENTS.md) for ready-made AGENTS.md /
 CLAUDE.md snippets you can drop into a Lustre workspace.
+
+## License
+
+BSD 3-Clause.  See [LICENSE](LICENSE).
