@@ -59,7 +59,10 @@ DEFAULT_VARIANT = "base"
 # Shared with TargetConfig.resolve_kernel so the packager and the
 # builder agree on which of several built kernels is the newest --
 # a disagreement means publishing artifacts the build never produced.
-from .target_config import kernel_dir_version_key  # noqa: E402
+from .target_config import (  # noqa: E402
+    kernel_dir_version_key,
+    resolve_kernel_dir,
+)
 
 
 # Release manifest schema version.  Bump when anything about the
@@ -290,50 +293,50 @@ def _unzstd_file(src: Path, dst: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_kernel(output_dir: Path, kernel: str | None) -> tuple[str, Path]:
+def _resolve_kernel(
+    output_dir: Path,
+    kernel: str | None,
+    default_kernel: str | None = None,
+) -> tuple[str, Path]:
     """Resolve kernel name and directory under ``output_dir/kernels``.
 
     Disk dirs are named ``<short>-<fullkernel>`` (e.g.
     ``5.14-rhel9.5-5.14.0-503.40.1.el9_5``); ``targets.yaml`` and most
     user-facing args use just the short prefix (``5.14-rhel9.5``).
-    Accept either: exact match wins, then a prefix match against the
-    short name (highest kernel version among matches, so the newest
-    .elN_M sibling gets picked when multiple coexist), then
-    auto-detection if no kernel was specified at all.
+    Either form is accepted; the match itself is done by
+    target_config.resolve_kernel_dir, shared with the builder.
 
-    "Highest" must be a numeric comparison, not a lexical one:
-    553.155.1 is newer than 553.89.1 but sorts before it as a string,
-    so sorted()[-1] would package the older kernel -- and the tag is
-    derived from whatever this returns, so the release would be named
-    for a kernel the operator did not ask to publish.
+    With no ``kernel``, package the target's ``default_kernel`` -- the
+    same kernel `ltvm build` would act on with no --kernel.  Publishing
+    a non-default kernel is an explicit ``--kernel <name>``.
+
+    Deciding that here by scanning for the newest built kernel instead
+    made publish answer a different question than build: with rocky10's
+    10.0 default and 10.1 also built, `ltvm build all rocky10` operated
+    on 10.0 while `ltvm target publish rocky10` packaged 10.1 -- naming
+    the release for a kernel the operator never asked to publish.  The
+    scan survives only as the fallback for a ``target_name`` that isn't
+    in targets.yaml (export_build_container accepts synthetic names),
+    where there is no default to consult.
     """
     kernels_dir = output_dir / "kernels"
 
+    if kernel is None and default_kernel is not None:
+        kernel = default_kernel
+
     if kernel is not None:
-        exact = kernels_dir / kernel
-        if exact.is_dir():
-            return kernel, exact
-        if kernels_dir.is_dir():
-            prefix = f"{kernel}-"
-            siblings = [
-                d
-                for d in kernels_dir.iterdir()
-                if d.is_dir() and d.name.startswith(prefix)
-            ]
-            if siblings:
-                chosen = max(
-                    siblings, key=lambda p: kernel_dir_version_key(p.name)
-                )
-                return chosen.name, chosen
-        # No match -- return the exact path so the downstream "missing
-        # artifacts" error names what the caller asked for.
-        return kernel, exact
+        name = resolve_kernel_dir(kernels_dir, kernel)
+        # A miss returns the name unchanged, so the path we hand back
+        # names what the caller asked for and the downstream "missing
+        # artifacts" error stays legible.
+        return name, kernels_dir / name
 
     if not kernels_dir.is_dir():
         raise ValueError(
             f"No kernels/ directory in {output_dir}. "
             f"Run 'ltvm build kernel <target>' to build one."
         )
+
 
     candidates = [
         d
@@ -347,6 +350,21 @@ def _resolve_kernel(output_dir: Path, kernel: str | None) -> tuple[str, Path]:
         )
     chosen = max(candidates, key=lambda p: kernel_dir_version_key(p.name))
     return chosen.name, chosen
+
+
+def _declared_default_kernel(target_name: str, arch: str) -> str | None:
+    """The target's default kernel from targets.yaml.
+
+    Returns None when ``target_name`` isn't a configured target, so the
+    packager still works for the synthetic names export_build_container
+    accepts.
+    """
+    from .target_config import TargetConfig
+
+    try:
+        return TargetConfig(target_name, arch=arch).default_kernel
+    except (ValueError, KeyError, FileNotFoundError):
+        return None
 
 
 def _variant_paths(
@@ -457,7 +475,9 @@ def snapshot_lustre(
     lustre_tree = Path(lustre_tree).resolve()
     output_dir = Path(output_dir)
 
-    kernel_name, kernel_dir = _resolve_kernel(output_dir, kernel)
+    kernel_name, kernel_dir = _resolve_kernel(
+        output_dir, kernel, _declared_default_kernel(target, arch)
+    )
 
     staging_src = staging_path(
         lustre_tree, target, arch=arch, kernel=kernel_name, variant=variant
@@ -614,7 +634,9 @@ def package_target(
     # image.tar matches whatever is currently tagged in podman.
     export_build_container(target_name, output_dir, arch=arch, variant=variant)
 
-    kernel_name, kernel_dir = _resolve_kernel(output_dir, kernel)
+    kernel_name, kernel_dir = _resolve_kernel(
+        output_dir, kernel, _declared_default_kernel(target_name, arch)
+    )
     paths = _variant_paths(output_dir, kernel_name, variant)
 
     # Sanity: container/kernel/image must exist; lustre is optional.
@@ -819,7 +841,9 @@ def package_bootable(
     """
     _check_zstd()
     output_dir = Path(output_dir)
-    kernel_name, kernel_dir = _resolve_kernel(output_dir, kernel)
+    kernel_name, kernel_dir = _resolve_kernel(
+        output_dir, kernel, _declared_default_kernel(target_name, arch)
+    )
     paths = _variant_paths(output_dir, kernel_name, variant)
 
     if qcow2_path is None:

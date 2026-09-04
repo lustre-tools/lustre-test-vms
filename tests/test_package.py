@@ -149,6 +149,39 @@ class TestResolveKernel:
         name, _ = _resolve_kernel(tmp_path, "4.18-rhel8.10")
         assert name == newer
 
+    def test_default_kernel_wins_over_newest_built(
+        self, tmp_path: Path
+    ) -> None:
+        """With no --kernel, package the target's declared default.
+
+        Publish must answer the same question build does.  Scanning for
+        the newest built kernel instead means `ltvm build all rocky10`
+        acts on the 10.0 default while `ltvm target publish rocky10`
+        packages 10.1, naming the release for a kernel nobody asked to
+        publish.
+        """
+        kernels = tmp_path / "kernels"
+        default = "6.12-rhel10.0-6.12.0-55.41.1.el10_0"
+        newer = "6.12-rhel10.1-6.12.0-124.56.1.el10_1"
+        for d in (default, newer):
+            (kernels / d).mkdir(parents=True)
+            (kernels / d / "vmlinux").write_bytes(b"")
+        name, _ = _resolve_kernel(tmp_path, None, "6.12-rhel10.0")
+        assert name == default
+
+    def test_explicit_kernel_overrides_default(self, tmp_path: Path) -> None:
+        """--kernel still selects a non-default kernel."""
+        kernels = tmp_path / "kernels"
+        for d in (
+            "6.12-rhel10.0-6.12.0-55.41.1.el10_0",
+            "6.12-rhel10.1-6.12.0-124.56.1.el10_1",
+        ):
+            (kernels / d).mkdir(parents=True)
+        name, _ = _resolve_kernel(
+            tmp_path, "6.12-rhel10.1", "6.12-rhel10.0"
+        )
+        assert name == "6.12-rhel10.1-6.12.0-124.56.1.el10_1"
+
     def test_missing_kernels_dir_raises(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="No kernels/ directory"):
             _resolve_kernel(tmp_path, None)

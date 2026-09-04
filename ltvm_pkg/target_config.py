@@ -195,6 +195,37 @@ def kernel_dir_version_key(name: str) -> tuple:
     )
 
 
+def resolve_kernel_dir(kernels_dir: Path, name: str) -> str:
+    """Match a kernel name against the built dirs under ``kernels_dir``.
+
+    ``name`` may be the short form from targets.yaml ("5.14-rhel9.7")
+    or a full cached-dir name.  Exact match wins; otherwise the
+    highest-versioned dir sharing the ``<name>-`` prefix; otherwise
+    ``name`` unchanged, so callers naming a not-yet-built kernel get a
+    path to create rather than an error.
+
+    This is the single implementation of that lookup.  It used to be
+    duplicated between TargetConfig.resolve_kernel and
+    release_package._resolve_kernel, and the copies drifted -- one was
+    fixed to order numerically while the other still ordered lexically,
+    so a build and the publish that followed it packaged different
+    kernels.
+    """
+    if not kernels_dir.is_dir():
+        return name
+    if (kernels_dir / name).is_dir():
+        return name
+    prefix = name + "-"
+    candidates = [
+        d.name
+        for d in kernels_dir.iterdir()
+        if d.is_dir() and d.name.startswith(prefix)
+    ]
+    if candidates:
+        return max(candidates, key=kernel_dir_version_key)
+    return name
+
+
 def build_container_tag(
     name: str, arch: str = "x86_64", variant: str = DEFAULT_VARIANT
 ) -> str:
@@ -617,10 +648,10 @@ class TargetConfig:
              mismatched (--variant, --kernel) combos fail loudly
              instead of silently routing to the wrong artifacts.
           2. Else if kernel is None, use default_kernel.
-          3. Exact directory match.
-          4. Prefix match: scan for dirs starting with <kernel>-,
-             pick the highest kernel version (numeric, not lexical).
-          5. Return name as-is (for new builds not yet on disk).
+          3. Hand the resulting name to resolve_kernel_dir(), which
+             does exact match -> highest-versioned prefix match ->
+             name unchanged.  That function is shared with the release
+             packager so both agree on which built kernel is newest.
         """
         # Honor the variant's kernel pin first: if bound to a variant
         # that pins a specific kernel, treat that pin as the default
@@ -641,32 +672,7 @@ class TargetConfig:
                     f"{pin!r}; cannot use {kernel!r}"
                 )
         name = kernel if kernel is not None else self.default_kernel
-        kernels_dir = self.output_dir / "kernels"
-
-        if not kernels_dir.exists():
-            return name
-
-        # Exact match
-        if (kernels_dir / name).is_dir():
-            return name
-
-        # Prefix match (short name -> full-version dir).  Must sort by
-        # numeric version, not lexically: 553.155.1 is newer than
-        # 553.89.1 but sorts *before* it as a string ('1' < '8'), so a
-        # plain sorted()[-1] hands back the older kernel once a release
-        # crosses a digit-count boundary.  That silently pointed the
-        # Lustre build at a stale build-tree, producing modules that
-        # won't load on the kernel shipped beside them.
-        prefix = name + "-"
-        candidates = [
-            d.name
-            for d in kernels_dir.iterdir()
-            if d.is_dir() and d.name.startswith(prefix)
-        ]
-        if candidates:
-            return max(candidates, key=kernel_dir_version_key)
-
-        return name
+        return resolve_kernel_dir(self.output_dir / "kernels", name)
 
     def kernel_output_dir(self, kernel: str | None = None) -> Path:
         """Return the output directory for a kernel.
