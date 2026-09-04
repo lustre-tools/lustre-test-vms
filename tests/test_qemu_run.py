@@ -496,6 +496,55 @@ class TestLaunchQemuCommand:
         assert sleep_calls["n"] >= 1
 
 
+class TestForceTcg:
+    """LTVM_FORCE_TCG=1 selects software emulation and a concrete CPU.
+
+    Some guest kernels need a translation granule the host hypervisor
+    cannot provide -- Apple Silicon has no 64 KiB granule, so a
+    CONFIG_ARM64_64K_PAGES guest dies in early MMU setup under HVF with
+    no console output at all.  Falling back to TCG is the only way to
+    boot such a guest.
+    """
+
+    def test_machine_uses_tcg_when_forced(self, monkeypatch: Any) -> None:
+        """qemu_machine_for_arch honours the override on both arches."""
+        from ltvm_pkg.vm_state import qemu_machine_for_arch
+
+        monkeypatch.setenv("LTVM_FORCE_TCG", "1")
+        assert "accel=tcg" in qemu_machine_for_arch("aarch64")
+        assert "accel=tcg" in qemu_machine_for_arch("x86_64")
+
+    def test_machine_native_accel_without_override(
+        self, monkeypatch: Any
+    ) -> None:
+        """Unset (or not "1") leaves the existing behaviour alone."""
+        from ltvm_pkg.vm_state import qemu_machine_for_arch
+
+        monkeypatch.delenv("LTVM_FORCE_TCG", raising=False)
+        machine = qemu_machine_for_arch("aarch64")
+        assert machine.startswith("virt,")
+        assert "gic-version=max" in machine
+
+    def test_cpu_model_is_concrete_when_forced(
+        self, tmp_vmdir: Path, monkeypatch: Any
+    ) -> None:
+        """"-cpu host" is invalid without a hardware accelerator.
+
+        Under TCG the model must be a real one or QEMU refuses to start,
+        so the arch-matches-host shortcut has to be skipped.
+        """
+        monkeypatch.setenv("LTVM_FORCE_TCG", "1")
+        vm = _make_vm(tmp_vmdir, arch="aarch64", mem=2048)
+        h = _LaunchHarness()
+        # qemu_run does "import platform as _platform" inside the
+        # function, so patch the module attribute itself.
+        with patch("platform.machine", return_value="arm64"):
+            _run_launch(vm, h)
+        args = h.qemu_args
+        assert args is not None
+        assert args[args.index("-cpu") + 1] != "host"
+
+
 class TestLaunchQemuMacos:
     """On macOS, launch_qemu replaces -netdev tap with -netdev stream pointed
     at the socket_vmnet Unix socket.  No host TAPs are created or torn down --

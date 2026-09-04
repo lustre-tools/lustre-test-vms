@@ -87,6 +87,14 @@ def qemu_machine_for_arch(arch: str = "x86_64") -> str:
         return f"q35,{accel}"
     if arch == "aarch64":
         accel = f"accel={native_accel}" if host_is_arm64 else "accel=tcg"
+        # LTVM_FORCE_TCG=1 forces software emulation.  Needed for guest
+        # kernels whose translation granule the host hypervisor cannot
+        # provide (Apple Silicon HVF has no 64 KiB granule, so a
+        # CONFIG_ARM64_64K_PAGES guest dies in early MMU setup with no
+        # console output at all).
+        import os as _os
+        if _os.environ.get("LTVM_FORCE_TCG") == "1":
+            accel = "accel=tcg"
         return f"virt,{accel},gic-version=max"
     return "virt,accel=tcg"
 

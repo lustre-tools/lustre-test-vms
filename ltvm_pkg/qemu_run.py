@@ -390,9 +390,14 @@ def launch_qemu(vm: VMInfo) -> None:
     # support x86-64-v2" and the kernel panics.  Nehalem (Intel 2008) is
     # the baseline CPU model that satisfies v2 in full.
     host_arch = _platform.machine()
-    if (arch == "x86_64" and host_arch in ("x86_64", "amd64")) or (
-        arch == "aarch64" and host_arch in ("aarch64", "arm64")
+    import os as _os
+    _force_tcg = _os.environ.get("LTVM_FORCE_TCG") == "1"
+    if not _force_tcg and (
+        (arch == "x86_64" and host_arch in ("x86_64", "amd64"))
+        or (arch == "aarch64" and host_arch in ("aarch64", "arm64"))
     ):
+        # "-cpu host" is only valid with a hardware accelerator; under
+        # TCG it must be a concrete model.
         cpu_model = "host"
     elif arch == "aarch64":
         cpu_model = "cortex-a57"
