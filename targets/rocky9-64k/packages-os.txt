@@ -1,0 +1,6 @@
+# packages-os.txt -- Rocky 9 specific packages
+# Packages that are Rocky/RHEL specific or differ from other distros
+
+# Rocky base release and repo config
+rocky-release
+epel-release

@@ -68,6 +68,31 @@ targets:
         params:
           mofed_version: 24.10-2.1.8.0
           mofed_distro: rhel9.5
+  # 64 KiB-page aarch64 client, to reproduce the customer ARM config
+  rocky9-64k:
+    container_image: quay.io/rockylinux/rockylinux:9
+    kernels:
+      available:
+      - 5.14-rhel9.8
+      - 5.14-rhel9.7
+      - 5.14-rhel9.6
+      - 5.14-rhel9.5
+      - 5.14-rhel9.4
+      - 5.14-rhel9.3
+      - 5.14-rhel9.2
+      - 5.14-rhel9.1
+      config:
+        CONFIG_XEN_PVH: y
+        CONFIG_ARM64_64K_PAGES: y
+        CONFIG_ARM64_4K_PAGES: n
+        CONFIG_ARM64_16K_PAGES: n
+      default: 5.14-rhel9.7
+    lustre:
+      mode: server_ldiskfs
+    os_name: rocky
+    os_version: '9.7'
+    srpm_url: https://dl.rockylinux.org/pub/rocky/9/BaseOS/source/tree/Packages/k
+    status: working
   rocky10:
     configure_args:
     - --enable-gss=yes
