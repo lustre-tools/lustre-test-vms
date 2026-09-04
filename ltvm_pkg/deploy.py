@@ -11,6 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .paths import read_modinfo_field
 from .vm_net import SSH_OPTS, run_ssh
 from .vm_state import (
     EXIT_ERROR,
@@ -81,6 +82,9 @@ def deploy_to_vm(
             f"(rc={r.returncode}): {r.stderr}"
         )
 
+    if not userspace_only:
+        verify_deployed_modules(vm, staging)
+
     # Configure test framework's local.sh with VM disk topology
     if vm.mdt_disks or vm.ost_disks:
         configure_test_disks(
@@ -89,6 +93,76 @@ def deploy_to_vm(
             vm.ost_disks,
             vm.disk_size,
             os_family=os_family,
+        )
+
+
+def verify_deployed_modules(vm: VMInfo, staging: Path) -> None:
+    """Check the modules on the VM are the ones we just staged.
+
+    A deploy that silently ships stale modules is expensive: every
+    test result afterwards describes the previous build.  It happens
+    easily -- a build that failed leaves the old .ko in place, and the
+    Lustre version string does not change between two builds of the
+    same tree, so the usual "lctl get_param version" check still
+    agrees.
+
+    srcversion is a hash of the module's own sources, so it does
+    distinguish them, but only per module: editing osc_cache.c leaves
+    obdclass.ko byte-identical.  Checking one module is therefore not
+    a proxy for the rest, which is why this compares every staged
+    module against its counterpart on the VM.
+
+    Warns rather than raises: the deploy itself did happen, and a VM
+    that is merely mid-reboot should not turn into a hard failure.
+    """
+    staged: dict[str, str] = {}
+    for ko in staging.rglob("*.ko"):
+        srcver = read_modinfo_field(ko, "srcversion")
+        if srcver:
+            staged[ko.name] = srcver
+    if not staged:
+        return
+
+    # One round trip, asking by MODULE NAME so modinfo resolves the
+    # path itself: modules land under .../extra on some images and
+    # .../updates on others, and compressed .ko.xz is also possible.
+    names = sorted(n[:-3] for n in staged)
+    script = "; ".join(
+        "printf '%%s %%s\\n' %s \"$(modinfo -F srcversion %s 2>/dev/null)\""
+        % (shlex.quote(n), shlex.quote(n))
+        for n in names
+    )
+    r = run_ssh(vm.ip, script, timeout=120)
+    if r.returncode != 0:
+        print(
+            f"warning: could not verify deployed modules on {vm.name} "
+            f"(rc={r.returncode}); skipping the check",
+            file=sys.stderr,
+        )
+        return
+
+    on_vm = {}
+    for line in (r.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            on_vm[parts[0]] = parts[1]
+
+    stale = [
+        name for name, srcver in staged.items()
+        # only compare modules the VM actually has loaded on disk;
+        # a staged module absent there is not evidence of staleness
+        if on_vm.get(name[:-3]) and on_vm[name[:-3]] != srcver
+    ]
+    if stale:
+        shown = ", ".join(sorted(stale)[:5])
+        more = "" if len(stale) <= 5 else f" (+{len(stale) - 5} more)"
+        print(
+            f"warning: {len(stale)} module(s) on {vm.name} do not match "
+            f"the staged build: {shown}{more}\n"
+            "  The VM is running different code than was just built, so "
+            "test results will describe the older modules.  Check that "
+            "the build actually succeeded, then redeploy.",
+            file=sys.stderr,
         )
 
 

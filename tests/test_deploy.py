@@ -1412,3 +1412,74 @@ class TestCmdLlmount:
             )
             rc = cli_mod.cmd_llmount(args)
         assert rc == 0
+
+
+class TestVerifyDeployedModules:
+    """A deploy that ships stale modules must not pass silently."""
+
+    def _staging(self, tmp_path, mods):
+        from unittest.mock import patch
+        d = tmp_path / "staging"
+        d.mkdir()
+        for name in mods:
+            (d / name).write_bytes(b"\x7fELF fake")
+        return d
+
+    def _vm(self):
+        class V:
+            ip = "10.0.0.1"
+            name = "co1-test"
+        return V()
+
+    def test_warns_on_mismatch(self, tmp_path, capsys):
+        from unittest.mock import MagicMock, patch
+        from ltvm_pkg.deploy import verify_deployed_modules
+
+        staging = self._staging(tmp_path, ["osc.ko", "lov.ko"])
+        with patch("ltvm_pkg.deploy.read_modinfo_field",
+                   side_effect=lambda p, f: "STAGED_" + p.name), \
+             patch("ltvm_pkg.deploy.run_ssh") as ssh:
+            ssh.return_value = MagicMock(
+                returncode=0, stdout="osc STAGED_osc.ko\nlov OLDBUILD\n")
+            verify_deployed_modules(self._vm(), staging)
+        err = capsys.readouterr().err
+        assert "do not match" in err
+        assert "lov.ko" in err
+        assert "osc.ko" not in err
+
+    def test_silent_when_all_match(self, tmp_path, capsys):
+        from unittest.mock import MagicMock, patch
+        from ltvm_pkg.deploy import verify_deployed_modules
+
+        staging = self._staging(tmp_path, ["osc.ko"])
+        with patch("ltvm_pkg.deploy.read_modinfo_field",
+                   side_effect=lambda p, f: "SAME"), \
+             patch("ltvm_pkg.deploy.run_ssh") as ssh:
+            ssh.return_value = MagicMock(returncode=0, stdout="osc SAME\n")
+            verify_deployed_modules(self._vm(), staging)
+        assert capsys.readouterr().err == ""
+
+    def test_module_absent_on_vm_is_not_stale(self, tmp_path, capsys):
+        """A staged module the VM does not have is not evidence of staleness."""
+        from unittest.mock import MagicMock, patch
+        from ltvm_pkg.deploy import verify_deployed_modules
+
+        staging = self._staging(tmp_path, ["osc.ko"])
+        with patch("ltvm_pkg.deploy.read_modinfo_field",
+                   side_effect=lambda p, f: "SAME"), \
+             patch("ltvm_pkg.deploy.run_ssh") as ssh:
+            ssh.return_value = MagicMock(returncode=0, stdout="osc \n")
+            verify_deployed_modules(self._vm(), staging)
+        assert capsys.readouterr().err == ""
+
+    def test_ssh_failure_warns_but_does_not_raise(self, tmp_path, capsys):
+        from unittest.mock import MagicMock, patch
+        from ltvm_pkg.deploy import verify_deployed_modules
+
+        staging = self._staging(tmp_path, ["osc.ko"])
+        with patch("ltvm_pkg.deploy.read_modinfo_field",
+                   side_effect=lambda p, f: "SAME"), \
+             patch("ltvm_pkg.deploy.run_ssh") as ssh:
+            ssh.return_value = MagicMock(returncode=255, stdout="")
+            verify_deployed_modules(self._vm(), staging)
+        assert "could not verify" in capsys.readouterr().err
