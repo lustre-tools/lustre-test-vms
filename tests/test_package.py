@@ -215,8 +215,13 @@ def _make_fake_output(tmp: Path, variant: str = DEFAULT_VARIANT) -> Path:
     (kdir / "build-tree" / "Makefile").write_bytes(b"")
     (kdir / "modules").mkdir()
     (kdir / "modules" / "lib").mkdir()
+    # Kernel metas carry lustre_target too; the packager validates
+    # against meta_schema.KernelMeta rather than .get()-ing fields.
     (kdir / "meta.json").write_text(
-        json.dumps({"kernel_version": "5.14.0-611.test"})
+        json.dumps({
+            "kernel_version": "5.14.0-611.test",
+            "lustre_target": "5.14-rhel9.7",
+        })
     )
 
     # Container (variant-aware).

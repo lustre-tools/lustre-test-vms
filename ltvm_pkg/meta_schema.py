@@ -11,6 +11,13 @@ required field fails type-check.  Readers call ``require_*_meta()`` to
 validate required keys at runtime and raise ``RuntimeError`` on missing
 keys -- no silent ``.get(..., "")`` fallbacks on critical fields.
 
+Coverage today is partial: release_package validates kernel meta on
+every path that derives a release tag or checks module vermagic, since
+a wrong answer there ships an unloadable release.  The container and
+image validators exist for the same purpose but have no callers yet --
+if you add a reader of those metas, call them rather than reaching for
+``.get()``.
+
 Deliberately no schema_version: this is a single-user tool, artifacts
 are disposable (regenerated from source), and migration logic is pure
 cost.  Breaking reads force a rebuild -- which is the right outcome.

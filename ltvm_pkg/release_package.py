@@ -41,6 +41,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .meta_schema import require_kernel_meta
 from .paths import load_meta_safe
 
 # Compression level.  zstd -10 with --long=27 hits a sweet spot:
@@ -533,30 +534,39 @@ def snapshot_lustre(
         )
 
     # Verify the staging modules match the target kernel via vermagic.
+    # This must not be conditional on the meta being readable: guarding
+    # the whole check with `if meta is not None` meant a kernel dir with
+    # a missing or corrupt meta.json (interrupted build, hand-copied
+    # tree) let a mismatched staging tree be snapshotted silently, and a
+    # later kernel rebuild that rewrote meta.json left that stale
+    # snapshot publishable.
     meta_file = kernel_dir / "meta.json"
     meta = load_meta_safe(meta_file)
-    if meta is not None:
-        expected_kver = meta.get("kernel_version")
-        if not expected_kver:
-            raise RuntimeError(
-                f"kernel meta.json missing kernel_version: {meta_file}"
-            )
-        sample = ko_files[0]
-        from .paths import read_modinfo_field
-        vermagic = read_modinfo_field(sample, "vermagic")
-        if not vermagic:
-            raise RuntimeError(
-                f"could not read vermagic from {sample}; the file "
-                f"may not be a valid kernel module"
-            )
-        parts = vermagic.split()
-        actual_kver = parts[0] if parts else ""
-        if actual_kver != expected_kver:
-            raise ValueError(
-                f"Lustre modules built for {actual_kver} but target "
-                f"kernel is {expected_kver}\n"
-                f"  Rebuild: ltvm build lustre <target> --force"
-            )
+    if meta is None:
+        raise RuntimeError(
+            f"kernel meta.json missing or unreadable at {meta_file} -- "
+            f"cannot confirm the staged modules match this kernel; "
+            f"rebuild the kernel"
+        )
+    require_kernel_meta(meta, meta_file)
+    expected_kver = meta["kernel_version"]
+    sample = ko_files[0]
+    from .paths import read_modinfo_field
+
+    vermagic = read_modinfo_field(sample, "vermagic")
+    if not vermagic:
+        raise RuntimeError(
+            f"could not read vermagic from {sample}; the file "
+            f"may not be a valid kernel module"
+        )
+    parts = vermagic.split()
+    actual_kver = parts[0] if parts else ""
+    if actual_kver != expected_kver:
+        raise ValueError(
+            f"Lustre modules built for {actual_kver} but target "
+            f"kernel is {expected_kver}\n"
+            f"  Rebuild: ltvm build lustre <target> --force"
+        )
 
     dest_parent = kernel_dir / "lustre-artifacts"
     dest = (
@@ -721,11 +731,8 @@ def package_target(
         raise RuntimeError(
             f"kernel meta.json missing at {kernel_dir / 'meta.json'}"
         )
-    kver = kmeta.get("kernel_version")
-    if not kver:
-        raise RuntimeError(
-            f"kernel_version missing from {kernel_dir / 'meta.json'}"
-        )
+    require_kernel_meta(kmeta, kernel_dir / "meta.json")
+    kver = kmeta["kernel_version"]
 
     if dest_dir is None:
         # Scope staging under artifacts/publish/<target>-<arch>-<variant>/
@@ -916,11 +923,11 @@ def package_bootable(
         )
 
     kmeta = load_meta_safe(kernel_dir / "meta.json")
-    if kmeta is None or not kmeta.get("kernel_version"):
+    if kmeta is None:
         raise RuntimeError(
-            f"kernel meta.json missing kernel_version at "
-            f"{kernel_dir / 'meta.json'}"
+            f"kernel meta.json missing at {kernel_dir / 'meta.json'}"
         )
+    require_kernel_meta(kmeta, kernel_dir / "meta.json")
     kver = kmeta["kernel_version"]
 
     ext = qcow2_path.suffix.lstrip(".") or "qcow2"
