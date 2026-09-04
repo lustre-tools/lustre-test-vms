@@ -345,6 +345,14 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             # default to aarch64 and deploy the wrong modules.  Idempotent
             # for x86_64-default targets too, so just always forward.
             build_cmd += ["--arch", vm_arch]
+            # Forward the VM's variant for the same reason as --kernel
+            # and --arch above.  staging was computed with the VM's
+            # variant (which nests one level deeper for non-base), so
+            # without this the child builds the base variant, writes to
+            # the base staging dir, and the check below fails with
+            # "no staging with modules" after a full build.
+            if vm_variant and vm_variant != "base":
+                build_cmd += ["--variant", vm_variant]
             sudo_user = os.environ.get("SUDO_USER")
             if sudo_user:
                 build_cmd = ["sudo", "-u", sudo_user] + build_cmd

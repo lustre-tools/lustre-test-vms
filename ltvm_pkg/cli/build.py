@@ -354,49 +354,58 @@ def _cmd_build_all_body(
     )
 
     # 3. Lustre.  Runs BEFORE the image so its per-kernel staging is in
-    # place for the image-bake step to auto-inject.
-    if not use_json:
+    # place for the image-bake step to auto-inject.  --skip-lustre stops
+    # after the kernel: no Lustre build, no snapshot, and a kernel-only
+    # image (steps 4 and 5 below honor it too).
+    skip_lustre = bool(getattr(args, "skip_lustre", False))
+    if skip_lustre and not use_json:
+        print("==> Skipping Lustre build and snapshot (--skip-lustre)")
+    if not skip_lustre and not use_json:
         print(
             f"==> Building Lustre against {full_kernel} kernel tree..."
         )
     build_tree = tc.kernel_output_dir(kernel=full_kernel) / "build-tree"
-    try:
-        container_tag = tc.container_tag
-        lmeta = _cli_attr("build_lustre")(
-            lustre_tree,
-            build_tree,
-            container_tag=container_tag,
-            target=args.target,
-            enable_server=tc.lustre_mode != LustreMode.CLIENT,
-            extra_configure=list(tc.configure_args),
-            jobs=getattr(args, "jobs", None),
-            force=args.force,
-            arch=tc.arch,
-            kernel=full_kernel,
-            variant=tc.variant_name,
-        )
-        results["lustre"] = lmeta
-    except Exception as e:
-        return _error(f"Lustre build failed: {e}", use_json)
+    if not skip_lustre:
+        try:
+            container_tag = tc.container_tag
+            lmeta = _cli_attr("build_lustre")(
+                lustre_tree,
+                build_tree,
+                container_tag=container_tag,
+                target=args.target,
+                enable_server=tc.lustre_mode != LustreMode.CLIENT,
+                extra_configure=list(tc.configure_args),
+                jobs=getattr(args, "jobs", None),
+                force=args.force,
+                arch=tc.arch,
+                kernel=full_kernel,
+                variant=tc.variant_name,
+            )
+            results["lustre"] = lmeta
+        except Exception as e:
+            return _error(f"Lustre build failed: {e}", use_json)
 
-    # 4. Snapshot Lustre staging into the artifacts dir so ``ltvm target
-    # publish`` can bundle it without re-visiting the Lustre tree.  Runs
-    # under build-all so the full artifact set lands in one place.
-    if not use_json:
-        print("==> Snapshotting Lustre staging into artifacts...")
-    try:
-        _cli_attr("snapshot_lustre")(
-            lustre_tree,
-            tc.output_dir,
-            target=args.target,
-            kernel=full_kernel,
-            arch=tc.arch,
-            variant=tc.variant_name,
-        )
-    except Exception as e:
-        return _error(f"Lustre snapshot failed: {e}", use_json)
+        # 4. Snapshot Lustre staging into the artifacts dir so ``ltvm
+        # target publish`` can bundle it without re-visiting the Lustre
+        # tree.  Runs under build-all so the full artifact set lands in
+        # one place.
+        if not use_json:
+            print("==> Snapshotting Lustre staging into artifacts...")
+        try:
+            _cli_attr("snapshot_lustre")(
+                lustre_tree,
+                tc.output_dir,
+                target=args.target,
+                kernel=full_kernel,
+                arch=tc.arch,
+                variant=tc.variant_name,
+            )
+        except Exception as e:
+            return _error(f"Lustre snapshot failed: {e}", use_json)
+    else:
+        results["lustre"] = "skipped"
 
-    # 5. Image (picks up Lustre staging from step 3).
+    # 5. Image (picks up Lustre staging from step 3, unless skipped).
     if not use_json:
         print(f"==> Building image for {args.target} (kernel={full_kernel})...")
     try:
@@ -404,7 +413,7 @@ def _cmd_build_all_body(
             tc,
             force=args.force,
             kernel=full_kernel,
-            with_lustre=str(lustre_tree),
+            with_lustre=None if skip_lustre else str(lustre_tree),
         )
         results["image"] = "ok"
     except Exception as e:
@@ -966,9 +975,17 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     all_status = {}
     TargetConfig = _cli_attr("TargetConfig")
+    # Honor --arch, and otherwise default to the host arch the way every
+    # build/publish/validate path does via _load_target_args.  Falling
+    # back to the targets.yaml arch instead made `ltvm build status`
+    # report x86_64 rows on an aarch64 host -- i.e. "not built" for
+    # everything the host had just built, with --arch unable to fix it.
+    from ltvm_pkg.cli.util import host_arch
+
+    status_arch = getattr(args, "arch", None) or host_arch()
     for name in targets:
         try:
-            tc = TargetConfig(name)
+            tc = TargetConfig(name, arch=status_arch)
         except ValueError as exc:
             if "not available for use" in str(exc):
                 continue  # planned/disabled targets stay hidden

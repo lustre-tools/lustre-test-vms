@@ -1104,7 +1104,7 @@ class TestCmdStatusFormat:
         is silently skipped instead of crashing the whole status."""
         from ltvm_pkg import cli as cli_mod
 
-        def _tc_factory(name: str) -> Any:
+        def _tc_factory(name: str, arch: str | None = None) -> Any:
             if name == "broken":
                 # Realistic status-gate message: only "not available
                 # for use" errors are silently skipped; schema errors

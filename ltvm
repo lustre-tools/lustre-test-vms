@@ -808,9 +808,14 @@ def build_parser() -> argparse.ArgumentParser:
     tep.set_defaults(func=cmd_target_export)
 
     # publish (maintainer use)
+    # No force_compat_arg: publish runs no compat gate.  It bundles
+    # artifacts a build already produced (and vetted), and
+    # snapshot_lustre re-checks module vermagic against the kernel.
+    # Offering --force-compat here advertised an override for a check
+    # that never runs.
     tpbp = target_sub.add_parser(
         "publish",
-        parents=[common, kernel_arg, force_compat_arg],
+        parents=[common, kernel_arg],
         help="Bundle artifacts and upload to a GitHub release "
         "(--no-upload keeps the tarballs local)",
     )
