@@ -1068,7 +1068,22 @@ def _export_to_ext4(
         # populate to work around e2fsprogs 1.46.5 bugs.  e2fsck -D
         # rebuilds htree indexes over the linear dirs we just wrote.
         _run(["tune2fs", "-O", "metadata_csum,dir_index", tmpfile])
-        subprocess.run(["e2fsck", "-fyD", tmpfile], capture_output=True)
+        # Check this one too.  It is the pass that actually builds the
+        # htree indexes and checksums tune2fs just enabled, and it runs
+        # on a filesystem resize2fs -M has already shrunk to minimum --
+        # so `-D`'s directory rebuild can genuinely run out of free
+        # blocks.  Discarding the status shipped a filesystem with the
+        # feature flags set and the reorganisation half-done as a good
+        # image.  Same 0/1-are-fine convention as the check above.
+        r_fsck2 = subprocess.run(
+            ["e2fsck", "-fyD", tmpfile], capture_output=True
+        )
+        if r_fsck2.returncode > 1:
+            raise RuntimeError(
+                f"e2fsck -D failed (rc={r_fsck2.returncode}) after "
+                f"re-enabling metadata_csum/dir_index: "
+                f"{r_fsck2.stderr.decode(errors='replace').strip()}"
+            )
 
         os.rename(tmpfile, str(image_path))
         tmpfile = None

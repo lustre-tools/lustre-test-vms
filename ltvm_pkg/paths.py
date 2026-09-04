@@ -64,22 +64,70 @@ def read_modinfo_field(ko_path: Path, field: str) -> str | None:
         data = ko_path.read_bytes()
     except OSError:
         return None
+    section = _elf_section(data, b".modinfo")
+    if section is None:
+        return None
     needle = f"{field}=".encode()
-    # Each .modinfo entry is preceded by a NUL except (occasionally)
-    # the very first one when the section starts immediately with
-    # the entry.  Try the NUL-prefixed form first, then the bare form.
-    for prefix in (b"\x00" + needle, needle):
-        idx = data.find(prefix)
-        if idx < 0:
-            continue
-        start = idx + len(prefix)
-        end = data.find(b"\x00", start)
-        if end < 0:
+    for entry in section.split(b"\x00"):
+        if entry.startswith(needle):
+            return entry[len(needle):].decode("utf-8", errors="replace")
+    return None
+
+
+def _elf_section(data: bytes, want: bytes) -> bytes | None:
+    """Return the contents of ELF section *want*, or None.
+
+    Scanning the whole file for ``<field>=`` instead is not safe: the
+    needle also occurs inside longer keys (``version=`` within
+    ``rhelversion=9.7``) and inside ordinary string constants -- real
+    modules here carry the format string ``program=%u version=%u
+    protocol=%d``, so a whole-file scan reported that as sunrpc.ko's
+    "version".  Only the bytes of .modinfo are entries.
+
+    Minimal ELF32/ELF64 section-header walk, both endiannesses.
+    Returns None for anything malformed; callers treat that as "field
+    not present" and fall back.
+    """
+    import struct
+
+    if len(data) < 64 or data[:4] != b"\x7fELF":
+        return None
+    is64 = data[4] == 2
+    end = "<" if data[5] == 1 else ">"
+    try:
+        if is64:
+            e_shoff, = struct.unpack_from(end + "Q", data, 0x28)
+            e_shentsize, e_shnum, e_shstrndx = struct.unpack_from(
+                end + "HHH", data, 0x3A
+            )
+        else:
+            e_shoff, = struct.unpack_from(end + "I", data, 0x20)
+            e_shentsize, e_shnum, e_shstrndx = struct.unpack_from(
+                end + "HHH", data, 0x2E
+            )
+        if not e_shoff or e_shstrndx >= e_shnum:
             return None
-        try:
-            return data[start:end].decode("utf-8")
-        except UnicodeDecodeError:
-            return data[start:end].decode("utf-8", errors="replace")
+
+        def sh(i: int) -> tuple[int, int, int]:
+            off = e_shoff + i * e_shentsize
+            name, = struct.unpack_from(end + "I", data, off)
+            if is64:
+                s_off, s_size = struct.unpack_from(end + "QQ", data, off + 0x18)
+            else:
+                s_off, s_size = struct.unpack_from(end + "II", data, off + 0x10)
+            return name, s_off, s_size
+
+        _, str_off, str_size = sh(e_shstrndx)
+        strtab = data[str_off:str_off + str_size]
+        for i in range(e_shnum):
+            name_off, s_off, s_size = sh(i)
+            nul = strtab.find(b"\x00", name_off)
+            if nul < 0:
+                continue
+            if strtab[name_off:nul] == want:
+                return data[s_off:s_off + s_size]
+    except (struct.error, IndexError):
+        return None
     return None
 
 

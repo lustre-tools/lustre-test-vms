@@ -162,3 +162,50 @@ def lustre_tree(tmp_path: Path) -> Path:
     (patches_dir / "patch2.patch").write_text("--- a/bar\n+++ b/bar\n")
 
     return lt
+
+
+def make_fake_ko(modinfo: dict[str, str]) -> bytes:
+    """Build a minimal ELF64 .ko carrying a .modinfo section.
+
+    read_modinfo_field parses the real .modinfo section rather than
+    scanning the whole file, because a whole-file scan matches the
+    needle inside longer keys ("version=" within "rhelversion=") and
+    inside ordinary string constants.  So tests need a genuine ELF, not
+    a blob with key=value bytes in it.
+    """
+    import struct
+
+    entries = b"".join(
+        f"{k}={v}".encode() + b"\x00" for k, v in modinfo.items()
+    )
+    shstrtab = b"\x00.modinfo\x00.shstrtab\x00"
+    ehsize, shentsize, shnum = 64, 64, 3
+    shoff = ehsize
+    body_off = shoff + shentsize * shnum
+    modinfo_off = body_off
+    shstrtab_off = modinfo_off + len(entries)
+
+    eh = bytearray(ehsize)
+    eh[0:4] = b"\x7fELF"
+    eh[4] = 2          # ELFCLASS64
+    eh[5] = 1          # little endian
+    eh[6] = 1          # EV_CURRENT
+    struct.pack_into("<H", eh, 0x10, 1)        # e_type = ET_REL
+    struct.pack_into("<Q", eh, 0x28, shoff)    # e_shoff
+    struct.pack_into("<HHH", eh, 0x3A, shentsize, shnum, 2)
+
+    def sh(name_off: int, off: int, size: int) -> bytes:
+        s = bytearray(shentsize)
+        struct.pack_into("<I", s, 0x00, name_off)
+        struct.pack_into("<I", s, 0x04, 1)  # SHT_PROGBITS
+        struct.pack_into("<QQ", s, 0x18, off, size)
+        return bytes(s)
+
+    return b"".join([
+        bytes(eh),
+        sh(0, 0, 0),                                   # SHN_UNDEF
+        sh(1, modinfo_off, len(entries)),              # ".modinfo"
+        sh(10, shstrtab_off, len(shstrtab)),           # ".shstrtab"
+        entries,
+        shstrtab,
+    ])

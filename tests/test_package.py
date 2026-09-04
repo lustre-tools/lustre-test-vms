@@ -392,12 +392,15 @@ class TestSnapshotLustreVariant:
         modules.mkdir(parents=True)
         ko = modules / "lustre.ko"
         # snapshot_lustre reads `vermagic` from this .ko (via the
-        # in-Python ELF .modinfo parser in ltvm_pkg.paths).  The
-        # parser scans for a NUL-prefixed `<field>=value\0` byte
-        # sequence anywhere in the file -- crafting just that bit
-        # lets the test stay independent of a real kbuild artifact.
+        # in-Python ELF .modinfo parser in ltvm_pkg.paths).  That
+        # parser walks real section headers, so the fixture has to be
+        # a genuine ELF -- a blob with key=value bytes in it is what a
+        # whole-file scan accepted, and a whole-file scan is exactly
+        # what returned string-constant matches for real modules.
+        from tests.conftest import make_fake_ko
+
         ko.write_bytes(
-            b"fake-ko\x00vermagic=5.14.0-611.test SMP mod_unload\x00"
+            make_fake_ko({"vermagic": "5.14.0-611.test SMP mod_unload"})
         )
 
         tree.mkdir(exist_ok=True)
