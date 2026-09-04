@@ -448,15 +448,37 @@ class TestLustreInjectLines:
         """On macOS the inject helper bundles each subtree into a
         tar.gz and emits ``ADD <name>.tar.gz <path>`` so podman build
         does a single listxattr probe instead of one-per-file (the
-        APFS com.apple.provenance + virtiofs ENOMEM trap)."""
+        APFS com.apple.provenance + virtiofs ENOMEM trap).
+
+        The tar call is stubbed rather than executed: this branch runs
+        only on macOS, where ``tar`` is bsdtar, and it uses bsdtar's
+        ``--uid``/``--gid`` spelling.  Running it for real on Linux
+        invokes GNU tar, which has ``--owner``/``--group`` instead and
+        rejects ``--uid`` outright -- so the old version of this test
+        failed on every Linux host.  Stubbing also lets us pin the tar
+        flags themselves, which carry real weight (see _stage_subtree:
+        numeric root ownership avoids a podman ADD lchown failure, and
+        COPYFILE_DISABLE suppresses AppleDouble sidecars that break
+        depmod).
+        """
         import ltvm_pkg.image_build as image
 
         staging = self._make_staging(tmp_path, "5.14.0-foo")
         inject = tmp_path / "inject"
         inject.mkdir()
 
-        with patch.object(
-            image, "_is_macos_build_host", return_value=True
+        calls: list[tuple[list[str], dict]] = []
+
+        def fake_tar(argv: list[str], **kw: object) -> object:
+            calls.append((argv, kw))
+            # Stand in for bsdtar: produce the archive the caller and
+            # the Dockerfile line both expect to exist.
+            Path(argv[argv.index("-czf") + 1]).write_bytes(b"")
+            return subprocess.CompletedProcess(argv, 0)
+
+        with (
+            patch.object(image, "_is_macos_build_host", return_value=True),
+            patch.object(image.subprocess, "run", side_effect=fake_tar),
         ):
             lines = image._lustre_inject_lines(
                 staging, inject, "5.14.0-foo", "rhel"
@@ -467,6 +489,13 @@ class TestLustreInjectLines:
         # The corresponding archives actually got produced.
         assert (inject / "lustre-extra.tar.gz").is_file()
         assert (inject / "lustre-userland-usr.tar.gz").is_file()
+
+        assert calls, "no tar invocation"
+        for argv, kw in calls:
+            assert "--numeric-owner" in argv
+            assert argv[argv.index("--uid") + 1] == "0"
+            assert argv[argv.index("--gid") + 1] == "0"
+            assert kw["env"]["COPYFILE_DISABLE"] == "1"
 
     def test_no_shell_interpolation_in_copy_sources(
         self, tmp_path: Path
