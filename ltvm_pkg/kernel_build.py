@@ -19,6 +19,26 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 from .cross_compile import host_podman_platform
+
+
+def elf_build_id(path) -> str | None:
+    """GNU build ID of an ELF file, or None if it cannot be read.
+
+    Used to tell two builds of the same kernel VERSION apart: a
+    rebuild keeps the version string and changes the build ID, and
+    drgn matches a vmcore to a vmlinux on the build ID alone.
+    """
+    try:
+        out = subprocess.run(
+            ["readelf", "-n", str(path)],
+            capture_output=True, text=True, timeout=120,
+        ).stdout
+    except Exception:
+        return None
+    for line in out.splitlines():
+        if "Build ID" in line:
+            return line.split(":")[-1].strip() or None
+    return None
 from .lustre_tree import kp_configs, kp_patches, kp_series, kp_targets
 from .paths import load_meta_safe
 from .podman_run import run_podman_with_cleanup
@@ -904,6 +924,7 @@ def _finalize_kernel_build(
     if kr_file.exists():
         krelease = kr_file.read_text().strip()
 
+    kernel_build_id = elf_build_id(vmlinux)
     vmlinux_size = vmlinux.stat().st_size
     vmlinuz_size = vmlinuz.stat().st_size
     log.info("vmlinux: %.1f MB", vmlinux_size / 1e6)
@@ -923,6 +944,13 @@ def _finalize_kernel_build(
         "patches_applied": patches_applied,
         "vmlinux_bytes": vmlinux_size,
         "vmlinuz_bytes": vmlinuz_size,
+        # GNU build ID of this vmlinux.  The kernel directory is keyed
+        # on the kernel VERSION, so a rebuild overwrites vmlinux in
+        # place and any VM still running the previous build now has a
+        # kernel whose binary is gone.  Recording the build ID lets
+        # crash-collect tell whether the vmlinux on disk actually
+        # matches the vmcore it is about to be paired with.
+        "kernel_build_id": kernel_build_id,
         "built_at": datetime.now(timezone.utc).isoformat(),
         **extra_meta,
     }

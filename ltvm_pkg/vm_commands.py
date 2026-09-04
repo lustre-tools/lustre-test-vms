@@ -1355,6 +1355,59 @@ def cmd_nmi(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _elf_build_id(path) -> str | None:
+    """GNU build ID of an ELF file, or None if unreadable."""
+    try:
+        out = subprocess.run(
+            ["readelf", "-n", str(path)],
+            capture_output=True, text=True, timeout=120,
+        ).stdout
+    except Exception:
+        return None
+    for line in out.splitlines():
+        if "Build ID" in line:
+            return line.split(":")[-1].strip() or None
+    return None
+
+
+def _vm_kernel_build_id(vm) -> str | None:
+    """GNU build ID of the kernel running in `vm`.
+
+    /sys/kernel/notes carries the same ELF notes the vmlinux does, so
+    the ID parsed here can be compared directly against readelf's
+    output for a candidate vmlinux.  The notes are fetched as hex and
+    parsed here rather than by a script on the VM, which keeps the
+    quoting simple and works on any image with od(1).
+    """
+    try:
+        r = run_ssh(
+            vm.ip,
+            "od -An -v -tx1 /sys/kernel/notes 2>/dev/null | tr -d ' \\n'",
+            timeout=15,
+        )
+    except Exception:
+        return None
+    if r.returncode != 0 or not (r.stdout or "").strip():
+        return None
+    try:
+        data = bytes.fromhex((r.stdout or "").strip())
+    except ValueError:
+        return None
+
+    i = 0
+    while i + 12 <= len(data):
+        namesz = int.from_bytes(data[i:i + 4], "little")
+        descsz = int.from_bytes(data[i + 4:i + 8], "little")
+        ntype = int.from_bytes(data[i + 8:i + 12], "little")
+        name = data[i + 12:i + 12 + namesz].rstrip(b"\0")
+        off = i + 12 + ((namesz + 3) // 4) * 4
+        # NT_GNU_BUILD_ID == 3
+        if ntype == 3 and name == b"GNU" and descsz:
+            return data[off:off + descsz].hex()
+        i = off + ((descsz + 3) // 4) * 4
+    return None
+
+
 # ── crash-collect ────────────────────────────────────────
 
 
@@ -1412,6 +1465,14 @@ def cmd_crash_collect(args: argparse.Namespace) -> int:
             )
     elif not is_running(vm):
         return _handler_error(args, f"VM '{args.name}' not running")
+
+    # GNU build ID of the kernel the VM is actually running.  The
+    # kernel artifact dir is keyed on kernel VERSION, so a rebuild
+    # overwrites vmlinux in place: the newest vmlinux on disk can have
+    # the same "uname -r" as this VM while being a different binary.
+    # drgn matches on build ID alone, so capture it here and compare
+    # below rather than handing triage a vmlinux that cannot work.
+    running_build_id = _vm_kernel_build_id(vm)
 
     print("finding vmcore...")
     # Support both RHEL format (/var/crash/*/vmcore) and
@@ -1513,6 +1574,39 @@ def cmd_crash_collect(args: argparse.Namespace) -> int:
         )
         print(f"vmcore dir: {local_dir}")
         return EXIT_NOT_FOUND
+
+    vmlinux_build_id = _elf_build_id(vmlinux)
+    if (
+        running_build_id
+        and vmlinux_build_id
+        and running_build_id != vmlinux_build_id
+    ):
+        print(
+            f"warning: {vmlinux} does not match this vmcore\n"
+            f"  vmcore kernel build ID:  {running_build_id}\n"
+            f"  vmlinux  build ID:       {vmlinux_build_id}\n"
+            "  Same kernel version, different build -- the kernel was\n"
+            "  rebuilt after this VM booted, overwriting vmlinux in\n"
+            "  place.  Symbol-aware triage cannot work with it; read\n"
+            "  vmcore-dmesg.txt in the crash dir instead, or recreate\n"
+            "  the VM so it runs the current kernel.",
+            file=sys.stderr,
+        )
+    # Record what this dump was paired with, so the mismatch is still
+    # diagnosable later when artifacts have moved on again.
+    try:
+        (local_dir / "kernel-build-id.txt").write_text(
+            "vmcore_kernel_build_id=%s\nvmlinux=%s\n"
+            "vmlinux_build_id=%s\nmatch=%s\n"
+            % (
+                running_build_id or "unknown",
+                vmlinux,
+                vmlinux_build_id or "unknown",
+                "yes" if running_build_id == vmlinux_build_id else "NO",
+            )
+        )
+    except OSError:
+        pass
 
     if args.mod_dir:
         print("running lustre triage...")

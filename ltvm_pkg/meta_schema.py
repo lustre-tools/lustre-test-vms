@@ -56,6 +56,7 @@ class KernelMeta(_BaseMeta, total=False):
     vmlinux_bytes: int
     vmlinuz_bytes: int
     built_at: str
+    kernel_build_id: str
 
 
 class ImageMeta(_BaseMeta, total=False):
