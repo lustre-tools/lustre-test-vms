@@ -53,6 +53,27 @@ def _tc(tmp_targets: Path) -> Any:
         return cfg.TargetConfig("rocky9")
 
 
+def _tag_path(
+    out: Path, target: str, arch: str, kver: str, variant: str = "base"
+) -> Path:
+    """Path of a recorded release tag in the per-(kernel, variant)
+    layout.  Built by hand rather than via cli.util so it stays
+    independent of which ARTIFACTS_DIR is patched in."""
+    return out / target / arch / ".ltvm-release-tags" / f"{variant}__{kver}"
+
+
+def _write_tag(
+    out: Path, target: str, arch: str, tag: str, variant: str = "base"
+) -> Path:
+    from ltvm_pkg.cli.util import kver_from_release_tag
+
+    kver = kver_from_release_tag(tag, target, arch, variant)
+    p = _tag_path(out, target, arch, kver, variant)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(tag + "\n")
+    return p
+
+
 def _ns(**kwargs: Any) -> argparse.Namespace:
     """Build an argparse.Namespace with sensible cli defaults."""
     defaults: dict[str, Any] = {
@@ -821,8 +842,11 @@ class TestCmdFetch:
         # Explicit URL must skip the GitHub API entirely.
         assert not ga.called
         assert ft.called
-        # Tag was extracted and recorded for next-run idempotency.
-        tag_file = target_dir / ".ltvm-release-tag"
+        # Tag was extracted and recorded for next-run idempotency,
+        # keyed by (kernel, variant).
+        tag_file = _tag_path(
+            target_dir.parent.parent, "rocky9", "x86_64", "foo"
+        )
         assert tag_file.exists()
         assert tag_file.read_text().strip() == "rocky9-x86_64-foo"
 
@@ -912,9 +936,18 @@ class TestCmdFetch:
         out = tmp_targets / "artifacts"
         target_dir = out / "rocky9" / "x86_64"
         target_dir.mkdir(parents=True, exist_ok=True)
-        (target_dir / ".ltvm-release-tag").write_text("rocky9-x86_64-same\n")
-        leftover = target_dir / "stale.txt"
+        _write_tag(out, "rocky9", "x86_64", "rocky9-x86_64-same")
+        # Stale content inside what --replace now scopes: this
+        # release's container.
+        leftover = target_dir / "container" / "stale.txt"
+        leftover.parent.mkdir(parents=True, exist_ok=True)
         leftover.write_text("old")
+        # A different kernel's artifacts must survive.  Wiping the
+        # whole arch dir took these out, and that wipe was the remedy
+        # ltvm suggested when fetching a second kernel.
+        sibling = target_dir / "kernels" / "5.14-rhel9.8-5.14.0-687.39.1.el9_8"
+        sibling.mkdir(parents=True, exist_ok=True)
+        (sibling / "vmlinux").write_bytes(b"other-kernel")
 
         url = "https://x/releases/download/rocky9-x86_64-same/manifest.json"
 
@@ -949,22 +982,29 @@ class TestCmdFetch:
         assert rc == EXIT_OK
         assert ft.called
         assert not leftover.exists()
+        assert (sibling / "vmlinux").exists(), (
+            "--replace must not delete another kernel's artifacts"
+        )
 
     def test_divergent_tag_refuses_without_replace(
         self,
         capsys: pytest.CaptureFixture[str],
         tmp_targets: Path,
     ) -> None:
-        """Local tag differs from remote release: refuse by default so a
-        fresh fetch doesn't silently mix two releases' files."""
+        """A *different release of the same kernel* still refuses.
+
+        Divergence is now judged per (kernel, variant); a different
+        kernel is additive and has its own test below.
+        """
         import ltvm_pkg.target_config as cfg
 
         out = tmp_targets / "artifacts"
         target_dir = out / "rocky9" / "x86_64"
         target_dir.mkdir(parents=True, exist_ok=True)
-        (target_dir / ".ltvm-release-tag").write_text(
-            "rocky9-x86_64-5.14.0-500.el9_5\n"
-        )
+        # Same kver on disk, recorded under a different release tag.
+        tag_file = _tag_path(out, "rocky9", "x86_64", "5.14.0-600.el9_7")
+        tag_file.parent.mkdir(parents=True, exist_ok=True)
+        tag_file.write_text("rocky9-x86_64-5.14.0-500.el9_5\n")
         url = (
             "https://x/releases/download/"
             "rocky9-x86_64-5.14.0-600.el9_7/manifest.json"
@@ -1004,6 +1044,47 @@ class TestCmdFetch:
         # the user can judge newness before deciding to upgrade.
         assert "2025-02-10" in err
 
+    def test_other_kernel_is_additive_not_divergent(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+    ) -> None:
+        """Fetching a second kernel must not read as a divergence.
+
+        Tags used to be tracked once per (target, arch), so fetching
+        rhel9.8 after rhel9.7 looked like a conflicting release and was
+        refused -- and the remedy ltvm printed, --replace, wiped the
+        whole arch dir and took rhel9.7's artifacts with it.
+        """
+        import ltvm_pkg.target_config as cfg
+
+        out = tmp_targets / "artifacts"
+        target_dir = out / "rocky9" / "x86_64"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        _write_tag(out, "rocky9", "x86_64", "rocky9-x86_64-5.14.0-500.el9_5")
+        url = (
+            "https://x/releases/download/"
+            "rocky9-x86_64-5.14.0-600.el9_7/manifest.json"
+        )
+
+        with (
+            patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
+            patch.object(cfg, "ARTIFACTS_DIR", out),
+            patch.object(cli_mod, "fetch_target") as ft,
+        ):
+            args = _ns(
+                target="rocky9", url=url, filter=None, arch="x86_64",
+                kernel=None, variant="base", list=False,
+                replace=False, force=False, image=False,
+            )
+            rc = cmd_fetch(args)
+
+        assert rc == EXIT_OK
+        assert ft.called
+        # Both kernels' tags now coexist.
+        assert _tag_path(out, "rocky9", "x86_64", "5.14.0-500.el9_5").exists()
+        assert _tag_path(out, "rocky9", "x86_64", "5.14.0-600.el9_7").exists()
+
     def test_divergent_tag_proceeds_with_replace(
         self,
         capsys: pytest.CaptureFixture[str],
@@ -1015,10 +1096,14 @@ class TestCmdFetch:
         out = tmp_targets / "artifacts"
         target_dir = out / "rocky9" / "x86_64"
         target_dir.mkdir(parents=True, exist_ok=True)
-        (target_dir / ".ltvm-release-tag").write_text(
-            "rocky9-x86_64-old\n"
-        )
-        (target_dir / "stale.txt").write_text("old")
+        # Same kver recorded under a different release tag, so this is
+        # a genuine same-kernel conflict rather than an additive fetch.
+        tag_file = _tag_path(out, "rocky9", "x86_64", "new")
+        tag_file.parent.mkdir(parents=True, exist_ok=True)
+        tag_file.write_text("rocky9-x86_64-old\n")
+        stale = target_dir / "container" / "stale.txt"
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_text("old")
         url = "https://x/releases/download/rocky9-x86_64-new/manifest.json"
 
         def _fake_fetch(target, url, base, **kw):  # type: ignore[no-untyped-def]
@@ -1050,7 +1135,7 @@ class TestCmdFetch:
 
         assert rc == EXIT_OK
         assert ft.called
-        assert not (target_dir / "stale.txt").exists()
+        assert not stale.exists()
 
     def test_fetch_target_failure_returns_error(
         self,
@@ -1435,9 +1520,11 @@ class TestCmdPublish:
         # Tag derived from manifest name.
         assert "Tag: rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre" in out
         # Recorded the tag locally for fetch idempotency.
-        tag_file = (
-            tmp_targets / "artifacts" / "rocky9" / "x86_64"
-            / ".ltvm-release-tag"
+        tag_file = _tag_path(
+            tmp_targets / "artifacts",
+            "rocky9",
+            "x86_64",
+            "5.14.0-611.13.1.el9_7_lustre",
         )
         assert tag_file.exists()
         assert (

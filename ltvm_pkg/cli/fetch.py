@@ -461,6 +461,47 @@ def _dry_run_report(
             print(f"  local tag:  {existing_tag} (would be replaced)")
 
 
+def _replace_scope(
+    target: str, arch: str, kver: str, variant: str
+) -> list[Path]:
+    """Directories --replace should clear for one (kernel, variant).
+
+    The kernel directory is identified by its meta.json kernel_version
+    rather than by matching substrings of the directory name, so this
+    cannot pick the wrong sibling.  The container is per-target and is
+    re-extracted by the same fetch, so clearing it is safe and keeps
+    the "clean re-fetch" guarantee for everything this fetch writes.
+    """
+    from ltvm_pkg.paths import load_meta_safe
+    from ltvm_pkg.target_config import ARTIFACTS_DIR, DEFAULT_VARIANT
+
+    root = ARTIFACTS_DIR / target / arch
+    victims: list[Path] = []
+
+    container = root / "container"
+    victims.append(
+        container if variant == DEFAULT_VARIANT else container / variant
+    )
+
+    kernels = root / "kernels"
+    if kver and kernels.is_dir():
+        for kdir in kernels.iterdir():
+            if not kdir.is_dir():
+                continue
+            meta = load_meta_safe(kdir / "meta.json")
+            if meta is None or meta.get("kernel_version") != kver:
+                continue
+            # The kernel itself is variant-independent; only drop it
+            # for a base fetch, which is what re-extracts it.
+            if variant == DEFAULT_VARIANT:
+                victims.append(kdir)
+            img = root / "images" / kdir.name
+            victims.append(
+                img if variant == DEFAULT_VARIANT else img / variant
+            )
+    return victims
+
+
 def cmd_fetch(args: argparse.Namespace) -> int:
     use_json = args.json
     url = getattr(args, "url", None)
@@ -617,11 +658,29 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         release_tag = url.split("/releases/download/")[1].split("/")[0]
     else:
         release_tag = ""
-    tag_file = ARTIFACTS_DIR / target / arch / ".ltvm-release-tag"
+    # Tracked per (kernel, variant): fetching a second kernel is
+    # additive, not a divergence.  Only a *different release of the
+    # same kernel* is a real conflict.
+    from ltvm_pkg.cli.util import (
+        kver_from_release_tag,
+        read_release_tag,
+        release_tag_file,
+        write_release_tag,
+    )
+
+    fetch_kver = (
+        kver_from_release_tag(release_tag, target, arch, variant)
+        if release_tag
+        else ""
+    )
+    tag_root = ARTIFACTS_DIR / target / arch
+    tag_file = release_tag_file(tag_root, fetch_kver, variant)
     replace = bool(getattr(args, "replace", False))
     force = bool(getattr(args, "force", False))
     existing_tag = (
-        tag_file.read_text().strip() if tag_file.exists() else ""
+        read_release_tag(tag_root, target, arch, fetch_kver, variant)
+        if fetch_kver
+        else ""
     )
 
     if dry_run:
@@ -696,17 +755,22 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         )
         return EXIT_OK
 
-    # --replace: wipe the target's output dir so a partial or
-    # mismatched prior fetch doesn't leave stale files behind the
-    # new extraction.  The reference directory is target/arch, not
-    # target/, because per-arch fetches share artifacts/<target>/.
+    # --replace: clear this kernel's artifacts so a partial or
+    # mismatched prior fetch doesn't leave stale files behind the new
+    # extraction.  Scoped to the (kernel, variant) being fetched, plus
+    # the container, which is per-target and re-extracted by this same
+    # fetch.  Wiping all of artifacts/<target>/<arch> instead destroyed
+    # every *other* kernel the user had fetched -- and that wipe was
+    # what ltvm suggested when fetching a second kernel tripped the
+    # divergence check.
     if replace:
-        target_out = ARTIFACTS_DIR / target / arch
-        if target_out.exists():
-            if not use_json:
-                print(f"  Removing existing {target_out}...")
-            import shutil as _shutil
-            _shutil.rmtree(target_out)
+        import shutil as _shutil
+
+        for victim in _replace_scope(target, arch, fetch_kver, variant):
+            if victim.exists():
+                if not use_json:
+                    print(f"  Removing existing {victim}...")
+                _shutil.rmtree(victim)
 
     if not use_json:
         print(f"Fetching {target}...")
@@ -716,8 +780,8 @@ def cmd_fetch(args: argparse.Namespace) -> int:
             target, url, ARTIFACTS_DIR, arch=arch, variant=variant
         )
         # Record the release tag so repeat fetches are instant
-        tag_file.parent.mkdir(parents=True, exist_ok=True)
-        tag_file.write_text(release_tag + "\n")
+        if release_tag:
+            write_release_tag(tag_root, target, arch, release_tag, variant)
     except Exception as e:
         # A schema-mismatch error means the published manifest was
         # produced by a newer (or older) ltvm.  Force an immediate
@@ -1037,9 +1101,12 @@ def cmd_publish(args: argparse.Namespace) -> int:
     # test that patches TargetConfig automatically gets the redirected
     # path -- otherwise the write lands on the real filesystem while
     # the rest of the publish flow is mocked.
-    tag_file = tc.output_dir / ".ltvm-release-tag"
-    tag_file.parent.mkdir(parents=True, exist_ok=True)
-    tag_file.write_text(tag + "\n")
+    from ltvm_pkg.cli.util import write_release_tag
+
+    # tc.output_dir, not the global ARTIFACTS_DIR: they differ under
+    # tests that patch only the TargetConfig, and reaching for the
+    # global wrote release tags into the real artifacts tree.
+    write_release_tag(tc.output_dir, tc.name, tc.arch, tag, variant)
 
     result = {
         "target": args.target,

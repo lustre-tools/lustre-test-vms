@@ -343,3 +343,131 @@ def _require_root(use_json: bool, hint: str = "") -> int | None:
 def _qemu_ns(**kwargs: Any) -> argparse.Namespace:
     """Build a minimal argparse.Namespace for qemu command functions."""
     return argparse.Namespace(**kwargs)
+
+
+# ------------------------------------------------------------------
+# Release-tag bookkeeping
+# ------------------------------------------------------------------
+#
+# Which published release is on disk is tracked per (kernel, variant),
+# not per (target, arch).  A single file per arch conflated artifact
+# sets that are designed to coexist -- kernels/<k>/ and images/<k>/ are
+# per-kernel -- so fetching a second kernel read as a "divergent
+# release" and was refused, and the remedy fetch itself suggested
+# (--replace) rmtree'd the whole arch directory, taking the first
+# kernel's artifacts with it.
+
+LEGACY_RELEASE_TAG = ".ltvm-release-tag"
+RELEASE_TAG_DIR = ".ltvm-release-tags"
+
+# All of these take ``root`` -- the <artifacts>/<target>/<arch> dir --
+# explicitly rather than deriving it from the global ARTIFACTS_DIR.
+# Callers already hold it (TargetConfig.output_dir is exactly this),
+# and reaching for the global instead writes into the real artifacts
+# tree under tests that patch only the TargetConfig.
+
+
+def release_tag_dir(root: Path) -> Path:
+    return Path(root) / RELEASE_TAG_DIR
+
+
+def kver_from_release_tag(
+    tag: str, target: str, arch: str, variant: str = "base"
+) -> str:
+    """Extract the kernel-version core of a release tag.
+
+    Tags are ``<target>-<arch>-<kver>[-<variant>]``.
+    """
+    core = tag.strip()
+    prefix = f"{target}-{arch}-"
+    if core.startswith(prefix):
+        core = core[len(prefix):]
+    if variant != "base" and core.endswith(f"-{variant}"):
+        core = core[: -(len(variant) + 1)]
+    return core
+
+
+def release_tag_file(root: Path, kver: str, variant: str = "base") -> Path:
+    # "/" cannot appear in a kver, but be defensive: this becomes a
+    # filename.
+    return release_tag_dir(root) / f"{variant}__{kver.replace('/', '_')}"
+
+
+def migrate_legacy_release_tag(root: Path, target: str, arch: str) -> None:
+    """Move a pre-per-kernel .ltvm-release-tag into the new layout.
+
+    One-time and best-effort: a tree fetched by an older ltvm should
+    not suddenly read as "nothing fetched".
+    """
+    legacy = Path(root) / LEGACY_RELEASE_TAG
+    if not legacy.is_file():
+        return
+    try:
+        tag = legacy.read_text().strip()
+        if tag:
+            # The legacy file records one tag for the whole arch and
+            # doesn't say which variant wrote it, so recover that from
+            # the tag's own suffix -- filing a mofed tag under base
+            # would make a base query claim the variant's release.
+            variant = "base"
+            from ltvm_pkg.release_package import _declared_variant_names
+
+            for v in _declared_variant_names(target, arch):
+                if tag.endswith(f"-{v}"):
+                    variant = v
+                    break
+            else:
+                # Not a variant this ltvm declares.  Fall back to the
+                # shape rule, applied to the part after
+                # "<target>-<arch>-": a kver's last dashed segment
+                # always carries a digit, so a purely alphabetic tail
+                # is a variant name we no longer know about.  Require
+                # more than one segment, or a single-segment kver
+                # (which need not contain a digit) reads as a variant.
+                core = kver_from_release_tag(tag, target, arch)
+                segs = core.split("-")
+                if len(segs) > 1 and not any(ch.isdigit() for ch in segs[-1]):
+                    variant = segs[-1]
+            kver = kver_from_release_tag(tag, target, arch, variant)
+            dest = release_tag_file(root, kver, variant)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if not dest.exists():
+                dest.write_text(tag + "\n")
+        legacy.unlink()
+    except OSError:
+        pass
+
+
+def read_release_tag(
+    root: Path, target: str, arch: str, kver: str, variant: str = "base"
+) -> str:
+    """Release tag recorded for this (kernel, variant), or ""."""
+    migrate_legacy_release_tag(root, target, arch)
+    try:
+        return release_tag_file(root, kver, variant).read_text().strip()
+    except OSError:
+        return ""
+
+
+def write_release_tag(
+    root: Path, target: str, arch: str, tag: str, variant: str = "base"
+) -> None:
+    kver = kver_from_release_tag(tag, target, arch, variant)
+    f = release_tag_file(root, kver, variant)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(tag + "\n")
+
+
+def released_kvers(
+    root: Path, target: str, arch: str, variant: str = "base"
+) -> list[str]:
+    """kvers with a recorded release tag for this variant."""
+    migrate_legacy_release_tag(root, target, arch)
+    d = release_tag_dir(root)
+    if not d.is_dir():
+        return []
+    pre = f"{variant}__"
+    return sorted(
+        p.name[len(pre):] for p in d.iterdir()
+        if p.is_file() and p.name.startswith(pre)
+    )

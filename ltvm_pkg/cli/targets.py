@@ -64,26 +64,29 @@ def _release_status(
     in _find_release_url so `target list`, `target fetch`, and
     `target show` agree on what's available.)
     """
-    from ltvm_pkg.target_config import ARTIFACTS_DIR
+    from ltvm_pkg.cli.util import read_release_tag, released_kvers
 
     prefix = f"{target}-{arch}-"
 
     def _trim(tag: str) -> str:
         return tag[len(prefix):] if tag.startswith(prefix) else tag
 
-    tag_file = ARTIFACTS_DIR / target / arch / ".ltvm-release-tag"
-    if tag_file.exists():
-        raw_local = tag_file.read_text().strip()
-        if kernel_signature and kernel_signature not in raw_local:
-            local = "-"
-        elif variant != "base" and not raw_local.endswith(f"-{variant}"):
-            local = "-"
-        elif variant == "base" and _variant_suffix_in_tag(raw_local):
-            local = "-"
-        else:
-            local = _trim(raw_local)
-    else:
-        local = "-"
+    # Release tags are recorded per (kernel, variant), so this is an
+    # exact lookup -- no need to guess from a single arch-wide tag
+    # whether it happened to be written by a variant fetch or for a
+    # different kernel.
+    from ltvm_pkg.target_config import ARTIFACTS_DIR
+
+    tag_root = ARTIFACTS_DIR / target / arch
+    kvers = released_kvers(tag_root, target, arch, variant)
+    if kernel_signature:
+        kvers = [k for k in kvers if kernel_signature in k]
+    raw_local = (
+        read_release_tag(tag_root, target, arch, kvers[-1], variant)
+        if kvers
+        else ""
+    )
+    local = _trim(raw_local) if raw_local else "-"
 
     if all_releases is None:
         remote = "?"
@@ -132,10 +135,13 @@ def _release_status(
 def _variant_suffix_in_tag(tag: str) -> str | None:
     """Heuristic: does ``tag`` look like it ends with ``-<variant>``?
 
-    Only used to reject a base-variant ``local`` claim when the stored
-    .ltvm-release-tag was written by a variant fetch.  A bare kver
-    (digits+dots+underscore) returns None; ``rocky9-x86_64-...-mofed``
-    returns ``"mofed"``.
+    A bare kver (digits+dots+underscore) returns None;
+    ``rocky9-x86_64-...-mofed`` returns ``"mofed"``.
+
+    _release_status no longer needs this -- release tags are recorded
+    per (kernel, variant), so which variant wrote one is a fact rather
+    than a guess.  Kept for the legacy-tag migration in cli.util, which
+    has only the tag text to go on.
     """
     last = tag.rsplit("-", 1)[-1]
     if last and not any(ch.isdigit() for ch in last):
