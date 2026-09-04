@@ -1165,3 +1165,58 @@ class TestSchemaValidation:
             "CONFIG_BAR": "n",
             "CONFIG_BAZ": "m",
         }
+
+
+class TestAmbiguousKernelResolution:
+    """A short kernel name can mean more than one built kernel."""
+
+    def test_matching_kernel_dirs_orders_newest_first(
+        self, tmp_path: Path
+    ) -> None:
+        from ltvm_pkg.target_config import matching_kernel_dirs
+
+        kernels = tmp_path / "kernels"
+        older = "5.14-rhel9.7-5.14.0-611.13.1.el9_7"
+        newer = "5.14-rhel9.7-5.14.0-611.55.1.el9_7"
+        other = "5.14-rhel9.8-5.14.0-687.39.1.el9_8"
+        for d in (older, newer, other):
+            (kernels / d).mkdir(parents=True)
+        assert matching_kernel_dirs(kernels, "5.14-rhel9.7") == [newer, older]
+        # A different short name must not be swept in.
+        assert matching_kernel_dirs(kernels, "5.14-rhel9.8") == [other]
+
+    def test_ambiguity_warns_once(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """One artifacts dir is shared by every checkout on the machine,
+        so two trees declaring different point releases leave two dirs
+        under one short name.  Resolution picks one; say which.
+        """
+        import ltvm_pkg.target_config as cfg
+
+        kernels = tmp_path / "kernels"
+        for d in (
+            "5.14-rhel9.7-5.14.0-611.13.1.el9_7",
+            "5.14-rhel9.7-5.14.0-611.55.1.el9_7",
+        ):
+            (kernels / d).mkdir(parents=True)
+        cfg._AMBIGUITY_WARNED.clear()
+        with caplog.at_level("WARNING", logger="ltvm"):
+            first = cfg.resolve_kernel_dir(kernels, "5.14-rhel9.7")
+            cfg.resolve_kernel_dir(kernels, "5.14-rhel9.7")
+        assert first == "5.14-rhel9.7-5.14.0-611.55.1.el9_7"
+        warnings = [r for r in caplog.records if "matches 2" in r.getMessage()]
+        assert len(warnings) == 1, "should warn once per name, not per call"
+        assert "611.13.1" in warnings[0].getMessage()
+
+    def test_unambiguous_resolution_is_quiet(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import ltvm_pkg.target_config as cfg
+
+        kernels = tmp_path / "kernels"
+        (kernels / "5.14-rhel9.7-5.14.0-611.55.1.el9_7").mkdir(parents=True)
+        cfg._AMBIGUITY_WARNED.clear()
+        with caplog.at_level("WARNING", logger="ltvm"):
+            cfg.resolve_kernel_dir(kernels, "5.14-rhel9.7")
+        assert not [r for r in caplog.records if "matches" in r.getMessage()]

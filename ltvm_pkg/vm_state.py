@@ -172,27 +172,21 @@ def resolve_os_artifacts(
     kernels_root = output_dir / "kernels"
 
     if kernel:
-        # Exact match first, then prefix match. When multiple kernel
-        # directories share the prefix, pick the newest by mtime -- the
-        # user wants the most recently built, and a lexicographic sort
-        # gets this wrong (e.g. "5.14.0-9..." > "5.14.0-10..." under
-        # string ordering).
+        # Exact match first, then prefix match -- via the shared
+        # resolver, so a VM boots the same kernel that `build status`
+        # and `target publish` reason about.  This used to pick the
+        # newest by mtime, which is a different question: rebuilding an
+        # older point release most recently made `ltvm create` choose
+        # it while everything else chose the newer one, pairing a
+        # kernel with another build's modules.
+        from .target_config import matching_kernel_dirs, resolve_kernel_dir
+
         cand = kernels_root / kernel
         if cand.is_dir():
             kernel_dirname = kernel
         else:
-            prefix = kernel + "-"
-            matches = (
-                sorted(
-                    (d for d in kernels_root.iterdir()
-                     if d.is_dir() and d.name.startswith(prefix)),
-                    key=lambda d: d.stat().st_mtime,
-                )
-                if kernels_root.is_dir()
-                else []
-            )
-            if matches:
-                kernel_dirname = matches[-1].name
+            if matching_kernel_dirs(kernels_root, kernel):
+                kernel_dirname = resolve_kernel_dir(kernels_root, kernel)
             else:
                 raise FileNotFoundError(
                     f"No kernel matching {kernel!r} for '{os_name}' "
@@ -207,25 +201,18 @@ def resolve_os_artifacts(
         # some other built kernel -- the caller must opt in via
         # --kernel to use a non-default.
         if kernel_suffix:
+            from .target_config import (
+                matching_kernel_dirs,
+                resolve_kernel_dir,
+            )
+
             cand = kernels_root / kernel_suffix
             if cand.is_dir():
                 kernel_dirname = kernel_suffix
-            else:
-                prefix = kernel_suffix + "-"
-                # Pick newest by mtime, not by lexicographic order --
-                # kernel names like "5.14.0-9..." sort after
-                # "5.14.0-10..." as strings.
-                matches = (
-                    sorted(
-                        (d for d in kernels_root.iterdir()
-                         if d.is_dir() and d.name.startswith(prefix)),
-                        key=lambda d: d.stat().st_mtime,
-                    )
-                    if kernels_root.is_dir()
-                    else []
+            elif matching_kernel_dirs(kernels_root, kernel_suffix):
+                kernel_dirname = resolve_kernel_dir(
+                    kernels_root, kernel_suffix
                 )
-                if matches:
-                    kernel_dirname = matches[-1].name
         if kernel_dirname is None and kernels_root.is_dir():
             any_built = sorted(
                 d.name for d in kernels_root.iterdir() if d.is_dir()

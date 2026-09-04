@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import tempfile
@@ -31,6 +32,8 @@ class LustreMode(str, Enum):
     CLIENT = "client"
 
 from .paths import find_ltvm_root, load_meta_safe
+
+log = logging.getLogger("ltvm")
 
 REPO_ROOT = find_ltvm_root()
 TARGETS_DIR = REPO_ROOT / "targets"
@@ -195,6 +198,51 @@ def kernel_dir_version_key(name: str) -> tuple:
     )
 
 
+def matching_kernel_dirs(kernels_dir: Path, name: str) -> list[str]:
+    """Built kernel dirs a short name could mean, newest version first.
+
+    A short name from targets.yaml ("5.14-rhel9.7") does not identify a
+    kernel: only the Lustre tree knows which lnxrel it stands for, and
+    one artifacts dir is shared by every checkout on the machine.  Two
+    trees declaring different point releases therefore leave two dirs
+    under the same prefix, and any lookup by short name is picking one.
+    """
+    if not kernels_dir.is_dir():
+        return []
+    prefix = name + "-"
+    return sorted(
+        (
+            d.name
+            for d in kernels_dir.iterdir()
+            if d.is_dir() and d.name.startswith(prefix)
+        ),
+        key=kernel_dir_version_key,
+        reverse=True,
+    )
+
+
+# Ambiguous resolutions warn once per (dir, name) per process; a table
+# command resolves the same target repeatedly and should not repeat
+# itself.
+_AMBIGUITY_WARNED: set[tuple[str, str]] = set()
+
+
+def _warn_if_ambiguous(kernels_dir: Path, name: str, chosen: str) -> None:
+    matches = matching_kernel_dirs(kernels_dir, name)
+    if len(matches) < 2:
+        return
+    key = (str(kernels_dir), name)
+    if key in _AMBIGUITY_WARNED:
+        return
+    _AMBIGUITY_WARNED.add(key)
+    others = ", ".join(m for m in matches if m != chosen)
+    log.warning(
+        "%r matches %d built kernels; using %s (also built: %s). "
+        "Pass --kernel <full-name> to pick a specific one.",
+        name, len(matches), chosen, others,
+    )
+
+
 def resolve_kernel_dir(kernels_dir: Path, name: str) -> str:
     """Match a kernel name against the built dirs under ``kernels_dir``.
 
@@ -215,14 +263,15 @@ def resolve_kernel_dir(kernels_dir: Path, name: str) -> str:
         return name
     if (kernels_dir / name).is_dir():
         return name
-    prefix = name + "-"
-    candidates = [
-        d.name
-        for d in kernels_dir.iterdir()
-        if d.is_dir() and d.name.startswith(prefix)
-    ]
+    candidates = matching_kernel_dirs(kernels_dir, name)
     if candidates:
-        return max(candidates, key=kernel_dir_version_key)
+        chosen = candidates[0]
+        # Highest version is a guess -- the tree that declares this
+        # short name is the only thing that knows which release it
+        # means, and this function has no tree.  Say so rather than
+        # answer silently.
+        _warn_if_ambiguous(kernels_dir, name, chosen)
+        return chosen
     return name
 
 
