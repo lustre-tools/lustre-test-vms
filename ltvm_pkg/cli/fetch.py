@@ -907,9 +907,19 @@ def cmd_publish(args: argparse.Namespace) -> int:
     # -- "silently shipped without Lustre" is too costly to be the default.
     no_lustre = getattr(args, "no_lustre", False)
     if not no_lustre:
-        # Resolve full kernel name the same way package_target will.
-        from ltvm_pkg.release_package import _resolve_kernel
-        kernel_name, kernel_dir = _resolve_kernel(tc.output_dir, kernel)
+        # Resolve full kernel name the same way package_target will --
+        # including the declared default, or this gate inspects a
+        # different kernel than the one that gets packaged and a
+        # Lustre-less release ships without a word.
+        from ltvm_pkg.release_package import (
+            _declared_default_kernel,
+            _resolve_kernel,
+        )
+        kernel_name, kernel_dir = _resolve_kernel(
+            tc.output_dir,
+            kernel,
+            _declared_default_kernel(tc.name, tc.arch, variant),
+        )
         snap_root = kernel_dir / "lustre-artifacts"
         snap_dir = (
             snap_root if variant == "base" else snap_root / variant

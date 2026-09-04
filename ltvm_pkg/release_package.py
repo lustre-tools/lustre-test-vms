@@ -352,8 +352,17 @@ def _resolve_kernel(
     return chosen.name, chosen
 
 
-def _declared_default_kernel(target_name: str, arch: str) -> str | None:
-    """The target's default kernel from targets.yaml.
+def _declared_default_kernel(
+    target_name: str, arch: str, variant: str = DEFAULT_VARIANT
+) -> str | None:
+    """The kernel this (target, variant) acts on when none is given.
+
+    Must honor the variant's kernel pin, not just the target default:
+    rocky9's mofed-24 pins 5.14-rhel9.5 while the target defaults to
+    5.14-rhel9.7, and `ltvm build all --variant mofed-24` builds the
+    pinned one.  Naming the target default here sends the packager
+    looking under a kernel the variant is forbidden to use, so
+    publishing a pinned variant dies on missing artifacts.
 
     Returns None when ``target_name`` isn't a configured target, so the
     packager still works for the synthetic names export_build_container
@@ -362,7 +371,9 @@ def _declared_default_kernel(target_name: str, arch: str) -> str | None:
     from .target_config import TargetConfig
 
     try:
-        return TargetConfig(target_name, arch=arch).default_kernel
+        return TargetConfig(
+            target_name, arch=arch, variant=variant
+        ).declared_kernel
     except (ValueError, KeyError, FileNotFoundError):
         return None
 
@@ -476,7 +487,7 @@ def snapshot_lustre(
     output_dir = Path(output_dir)
 
     kernel_name, kernel_dir = _resolve_kernel(
-        output_dir, kernel, _declared_default_kernel(target, arch)
+        output_dir, kernel, _declared_default_kernel(target, arch, variant)
     )
 
     staging_src = staging_path(
@@ -635,7 +646,7 @@ def package_target(
     export_build_container(target_name, output_dir, arch=arch, variant=variant)
 
     kernel_name, kernel_dir = _resolve_kernel(
-        output_dir, kernel, _declared_default_kernel(target_name, arch)
+        output_dir, kernel, _declared_default_kernel(target_name, arch, variant)
     )
     paths = _variant_paths(output_dir, kernel_name, variant)
 
@@ -842,7 +853,7 @@ def package_bootable(
     _check_zstd()
     output_dir = Path(output_dir)
     kernel_name, kernel_dir = _resolve_kernel(
-        output_dir, kernel, _declared_default_kernel(target_name, arch)
+        output_dir, kernel, _declared_default_kernel(target_name, arch, variant)
     )
     paths = _variant_paths(output_dir, kernel_name, variant)
 

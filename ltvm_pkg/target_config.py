@@ -564,6 +564,23 @@ class TargetConfig:
         """Default lustre target name (short form, e.g. 5.14-rhel9.7)."""
         return str(self._kernels["default"])
 
+    @property
+    def declared_kernel(self) -> str:
+        """The kernel this (target, variant) acts on when none is given.
+
+        A variant's pin wins over the target default -- rocky9's
+        mofed-24 pins 5.14-rhel9.5 while the target defaults to
+        5.14-rhel9.7.  Consulting default_kernel directly skips the pin
+        and names a kernel the variant is forbidden to use.
+
+        This is the *declared* name only; no directory lookup.  Pass it
+        to resolve_kernel_dir() to get the built dir.
+        """
+        var = self._variants.get(self.variant_name)
+        if var is not None and var.pinned_kernel is not None:
+            return var.pinned_kernel
+        return self.default_kernel
+
     def declared_kernels(self) -> list[str]:
         """Lustre target names declared as available in targets.yaml.
 
