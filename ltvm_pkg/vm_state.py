@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import IO
 
 
 def _atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
@@ -498,6 +499,26 @@ class VMInfo:
     def _lock_path(self) -> Path:
         return SOCKETS / f".{self.name}.info.lock"
 
+    def _open_lock_file(self) -> IO[str]:
+        """Open the per-VM lock file, creating it if needed.
+
+        SOCKETS is root-owned and not user-writable, so a plain
+        open(.., "w") from an unprivileged ltvm fails outright -- which
+        is what made `ltvm cluster deploy` die with PermissionError on
+        a lock that `sudo ltvm cluster create` had left behind.  Create
+        through _atomic_write (which knows how to escalate) and mode
+        0o666 so either uid can lock it later, and fall back to a
+        read-only descriptor for locks already on disk owned by root:
+        flock() needs an open fd, not write access.
+        """
+        path = self._lock_path
+        if not path.exists():
+            _atomic_write(path, "", mode=0o666)
+        try:
+            return open(path, "a")
+        except PermissionError:
+            return open(path)
+
     @contextmanager
     def _info_lock(self) -> Iterator[None]:
         """Per-VM exclusive lock for read-modify-write of the .info file.
@@ -507,8 +528,11 @@ class VMInfo:
         lock, both read the same text, both rename, the second write wins and
         the first update is silently lost.
         """
-        SOCKETS.mkdir(parents=True, exist_ok=True)
-        with open(self._lock_path, "w") as fh:
+        try:
+            SOCKETS.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            pass  # _atomic_write escalates to create it if it must
+        with self._open_lock_file() as fh:
             fcntl.flock(fh, fcntl.LOCK_EX)
             try:
                 yield

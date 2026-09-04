@@ -76,6 +76,55 @@ def sudo_prime(reason: str) -> None:
     _run(["sudo", "-v"])
 
 
+def invoking_user() -> tuple[str, str] | None:
+    """(user, group) of the human behind this invocation, or None.
+
+    Files ltvm writes into root-owned dirs like /opt/qemu-vms/sockets
+    go through a ``sudo install``, so without an explicit owner they
+    land root-owned and the next unprivileged ltvm command can't touch
+    them.  Under sudo the human is $SUDO_USER; otherwise it is just us.
+    None means we genuinely are root (a real root login) and there is
+    no better owner to pick.
+    """
+    import grp
+    import pwd
+
+    name = os.environ.get("SUDO_USER")
+    if not name and os.geteuid() != 0:
+        try:
+            name = pwd.getpwuid(os.geteuid()).pw_name
+        except KeyError:
+            return None
+    if not name or name == "root":
+        return None
+    try:
+        pw = pwd.getpwnam(name)
+        return name, grp.getgrgid(pw.pw_gid).gr_name
+    except KeyError:
+        return None
+
+
+def chown_to_invoking_user(path: Path) -> None:
+    """Give *path* back to the human when we hold it as root.
+
+    A no-op when not root or when there is no better owner.  Failures
+    are ignored: ownership is a convenience, not correctness, and the
+    caller has already written the file.
+    """
+    if os.geteuid() != 0:
+        return
+    owner = invoking_user()
+    if owner is None:
+        return
+    import pwd
+
+    try:
+        pw = pwd.getpwnam(owner[0])
+        os.chown(path, pw.pw_uid, pw.pw_gid)
+    except (KeyError, OSError):
+        pass
+
+
 def atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
     """Write *text* to *path* atomically, falling back to sudo when
     the destination dir isn't user-writable.
@@ -106,6 +155,7 @@ def atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
                 f.write(text)
             os.chmod(tmp, mode)
             os.rename(tmp, str(path))
+            chown_to_invoking_user(path)
         except BaseException:
             try:
                 os.unlink(tmp)
@@ -119,8 +169,19 @@ def atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
     try:
         with os.fdopen(fd, "w") as f:
             f.write(text)
+        owner = invoking_user()
+        own_args = (
+            ["-o", owner[0], "-g", owner[1]] if owner is not None else []
+        )
         sudo_run(
-            ["install", "-m", f"{mode & 0o777:o}", tmp, str(dest_tmp)],
+            [
+                "install",
+                "-m",
+                f"{mode & 0o777:o}",
+                *own_args,
+                tmp,
+                str(dest_tmp),
+            ],
             quiet=True,
         )
         sudo_run(["mv", "-f", str(dest_tmp), str(path)], quiet=True)
