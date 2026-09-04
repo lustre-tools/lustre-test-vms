@@ -210,7 +210,13 @@ def _prebuild_tools_native(
 
 def _lustre_staging_hash_input(staging: Path) -> bytes:
     """Return bytes to fold into the image input hash when --with-lustre
-    is active. Uses Module.symvers sha256 recorded in the staging meta.
+    is active.
+
+    Folds two recorded digests: the kernel's Module.symvers (kernel ABI)
+    and the staged Lustre modules themselves.  Both are needed --
+    symvers alone is identical across two Lustre builds against one
+    kernel, so an image keyed on it is never rebuilt after a Lustre
+    source change and silently keeps the previous modules baked in.
 
     Staging meta MUST exist for any modern build; the old rglob+sha256
     fallback over the entire staging tree was multi-GB-expensive and
@@ -224,8 +230,23 @@ def _lustre_staging_hash_input(staging: Path) -> bytes:
             f"missing or invalid .ltvm-staging-meta.json under {staging}; "
             "run `ltvm build-lustre` to regenerate staging meta"
         )
+    lustre_hash = meta.get("lustre_modules_sha256")
+    if not isinstance(lustre_hash, str):
+        # Written by older ltvm, before the Lustre-content digest
+        # existed.  Refuse rather than fall back to symvers-only, which
+        # is precisely the combination that skips the rebuild.
+        raise FileNotFoundError(
+            f".ltvm-staging-meta.json under {staging} predates the Lustre "
+            "module digest; re-run `ltvm build lustre` to regenerate it"
+        )
     return b"|".join(
-        [b"with-lustre:", b"symvers:", meta["module_symvers_sha256"].encode()]
+        [
+            b"with-lustre:",
+            b"symvers:",
+            meta["module_symvers_sha256"].encode(),
+            b"lustre:",
+            lustre_hash.encode(),
+        ]
     )
 
 

@@ -119,7 +119,8 @@ def parse_lustre_target(
     from .lustre_compat import parse_target_in
 
     # parse_target_in raises FileNotFoundError / ValueError itself.
-    # Prefer .target over .target.in (matches historical behavior).
+    # It prefers .target.in (the tracked file) and falls back to the
+    # generated .target; lustre_inputs_hash matches that order.
     targets_dir = kp_targets(lustre_tree)
     plain = targets_dir / f"{lustre_target}.target"
     dotin = targets_dir / f"{lustre_target}.target.in"
@@ -341,7 +342,16 @@ def lustre_inputs_hash(
     h = hashlib.sha256()
 
     targets_dir = kp_targets(lustre_tree)
-    for name in (f"{lustre_target}.target", f"{lustre_target}.target.in"):
+    # Same precedence as parse_target_in(), which is what the build
+    # actually reads.  Hashing the other one is wrong in both
+    # directions once a configured tree has both files: .target is
+    # generated and gitignored, so editing the tracked .target.in to
+    # pin a different lnxrel changes nothing the hash can see (the
+    # rebuild is silently skipped), while .target embeds a
+    # git-describe LUSTRE_VERSION that changes on every unrelated
+    # Lustre commit (forcing a full kernel rebuild that changes
+    # nothing).
+    for name in (f"{lustre_target}.target.in", f"{lustre_target}.target"):
         tf = targets_dir / name
         if tf.exists():
             h.update(tf.read_bytes())

@@ -516,7 +516,8 @@ class TestBuildImageWithLustre:
         (staging / "usr" / "sbin").mkdir(parents=True)
         (staging / "usr" / "sbin" / "mount.lustre").write_text("X")
         (staging / ".ltvm-staging-meta.json").write_text(
-            '{"module_symvers_sha256": "deadbeef"}'
+            '{"module_symvers_sha256": "deadbeef",'
+            ' "lustre_modules_sha256": "c0ffee"}'
         )
         return lt
 
@@ -564,14 +565,60 @@ class TestBuildImageWithLustre:
         staging = tmp_path / "staging"
         staging.mkdir()
         (staging / ".ltvm-staging-meta.json").write_text(
-            '{"module_symvers_sha256": "aaaa"}'
+            '{"module_symvers_sha256": "aaaa",'
+            ' "lustre_modules_sha256": "zzzz"}'
         )
         h0 = _lustre_staging_hash_input(staging)
         (staging / ".ltvm-staging-meta.json").write_text(
-            '{"module_symvers_sha256": "bbbb"}'
+            '{"module_symvers_sha256": "bbbb",'
+            ' "lustre_modules_sha256": "zzzz"}'
         )
         h1 = _lustre_staging_hash_input(staging)
         assert h0 != h1
+
+    def test_staging_hash_changes_when_lustre_modules_change(
+        self, tmp_path: Path
+    ) -> None:
+        """A Lustre rebuild against an unchanged kernel must invalidate.
+
+        The kernel's Module.symvers is identical across two Lustre
+        builds on one kernel, so keying the image on it alone means
+        editing Lustre source, rebuilding and re-imaging silently keeps
+        the previous modules baked in.
+        """
+        from ltvm_pkg.image_build import _lustre_staging_hash_input
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / ".ltvm-staging-meta.json").write_text(
+            '{"module_symvers_sha256": "same",'
+            ' "lustre_modules_sha256": "before"}'
+        )
+        h0 = _lustre_staging_hash_input(staging)
+        (staging / ".ltvm-staging-meta.json").write_text(
+            '{"module_symvers_sha256": "same",'
+            ' "lustre_modules_sha256": "after"}'
+        )
+        h1 = _lustre_staging_hash_input(staging)
+        assert h0 != h1
+
+    def test_staging_meta_without_lustre_digest_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        """Pre-digest staging meta must fail loud, not silently reuse.
+
+        Falling back to symvers-only for an old meta would reinstate
+        exactly the skip this digest exists to prevent.
+        """
+        from ltvm_pkg.image_build import _lustre_staging_hash_input
+
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        (staging / ".ltvm-staging-meta.json").write_text(
+            '{"module_symvers_sha256": "aaaa"}'
+        )
+        with pytest.raises(FileNotFoundError, match="build lustre"):
+            _lustre_staging_hash_input(staging)
 
 
 class TestGetPackageManifest:

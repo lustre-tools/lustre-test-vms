@@ -100,6 +100,32 @@ def _hash_file(path: Path) -> str | None:
     return h.hexdigest()
 
 
+def _hash_staged_modules(staging: Path) -> str:
+    """Digest identifying the Lustre modules currently staged.
+
+    Cheap: stats the staged ``.ko`` files rather than reading them
+    (staging runs to hundreds of MB).  Path + size + mtime changes
+    whenever a build rewrites a module, which is exactly the signal
+    the image cache needs.
+
+    The kernel's Module.symvers cannot serve this purpose -- it belongs
+    to the kernel build-tree and is identical across two Lustre builds
+    against the same kernel, so an image keyed on it alone is never
+    invalidated by a Lustre source change.
+    """
+    h = hashlib.sha256()
+    for ko in sorted(staging.rglob("*.ko")):
+        try:
+            st = ko.stat()
+        except OSError:
+            continue
+        h.update(str(ko.relative_to(staging)).encode())
+        h.update(b"\0")
+        h.update(f"{st.st_size}:{st.st_mtime_ns}".encode())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
 def read_staging_meta(staging: Path) -> dict | None:
     """Load staging meta, or None if missing/unparseable."""
     meta_file = staging / ".ltvm-staging-meta.json"
@@ -941,10 +967,16 @@ fi""")
     # lib/modules/.../extra/ (which doesn't update the staging dir's
     # own mtime) still gets a fresh "newer than this" comparison.
     (host_staging / ".ltvm-staging-stamp").write_text(kver + "\n")
-    # Per-kernel meta so build-image --with-lustre can fold the built
-    # Module.symvers hash into the image input hash and invalidate the
-    # cache when a rebuilt Lustre lands new modules.
+    # Per-kernel meta so build-image --with-lustre can invalidate its
+    # cache when a rebuilt Lustre lands new modules.  Two separate
+    # signals, because they answer different questions:
+    #   module_symvers_sha256 -- the *kernel's* ABI.  Changes when the
+    #     kernel is rebuilt (e.g. an edited kernel patch).
+    #   lustre_modules_sha256 -- the *Lustre* modules just staged.
+    #     Changes when Lustre source is rebuilt against an unchanged
+    #     kernel, which the symvers hash cannot see.
     symvers_hash = _hash_file(build_tree / "Module.symvers")
+    lustre_hash = _hash_staged_modules(host_staging)
     meta_text = json.dumps(
         {
             "kernel_version": kver,
@@ -952,6 +984,7 @@ fi""")
             "target": target,
             "arch": arch,
             "module_symvers_sha256": symvers_hash,
+            "lustre_modules_sha256": lustre_hash,
         },
         indent=2,
     )
