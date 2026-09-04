@@ -216,7 +216,15 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
         else:
             regen_cmd = f"dracut --kver {kver} --force {initrd_path}"
         run_ssh(vm.ip, regen_cmd, timeout=120)
-    run_ssh(vm.ip, reload_cmd, timeout=30)
+    # kdump seeding is a debugging convenience, not required for the VM to
+    # function.  Under TCG emulation -- a cross-arch guest, or any guest
+    # started with LTVM_FORCE_TCG -- a kdump restart routinely exceeds 30s,
+    # which aborted `ltvm create` outright.  Allow more time and treat a
+    # slow or failed reload as non-fatal.
+    try:
+        run_ssh(vm.ip, reload_cmd, timeout=300)
+    except Exception as e:  # noqa: BLE001 - best-effort step
+        print(f"warning: kdump reload on '{vm.name}' did not complete: {e}")
 
 
 def _ago(epoch: int) -> str:
