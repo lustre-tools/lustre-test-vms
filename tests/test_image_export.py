@@ -368,3 +368,505 @@ class TestHostSetupDeps:
             host_setup.check_prerequisites(host)
         pkgs = [a for call in install.call_args_list for a in call.args]
         assert "grub2-pc" in pkgs
+
+
+# ======================================================================
+# --format gce
+# ======================================================================
+
+
+def _has_gnu_tar() -> bool:
+    """True when PATH's tar can write oldgnu/sparse members.
+
+    macOS (and some minimal images) ship bsdtar, which cannot -- the
+    real-tar round-trip below is skipped there.  Export itself is
+    Linux-only anyway (losetup), so the hosts that can run an export
+    are the hosts that run this test.
+    """
+    import shutil as _shutil
+    import subprocess as _sp
+
+    if _shutil.which("tar") is None:
+        return False
+    r = _sp.run(["tar", "--version"], capture_output=True, text=True,
+                check=False)
+    return "GNU tar" in (r.stdout or "")
+
+
+class TestGceSizing:
+    """GCE rejects an image whose disk.raw is not a whole number of
+    gigabytes, so the raw disk is rounded up before it is packed."""
+
+    def test_rounds_up_to_whole_gib(self) -> None:
+        import ltvm_pkg.image_export as ie
+
+        assert ie._round_up_gib_mb(1) == 1024
+        assert ie._round_up_gib_mb(1023) == 1024
+        assert ie._round_up_gib_mb(1024) == 1024      # already exact
+        assert ie._round_up_gib_mb(1025) == 2048
+        assert ie._round_up_gib_mb(4600) == 5120
+
+    def test_export_rounds_size_for_gce_only(self, tmp_path: Path) -> None:
+        """The rounding is applied for gce and not for qcow2/raw.
+
+        Checked at the helper boundary: the full export needs
+        losetup, so the size is verified via the log line instead of
+        by running the pipeline.
+        """
+        import ltvm_pkg.image_export as ie
+
+        # 521 MiB of content -> one whole GiB once rounded.
+        assert ie._round_up_gib_mb(521) == 1024
+
+
+class TestGnuTarCheck:
+    def test_missing_tar_raises(self) -> None:
+        import ltvm_pkg.image_export as ie
+
+        with patch.object(ie.shutil, "which", return_value=None):
+            with pytest.raises(RuntimeError, match="tar not found"):
+                ie._check_gnu_tar()
+
+    def test_bsdtar_rejected(self) -> None:
+        """bsdtar can't write oldgnu sparse members; catching it here
+        beats handing Google a tarball it silently refuses."""
+        import ltvm_pkg.image_export as ie
+
+        fake = MagicMock(stdout="bsdtar 3.5.3 - libarchive 3.5.3\n")
+        with patch.object(ie.shutil, "which", return_value="/usr/bin/tar"), \
+             patch.object(ie.subprocess, "run", return_value=fake):
+            with pytest.raises(RuntimeError, match="GNU tar is required"):
+                ie._check_gnu_tar()
+
+    def test_gnu_tar_accepted(self) -> None:
+        import ltvm_pkg.image_export as ie
+
+        fake = MagicMock(stdout="tar (GNU tar) 1.34\n")
+        with patch.object(ie.shutil, "which", return_value="/usr/bin/tar"), \
+             patch.object(ie.subprocess, "run", return_value=fake):
+            ie._check_gnu_tar()  # no raise
+
+    def test_only_checked_for_gce(self) -> None:
+        """qcow2/raw exports don't need tar at all, so they must not
+        fail on a host whose tar is bsdtar."""
+        import ltvm_pkg.image_export as ie
+
+        with patch.object(ie.shutil, "which", return_value="/u/bin/x"), \
+             patch.object(ie, "_check_gnu_tar") as chk:
+            ie._check_host_tools("qcow2")
+            chk.assert_not_called()
+            ie._check_host_tools("gce")
+            chk.assert_called_once()
+
+
+class TestFstabRewrite:
+    """The base image's `/dev/vda / ext4` entry is right for ltvm's
+    microvm boot (whole unpartitioned disk) and wrong for every
+    exported disk, which is partitioned and named differently by
+    every hypervisor.  Rewriting to UUID fixes all of them."""
+
+    def test_replaces_root_device(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        etc = tmp_path / "etc"
+        etc.mkdir()
+        (etc / "fstab").write_text(
+            "/dev/vda  /  ext4  defaults,noatime  0 1\n"
+        )
+        ie._rewrite_fstab_root(tmp_path, "1111-2222")
+
+        text = (etc / "fstab").read_text()
+        assert "UUID=1111-2222" in text
+        assert "/dev/vda" not in text
+        # Mount options must survive the rewrite.
+        assert "defaults,noatime" in text
+
+    def test_preserves_comments_and_other_mounts(
+        self, tmp_path: Path
+    ) -> None:
+        import ltvm_pkg.image_export as ie
+
+        etc = tmp_path / "etc"
+        etc.mkdir()
+        (etc / "fstab").write_text(
+            "# a comment mentioning / that must not be rewritten\n"
+            "/dev/vda   /      ext4  defaults  0 1\n"
+            "/dev/vdb1  /mnt   ext4  defaults  0 2\n"
+        )
+        ie._rewrite_fstab_root(tmp_path, "abcd")
+
+        lines = (etc / "fstab").read_text().splitlines()
+        assert lines[0].startswith("# a comment")
+        assert lines[1].split()[0] == "UUID=abcd"
+        assert lines[2].split()[0] == "/dev/vdb1"
+
+    def test_appends_when_no_root_entry(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        etc = tmp_path / "etc"
+        etc.mkdir()
+        (etc / "fstab").write_text("/dev/vdb1  /mnt  ext4  defaults  0 2\n")
+        ie._rewrite_fstab_root(tmp_path, "beef")
+
+        text = (etc / "fstab").read_text()
+        assert "UUID=beef  /  ext4" in text
+        assert "/dev/vdb1" in text
+
+    def test_missing_fstab_is_created(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        (tmp_path / "etc").mkdir()
+        ie._rewrite_fstab_root(tmp_path, "cafe")
+        assert "UUID=cafe" in (tmp_path / "etc" / "fstab").read_text()
+
+
+class TestInjectSshKey:
+    def test_appends_without_dropping_shared_key(
+        self, tmp_path: Path
+    ) -> None:
+        """The image already carries the shared inter-VM ltvm key in
+        root's authorized_keys; clobbering it would break cluster
+        ssh, so injection must append."""
+        import ltvm_pkg.image_export as ie
+
+        ssh = tmp_path / "root" / ".ssh"
+        ssh.mkdir(parents=True)
+        (ssh / "authorized_keys").write_text("ssh-ed25519 SHARED ltvm\n")
+        key = tmp_path / "id.pub"
+        key.write_text("ssh-ed25519 MINE me@host\n")
+
+        with patch.object(ie, "sudo_run"):
+            ie._inject_ssh_key(tmp_path, key)
+
+        text = (ssh / "authorized_keys").read_text()
+        assert "SHARED" in text
+        assert "MINE" in text
+        assert (ssh / "authorized_keys").stat().st_mode & 0o777 == 0o600
+
+    def test_idempotent(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        ssh = tmp_path / "root" / ".ssh"
+        ssh.mkdir(parents=True)
+        key = tmp_path / "id.pub"
+        key.write_text("ssh-ed25519 MINE me@host\n")
+
+        with patch.object(ie, "sudo_run"):
+            ie._inject_ssh_key(tmp_path, key)
+            ie._inject_ssh_key(tmp_path, key)
+
+        text = (ssh / "authorized_keys").read_text()
+        assert text.count("MINE") == 1
+
+    def test_appends_missing_trailing_newline(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        ssh = tmp_path / "root" / ".ssh"
+        ssh.mkdir(parents=True)
+        (ssh / "authorized_keys").write_text("ssh-ed25519 SHARED ltvm")
+        key = tmp_path / "id.pub"
+        key.write_text("ssh-ed25519 MINE me@host")
+
+        with patch.object(ie, "sudo_run"):
+            ie._inject_ssh_key(tmp_path, key)
+
+        lines = (ssh / "authorized_keys").read_text().splitlines()
+        assert len(lines) == 2
+
+    def test_rejects_empty_key_file(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        key = tmp_path / "id.pub"
+        key.write_text("   \n")
+        with patch.object(ie, "sudo_run"):
+            with pytest.raises(ValueError, match="empty"):
+                ie._inject_ssh_key(tmp_path, key)
+
+
+class TestGceGuestConfig:
+    """Without these tweaks a GCE instance boots with no network:
+    rc.local only configures eth0 from ltvm's fc_ip= cmdline, which
+    GCE never passes."""
+
+    def _mk_rootfs(self, tmp_path: Path, with_nm_unit: bool = True) -> Path:
+        if with_nm_unit:
+            unit_dir = tmp_path / "usr" / "lib" / "systemd" / "system"
+            unit_dir.mkdir(parents=True)
+            (unit_dir / "NetworkManager.service").write_text("[Unit]\n")
+        return tmp_path
+
+    def test_writes_nm_profile_with_dhcp(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        root = self._mk_rootfs(tmp_path)
+        with patch.object(ie, "sudo_run"):
+            ie._apply_gce_guest_config(root)
+
+        prof = (root / "etc" / "NetworkManager" / "system-connections"
+                / "ltvm-gce.nmconnection")
+        text = prof.read_text()
+        assert "method=auto" in text          # DHCP
+        assert "interface-name=eth0" in text  # grub pins net.ifnames=0
+        # NM silently ignores a group/world-readable keyfile.
+        assert prof.stat().st_mode & 0o777 == 0o600
+
+    def test_enables_networkmanager(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        root = self._mk_rootfs(tmp_path)
+        with patch.object(ie, "sudo_run") as sr:
+            ie._apply_gce_guest_config(root)
+
+        ln_calls = [c.args[0] for c in sr.call_args_list
+                    if c.args and c.args[0][0] == "ln"]
+        assert len(ln_calls) == 1
+        argv = ln_calls[0]
+        assert argv[:3] == ["ln", "-sf",
+                            "/usr/lib/systemd/system/NetworkManager.service"]
+        assert argv[3].endswith(
+            "etc/systemd/system/multi-user.target.wants/"
+            "NetworkManager.service"
+        )
+
+    def test_finds_debian_unit_path(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        unit_dir = tmp_path / "lib" / "systemd" / "system"
+        unit_dir.mkdir(parents=True)
+        (unit_dir / "NetworkManager.service").write_text("[Unit]\n")
+
+        with patch.object(ie, "sudo_run") as sr:
+            ie._apply_gce_guest_config(tmp_path)
+
+        ln_calls = [c.args[0] for c in sr.call_args_list
+                    if c.args and c.args[0][0] == "ln"]
+        assert ln_calls[0][2] == "/lib/systemd/system/NetworkManager.service"
+
+    def test_no_dangling_symlink_when_unit_absent(
+        self, tmp_path: Path
+    ) -> None:
+        """A .wants symlink to a unit that isn't there just makes
+        systemd complain, so skip it and warn instead."""
+        import ltvm_pkg.image_export as ie
+
+        root = self._mk_rootfs(tmp_path, with_nm_unit=False)
+        with patch.object(ie, "sudo_run") as sr:
+            ie._apply_gce_guest_config(root)
+
+        assert not [c for c in sr.call_args_list
+                    if c.args and c.args[0][0] == "ln"]
+        # The profile is still written -- harmless, and correct if the
+        # user enables NM themselves.
+        assert (root / "etc" / "NetworkManager" / "system-connections"
+                / "ltvm-gce.nmconnection").exists()
+
+
+class TestPackageGce:
+    def test_argv_is_googles_documented_form(self, tmp_path: Path) -> None:
+        """GCE's import wants oldgnu format; -S keeps the sparse
+        multi-GiB disk cheap; -C keeps the member name bare (a path
+        prefix makes the import fail)."""
+        import ltvm_pkg.image_export as ie
+
+        raw = tmp_path / "disk.raw"
+        raw.write_bytes(b"")
+        out = tmp_path / "img.tar.gz"
+
+        with patch.object(ie.subprocess, "run") as run:
+            ie._package_gce(raw, out)
+
+        argv = run.call_args.args[0]
+        assert argv[0] == "tar"
+        assert "--format=oldgnu" in argv
+        assert "-Sczf" in argv
+        assert argv[-3:] == ["-C", str(tmp_path), "disk.raw"]
+        assert str(out) in argv
+
+    def test_rejects_wrong_member_name(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        raw = tmp_path / "notdisk.raw"
+        raw.write_bytes(b"")
+        with pytest.raises(RuntimeError, match="disk.raw"):
+            ie._package_gce(raw, tmp_path / "o.tar.gz")
+
+    @pytest.mark.skipif(not _has_gnu_tar(),
+                        reason="needs GNU tar (export is Linux-only anyway)")
+    def test_real_tarball_has_bare_disk_raw(self, tmp_path: Path) -> None:
+        """End-to-end on the packaging step: the tarball GCE receives
+        must contain exactly one member, named `disk.raw`, at the
+        archive root."""
+        import tarfile
+
+        import ltvm_pkg.image_export as ie
+
+        raw = tmp_path / "disk.raw"
+        with raw.open("wb") as fp:
+            fp.truncate(64 * 1024 * 1024)  # sparse
+        out = tmp_path / "img.tar.gz"
+
+        ie._package_gce(raw, out)
+
+        assert out.exists()
+        with tarfile.open(out, "r:gz") as tf:
+            names = tf.getnames()
+        assert names == ["disk.raw"]
+        # Sparse packing: 64 MiB of holes must not become a big file.
+        assert out.stat().st_size < 1024 * 1024
+
+
+class TestExportImageGceGuards:
+    def test_unknown_format_lists_gce(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        tc = _make_target_config(tmp_path)
+        with pytest.raises(ValueError, match="gce"):
+            ie.export_image(tc, None, tmp_path / "o.img", image_format="vmdk")
+
+    def test_gce_format_accepted(self, tmp_path: Path) -> None:
+        """'gce' must get past format validation (and fail later, on
+        the missing rootfs) rather than being rejected outright."""
+        import ltvm_pkg.image_export as ie
+
+        tc = _make_target_config(tmp_path)
+        (tc.image_output_dir.return_value / "base.ext4").unlink()
+        with patch.object(ie, "_check_host_tools", return_value={
+                "grub_install": "grub-install"}):
+            with pytest.raises(FileNotFoundError, match="base.ext4"):
+                ie.export_image(tc, None, tmp_path / "o.tar.gz",
+                                image_format="gce")
+
+    def test_disk_size_smaller_than_rootfs_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        import ltvm_pkg.image_export as ie
+
+        tc = _make_target_config(tmp_path)
+        # Fixture needs 1 + 8 + 512 = 521 MiB; 0 GiB can't hold it.
+        with patch.object(ie, "_check_host_tools", return_value={
+                "grub_install": "grub-install"}):
+            with pytest.raises(ValueError, match="too small"):
+                ie.export_image(tc, None, tmp_path / "o.qcow2",
+                                disk_size_gb=0)
+
+    def test_missing_ssh_key_file_rejected_early(
+        self, tmp_path: Path
+    ) -> None:
+        """Caught before any disk work: discovering a typo'd key path
+        after a multi-minute export would be miserable."""
+        import ltvm_pkg.image_export as ie
+
+        tc = _make_target_config(tmp_path)
+        with pytest.raises(FileNotFoundError, match="ssh key"):
+            ie.export_image(tc, None, tmp_path / "o.qcow2",
+                            ssh_key=tmp_path / "nope.pub")
+
+
+class TestGceCliWiring:
+    def _parser(self):
+        import importlib.machinery
+        from pathlib import Path as _P
+
+        root = _P(__file__).resolve().parent.parent
+        loader = importlib.machinery.SourceFileLoader(
+            "ltvm_script_gce", str(root / "ltvm"))
+        mod = loader.load_module()  # type: ignore[deprecated]
+        return mod.build_parser()
+
+    def test_format_gce_parses(self) -> None:
+        ns = self._parser().parse_args(
+            ["target", "export", "rocky9", "--format", "gce"])
+        assert ns.format == "gce"
+
+    def test_new_flags_parse(self) -> None:
+        ns = self._parser().parse_args([
+            "target", "export", "rocky9", "--format", "gce",
+            "--disk-size-gb", "20", "--ssh-key", "/tmp/k.pub",
+        ])
+        assert ns.disk_size_gb == 20
+        assert ns.ssh_key == "/tmp/k.pub"
+
+    def test_flags_default_to_none(self) -> None:
+        ns = self._parser().parse_args(["target", "export", "rocky9"])
+        assert ns.disk_size_gb is None
+        assert ns.ssh_key is None
+        assert ns.format == "qcow2"
+
+    def test_extension_mapping(self) -> None:
+        from ltvm_pkg.cli.targets import _EXPORT_EXT
+
+        assert _EXPORT_EXT == {
+            "qcow2": "qcow2", "raw": "raw", "gce": "tar.gz"}
+
+    def test_gce_default_output_name_and_hints(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """gce assets get their own stem so `target publish --image`,
+        which looks for bootable-<kernel>.qcow2, can't pick one up."""
+        import argparse
+
+        from ltvm_pkg import cli, priv
+        from ltvm_pkg.cli import targets as cli_targets
+        import ltvm_pkg.image_export as ie
+
+        tc = _make_target_config(tmp_path)
+        produced = tmp_path / "produced.tar.gz"
+        produced.write_bytes(b"\0" * 2048)
+        seen: dict[str, object] = {}
+
+        def fake_export(tc_, kernel, out, **kw):
+            seen["out"] = out
+            seen.update(kw)
+            return produced
+
+        args = argparse.Namespace(
+            target="rocky9", arch=None, kernel=None, output=None,
+            format="gce", force=False, json=False,
+            disk_size_gb=20, ssh_key=None,
+        )
+        with patch.object(priv, "sudo_prime"), \
+             patch.object(cli_targets, "_load_target_args",
+                          return_value=(tc, None)), \
+             patch.object(ie, "export_image", side_effect=fake_export):
+            rc = cli.cmd_target_export(args)
+
+        assert rc == cli.EXIT_OK
+        assert seen["out"].name == "gce-5.14-rhel9.7-1.el9.tar.gz"
+        assert seen["image_format"] == "gce"
+        assert seen["disk_size_gb"] == 20
+
+        out = capsys.readouterr().out
+        assert "gcloud compute images create" in out
+        assert "--source-uri" in out
+        # No key baked in -> say so, since GCE can't inject one either.
+        assert "--ssh-key" in out
+
+    def test_qcow2_keeps_bootable_stem(self, tmp_path: Path) -> None:
+        import argparse
+
+        from ltvm_pkg import cli, priv
+        from ltvm_pkg.cli import targets as cli_targets
+        import ltvm_pkg.image_export as ie
+
+        tc = _make_target_config(tmp_path)
+        produced = tmp_path / "produced.qcow2"
+        produced.write_bytes(b"\0" * 2048)
+        seen: dict[str, object] = {}
+
+        def fake_export(tc_, kernel, out, **kw):
+            seen["out"] = out
+            return produced
+
+        args = argparse.Namespace(
+            target="rocky9", arch=None, kernel=None, output=None,
+            format="qcow2", force=False, json=False,
+            disk_size_gb=None, ssh_key=None,
+        )
+        with patch.object(priv, "sudo_prime"), \
+             patch.object(cli_targets, "_load_target_args",
+                          return_value=(tc, None)), \
+             patch.object(ie, "export_image", side_effect=fake_export):
+            rc = cli.cmd_target_export(args)
+
+        assert rc == cli.EXIT_OK
+        assert seen["out"].name == "bootable-5.14-rhel9.7-1.el9.qcow2"

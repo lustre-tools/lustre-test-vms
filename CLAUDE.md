@@ -118,6 +118,34 @@ autologin, kdump pre-configured (vmlinuz + initramfs
 baked in at build time).  No kernel inside the image --
 QEMU passes it via `-kernel`.
 
+## Exporting Images
+
+`ltvm target export` repackages a built `base.ext4` + its
+kernel + a BIOS GRUB2 bootloader into one self-contained
+bootable disk -- for people (or clouds) that don't have
+the ltvm runtime.
+
+```bash
+ltvm target export rocky9                      # bootable qcow2
+ltvm target export rocky9 --format raw
+ltvm target export rocky9 --format gce \
+    --disk-size-gb 20 --ssh-key ~/.ssh/id_ed25519.pub
+```
+
+`--format gce` writes the `disk.raw` tar.gz (oldgnu format,
+whole-GiB disk) that Google Compute Engine's custom-image
+import requires, and fixes up the guest for it: an explicit
+NetworkManager DHCP profile for eth0, because ltvm's own
+images take their address from the `fc_ip=` kernel cmdline
+that GCE never passes.  The fstab `/` entry is rewritten to
+`UUID=` for *every* format -- the image ships `/dev/vda`,
+which is right only for ltvm's unpartitioned microvm boot.
+
+The image ships no Google guest agent, so GCE cannot inject
+SSH keys: pass `--ssh-key` to bake one in.  It also keeps
+ltvm's lab defaults (root login, empty password) -- don't
+open port 22 to the world.
+
 ## Lustre/Kernel Compatibility Gate
 
 `ltvm` checks Lustre tree compatibility with the target's

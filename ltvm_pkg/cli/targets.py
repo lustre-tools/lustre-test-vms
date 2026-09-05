@@ -713,6 +713,9 @@ def cmd_target_show(args: argparse.Namespace) -> int:
 # Subcommand: target export (bootable-disk packaging)
 # ------------------------------------------------------------------
 
+# Output extension per --format.  "gce" is a tarball, not a disk.
+_EXPORT_EXT = {"qcow2": "qcow2", "raw": "raw", "gce": "tar.gz"}
+
 
 def cmd_target_export(args: argparse.Namespace) -> int:
     use_json = args.json
@@ -740,7 +743,7 @@ def cmd_target_export(args: argparse.Namespace) -> int:
     kernel = getattr(args, "kernel", None)
     kernel_name = tc.resolve_kernel(kernel)
     fmt = args.format
-    ext = "qcow2" if fmt == "qcow2" else "raw"
+    ext = _EXPORT_EXT[fmt]
 
     if not use_json:
         _print_target_header(
@@ -751,11 +754,17 @@ def cmd_target_export(args: argparse.Namespace) -> int:
     if args.output:
         out = Path(args.output).expanduser().resolve()
     else:
-        out = tc.image_output_dir(kernel) / f"bootable-{kernel_name}.{ext}"
+        # gce assets get their own stem so they don't collide with the
+        # bootable-<kernel>.qcow2 that `target publish --image` looks for.
+        stem = "gce" if fmt == "gce" else "bootable"
+        out = tc.image_output_dir(kernel) / f"{stem}-{kernel_name}.{ext}"
 
+    ssh_key = getattr(args, "ssh_key", None)
     try:
         result = export_image(
             tc, kernel, out, image_format=fmt, force=args.force,
+            disk_size_gb=getattr(args, "disk_size_gb", None),
+            ssh_key=Path(ssh_key).expanduser() if ssh_key else None,
         )
     except FileExistsError as e:
         return _error(str(e), use_json,
@@ -771,7 +780,37 @@ def cmd_target_export(args: argparse.Namespace) -> int:
         "size_mb": round(result.stat().st_size / (1024 * 1024), 1),
     }
     _output(payload, use_json)
+    if fmt == "gce" and not use_json:
+        _print_gce_next_steps(result, tc.name, kernel_name,
+                              have_ssh_key=ssh_key is not None)
     return EXIT_OK
+
+
+def _print_gce_next_steps(
+    asset: Path, target: str, kernel_name: str, have_ssh_key: bool
+) -> None:
+    """Print the upload/import commands, plus the one caveat that
+    bites people: no guest agent means no metadata key injection."""
+    image_name = f"ltvm-{target}-{kernel_name}".lower().replace(".", "-")
+    print()
+    print("Next steps (GCE):")
+    print(f"  gcloud storage cp {asset} gs://YOUR_BUCKET/")
+    print(f"  gcloud compute images create {image_name} \\")
+    print(f"      --source-uri gs://YOUR_BUCKET/{asset.name}")
+    if not have_ssh_key:
+        print()
+        print(
+            "  Note: this image ships no Google guest agent, so GCE will "
+            "not inject\n"
+            "  your SSH keys.  Re-export with --ssh-key ~/.ssh/id_ed25519.pub "
+            "to bake\n"
+            "  one in, or reach the instance over the serial console."
+        )
+    print(
+        "  Note: the image keeps ltvm's lab defaults -- root login with an "
+        "empty\n"
+        "  password.  Do not expose port 22 to 0.0.0.0/0."
+    )
 
 
 # ------------------------------------------------------------------

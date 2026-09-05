@@ -789,17 +789,34 @@ def build_parser() -> argparse.ArgumentParser:
     tep = target_sub.add_parser(
         "export",
         parents=[common, kernel_arg],
-        help="Export base.ext4 + kernel as a bootable qcow2/raw disk",
+        help="Export base.ext4 + kernel as a bootable qcow2/raw disk, "
+        "or a Google Compute Engine image (--format gce)",
     )
     _add_target_arg(tep, required=True)
     tep.add_argument(
         "--output", "-o", default=None,
         help="Output file (default: "
-        "artifacts/<target>/<arch>/images/<kernel>/bootable-<kernel>.<ext>)",
+        "artifacts/<target>/<arch>/images/<kernel>/bootable-<kernel>.<ext>; "
+        "gce-<kernel>.tar.gz for --format gce)",
     )
     tep.add_argument(
-        "--format", choices=["qcow2", "raw"], default="qcow2",
-        help="Disk image format (default: qcow2)",
+        "--format", choices=["qcow2", "raw", "gce"], default="qcow2",
+        help="Output format (default: qcow2).  'gce' writes the "
+        "disk.raw tar.gz that Google Compute Engine's custom-image "
+        "import expects, and configures the guest for DHCP.",
+    )
+    tep.add_argument(
+        "--disk-size-gb", dest="disk_size_gb", type=int, default=None,
+        help="Grow the exported disk to this many GiB instead of "
+        "sizing it to the rootfs.  Must be at least as large as the "
+        "rootfs needs.",
+    )
+    tep.add_argument(
+        "--ssh-key", dest="ssh_key", default=None,
+        help="Public key file to append to root's authorized_keys "
+        "inside the image.  Recommended for --format gce: GCE's "
+        "metadata key injection needs a guest agent the image "
+        "doesn't ship.",
     )
     tep.add_argument(
         "--force", action="store_true",

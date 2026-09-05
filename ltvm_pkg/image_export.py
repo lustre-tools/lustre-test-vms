@@ -9,6 +9,12 @@ inside the image).
 GRUB2 bootloader into a single bootable disk image (qcow2 by default)
 that any plain QEMU or libvirt can boot with just `-drive file=...`.
 
+`--format gce` wraps that same disk as a Google Compute Engine
+custom image (`disk.raw` in an oldgnu-format tar.gz) and applies the
+guest tweaks GCE needs -- DHCP networking in place of ltvm's
+cmdline-assigned addresses, and a UUID-based fstab.  Upload the
+result to a GCS bucket and `gcloud compute images create ... --source-uri`.
+
 Uses losetup + mount, so every external command is invoked through
 ``sudo_run`` from ``ltvm_pkg.priv``.  The CLI wrapper primes sudo
 upfront so the user gets a single password prompt.  Tooling: parted,
@@ -38,6 +44,15 @@ _HEADROOM_MB = 512
 # Reserve the first 1 MiB for the MBR + post-MBR gap where GRUB's
 # core.img lives (matches the parted/grub default).
 _PART_OFFSET_MIB = 1
+
+# Formats `export_image` knows how to write.  "gce" is "raw", rounded
+# up to a whole GiB and tarred the way Google's image import wants.
+_FORMATS = ("qcow2", "raw", "gce")
+
+# GCE requires the image tarball to hold exactly one file, named
+# `disk.raw`, and requires its size to be a whole number of GiB.
+_GCE_DISK_NAME = "disk.raw"
+_MB_PER_GIB = 1024
 
 
 def _run(
@@ -94,7 +109,31 @@ def _which_or_die(names: list[str]) -> str:
     )
 
 
-def _check_host_tools() -> dict[str, str]:
+def _check_gnu_tar() -> None:
+    """Fail fast unless PATH's tar is GNU tar.
+
+    The GCE tarball must be in GNU (oldgnu) format with sparse
+    members; bsdtar -- the default `tar` on macOS and on some
+    minimal images -- can write neither, and would silently produce
+    a tarball Google's image import rejects.
+    """
+    if shutil.which("tar") is None:
+        raise RuntimeError(
+            "tar not found on PATH -- needed for --format gce"
+        )
+    r = subprocess.run(
+        ["tar", "--version"], capture_output=True, text=True, check=False
+    )
+    if "GNU tar" not in (r.stdout or ""):
+        found = (r.stdout or "").splitlines()
+        raise RuntimeError(
+            "GNU tar is required for --format gce (the GCE image tarball "
+            "must be oldgnu format) -- found "
+            f"{found[0] if found else 'an unrecognised tar'}"
+        )
+
+
+def _check_host_tools(image_format: str = "qcow2") -> dict[str, str]:
     """Verify every tool the export needs is installed."""
     missing = [
         t for t in ("parted", "mkfs.ext4", "losetup", "mount",
@@ -106,6 +145,8 @@ def _check_host_tools() -> dict[str, str]:
             f"missing host tool(s): {', '.join(missing)} -- "
             f"install parted, e2fsprogs, util-linux, qemu-utils"
         )
+    if image_format == "gce":
+        _check_gnu_tar()
     # grub2-install on RHEL/Rocky, grub-install on Debian/Ubuntu.
     grub = _which_or_die(["grub2-install", "grub-install"])
     return {"grub_install": grub}
@@ -181,12 +222,182 @@ def _fs_uuid(dev: str) -> str:
     return uuid
 
 
+def _sudo_read_text(path: Path, missing_ok: bool = False) -> str:
+    """Read *path*, falling back to sudo only when the user can't
+    read it directly (e.g. inside a root-owned mount).
+
+    Never uses ``Path.exists()`` to decide: under a root-owned 0700
+    directory that reports False for a file that is really there,
+    which would turn an append into a clobber.
+    """
+    try:
+        return path.read_text()
+    except FileNotFoundError:
+        if missing_ok:
+            return ""
+        raise
+    except PermissionError:
+        pass
+    r = sudo_run(["cat", str(path)], check=not missing_ok, quiet=True)
+    return r.stdout if r.returncode == 0 else ""
+
+
+def _rewrite_fstab_root(dst_mnt: Path, fs_uuid: str) -> None:
+    """Point the exported image's fstab "/" entry at *fs_uuid*.
+
+    The base image ships ``/dev/vda / ext4 ...`` because ltvm's own
+    microvm boot hands the rootfs over as one unpartitioned virtio
+    disk.  An exported disk is partitioned and its device name
+    depends on the hypervisor -- /dev/vda1 under virtio-blk,
+    /dev/sda1 on GCE's virtio-scsi, /dev/nvme0n1p1 on NVMe -- so any
+    literal device node is wrong somewhere.  The UUID is right
+    everywhere, and matches the root= the grub.cfg already emits.
+    """
+    fstab = dst_mnt / "etc" / "fstab"
+    lines = _sudo_read_text(fstab, missing_ok=True).splitlines()
+
+    out: list[str] = []
+    replaced = False
+    for line in lines:
+        fields = line.split()
+        if (not line.lstrip().startswith("#")
+                and len(fields) >= 2 and fields[1] == "/"):
+            fields[0] = f"UUID={fs_uuid}"
+            out.append("  ".join(fields))
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        out.append(f"UUID={fs_uuid}  /  ext4  defaults,noatime  0 1")
+    _sudo_write_text(fstab, "\n".join(out) + "\n")
+
+
+def _inject_ssh_key(dst_mnt: Path, pubkey: Path) -> None:
+    """Append *pubkey* to root's authorized_keys inside the image.
+
+    Appends rather than replaces: the base image already holds the
+    shared inter-VM ltvm key there, and dropping it would break
+    VM-to-VM ssh for anyone using the export as a cluster node.
+    """
+    key_text = pubkey.read_text().strip()
+    if not key_text:
+        raise ValueError(f"ssh key file is empty: {pubkey}")
+
+    ssh_dir = dst_mnt / "root" / ".ssh"
+    _ensure_dir(ssh_dir)
+    sudo_run(["chmod", "700", str(ssh_dir)], check=False, quiet=True)
+
+    auth = ssh_dir / "authorized_keys"
+    existing = _sudo_read_text(auth, missing_ok=True)
+    if key_text in existing:
+        return
+    if existing and not existing.endswith("\n"):
+        existing += "\n"
+    _sudo_write_text(auth, existing + key_text + "\n", mode=0o600)
+
+
+# NetworkManager keyfile for the GCE guest.  eth0 is the right name
+# because the grub.cfg we emit already pins net.ifnames=0/biosdevname=0.
+_GCE_NM_PROFILE = """\
+# Written by `ltvm target export --format gce`.
+[connection]
+id=ltvm-gce
+type=ethernet
+interface-name=eth0
+autoconnect=true
+autoconnect-priority=100
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=disabled
+"""
+
+_NM_UNIT_CANDIDATES = (
+    "usr/lib/systemd/system/NetworkManager.service",
+    "lib/systemd/system/NetworkManager.service",
+)
+
+
+def _apply_gce_guest_config(dst_mnt: Path) -> None:
+    """Make the rootfs usable as a GCE custom image.
+
+    ltvm images take their address from the kernel cmdline
+    (``fc_ip=``/``fc_gw=``, parsed by rc.local) because the microvm
+    boot path has no DHCP server.  GCE passes no ltvm cmdline and
+    hands out address, routes, DNS and the metadata server over DHCP
+    instead, so rc.local's network block is simply skipped and the
+    instance would boot with no networking at all.
+
+    Fix: an explicit NetworkManager profile for eth0.  Explicit is
+    what makes it work -- setup-network.sh sets ``no-auto-default=*``
+    to stop NM fighting rc.local, but that only suppresses NM's
+    *implicit* default wired connection, not a profile on disk.
+    """
+    nm_dir = dst_mnt / "etc" / "NetworkManager" / "system-connections"
+    _ensure_dir(nm_dir)
+    # NM ignores a keyfile that is group- or world-readable.
+    _sudo_write_text(
+        nm_dir / "ltvm-gce.nmconnection", _GCE_NM_PROFILE, mode=0o600
+    )
+
+    unit = next(
+        (c for c in _NM_UNIT_CANDIDATES if (dst_mnt / c).exists()), None
+    )
+    if unit is None:
+        log.warning(
+            "NetworkManager.service not found in the image; the GCE "
+            "instance may come up without networking"
+        )
+        return
+    # Offline `systemctl enable` for a WantedBy=multi-user.target unit is
+    # exactly this symlink -- doing it by hand avoids needing a host
+    # systemctl that understands --root.
+    wants = dst_mnt / "etc" / "systemd" / "system" / "multi-user.target.wants"
+    _ensure_dir(wants)
+    sudo_run(
+        ["ln", "-sf", "/" + unit, str(wants / "NetworkManager.service")],
+        check=False, quiet=True,
+    )
+
+
+def _round_up_gib_mb(size_mb: int) -> int:
+    """Round *size_mb* up to a whole GiB.  GCE rejects an image whose
+    disk.raw is not a whole number of gigabytes."""
+    return ((size_mb + _MB_PER_GIB - 1) // _MB_PER_GIB) * _MB_PER_GIB
+
+
+def _package_gce(raw: Path, output: Path) -> None:
+    """Pack *raw* into the tarball GCE's image import expects.
+
+    One member, named exactly ``disk.raw``, oldgnu tar format, gzip
+    compressed.  ``-S`` keeps the sparse regions sparse so a mostly
+    empty multi-GiB disk still packs in seconds instead of streaming
+    gigabytes of zeroes through gzip.  ``-C`` keeps the member name
+    bare -- a leading path component makes GCE reject the tarball.
+    """
+    if raw.name != _GCE_DISK_NAME:
+        raise RuntimeError(
+            f"GCE tarball member must be named {_GCE_DISK_NAME}, "
+            f"got {raw.name}"
+        )
+    log.info("Packing %s -> %s (oldgnu tar.gz)", raw.name, output)
+    subprocess.run(
+        ["tar", "--format=oldgnu", "-Sczf", str(output),
+         "-C", str(raw.parent), _GCE_DISK_NAME],
+        check=True,
+    )
+
+
 def export_image(
     target_config: "TargetConfig",
     kernel: str | None,
     output: Path,
     image_format: str = "qcow2",
     force: bool = False,
+    disk_size_gb: int | None = None,
+    ssh_key: Path | None = None,
 ) -> Path:
     """Build a self-contained bootable disk for the given target.
 
@@ -195,18 +406,29 @@ def export_image(
         kernel: optional kernel selector (short or full); defaults
                 to the target's default kernel.
         output: destination file path (parent will be created).
-        image_format: "qcow2" or "raw".
+        image_format: "qcow2", "raw", or "gce" (a disk.raw tar.gz for
+                Google Compute Engine's custom-image import).
         force: overwrite *output* if it exists.
+        disk_size_gb: grow the disk to this many GiB instead of
+                sizing it to the rootfs.  Must be at least as large
+                as the rootfs needs.
+        ssh_key: public key file to append to root's authorized_keys
+                inside the image.
 
     Returns:
         The final written path.
     """
-    if image_format not in ("qcow2", "raw"):
-        raise ValueError(f"unknown format: {image_format!r}")
+    if image_format not in _FORMATS:
+        raise ValueError(
+            f"unknown format: {image_format!r} "
+            f"(expected one of {', '.join(_FORMATS)})"
+        )
     if output.exists() and not force:
         raise FileExistsError(f"{output} exists; use --force to overwrite")
+    if ssh_key is not None and not ssh_key.exists():
+        raise FileNotFoundError(f"ssh key file not found: {ssh_key}")
 
-    tools = _check_host_tools()
+    tools = _check_host_tools(image_format)
     grub_install = tools["grub_install"]
 
     kernel_name = target_config.resolve_kernel(kernel)
@@ -238,6 +460,16 @@ def export_image(
 
     t0 = time.monotonic()
     size_mb = _image_size_mb(base_ext4, kdir)
+    if disk_size_gb is not None:
+        requested_mb = disk_size_gb * _MB_PER_GIB
+        if requested_mb < size_mb:
+            raise ValueError(
+                f"--disk-size-gb {disk_size_gb} is too small: this image "
+                f"needs at least {size_mb} MiB"
+            )
+        size_mb = requested_mb
+    if image_format == "gce":
+        size_mb = _round_up_gib_mb(size_mb)
     log.info(
         "Exporting %s (kernel %s) -> %s (%s, ~%d MiB)",
         target_config.name, kernel_name, output, image_format, size_mb,
@@ -311,6 +543,16 @@ def export_image(
         #    the mounted target fs; no chroot needed.
         fs_uuid = _fs_uuid(part)
         _write_grub_cfg(boot, kver, fs_uuid, grub_install=grub_install)
+
+        # 5a. Guest-side fixups, while the rootfs is still mounted.
+        #     The fstab rewrite is unconditional: /dev/vda is wrong for
+        #     every exported (partitioned) disk, not just GCE's.
+        _rewrite_fstab_root(dst_mnt, fs_uuid)
+        if image_format == "gce":
+            _apply_gce_guest_config(dst_mnt)
+        if ssh_key is not None:
+            _inject_ssh_key(dst_mnt, ssh_key)
+
         _run([
             grub_install,
             "--target=i386-pc",
@@ -329,6 +571,8 @@ def export_image(
         output.parent.mkdir(parents=True, exist_ok=True)
         if image_format == "raw":
             shutil.move(str(raw), str(output))
+        elif image_format == "gce":
+            _package_gce(raw, output)
         else:
             _run([
                 "qemu-img", "convert", "-f", "raw", "-O", "qcow2",

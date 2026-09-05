@@ -122,7 +122,8 @@ ltvm target clean <target>      Remove built artifacts
 ltvm target delete <target>     Delete artifacts (local; --remote for GitHub release)
 ltvm target validate <target>   Read-only Lustre/kernel compat check
 ltvm target fetch <target>      Download latest release tarballs
-ltvm target export <target>     Bake a bootable qcow2/raw (no ltvm runtime)
+ltvm target export <target>     Bake a bootable qcow2/raw, or a Google Cloud
+                                image (--format gce); no ltvm runtime needed
 ltvm target publish <target>    Bundle artifacts and upload to GitHub release
                                 (use --no-upload to produce tarballs locally)
 ```
