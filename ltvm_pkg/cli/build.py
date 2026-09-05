@@ -482,9 +482,11 @@ def cmd_build_kernel(args: argparse.Namespace) -> int:
     with _podman_machine_autostop() as autostop:
         kernel = getattr(args, "kernel", None)
 
-        # Deb-based targets don't need a Lustre tree for kernel builds
+        # Deb-based and kernel.org targets don't need a Lustre tree for
+        # kernel builds: their source is a distro package or an upstream
+        # tarball, and neither takes a Lustre patch series.
         lustre_tree = None
-        if not tc.kernel_deb_source:
+        if not tc.kernel_deb_source and not tc.is_upstream:
             lustre_tree, err_msg = _cli_attr("_resolve_lustre_tree")(args.lustre_tree)
             if err_msg:
                 return _error(

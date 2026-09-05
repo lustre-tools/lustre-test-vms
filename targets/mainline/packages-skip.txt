@@ -1,0 +1,28 @@
+# packages-skip.txt -- rocky10
+#
+# Per-target package skip list, applied on top of the per-arch
+# packages-skip-<arch>.txt.  Used for packages from the common lists
+# that exist on other RHEL/EPEL generations but aren't available on
+# this target (typically because EPEL10 is still catching up).
+#
+# Rationale matches the per-arch skip file: an explicit allowlist
+# preserves error signal -- a typo or genuine repo break still fails
+# the build instead of being silently dropped along with the known
+# gaps.
+#
+# One package per line.  Comments (#) and blank lines ignored.
+# Revisit when EPEL10 ships these.
+
+# pdsh landed in EPEL10 (pdsh-2.36-3.el10_3) but ONLY in the 10.3 /
+# latest branches -- the epel-release on a Rocky 10.1 base pins the
+# epel 10.2 branch via 'epel-z-10', which has no pdsh on either arch
+# (verified in the 10.1 container, 2026-08).  Keep skipping until the
+# base image moves to 10.3+.
+pdsh
+pdsh-rcmd-ssh
+# Verified absent on both x86_64 and aarch64 (EPEL10, 2026-08).
+# vmtouch is in EPEL8/9; fscrypt only ever landed in EPEL9.
+# Consequence: sanity-sec/sanity.sh vmtouch tests and the conf-sanity
+# encryption tests skip on rocky10.
+vmtouch
+fscrypt

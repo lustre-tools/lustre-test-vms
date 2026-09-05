@@ -123,6 +123,9 @@ def _kernel_build_jobs() -> int:
 
 INNER_SCRIPT = Path(__file__).parent / "kernel-build-inner.sh"
 INNER_SCRIPT_DEB = Path(__file__).parent / "kernel-build-inner-deb.sh"
+INNER_SCRIPT_UPSTREAM = (
+    Path(__file__).parent / "kernel-build-inner-upstream.sh"
+)
 
 
 def _kernel_outputs_complete(kernel_out: Path) -> bool:
@@ -926,7 +929,8 @@ def build_kernel(
 ) -> dict[str, object]:
     """Build a kernel for the given target.
 
-    Dispatches to the deb-based build path for debian-family targets
+    Dispatches to the kernel.org tarball path for upstream targets
+    (kernel_upstream set), the deb-based path for debian-family targets
     (kernel_deb_source set), or the SRPM-based path for RHEL-family.
 
     Args:
@@ -938,6 +942,11 @@ def build_kernel(
     Returns:
         dict with build metadata
     """
+    if target_config.is_upstream:
+        return _build_kernel_upstream(
+            target_config, force=force, kernel=kernel
+        )
+
     if target_config.kernel_deb_source:
         return _build_kernel_deb(target_config, force=force, kernel=kernel)
 
@@ -1007,6 +1016,121 @@ def _finalize_kernel_build(
     )
     log.info("Kernel build complete")
     return meta
+
+
+def _build_kernel_upstream(
+    target_config: TargetConfig,
+    force: bool = False,
+    kernel: str | None = None,
+) -> dict[str, object]:
+    """Build a vanilla kernel.org kernel from a source tarball.
+
+    ``kernel`` is a spec, not a version: "latest", "stable", "6.18" and
+    "7.2.3" are all accepted (see ltvm_pkg.upstream_kernel).  Moving
+    specs are resolved here, at build time, and the version they landed
+    on is folded into the staleness hash -- otherwise "latest" would
+    keep reusing the vmlinux it built the first time long after Linus
+    had tagged something newer.
+    """
+    from . import upstream_kernel as uk
+
+    spec = target_config._short_kernel_name(
+        kernel or target_config.default_kernel
+    )
+    cfg = target_config.kernel_upstream or {}
+    releases_url = str(cfg.get("releases_url", uk.RELEASES_URL))
+
+    rel = uk.resolve(spec, uk.fetch_releases(releases_url))
+    log.info("Kernel spec %r resolves to upstream %s", spec, rel.version)
+
+    # The resolved version has to reach the staleness hash: two builds
+    # of the spec "latest" are different kernels if Linus tagged in
+    # between, and nothing else in the hash would say so.
+    extra_hash = f"upstream:{rel.version}".encode()
+
+    if not force and not target_config.is_stale(
+        "kernel", kernel=spec, extra_hash=extra_hash
+    ):
+        log.info("Kernel is up to date (use force=True to rebuild)")
+        return kernel_status(
+            target_config, kernel=spec, extra_hash=extra_hash
+        )
+
+    # <spec>-<version>, matching the <short>-<full> convention the rest
+    # of ltvm resolves against, so `latest` and `6.18` keep separate
+    # directories even when they resolve to the same release.
+    full_name = f"{spec}-{rel.version}"
+    log.info("Kernel output directory: kernels/%s", full_name)
+
+    cache_dir = target_config.output_dir / "cache"
+    tarball = uk.download_tarball(rel, cache_dir)
+
+    image_tag = _ensure_container_image(target_config)
+
+    kernel_out = target_config.output_dir / "kernels" / full_name
+    kernel_out.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="ltvm-kbuild-") as staging_str:
+        staging = Path(staging_str)
+        (staging / "config.fragment").write_text(
+            _build_config_fragment(target_config)
+        )
+        shutil.copy2(
+            INNER_SCRIPT_UPSTREAM, staging / "kernel-build-inner-upstream.sh"
+        )
+        os.chmod(staging / "kernel-build-inner-upstream.sh", 0o755)
+        shutil.copy2(
+            TARGETS_DIR / "common" / "cross-compile-env.sh",
+            staging / "cross-compile-env.sh",
+        )
+
+        jobs = _kernel_build_jobs()
+        container_cmd = [
+            "podman",
+            "run",
+            "--rm",
+            "-v",
+            f"{staging}:/input/staging:ro,Z",
+            "-v",
+            f"{tarball.parent}:/input/cache:ro,Z",
+            "-v",
+            f"{kernel_out}:/output:Z",
+            "-v",
+            f"{_ccache_volume(target_config)}:/ccache:Z",
+            "-e",
+            f"JOBS={jobs}",
+            "-e",
+            f"KERNEL_TARBALL={tarball.name}",
+            "-e",
+            f"KERNEL_VERSION={rel.version}",
+            "-e",
+            f"TARGET_ARCH={target_config.arch}",
+            image_tag,
+            "-c",
+            "/input/staging/kernel-build-inner-upstream.sh",
+        ]
+
+        log.info(
+            "Starting upstream kernel build in container (j%d, linux %s)...",
+            jobs,
+            rel.version,
+        )
+        _run_kernel_podman(container_cmd, kernel_out)
+
+    return _finalize_kernel_build(
+        target_config,
+        kernel_out,
+        full_name,
+        spec,
+        patches_applied=0,
+        extra_meta={
+            "upstream_version": rel.version,
+            "upstream_source": rel.source,
+            "upstream_spec": spec,
+            "upstream_moniker": rel.moniker,
+        },
+        extra_hash=extra_hash,
+    )
 
 
 def _build_kernel_deb(

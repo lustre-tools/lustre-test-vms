@@ -294,8 +294,9 @@ class TestParseLdiskfsSeries:
 
 
 class _FakeTC:
-    """Minimal stand-in for TargetConfig -- validate_target only reads
-    .default_kernel, .lustre_mode and ._short_kernel_name."""
+    """Minimal stand-in for TargetConfig -- validate_target reads
+    .default_kernel, .lustre_mode, .kernel_deb_source, .is_upstream
+    and ._short_kernel_name."""
 
     def __init__(
         self,
@@ -303,10 +304,14 @@ class _FakeTC:
         lustre_mode: LustreMode,
         kernel_deb_source: str = "",
         declared_kernels: list[str] | None = None,
+        is_upstream: bool = False,
     ) -> None:
         self.default_kernel = lustre_target
         self.lustre_mode = lustre_mode
         self.kernel_deb_source = kernel_deb_source
+        # Distro targets, which is every case in this file; the
+        # kernel.org path has its own coverage in test_upstream_kernel.
+        self.is_upstream = is_upstream
         self._declared = declared_kernels or [lustre_target]
 
     def _short_kernel_name(self, name: str) -> str:

@@ -1,0 +1,12 @@
+# packages-os.txt -- Rocky 10 specific packages
+# Packages that are Rocky/RHEL specific or differ from other distros
+
+# Rocky base release and repo config
+rocky-release
+epel-release
+
+# kdump systemd service (kdump.service, kdumpctl, /etc/kdump.conf).
+# On EL10 this was split out of kexec-tools (which packages-base.txt
+# still lists for el8/el9); without it `systemctl enable kdump` in
+# setup-kdump.sh fails on a nonexistent unit.
+kdump-utils

@@ -242,7 +242,7 @@ def parse_target_in(tree: Path, series: str) -> TargetIn:
 
 
 def parse_ldiskfs_series(tree: Path) -> set[str]:
-    """Return series file stems under lustre/ldiskfs/kernel_patches/series/.
+    """Return series file stems under ldiskfs/kernel_patches/series/.
 
     Each stem is the filename without ``.series`` (e.g.
     ``ldiskfs-6.8.0-90-ubuntu24``, ``ldiskfs-5.14.0-427.13.1.el9``).
@@ -335,6 +335,10 @@ MatchedIn = Literal[
     "changelog_best_effort",
     "changelog_client_primary",
     "changelog_client_best_effort",
+    # A vanilla kernel.org kernel newer than anything lustre/ChangeLog
+    # lists.  Distinct from "not_listed": being ahead of the ChangeLog
+    # is the point of an upstream target, not a reason to refuse it.
+    "upstream_ahead",
     "not_listed",
 ]
 
@@ -380,6 +384,79 @@ def _kver_majmin(s: str) -> str | None:
     return f"{m.group(1)}.{m.group(2)}" if m else None
 
 
+# ------------------------------------------------------------------
+# Vanilla (kernel.org) ldiskfs series selection
+# ------------------------------------------------------------------
+
+# Ported from the "probably mainline" ladder at the end of
+# LDISKFS_LINUX_SERIES in config/lustre-build-ldiskfs.m4.  Lustre picks
+# the ldiskfs series for a vanilla kernel by version range, not by
+# filename, and the filename heuristic below cannot reproduce it: the
+# mainline series are named ``ldiskfs-6.18-ml``, with a dash, while the
+# heuristic looks for a ``ldiskfs-6.18.`` prefix with a dot and so
+# matches none of them.
+#
+# Each entry is (inclusive floor, series stem); the last entry whose
+# floor is <= the kernel version wins, and anything below the first
+# floor has no series at all.  The 5.4.22 floor is not a typo -- the
+# m4 hands (5.4.21, 5.10.0) to 5.4.136-ml while 5.4.21 itself gets
+# 5.4.21-ml, and versions are discrete, so 5.4.22 reproduces that
+# boundary exactly.
+#
+# Keep in sync with the m4 when Lustre adds a new -ml series; the
+# top entry is the catch-all for every kernel newer than it, which is
+# what lets an unreleased mainline kernel resolve at all.
+_VANILLA_LDISKFS_LADDER: tuple[tuple[str, str], ...] = (
+    ("5.4.0", "ldiskfs-5.4.0-ml"),
+    ("5.4.21", "ldiskfs-5.4.21-ml"),
+    ("5.4.22", "ldiskfs-5.4.136-ml"),
+    ("5.10.0", "ldiskfs-5.10.0-ml"),
+    ("6.1.0", "ldiskfs-6.1.38-ml"),
+    ("6.6.0", "ldiskfs-6.6-ml"),
+    ("6.12.0", "ldiskfs-6.12-ml"),
+    ("6.18.0", "ldiskfs-6.18-ml"),
+    ("6.19.0", "ldiskfs-7.0-ml"),
+)
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """Numeric tuple for a kernel version, ignoring any -rc suffix.
+
+    An -rc is treated as its base version: 7.3-rc1 selects the same
+    ldiskfs series 7.3 would, which is what Lustre's AS_VERSION_COMPARE
+    ladder does with the release string it is handed.
+    """
+    base = version.partition("-rc")[0]
+    parts = []
+    for chunk in base.split("."):
+        digits = ""
+        for ch in chunk:
+            if not ch.isdigit():
+                break
+            digits += ch
+        parts.append(int(digits) if digits else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
+
+
+def vanilla_ldiskfs_series(version: str) -> str | None:
+    """The ldiskfs series stem Lustre would pick for a vanilla kernel.
+
+    ``version`` is an upstream kernel version ("7.2.3", "6.18.49",
+    "7.3-rc1").  Returns the series stem without ``.series``, or None
+    for kernels older than the first series Lustre ships.
+    """
+    v = _version_tuple(version)
+    chosen: str | None = None
+    for floor, stem in _VANILLA_LDISKFS_LADDER:
+        if v >= _version_tuple(floor):
+            chosen = stem
+        else:
+            break
+    return chosen
+
+
 def _ldiskfs_series_matches(
     series_stems: set[str], kver_majmin: str | None
 ) -> str | None:
@@ -399,6 +476,35 @@ def _ldiskfs_series_matches(
     for stem in sorted(series_stems):
         if stem.startswith(prefix):
             return stem
+    return None
+
+
+# A kernel name for an upstream target is either a bare spec
+# ("latest", "6.18") or a built dir named ``<spec>-<version>``
+# ("latest-7.3-rc1", "6.18-6.18.49").  Only the version half can be
+# compared against ChangeLog, so pull it off the end.
+_UPSTREAM_VER_RE = re.compile(r"(\d+\.\d+(?:\.\d+)?(?:-rc\d+)?)$")
+
+
+def _upstream_kver(tc: TargetConfig, kernel: str | None) -> str | None:
+    """The concrete kernel.org version ``kernel`` names, if it names one.
+
+    Falls back to the version recorded by the last build when the
+    caller passed a moving spec ("latest") that no longer identifies a
+    version on its own, so validating a built target still compares
+    against what is actually on disk.
+    """
+    if kernel:
+        m = _UPSTREAM_VER_RE.search(kernel)
+        if m:
+            return m.group(1)
+    from .paths import load_meta_safe
+
+    meta = load_meta_safe(tc.meta_path("kernel", kernel))
+    if meta is not None:
+        v = meta.get("upstream_version")
+        if isinstance(v, str) and v:
+            return v
     return None
 
 
@@ -428,9 +534,14 @@ def validate_target(
     # which_patch / .target.in lookups are keyed on the short name.
     series = tc._short_kernel_name(kernel) if kernel else tc.default_kernel
 
-    # .target.in is a RHEL/SLES artifact; deb-source targets have no
-    # such file and get their kver from the distro source package.
-    if tc.kernel_deb_source:
+    # .target.in is a RHEL/SLES artifact; deb-source and kernel.org
+    # targets have no such file.  For an upstream target the kernel
+    # under build is a real kernel.org version, so prefer the resolved
+    # one the caller passed over the spec ("latest", "6.18") that named
+    # it -- a spec is not a version and cannot be compared against one.
+    if tc.is_upstream:
+        kver = _upstream_kver(tc, kernel) or series
+    elif tc.kernel_deb_source:
         kver = series
     else:
         try:
@@ -486,11 +597,31 @@ def validate_target(
                 ),
             )
         # Fallback: ldiskfs patches may ship under
-        # lustre/ldiskfs/kernel_patches/series/ without being listed in
-        # which_patch (e.g. some ubuntu/debian flows).
+        # ldiskfs/kernel_patches/series/ without being listed in
+        # which_patch (e.g. some ubuntu/debian flows, and every
+        # vanilla kernel).
         kver_mm = _kver_majmin(series) or _kver_majmin(kver)
         stems = parse_ldiskfs_series(lustre_tree)
-        match_stem = _ldiskfs_series_matches(stems, kver_mm)
+        if tc.is_upstream:
+            # A vanilla kernel is never in which_patch and its series is
+            # chosen by version range, not filename -- ask the ladder
+            # ported from Lustre's own configure.
+            match_stem = vanilla_ldiskfs_series(kver)
+            if match_stem is not None and match_stem not in stems:
+                return ValidationResult(
+                    status="refuse",
+                    mode=mode,
+                    kernel_version=kver,
+                    matched_in="not_listed",
+                    message=(
+                        f"kernel {kver} maps to ldiskfs series "
+                        f"{match_stem!r}, which this Lustre tree does "
+                        f"not ship -- the tree predates server support "
+                        f"for this kernel"
+                    ),
+                )
+        else:
+            match_stem = _ldiskfs_series_matches(stems, kver_mm)
         if match_stem is not None:
             bt = kernel_build_tree
             sysfs_c = bt / "fs" / "ext4" / "sysfs.c" if bt else None
@@ -504,7 +635,7 @@ def validate_target(
                         kernel_version=kver,
                         matched_in="ldiskfs_series",
                         message=(
-                            f"matched ldiskfs series file {match_stem!r}; "
+                            f"ldiskfs series {match_stem!r}; "
                             f"all {len(patches)} patches dry-applied cleanly "
                             f"against {bt}"
                         ),
@@ -528,15 +659,20 @@ def validate_target(
                 if bt is None
                 else "patch dry-apply not run (kernel build-tree incomplete)"
             )
+            how = (
+                "selected by Lustre's own mainline version ladder"
+                if tc.is_upstream
+                else f"matched by filename prefix ldiskfs-{kver_mm}."
+            )
             return ValidationResult(
                 status="ok",
                 mode=mode,
                 kernel_version=kver,
                 matched_in="ldiskfs_series",
                 message=(
-                    f"matched ldiskfs series file {match_stem!r} under "
-                    f"lustre/ldiskfs/kernel_patches/series/ for kernel "
-                    f"{kver} (prefix ldiskfs-{kver_mm}.); {no_bt_note}"
+                    f"ldiskfs series {match_stem!r} under "
+                    f"ldiskfs/kernel_patches/series/ for kernel "
+                    f"{kver} ({how}); {no_bt_note}"
                 ),
             )
         return ValidationResult(
@@ -547,7 +683,7 @@ def validate_target(
             message=(
                 f"{series} is not listed in lustre/kernel_patches/"
                 f"which_patch and no matching ldiskfs series file "
-                f"found under lustre/ldiskfs/kernel_patches/series/ "
+                f"found under ldiskfs/kernel_patches/series/ "
                 f"for kernel {kver}"
             ),
         )
@@ -650,6 +786,22 @@ def validate_target(
                         f"{declared})"
                     ),
                 )
+        if tc.is_upstream:
+            # Building against a kernel Lustre has not tested is the
+            # entire purpose of an upstream target -- refusing would
+            # mean --force-compat on every single invocation, which
+            # tells the user nothing they did not already know.
+            return ValidationResult(
+                status="best_effort",
+                mode=mode,
+                kernel_version=kver,
+                matched_in="upstream_ahead",
+                message=(
+                    f"kernel {kver} is a vanilla kernel.org kernel that "
+                    f"lustre/ChangeLog does not list; build breakage is "
+                    f"expected and is what this target exists to find"
+                ),
+            )
         return ValidationResult(
             status="refuse",
             mode=mode,

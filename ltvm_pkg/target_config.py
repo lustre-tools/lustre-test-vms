@@ -73,7 +73,8 @@ _DEFAULTS = {
 # input hash via base_data -- the worst of both worlds.
 _KNOWN_TARGET_KEYS = frozenset({
     "arch", "os_family", "os_name", "os_version", "container_image",
-    "configure_args", "default_mem", "kernel_deb_source", "kernels",
+    "configure_args", "default_mem", "kernel_deb_source",
+    "kernel_upstream", "kernels",
     "lustre", "srpm_url", "status", "variants",
 })
 _KNOWN_KERNELS_KEYS = frozenset({"available", "config", "default"})
@@ -595,6 +596,29 @@ class TargetConfig:
         return str(v) if v is not None else None
 
     @property
+    def kernel_upstream(self) -> dict[str, Any] | None:
+        """kernel.org source config, or None if this isn't an upstream target.
+
+        Presence of the ``kernel_upstream`` block is what makes a target
+        build vanilla kernel.org tarballs instead of a distro SRPM or
+        linux-source deb.  See ltvm_pkg.upstream_kernel.
+        """
+        v = self._data.get("kernel_upstream")
+        if v is None:
+            return None
+        if not isinstance(v, dict):
+            raise ValueError(
+                f"target {self.name!r}: kernel_upstream must be a mapping, "
+                f"got {type(v).__name__}"
+            )
+        return dict(v)
+
+    @property
+    def is_upstream(self) -> bool:
+        """True when kernels for this target come from kernel.org."""
+        return self._data.get("kernel_upstream") is not None
+
+    @property
     def configure_args(self) -> list[str]:
         """Extra configure args specific to this target (e.g. --with-o2ib=no)."""
         v = self._data.get("configure_args", [])
@@ -919,11 +943,12 @@ class TargetConfig:
             # os_family actually invokes -- editing the deb script
             # shouldn't invalidate every RHEL kernel and vice versa.
             ltvm_pkg_dir = Path(__file__).parent
-            inner_name = (
-                "kernel-build-inner-deb.sh"
-                if self.os_family == "debian"
-                else "kernel-build-inner.sh"
-            )
+            if self.is_upstream:
+                inner_name = "kernel-build-inner-upstream.sh"
+            elif self.os_family == "debian":
+                inner_name = "kernel-build-inner-deb.sh"
+            else:
+                inner_name = "kernel-build-inner.sh"
             inner_path = ltvm_pkg_dir / inner_name
             if inner_path.exists():
                 h.update(inner_path.read_bytes())

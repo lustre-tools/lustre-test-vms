@@ -120,6 +120,46 @@ targets:
     os_version: '10.1'
     srpm_url: https://dl.rockylinux.org/pub/rocky/10/BaseOS/source/tree/Packages/k
     status: working
+  # Vanilla kernel.org kernels on a Rocky 10 userspace.  Exists to get
+  # Lustre building and running against mainline before any distro
+  # ships it -- so it is expected to be ahead of lustre/ChangeLog, and
+  # the compat gate warns rather than refusing for kernels newer than
+  # anything Lustre lists (see lustre_compat.validate_target).
+  #
+  # server_ldiskfs, not client: Lustre ships ldiskfs series for vanilla
+  # kernels (ldiskfs-6.18-ml, ldiskfs-7.0-ml, ...) and its configure
+  # maps any kernel >= 6.19 onto 7.0-ml.  lustre_compat's
+  # vanilla_ldiskfs_series() is a port of that ladder.
+  #
+  # Kernels are specs, not versions -- see ltvm_pkg/upstream_kernel.py.
+  # `latest` and the monikers move whenever kernel.org publishes, and
+  # the version each resolved to is folded into the kernel staleness
+  # hash so a moved alias rebuilds instead of reusing a stale vmlinux.
+  mainline:
+    container_image: quay.io/rockylinux/rockylinux:10.1
+    default_mem: 4096
+    kernel_upstream:
+      releases_url: https://www.kernel.org/releases.json
+    kernels:
+      available:
+      # Moving aliases, resolved against kernel.org at build time.
+      - latest      # newest mainline -rc == closest tag to Linus HEAD
+      - stable      # newest stable release
+      - longterm    # newest longterm release
+      # Series pins -- newest point release kernel.org lists for each.
+      - '7.0'
+      - '6.18'
+      config:
+        CONFIG_XEN_PVH: y
+      # `stable` rather than `latest`: the default build should be a
+      # finished release.  Ask for `latest` explicitly to chase -rcs.
+      default: stable
+    lustre:
+      mode: server_ldiskfs
+    os_family: rhel
+    os_name: rocky
+    os_version: '10.1'
+    status: experimental
   ubuntu2404:
     # --with-o2ib=no is NOT needed here: it has been hard-coded in the
     # base configure line (lustre_build.py) for every target since
