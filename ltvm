@@ -1315,6 +1315,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_make_common(sp)
     sp.add_argument(
+        "--lustre-tree",
+        default=None,
+        help="Path to the Lustre source tree (default: cwd).  Required "
+        "because make-uninstall is the other half of make-install, "
+        "which is a source-tree command.",
+    )
+    sp.add_argument(
         "--no-unload",
         dest="no_unload",
         action="store_true",

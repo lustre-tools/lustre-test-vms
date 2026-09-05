@@ -209,15 +209,32 @@ ltvm make-reinstall --lustre-tree ~/lustre-release
 The build still happens in the target's build container
 (the VM image ships the runtime packages, not the
 toolchain), so the node needs podman plus a
-`ltvm target fetch <target>` first.  The target is read
-from `/etc/ltvm-image.json`, which `ltvm build image` bakes
-into every image; `/etc/os-release` is the fallback for
-older images, and `--target` overrides both.
+`ltvm target fetch <target>` first.
 
-`make-install` refuses to run on a machine with no image
-stamp -- it unpacks a tree onto `/`, and typing it on your
-build host would scatter Lustre across your workstation.
-`--force` overrides.
+**Two preconditions**, both enforced for all three
+commands: you must be on a machine ltvm built, and inside
+a Lustre source tree.  They unpack a tree onto `/`, and
+the machine where you'd most likely type one by accident
+is your build host.  `--force` overrides the first.
+
+Being an ltvm machine is established by any of three, in
+order:
+
+1. `/etc/ltvm-image.json`, baked in by `ltvm build image`
+   -- authoritative, and the only one that names the
+   variant and kernel;
+2. ltvm's kernel cmdline (`fc_ip=` / `fc_name=`), which
+   `qemu_run` passes -- this is what identifies every VM
+   from an image built before the stamp existed;
+3. ltvm's setup scripts under `/usr/local/sbin` -- what
+   identifies a cloud node, which gets no ltvm cmdline.
+
+Target resolution prefers the stamp, then `--target`, then
+an `/etc/os-release` guess -- and an ambiguous guess
+(rocky9 vs rocky9-64k) is an error asking for `--target`,
+not a coin flip.  Without a stamp the kernel is matched to
+whatever is **running** rather than the target's default,
+since modules built for the wrong release won't load.
 
 `make-uninstall` works from the manifest at
 `/var/lib/ltvm/lustre-install.json` that install writes, not
@@ -226,9 +243,16 @@ tree), so it removes exactly what ltvm put there.  It
 unloads Lustre modules first and refuses if they won't
 unload; `--no-unload` and `--force` override.
 
-Verified end-to-end against a real rootfs by
-[tests/e2e/local_install_rootfs.py](tests/e2e/local_install_rootfs.py)
--- run it only in a throwaway machine.
+Verified end-to-end by three scripts under `tests/e2e/`
+(none named `test_*.py` -- they write to `/`, so run them
+only in a throwaway machine):
+[local_install_rootfs.py](tests/e2e/local_install_rootfs.py)
+(any Linux rootfs),
+[make_install_vm.py](tests/e2e/make_install_vm.py) (a real
+Lustre DESTDIR in a real ltvm VM: depmod, `modprobe
+lustre`, then unloading it again), and
+[export_pipeline_rootfs.py](tests/e2e/export_pipeline_rootfs.py)
+(the real `target export` pipeline).
 
 ### Clusters
 

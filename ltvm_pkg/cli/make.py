@@ -27,6 +27,7 @@ from ltvm_pkg.local_install import (
     LocalImage,
     LocalInstallError,
     MANIFEST_PATH,
+    check_in_lustre_tree,
     check_is_ltvm_machine,
     check_kernel_match,
     install_staging_into_root,
@@ -49,12 +50,29 @@ def _cli_attr(name: str) -> Any:
     return getattr(_cli, name)
 
 
+def _guard(
+    args: argparse.Namespace, use_json: bool
+) -> tuple[tuple[str, Path] | None, int | None]:
+    """Both preconditions, for every make-* command.
+
+    They only make sense on a machine ltvm built (they write to /) and
+    from inside a Lustre checkout (install builds what the tree holds;
+    uninstall is the other half of that pair).  Returns
+    ((evidence, tree), None) or (None, exit_code).
+    """
+    try:
+        evidence = check_is_ltvm_machine(force=getattr(args, "force", False))
+        tree = check_in_lustre_tree(getattr(args, "lustre_tree", None))
+    except LocalInstallError as e:
+        return None, _error(str(e), use_json)
+    return (evidence, tree), None
+
+
 def _resolve_machine(
     args: argparse.Namespace, use_json: bool
 ) -> tuple[LocalImage | None, int | None]:
-    """Guard + identify.  Returns (image, error_exit_code)."""
+    """Identify which target this machine corresponds to."""
     try:
-        check_is_ltvm_machine(force=getattr(args, "force", False))
         image = resolve_local_image(
             explicit_target=getattr(args, "target", None),
             explicit_kernel=getattr(args, "kernel", None),
@@ -66,7 +84,8 @@ def _resolve_machine(
 
 
 def _build_lustre_locally(
-    args: argparse.Namespace, image: LocalImage, use_json: bool
+    args: argparse.Namespace, image: LocalImage, lustre_tree: Path,
+    use_json: bool,
 ) -> tuple[dict | None, int | None]:
     """`make install DESTDIR=<staging>` inside the build container.
 
@@ -78,7 +97,6 @@ def _build_lustre_locally(
         _podman_machine_autostop,
         _preflight_container,
         _preflight_podman,
-        _resolve_lustre_tree,
     )
     from ltvm_pkg.target_config import LustreMode, TargetConfig
 
@@ -86,16 +104,6 @@ def _build_lustre_locally(
         tc = TargetConfig(image.target, arch=image.arch, variant=image.variant)
     except (ValueError, KeyError) as e:
         return None, _error(f"Unknown target {image.target!r}: {e}", use_json)
-
-    lustre_tree, err_msg = _resolve_lustre_tree(
-        getattr(args, "lustre_tree", None)
-    )
-    if err_msg:
-        return None, _error(
-            err_msg, use_json,
-            hint="Pass --lustre-tree or run from a Lustre source tree",
-        )
-    assert lustre_tree is not None
 
     build_tree = tc.kernel_output_dir(kernel=image.kernel) / "build-tree"
     if not build_tree.is_dir():
@@ -149,17 +157,25 @@ def _build_lustre_locally(
 
 
 def _do_install(args: argparse.Namespace, use_json: bool) -> int:
+    guard, err = _guard(args, use_json)
+    if err is not None:
+        return err
+    assert guard is not None
+    evidence, lustre_tree = guard
+
     image, err = _resolve_machine(args, use_json)
     if err is not None:
         return err
     assert image is not None
 
     if not use_json:
+        print(f"  ltvm machine: {evidence}")
+        print(f"  Lustre tree:  {lustre_tree}")
         print(f"  Machine: {image.target} ({image.arch}, variant "
               f"{image.variant}, kernel {image.kernel}) "
               f"[detected via {image.source}]")
 
-    meta, err = _build_lustre_locally(args, image, use_json)
+    meta, err = _build_lustre_locally(args, image, lustre_tree, use_json)
     if err is not None:
         return err
     assert meta is not None
@@ -204,13 +220,12 @@ def _do_install(args: argparse.Namespace, use_json: bool) -> int:
 def _do_uninstall(
     args: argparse.Namespace, use_json: bool, missing_ok: bool = False
 ) -> int:
-    # Only the guard here: the manifest already records everything
-    # uninstall needs, so a target that has since changed in
-    # targets.yaml must not block removing files we put on the disk.
-    try:
-        check_is_ltvm_machine(force=getattr(args, "force", False))
-    except LocalInstallError as e:
-        return _error(str(e), use_json)
+    # Guards only: the manifest already records everything uninstall
+    # needs, so a target that has since changed in targets.yaml must
+    # not block removing files we put on the disk.
+    _, err = _guard(args, use_json)
+    if err is not None:
+        return err
 
     try:
         manifest = read_manifest()

@@ -134,12 +134,18 @@ def _check_gnu_tar() -> None:
 
 
 def _check_host_tools(image_format: str = "qcow2") -> dict[str, str]:
-    """Verify every tool the export needs is installed."""
-    missing = [
-        t for t in ("parted", "mkfs.ext4", "losetup", "mount",
-                    "umount", "qemu-img", "e2fsck", "blkid")
-        if shutil.which(t) is None
-    ]
+    """Verify every tool the export needs is installed.
+
+    Per-format, not one fixed list: only the qcow2 path shells out to
+    qemu-img (raw is a move, gce is a tar), so demanding qemu-utils on
+    a node that just wants a GCE image is a install-this-for-nothing
+    error.
+    """
+    needed = ["parted", "mkfs.ext4", "losetup", "mount", "umount",
+              "e2fsck", "blkid"]
+    if image_format == "qcow2":
+        needed.append("qemu-img")
+    missing = [t for t in needed if shutil.which(t) is None]
     if missing:
         raise RuntimeError(
             f"missing host tool(s): {', '.join(missing)} -- "

@@ -69,6 +69,19 @@ _NEVER_PRUNE = frozenset((
 ))
 
 
+# Files the image build drops in that only ltvm puts there.  These are
+# what identify a machine whose image predates the stamp, and a cloud
+# node, which gets no ltvm kernel cmdline.
+_LTVM_IMAGE_MARKERS = (
+    Path("/usr/local/sbin/setup-lnet-config.sh"),
+    Path("/usr/local/sbin/setup-nic-softroce.sh"),
+)
+
+# What a Lustre source tree must contain.  Same shape cmd_deploy
+# checks for, so "not a Lustre tree" means the same thing everywhere.
+_LUSTRE_TREE_MARKERS = ("configure.ac", "lustre", "lnet")
+
+
 class LocalInstallError(RuntimeError):
     """Anything that should surface to the CLI as a clean error."""
 
@@ -186,14 +199,49 @@ def running_kernel() -> str:
     return platform.release()
 
 
-def check_is_ltvm_machine(force: bool = False) -> None:
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text()
+    except OSError:
+        return ""
+
+
+def ltvm_machine_evidence() -> str | None:
+    """Say why we believe ltvm produced this machine, or None.
+
+    Three independent forms, because no single one covers every
+    machine that legitimately runs make-install:
+
+    * the image stamp -- authoritative, but only on images built
+      after it was introduced;
+    * ltvm's kernel cmdline -- qemu_run hands the guest its address
+      as ``fc_ip=``/``fc_name=``, which proves the ltvm *runtime*
+      booted us, and covers every pre-stamp VM;
+    * ltvm's own setup scripts in the rootfs -- proves the *image*
+      is ltvm's even when ltvm isn't what booted it, which is the
+      case for a cloud node from `target export`.
+    """
+    if IMAGE_STAMP_PATH.exists():
+        return f"image stamp {IMAGE_STAMP_PATH}"
+
+    cmdline = _read_text(Path("/proc/cmdline"))
+    if "fc_ip=" in cmdline or "fc_name=" in cmdline:
+        return "ltvm kernel cmdline (fc_ip=/fc_name=)"
+
+    for marker in _LTVM_IMAGE_MARKERS:
+        if marker.exists():
+            return f"ltvm image marker {marker}"
+    return None
+
+
+def check_is_ltvm_machine(force: bool = False) -> str:
     """Refuse to run anywhere that isn't a machine ltvm built.
 
-    make-install unpacks a tree onto `/`.  On the build host -- which
+    make-install unpacks a tree onto `/`.  On a build host -- which
     is where someone is most likely to type it by accident -- that
     means scattering Lustre binaries and modules across their
-    workstation.  The image stamp is the evidence that we're on a
-    machine whose whole filesystem is disposable.
+    workstation.  So we require positive evidence, and say which
+    piece of it convinced us.
     """
     if platform.system() != "Linux":
         raise LocalInstallError(
@@ -201,21 +249,45 @@ def check_is_ltvm_machine(force: bool = False) -> None:
             f"(this is {platform.system()}).  To install into a VM from "
             f"a build host, use: ltvm deploy-lustre <vm>"
         )
-    if IMAGE_STAMP_PATH.exists():
-        return
+    evidence = ltvm_machine_evidence()
+    if evidence is not None:
+        return evidence
     if force:
         log.warning(
-            "No %s -- this does not look like a machine built from an "
-            "ltvm image, but --force was given.  Installing into / anyway.",
-            IMAGE_STAMP_PATH,
+            "This does not look like a machine ltvm built, but --force "
+            "was given.  Installing into / anyway."
         )
-        return
+        return "forced"
     raise LocalInstallError(
-        f"This machine does not look like one ltvm built ({IMAGE_STAMP_PATH} "
-        f"is missing), and make-install installs Lustre into /.\n"
-        f"  To install into a VM from a build host: ltvm deploy-lustre <vm>\n"
-        f"  To install here anyway:                 add --force"
+        "This machine does not look like one ltvm built: no "
+        f"{IMAGE_STAMP_PATH}, no ltvm kernel cmdline, and none of "
+        "ltvm's setup scripts under /usr/local/sbin.  make-install "
+        "installs Lustre into /.\n"
+        "  To install into a VM from a build host: ltvm deploy-lustre <vm>\n"
+        "  To install here anyway:                 add --force"
     )
+
+
+def check_in_lustre_tree(path: Path | None = None) -> Path:
+    """Require that we are in (or were pointed at) a Lustre checkout.
+
+    make-install and make-uninstall are both source-tree commands:
+    install builds what the tree contains, and uninstall is the
+    matching half of that pair.  Running either from somewhere else
+    is a mistake worth catching before anything touches /.
+    """
+    tree = (Path(path).expanduser().resolve() if path else Path.cwd())
+    if not tree.is_dir():
+        raise LocalInstallError(f"Not a directory: {tree}")
+    missing = [m for m in _LUSTRE_TREE_MARKERS if not (tree / m).exists()]
+    if missing:
+        raise LocalInstallError(
+            f"{tree} is not a Lustre source tree (missing: "
+            f"{', '.join(missing)}).\n"
+            f"  Run this from inside your Lustre checkout, or pass "
+            f"--lustre-tree <path>."
+        )
+    return tree
 
 
 def resolve_local_image(
@@ -268,7 +340,17 @@ def resolve_local_image(
     except (ValueError, KeyError) as e:
         raise LocalInstallError(f"Unknown target {target!r}: {e}") from e
 
-    kernel = tc.resolve_kernel(explicit_kernel or image.kernel or None)
+    wanted = explicit_kernel or image.kernel or None
+    if wanted is None:
+        # No stamp and no --kernel: prefer whatever is actually
+        # running over the target's default.
+        wanted = kernel_dir_matching_running(tc)
+        if wanted is not None:
+            log.info(
+                "Matched running kernel %s to built kernel %s",
+                running_kernel(), wanted,
+            )
+    kernel = tc.resolve_kernel(wanted)
     return LocalImage(
         target=target,
         arch=tc.arch,
@@ -278,6 +360,31 @@ def resolve_local_image(
         os_family=tc.os_family,
         source="explicit" if explicit_target else image.source,
     )
+
+
+def kernel_dir_matching_running(tc) -> str | None:
+    """Find the built kernel whose release matches the running one.
+
+    Only used when nothing else names a kernel.  The alternative --
+    falling back to the target's *default* kernel -- is wrong on any
+    machine not booted on that default, and produces modules the
+    running kernel silently refuses to load.  Reads each candidate's
+    build-tree kernel.release rather than pattern-matching the
+    directory name, because the running release carries suffixes the
+    artifact name does not (e.g. `_lustre`).
+    """
+    running = running_kernel()
+    kernels_dir = Path(tc.output_dir) / "kernels"
+    if not kernels_dir.is_dir():
+        return None
+    for d in sorted(kernels_dir.iterdir()):
+        rel = d / "build-tree" / "include" / "config" / "kernel.release"
+        try:
+            if rel.read_text().strip() == running:
+                return d.name
+        except OSError:
+            continue
+    return None
 
 
 def check_kernel_match(image: LocalImage, kver: str) -> str | None:

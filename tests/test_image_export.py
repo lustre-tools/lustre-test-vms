@@ -870,3 +870,45 @@ class TestGceCliWiring:
 
         assert rc == cli.EXIT_OK
         assert seen["out"].name == "bootable-5.14-rhel9.7-1.el9.qcow2"
+
+
+class TestHostToolsAreFormatSpecific:
+    """Only the qcow2 path runs qemu-img: raw moves the file, gce tars
+    it.  Demanding qemu-utils for those is an install-for-nothing."""
+
+    def _which(self, absent: str):
+        def which(name: str) -> str | None:
+            return None if name == absent else f"/u/bin/{name}"
+        return which
+
+    def test_gce_does_not_need_qemu_img(self) -> None:
+        import ltvm_pkg.image_export as ie
+
+        with patch.object(ie.shutil, "which",
+                          side_effect=self._which("qemu-img")), \
+             patch.object(ie, "_check_gnu_tar"):
+            ie._check_host_tools("gce")  # no raise
+
+    def test_raw_does_not_need_qemu_img(self) -> None:
+        import ltvm_pkg.image_export as ie
+
+        with patch.object(ie.shutil, "which",
+                          side_effect=self._which("qemu-img")):
+            ie._check_host_tools("raw")  # no raise
+
+    def test_qcow2_still_needs_qemu_img(self) -> None:
+        import ltvm_pkg.image_export as ie
+
+        with patch.object(ie.shutil, "which",
+                          side_effect=self._which("qemu-img")):
+            with pytest.raises(RuntimeError, match="qemu-img"):
+                ie._check_host_tools("qcow2")
+
+    def test_core_tools_required_for_every_format(self) -> None:
+        import ltvm_pkg.image_export as ie
+
+        for fmt in ("qcow2", "raw", "gce"):
+            with patch.object(ie.shutil, "which",
+                              side_effect=self._which("losetup")):
+                with pytest.raises(RuntimeError, match="losetup"):
+                    ie._check_host_tools(fmt)

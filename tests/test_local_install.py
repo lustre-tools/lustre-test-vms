@@ -41,6 +41,32 @@ def _stamp(**over) -> dict:
     return base
 
 
+def _lustre_tree(tmp_path: Path, name: str = "lustre-release") -> Path:
+    """Minimal tree that satisfies check_in_lustre_tree."""
+    tree = tmp_path / name
+    (tree / "lustre" / "kernel_patches").mkdir(parents=True)
+    (tree / "lnet").mkdir(parents=True)
+    (tree / "configure.ac").write_text("AC_INIT([lustre],[2.17])\n")
+    return tree
+
+
+def _no_evidence(tmp_path: Path):
+    """Patch out every form of ltvm-machine evidence.
+
+    Needed because two of the three are absolute host paths: a Linux
+    dev box running these tests could genuinely have /proc/cmdline and
+    /usr/local/sbin, and the "refuses" tests must not depend on it.
+    """
+    import ltvm_pkg.local_install as li
+
+    return [
+        patch.object(li.platform, "system", return_value="Linux"),
+        patch.object(li, "IMAGE_STAMP_PATH", tmp_path / "absent.json"),
+        patch.object(li, "_LTVM_IMAGE_MARKERS", (tmp_path / "absent.sh",)),
+        patch.object(li, "_read_text", return_value=""),
+    ]
+
+
 def _write_stamp(tmp_path: Path, **over) -> Path:
     p = tmp_path / "ltvm-image.json"
     p.write_text(json.dumps(_stamp(**over)))
@@ -172,40 +198,125 @@ class TestMachineGuard:
             with pytest.raises(li.LocalInstallError, match="only runs on Linux"):
                 li.check_is_ltvm_machine()
 
-    def test_refuses_without_stamp(self, tmp_path: Path) -> None:
+    def test_refuses_without_any_evidence(self, tmp_path: Path) -> None:
         """The whole point: typing make-install on a build host must
         not scatter Lustre across the user's workstation."""
         import ltvm_pkg.local_install as li
+        from contextlib import ExitStack
 
-        with patch.object(li.platform, "system", return_value="Linux"), \
-             patch.object(li, "IMAGE_STAMP_PATH", tmp_path / "absent.json"):
+        with ExitStack() as st:
+            for cm in _no_evidence(tmp_path):
+                st.enter_context(cm)
             with pytest.raises(li.LocalInstallError,
                                match="does not look like one ltvm built"):
                 li.check_is_ltvm_machine()
 
     def test_error_points_at_deploy_lustre(self, tmp_path: Path) -> None:
         import ltvm_pkg.local_install as li
+        from contextlib import ExitStack
 
-        with patch.object(li.platform, "system", return_value="Linux"), \
-             patch.object(li, "IMAGE_STAMP_PATH", tmp_path / "absent.json"):
+        with ExitStack() as st:
+            for cm in _no_evidence(tmp_path):
+                st.enter_context(cm)
             with pytest.raises(li.LocalInstallError) as e:
                 li.check_is_ltvm_machine()
         assert "deploy-lustre" in str(e.value)
 
     def test_force_overrides(self, tmp_path: Path) -> None:
         import ltvm_pkg.local_install as li
+        from contextlib import ExitStack
 
-        with patch.object(li.platform, "system", return_value="Linux"), \
-             patch.object(li, "IMAGE_STAMP_PATH", tmp_path / "absent.json"):
-            li.check_is_ltvm_machine(force=True)  # no raise
+        with ExitStack() as st:
+            for cm in _no_evidence(tmp_path):
+                st.enter_context(cm)
+            assert li.check_is_ltvm_machine(force=True) == "forced"
 
-    def test_passes_with_stamp(self, tmp_path: Path) -> None:
+    def test_stamp_is_evidence(self, tmp_path: Path) -> None:
         import ltvm_pkg.local_install as li
 
-        stamp = _write_stamp(tmp_path)
         with patch.object(li.platform, "system", return_value="Linux"), \
-             patch.object(li, "IMAGE_STAMP_PATH", stamp):
-            li.check_is_ltvm_machine()  # no raise
+             patch.object(li, "IMAGE_STAMP_PATH", _write_stamp(tmp_path)):
+            assert "image stamp" in li.check_is_ltvm_machine()
+
+    def test_ltvm_kernel_cmdline_is_evidence(self, tmp_path: Path) -> None:
+        """Every VM built before the stamp existed still proves itself
+        this way: qemu_run hands the guest its address on the cmdline.
+        Taken from a real ltvm VM's /proc/cmdline."""
+        import ltvm_pkg.local_install as li
+
+        cmdline = (
+            "console=ttyAMA0 reboot=k panic=1 crashkernel=512M "
+            "net.ifnames=0 biosdevname=0 root=/dev/vda rw "
+            "fc_ip=192.168.105.182 fc_gw=192.168.105.1 fc_name=co1-mkinst"
+        )
+        with patch.object(li.platform, "system", return_value="Linux"), \
+             patch.object(li, "IMAGE_STAMP_PATH", tmp_path / "absent.json"), \
+             patch.object(li, "_LTVM_IMAGE_MARKERS", (tmp_path / "absent.sh",)), \
+             patch.object(li, "_read_text", return_value=cmdline):
+            assert "kernel cmdline" in li.check_is_ltvm_machine()
+
+    def test_image_markers_are_evidence(self, tmp_path: Path) -> None:
+        """A cloud node from `target export` gets no ltvm cmdline, so
+        the rootfs markers are what identify it."""
+        import ltvm_pkg.local_install as li
+
+        marker = tmp_path / "setup-lnet-config.sh"
+        marker.write_text("#!/bin/sh\n")
+        with patch.object(li.platform, "system", return_value="Linux"), \
+             patch.object(li, "IMAGE_STAMP_PATH", tmp_path / "absent.json"), \
+             patch.object(li, "_LTVM_IMAGE_MARKERS", (marker,)), \
+             patch.object(li, "_read_text", return_value=""):
+            assert "image marker" in li.check_is_ltvm_machine()
+
+    def test_plain_rhel_box_is_not_evidence(self, tmp_path: Path) -> None:
+        """A normal RHEL workstation has /proc/cmdline and may have
+        /usr/local/sbin -- neither must count."""
+        import ltvm_pkg.local_install as li
+
+        with patch.object(li.platform, "system", return_value="Linux"), \
+             patch.object(li, "IMAGE_STAMP_PATH", tmp_path / "absent.json"), \
+             patch.object(li, "_LTVM_IMAGE_MARKERS", (tmp_path / "absent.sh",)), \
+             patch.object(li, "_read_text",
+                          return_value="BOOT_IMAGE=/vmlinuz root=/dev/sda1 ro"):
+            assert li.ltvm_machine_evidence() is None
+
+
+class TestLustreTreeGuard:
+    """make-install builds what the tree holds and make-uninstall is
+    the other half of that pair, so both are source-tree commands."""
+
+    def test_accepts_a_lustre_tree(self, tmp_path: Path) -> None:
+        from ltvm_pkg.local_install import check_in_lustre_tree
+
+        tree = _lustre_tree(tmp_path)
+        assert check_in_lustre_tree(tree) == tree.resolve()
+
+    def test_rejects_a_non_lustre_dir(self, tmp_path: Path) -> None:
+        import ltvm_pkg.local_install as li
+
+        with pytest.raises(li.LocalInstallError, match="not a Lustre source tree"):
+            li.check_in_lustre_tree(tmp_path)
+
+    def test_names_what_is_missing(self, tmp_path: Path) -> None:
+        import ltvm_pkg.local_install as li
+
+        tree = _lustre_tree(tmp_path)
+        (tree / "configure.ac").unlink()
+        with pytest.raises(li.LocalInstallError, match="configure.ac"):
+            li.check_in_lustre_tree(tree)
+
+    def test_defaults_to_cwd(self, tmp_path: Path, monkeypatch) -> None:
+        from ltvm_pkg.local_install import check_in_lustre_tree
+
+        tree = _lustre_tree(tmp_path)
+        monkeypatch.chdir(tree)
+        assert check_in_lustre_tree(None) == tree.resolve()
+
+    def test_missing_dir_is_a_clean_error(self, tmp_path: Path) -> None:
+        import ltvm_pkg.local_install as li
+
+        with pytest.raises(li.LocalInstallError, match="Not a directory"):
+            li.check_in_lustre_tree(tmp_path / "nope")
 
 
 # ======================================================================
@@ -671,8 +782,10 @@ class TestMakeCliWiring:
         assert ns.force is True
 
     def test_uninstall_flags(self) -> None:
-        ns = _parser().parse_args(["make-uninstall", "--no-unload"])
+        ns = _parser().parse_args(
+            ["make-uninstall", "--no-unload", "--lustre-tree", "/src"])
         assert ns.no_unload is True
+        assert ns.lustre_tree == "/src"
 
     def test_reinstall_takes_both_sides_flags(self) -> None:
         ns = _parser().parse_args([
@@ -689,34 +802,80 @@ class TestMakeCliWiring:
 
 
 class TestMakeCommandBehaviour:
-    def _args(self, **over):
+    def _args(self, tmp_path: Path | None = None, **over):
         import argparse
 
         base = dict(
             json=False, target=None, variant=None, kernel=None, arch=None,
-            force=False, force_compat=False, lustre_tree=None, jobs=None,
+            force=False, force_compat=False, jobs=None,
             rebuild=False, no_unload=False,
+            lustre_tree=str(_lustre_tree(tmp_path)) if tmp_path else None,
         )
         base.update(over)
         return argparse.Namespace(**base)
 
+    def _on_ltvm(self, tmp_path: Path):
+        import ltvm_pkg.local_install as li
+
+        return [
+            patch.object(li.platform, "system", return_value="Linux"),
+            patch.object(li, "IMAGE_STAMP_PATH", _write_stamp(tmp_path)),
+        ]
+
     def test_install_refuses_off_an_ltvm_machine(self, tmp_path: Path) -> None:
         import ltvm_pkg.local_install as li
+        from contextlib import ExitStack
+
         from ltvm_pkg.cli.make import cmd_make_install
 
-        with patch.object(li.platform, "system", return_value="Linux"), \
-             patch.object(li, "IMAGE_STAMP_PATH", tmp_path / "absent.json"):
-            rc = cmd_make_install(self._args())
+        with ExitStack() as st:
+            for cm in _no_evidence(tmp_path):
+                st.enter_context(cm)
+            rc = cmd_make_install(self._args(tmp_path))
+        assert rc != 0
+
+    def test_install_refuses_outside_a_lustre_tree(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        """On an ltvm machine, but cwd isn't a checkout."""
+        import ltvm_pkg.cli.make as mk
+        from contextlib import ExitStack
+
+        notatree = tmp_path / "somewhere"
+        notatree.mkdir()
+        with ExitStack() as st:
+            for cm in self._on_ltvm(tmp_path):
+                st.enter_context(cm)
+            rc = mk.cmd_make_install(
+                self._args(lustre_tree=str(notatree)))
+        assert rc != 0
+        assert "not a Lustre source tree" in capsys.readouterr().err
+
+    def test_uninstall_refuses_outside_a_lustre_tree(
+        self, tmp_path: Path
+    ) -> None:
+        import ltvm_pkg.cli.make as mk
+        from contextlib import ExitStack
+
+        notatree = tmp_path / "somewhere"
+        notatree.mkdir()
+        with ExitStack() as st:
+            for cm in self._on_ltvm(tmp_path):
+                st.enter_context(cm)
+            rc = mk.cmd_make_uninstall(
+                self._args(lustre_tree=str(notatree)))
         assert rc != 0
 
     def test_uninstall_without_manifest_errors(self, tmp_path: Path) -> None:
-        import ltvm_pkg.local_install as li
         import ltvm_pkg.cli.make as mk
+        from contextlib import ExitStack
 
-        with patch.object(li.platform, "system", return_value="Linux"), \
-             patch.object(li, "IMAGE_STAMP_PATH", _write_stamp(tmp_path)), \
-             patch.object(mk, "read_manifest", return_value=None):
-            rc = mk.cmd_make_uninstall(self._args())
+        with ExitStack() as st:
+            for cm in self._on_ltvm(tmp_path):
+                st.enter_context(cm)
+            st.enter_context(
+                patch.object(mk, "read_manifest", return_value=None))
+            rc = mk.cmd_make_uninstall(self._args(tmp_path))
         assert rc != 0
 
     def test_reinstall_tolerates_nothing_installed(
@@ -732,7 +891,7 @@ class TestMakeCommandBehaviour:
              patch.object(li, "IMAGE_STAMP_PATH", _write_stamp(tmp_path)), \
              patch.object(mk, "read_manifest", return_value=None), \
              patch.object(mk, "_do_install", return_value=0) as inst:
-            rc = mk.cmd_make_reinstall(self._args())
+            rc = mk.cmd_make_reinstall(self._args(tmp_path))
 
         assert rc == 0
         inst.assert_called_once()
@@ -771,7 +930,7 @@ class TestMakeCommandBehaviour:
              patch.object(mk, "run_depmod_ldconfig"), \
              patch.object(mk, "loaded_lustre_modules", return_value=[]), \
              patch("ltvm_pkg.priv.sudo_run"):
-            rc = mk.cmd_make_uninstall(self._args(force=True))
+            rc = mk.cmd_make_uninstall(self._args(tmp_path, force=True))
 
         assert rc == 0
         rm.assert_called_once()
@@ -791,7 +950,7 @@ class TestMakeCommandBehaviour:
              patch.object(mk, "run_depmod_ldconfig"), \
              patch.object(mk, "loaded_lustre_modules", return_value=[]), \
              patch("ltvm_pkg.priv.sudo_run"):
-            rc = mk.cmd_make_uninstall(self._args(no_unload=True))
+            rc = mk.cmd_make_uninstall(self._args(tmp_path, no_unload=True))
 
         assert rc == 0
         unload.assert_not_called()
@@ -804,13 +963,9 @@ class TestMakeCommandBehaviour:
         import ltvm_pkg.local_install as li
         import ltvm_pkg.cli.make as mk
 
-        lustre_tree = tmp_path / "lustre"
-        (lustre_tree / "lustre" / "kernel_patches").mkdir(parents=True)
-
         with patch.object(li.platform, "system", return_value="Linux"), \
              patch.object(li, "IMAGE_STAMP_PATH", _write_stamp(tmp_path)):
-            rc = mk.cmd_make_install(
-                self._args(lustre_tree=str(lustre_tree)))
+            rc = mk.cmd_make_install(self._args(tmp_path))
         assert rc != 0
 
 
@@ -869,3 +1024,70 @@ class TestImageStampIsBakedIn:
         _image_stamp_lines(tc, tmp_path, "k", None)
         stamp = json.loads((tmp_path / "ltvm-image.json").read_text())
         assert stamp["kernel_version"] == ""
+
+
+class TestKernelDirMatchingRunning:
+    """Without a stamp, falling back to the target's *default* kernel
+    is wrong on any machine not booted on that default -- the modules
+    build fine and then won't load.  Prefer the running kernel."""
+
+    def _tc(self, tmp_path: Path) -> MagicMock:
+        tc = MagicMock()
+        tc.output_dir = tmp_path
+        return tc
+
+    def _kernel(self, tmp_path: Path, name: str, release: str) -> None:
+        d = tmp_path / "kernels" / name / "build-tree" / "include" / "config"
+        d.mkdir(parents=True)
+        (d / "kernel.release").write_text(release + "\n")
+
+    def test_matches_on_kernel_release_not_dir_name(
+        self, tmp_path: Path
+    ) -> None:
+        """The running release carries suffixes the artifact name does
+        not: an ltvm VM reports 5.14.0-503.40.1.el9_5_lustre from a
+        directory named 5.14-rhel9.5-5.14.0-503.40.1.el9_5."""
+        import ltvm_pkg.local_install as li
+
+        running = "5.14.0-503.40.1.el9_5_lustre"
+        self._kernel(tmp_path, "5.14-rhel9.5-5.14.0-503.40.1.el9_5", running)
+        self._kernel(tmp_path, "5.14-rhel9.7-5.14.0-611.49.1.el9_7",
+                     "5.14.0-611.49.1.el9_7_lustre")
+
+        with patch.object(li.platform, "release", return_value=running):
+            got = li.kernel_dir_matching_running(self._tc(tmp_path))
+        assert got == "5.14-rhel9.5-5.14.0-503.40.1.el9_5"
+
+    def test_none_when_nothing_matches(self, tmp_path: Path) -> None:
+        import ltvm_pkg.local_install as li
+
+        self._kernel(tmp_path, "5.14-rhel9.7-x", "5.14.0-611.el9_7")
+        with patch.object(li.platform, "release", return_value="6.1.0-other"):
+            assert li.kernel_dir_matching_running(self._tc(tmp_path)) is None
+
+    def test_none_on_a_fresh_node_with_no_artifacts(
+        self, tmp_path: Path
+    ) -> None:
+        import ltvm_pkg.local_install as li
+
+        assert li.kernel_dir_matching_running(self._tc(tmp_path)) is None
+
+    def test_incomplete_build_tree_is_skipped(self, tmp_path: Path) -> None:
+        import ltvm_pkg.local_install as li
+
+        (tmp_path / "kernels" / "half-built").mkdir(parents=True)
+        self._kernel(tmp_path, "good", "5.14.0-x")
+        with patch.object(li.platform, "release", return_value="5.14.0-x"):
+            assert li.kernel_dir_matching_running(self._tc(tmp_path)) == "good"
+
+    def test_stamp_kernel_wins_over_running_match(
+        self, tmp_path: Path
+    ) -> None:
+        """A stamped image already names its kernel authoritatively."""
+        import ltvm_pkg.local_install as li
+
+        with patch.object(li, "IMAGE_STAMP_PATH", _write_stamp(tmp_path)), \
+             patch.object(li, "kernel_dir_matching_running") as m:
+            img = li.resolve_local_image()
+        m.assert_not_called()
+        assert img.kernel == "5.14-rhel9.7-1.el9"
