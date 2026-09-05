@@ -848,6 +848,7 @@ class TestArchiveOutgoingVmlinux:
 
     def test_archives_previous_build(self, tmp_path):
         from unittest.mock import patch
+
         from ltvm_pkg import kernel_build
 
         self._mk(tmp_path, "aaaa")
@@ -862,8 +863,10 @@ class TestArchiveOutgoingVmlinux:
         assert kernel_build.archive_outgoing_vmlinux(tmp_path) is None
 
     def test_prunes_to_keep_limit(self, tmp_path):
-        import os, time
+        import os
+        import time
         from unittest.mock import patch
+
         from ltvm_pkg import kernel_build
 
         # two pre-existing archives, one clearly older
@@ -884,6 +887,7 @@ class TestArchiveOutgoingVmlinux:
 
     def test_same_build_id_not_duplicated(self, tmp_path):
         from unittest.mock import patch
+
         from ltvm_pkg import kernel_build
 
         (tmp_path / "vmlinux-dddd").write_bytes(b"already-kept")

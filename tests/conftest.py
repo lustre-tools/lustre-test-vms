@@ -59,7 +59,7 @@ def _make_config(
 
 
 @pytest.fixture(autouse=True)
-def _neutralize_podman_preflight() -> "object":
+def _neutralize_podman_preflight() -> object:
     """Suppress the macOS podman-machine preflight for unit tests.
 
     On Darwin, build commands call ``check_podman_machine_macos`` which
@@ -73,7 +73,7 @@ def _neutralize_podman_preflight() -> "object":
 
 
 @pytest.fixture(autouse=True)
-def _neutralize_container_preflight() -> "object":
+def _neutralize_container_preflight() -> object:
     """Suppress the build-container-exists preflight for unit tests.
 
     Build commands short-circuit when `podman image exists <tag>` fails.

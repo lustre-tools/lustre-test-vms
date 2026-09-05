@@ -8,7 +8,6 @@ Lustre onto that machine's own root filesystem.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -201,8 +200,9 @@ class TestMachineGuard:
     def test_refuses_without_any_evidence(self, tmp_path: Path) -> None:
         """The whole point: typing make-install on a build host must
         not scatter Lustre across the user's workstation."""
-        import ltvm_pkg.local_install as li
         from contextlib import ExitStack
+
+        import ltvm_pkg.local_install as li
 
         with ExitStack() as st:
             for cm in _no_evidence(tmp_path):
@@ -212,8 +212,9 @@ class TestMachineGuard:
                 li.check_is_ltvm_machine()
 
     def test_error_points_at_deploy_lustre(self, tmp_path: Path) -> None:
-        import ltvm_pkg.local_install as li
         from contextlib import ExitStack
+
+        import ltvm_pkg.local_install as li
 
         with ExitStack() as st:
             for cm in _no_evidence(tmp_path):
@@ -223,8 +224,9 @@ class TestMachineGuard:
         assert "deploy-lustre" in str(e.value)
 
     def test_force_overrides(self, tmp_path: Path) -> None:
-        import ltvm_pkg.local_install as li
         from contextlib import ExitStack
+
+        import ltvm_pkg.local_install as li
 
         with ExitStack() as st:
             for cm in _no_evidence(tmp_path):
@@ -823,7 +825,6 @@ class TestMakeCommandBehaviour:
         ]
 
     def test_install_refuses_off_an_ltvm_machine(self, tmp_path: Path) -> None:
-        import ltvm_pkg.local_install as li
         from contextlib import ExitStack
 
         from ltvm_pkg.cli.make import cmd_make_install
@@ -838,8 +839,9 @@ class TestMakeCommandBehaviour:
         self, tmp_path: Path, capsys
     ) -> None:
         """On an ltvm machine, but cwd isn't a checkout."""
-        import ltvm_pkg.cli.make as mk
         from contextlib import ExitStack
+
+        import ltvm_pkg.cli.make as mk
 
         notatree = tmp_path / "somewhere"
         notatree.mkdir()
@@ -854,8 +856,9 @@ class TestMakeCommandBehaviour:
     def test_uninstall_refuses_outside_a_lustre_tree(
         self, tmp_path: Path
     ) -> None:
-        import ltvm_pkg.cli.make as mk
         from contextlib import ExitStack
+
+        import ltvm_pkg.cli.make as mk
 
         notatree = tmp_path / "somewhere"
         notatree.mkdir()
@@ -867,8 +870,9 @@ class TestMakeCommandBehaviour:
         assert rc != 0
 
     def test_uninstall_without_manifest_errors(self, tmp_path: Path) -> None:
-        import ltvm_pkg.cli.make as mk
         from contextlib import ExitStack
+
+        import ltvm_pkg.cli.make as mk
 
         with ExitStack() as st:
             for cm in self._on_ltvm(tmp_path):
@@ -884,8 +888,8 @@ class TestMakeCommandBehaviour:
         """Reinstall is what people reach for after editing source;
         refusing because there was no prior ltvm install would just be
         in the way."""
-        import ltvm_pkg.local_install as li
         import ltvm_pkg.cli.make as mk
+        import ltvm_pkg.local_install as li
 
         with patch.object(li.platform, "system", return_value="Linux"), \
              patch.object(li, "IMAGE_STAMP_PATH", _write_stamp(tmp_path)), \
@@ -900,8 +904,8 @@ class TestMakeCommandBehaviour:
     def test_uninstall_refuses_while_modules_loaded(
         self, tmp_path: Path
     ) -> None:
-        import ltvm_pkg.local_install as li
         import ltvm_pkg.cli.make as mk
+        import ltvm_pkg.local_install as li
 
         manifest = {"schema": li.MANIFEST_SCHEMA, "files": [], "dirs": [],
                     "kernel_version": "5.14.0"}
@@ -914,8 +918,8 @@ class TestMakeCommandBehaviour:
         assert rc != 0
 
     def test_force_lets_uninstall_proceed_anyway(self, tmp_path: Path) -> None:
-        import ltvm_pkg.local_install as li
         import ltvm_pkg.cli.make as mk
+        import ltvm_pkg.local_install as li
 
         manifest = {"schema": li.MANIFEST_SCHEMA,
                     "files": ["usr/sbin/mount.lustre"], "dirs": [],
@@ -936,8 +940,8 @@ class TestMakeCommandBehaviour:
         rm.assert_called_once()
 
     def test_no_unload_skips_the_unload(self, tmp_path: Path) -> None:
-        import ltvm_pkg.local_install as li
         import ltvm_pkg.cli.make as mk
+        import ltvm_pkg.local_install as li
 
         manifest = {"schema": li.MANIFEST_SCHEMA, "files": [], "dirs": [],
                     "kernel_version": "5.14.0"}
@@ -960,8 +964,8 @@ class TestMakeCommandBehaviour:
     ) -> None:
         """A fresh cloud node has no artifacts yet; the error has to
         say how to get them rather than just naming a missing path."""
-        import ltvm_pkg.local_install as li
         import ltvm_pkg.cli.make as mk
+        import ltvm_pkg.local_install as li
 
         with patch.object(li.platform, "system", return_value="Linux"), \
              patch.object(li, "IMAGE_STAMP_PATH", _write_stamp(tmp_path)):

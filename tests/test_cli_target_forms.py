@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
-import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch

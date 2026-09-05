@@ -17,13 +17,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from ltvm_pkg.lustre_build import read_staging_meta
-
 from ltvm_pkg.cli.util import (
     EXIT_ERROR,
     EXIT_OK,
     _error,
 )
+from ltvm_pkg.lustre_build import read_staging_meta
 
 
 def _cli_attr(name: str) -> Any:

@@ -33,7 +33,6 @@ from ltvm_pkg.release_package import (
     snapshot_lustre,
 )
 
-
 # ---------------------------------------------------------------------------
 # Low-level unit tests
 # ---------------------------------------------------------------------------
@@ -268,7 +267,7 @@ class TestPackageTarget:
             assert path.exists(), f"{kind} asset missing at {path}"
 
         manifest = json.loads(assets["manifest"].read_text())
-        from ltvm_pkg.release_package import SCHEMA_VERSION, SCHEMA_NAME
+        from ltvm_pkg.release_package import SCHEMA_NAME, SCHEMA_VERSION
 
         assert manifest["schema"] == f"{SCHEMA_NAME}/{SCHEMA_VERSION}"
         assert "producer" in manifest

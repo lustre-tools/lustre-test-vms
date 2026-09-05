@@ -19,6 +19,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 from .cross_compile import host_podman_platform
+from .lustre_tree import kp_configs, kp_patches, kp_series, kp_targets
+from .paths import load_meta_safe
+from .podman_run import run_podman_with_cleanup
+from .target_config import TARGETS_DIR
 
 
 def archive_outgoing_vmlinux(kernel_out: Path, keep: int = 1) -> str | None:
@@ -87,10 +91,6 @@ def elf_build_id(path) -> str | None:
         if "Build ID" in line:
             return line.split(":")[-1].strip() or None
     return None
-from .lustre_tree import kp_configs, kp_patches, kp_series, kp_targets
-from .paths import load_meta_safe
-from .podman_run import run_podman_with_cleanup
-from .target_config import TARGETS_DIR
 
 if TYPE_CHECKING:
     from .target_config import TargetConfig
@@ -589,7 +589,7 @@ class SrpmNotFoundError(RuntimeError):
         if self.latest_available:
             lines += [
                 "  Rocky may lag behind RHEL on kernel rebuilds. The latest",
-                f"  matching SRPM currently published by Rocky appears to be:",
+                "  matching SRPM currently published by Rocky appears to be:",
                 f"    {self.latest_available}",
             ]
         else:

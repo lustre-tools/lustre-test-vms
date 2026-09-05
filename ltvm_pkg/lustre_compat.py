@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from .kernel_build import _shell_var
-from .lustre_tree import ldiskfs_patches, ldiskfs_series, kp_targets
+from .lustre_tree import kp_targets, ldiskfs_patches, ldiskfs_series
 
 if TYPE_CHECKING:
     from .target_config import LustreMode, TargetConfig

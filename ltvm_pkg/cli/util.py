@@ -19,7 +19,7 @@ from typing import Any
 
 from ltvm_pkg.paths import load_meta_safe
 from ltvm_pkg.target_config import TargetConfig as _TargetConfig
-from ltvm_pkg.target_config import list_targets as _list_targets
+
 
 # TargetConfig / list_targets are re-exported on ltvm_pkg.cli so that
 # tests can patch them at a stable location (``patch.object(cli_mod,

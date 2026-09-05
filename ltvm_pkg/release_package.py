@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -64,7 +63,6 @@ from .target_config import (  # noqa: E402
     kernel_dir_version_key,
     resolve_kernel_dir,
 )
-
 
 # Release manifest schema version.  Bump when anything about the
 # published artifact layout changes -- asset names, per-variant
@@ -1039,8 +1037,8 @@ def _expect_sha256(
         )
     else:
         msg += (
-            f"\n  hint: size matches, so this is most likely a "
-            f"network corruption -- retry the fetch."
+            "\n  hint: size matches, so this is most likely a "
+            "network corruption -- retry the fetch."
         )
     raise RuntimeError(msg)
 

@@ -425,7 +425,10 @@ class TestResolveOsArtifactsPerKernel:
         ):
             arts = vm_state.resolve_os_artifacts("rocky9", kernel="6.1-rhel9.7")
         assert arts.kernel.parent.name == "6.1-rhel9.7"
-        assert arts.image == root / "artifacts" / "rocky9" / "x86_64" / "images" / "6.1-rhel9.7" / "base.ext4"
+        assert arts.image == (
+            root / "artifacts" / "rocky9" / "x86_64" / "images"
+            / "6.1-rhel9.7" / "base.ext4"
+        )
 
     def test_default_uses_default_kernel_image(self, tmp_path: Path) -> None:
         from ltvm_pkg import vm_state

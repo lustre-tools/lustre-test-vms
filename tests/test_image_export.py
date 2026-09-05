@@ -805,9 +805,9 @@ class TestGceCliWiring:
         which looks for bootable-<kernel>.qcow2, can't pick one up."""
         import argparse
 
+        import ltvm_pkg.image_export as ie
         from ltvm_pkg import cli, priv
         from ltvm_pkg.cli import targets as cli_targets
-        import ltvm_pkg.image_export as ie
 
         tc = _make_target_config(tmp_path)
         produced = tmp_path / "produced.tar.gz"
@@ -844,9 +844,9 @@ class TestGceCliWiring:
     def test_qcow2_keeps_bootable_stem(self, tmp_path: Path) -> None:
         import argparse
 
+        import ltvm_pkg.image_export as ie
         from ltvm_pkg import cli, priv
         from ltvm_pkg.cli import targets as cli_targets
-        import ltvm_pkg.image_export as ie
 
         tc = _make_target_config(tmp_path)
         produced = tmp_path / "produced.qcow2"

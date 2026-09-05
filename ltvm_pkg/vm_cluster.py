@@ -13,6 +13,7 @@ from typing import Any
 
 from .qemu_run import die, is_running, kill_qemu, run
 from .vm_net import SSH_OPTS, run_ssh, sshpass_ssh_argv, unregister_ssh_name
+from .vm_owner import resolve_owner_id
 from .vm_state import (
     DEFAULT_TARGET,
     EXIT_TIMEOUT,
@@ -25,7 +26,6 @@ from .vm_state import (
     VMNotFound,
     lustre_libdir,
 )
-from .vm_owner import resolve_owner_id
 
 
 def _sudo_prefix() -> list[str]:

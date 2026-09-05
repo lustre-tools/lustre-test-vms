@@ -254,12 +254,10 @@ def _scan_target(
     # ---- Images: cascade with kernel removals + flag orphans ----
     images_dir = arch_dir / "images"
     if images_dir.exists():
-        # Build the "kernel survives" set (on-disk kernel dirs minus
-        # the ones we already scheduled for pruning).
-        surviving_kernels = {
-            d.name for d in on_disk_kernel_dirs if d.name not in pruned_kernel_names
-        }
-
+        # Survival is decided per-image below, from the kernel dir
+        # each image is named after: kernel_alive_on_disk and
+        # kernel_pruned together say the same thing a precomputed
+        # "surviving kernels" set used to.
         for kdir in sorted(images_dir.iterdir()):
             if not kdir.is_dir():
                 continue

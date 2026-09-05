@@ -207,8 +207,8 @@ def _cross_arch_warning(host: str, target: str) -> str:
     lines = [
         "",
         f"!!  Cross-compiling: host={host} target={target}",
-        f"!!  These VM-image tools will be missing from the resulting "
-        f"image:",
+        "!!  These VM-image tools will be missing from the resulting "
+        "image:",
         bullets,
         "!!  Install them inside the VM via dnf if needed at test time.",
     ]

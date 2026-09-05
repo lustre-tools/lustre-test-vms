@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 from ltvm_pkg import host_setup
-
 from ltvm_pkg.cli.util import (
     EXIT_ERROR,
     EXIT_OK,

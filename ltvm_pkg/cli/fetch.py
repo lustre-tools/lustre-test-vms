@@ -22,12 +22,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from ltvm_pkg.release_package import (
-    fetch_target,
-    package_target,
-    snapshot_lustre,
-)
-
 from ltvm_pkg.cli.util import (
     EXIT_ERROR,
     EXIT_OK,
@@ -1143,6 +1137,8 @@ def cmd_delete(args: argparse.Namespace) -> int:
         from ltvm_pkg.cli.build import (
             _dir_size_bytes,
             _format_bytes,
+        )
+        from ltvm_pkg.cli.build import (
             cmd_clean as _cmd_clean,
         )
         from ltvm_pkg.target_config import ARTIFACTS_DIR

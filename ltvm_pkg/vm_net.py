@@ -7,7 +7,6 @@ import hashlib
 import os
 import signal
 import subprocess
-import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -281,7 +280,7 @@ def reload_dns() -> None:
     pick up new /etc/hosts entries on SIGHUP -- only the pidfile
     location differs.
     """
-    from .host_setup import is_macos, DNSMASQ_PID_PATH
+    from .host_setup import DNSMASQ_PID_PATH, is_macos
     pid_path: Path
     if is_macos():
         pid_path = DNSMASQ_PID_PATH

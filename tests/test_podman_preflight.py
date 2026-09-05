@@ -17,11 +17,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ltvm_pkg.cli import EXIT_ERROR, EXIT_OK
+from ltvm_pkg.cli.build import (
+    _preflight_container as _real_preflight_container,
+)
 from ltvm_pkg.host_setup import (
     PodmanMachineError,
     check_podman_machine_macos,
 )
-
 
 _LTVM_PATH = str(Path(__file__).parent.parent / "ltvm")
 
@@ -267,8 +269,6 @@ class TestCliPreflight:
         # validation path does; in both cases we should NOT reach EXIT_OK.
         assert rc != EXIT_OK
 
-
-from ltvm_pkg.cli.build import _preflight_container as _real_preflight_container
 
 
 class TestPreflightContainerHelper:

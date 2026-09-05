@@ -162,10 +162,10 @@ def test_cluster_create_deploy_destroy(cluster_name) -> None:  # type: ignore[no
         f"leak: {cluster_state} present after destroy"
     )
     assert not (SOCKETS_DIR / f"{mds}.info").exists(), (
-        f"leak: mds .info still present after cluster destroy"
+        "leak: mds .info still present after cluster destroy"
     )
     assert not (SOCKETS_DIR / f"{oss}.info").exists(), (
-        f"leak: oss .info still present after cluster destroy"
+        "leak: oss .info still present after cluster destroy"
     )
     assert not _tap_exists(mds_tap), (
         f"leak: TAP {mds_tap!r} still present after cluster destroy"

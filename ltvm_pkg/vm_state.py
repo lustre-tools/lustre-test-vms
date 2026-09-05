@@ -7,7 +7,6 @@ import json
 import os
 import re
 import sys
-import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field

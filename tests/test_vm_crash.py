@@ -19,8 +19,8 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -158,7 +158,7 @@ class TestCrashVmcoreResolution:
         capsys: pytest.CaptureFixture[str],
         tmp_path: Path,
     ) -> None:
-        vm = _seed_vm(tmp_vmdir, "no-core")
+        _seed_vm(tmp_vmdir, "no-core")
         _build = self._build_mocks(tmp_path, vmcore_path="")
         # Inject empty stdout so find returns nothing.
         find_empty = MagicMock(returncode=0, stdout="", stderr="")
@@ -274,9 +274,7 @@ class TestCrashFullFlow:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         kdir, vmlinux = self._setup(tmp_path)
-        vm = _seed_vm(
-            tmp_vmdir, "crash-ok", kernel=str(kdir / "vmlinuz")
-        )
+        _seed_vm(tmp_vmdir, "crash-ok", kernel=str(kdir / "vmlinuz"))
         outdir = tmp_path / "out"
         args = _args("crash-ok", outdir=str(outdir), mod_dir=None)
 

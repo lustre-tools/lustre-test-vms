@@ -106,8 +106,8 @@ if __name__ == "__main__" and _VENV_PY.exists():
     _venv_ok = _venv_meets_floor(_VENV_PY, _BOOT_FLOOR)
     if _venv_ok and str(_VENV_PY) != sys.executable:
         try:
-            import yaml  # noqa: F401
             import argcomplete  # noqa: F401
+            import yaml  # noqa: F401
         except ImportError:
             os.execv(
                 str(_VENV_PY),
@@ -119,23 +119,18 @@ if __name__ == "__main__" and _VENV_PY.exists():
         # If it doesn't, surface actionable guidance instead of the
         # cryptic "requires Python 3.10+" loop.
         try:
-            import yaml  # noqa: F401
             import argcomplete  # noqa: F401
+            import yaml  # noqa: F401
         except ImportError:
             _venv_dir = _VENV_PY.parent.parent
+            _floor = f"{_BOOT_FLOOR[0]}.{_BOOT_FLOOR[1]}"
+            _newer = f"{_BOOT_FLOOR[0]}.{_BOOT_FLOOR[1] + 1}"
             sys.stderr.write(
-                "error: ltvm's venv at %s was created with a Python "
-                "older than %d.%d and cannot be used.\n"
-                "hint: rm -rf %s && python%d.%d -m venv %s && "
-                "%s/bin/pip install pyyaml argcomplete\n"
-                % (
-                    _venv_dir,
-                    _BOOT_FLOOR[0], _BOOT_FLOOR[1],
-                    _venv_dir,
-                    _BOOT_FLOOR[0], _BOOT_FLOOR[1] + 1,
-                    _venv_dir,
-                    _venv_dir,
-                )
+                f"error: ltvm's venv at {_venv_dir} was created with a "
+                f"Python older than {_floor} and cannot be used.\n"
+                f"hint: rm -rf {_venv_dir} && "
+                f"python{_newer} -m venv {_venv_dir} && "
+                f"{_venv_dir}/bin/pip install pyyaml argcomplete\n"
             )
             sys.exit(1)
 
@@ -151,13 +146,6 @@ from typing import Any  # noqa: E402
 sys.path.insert(0, str(_REPO_ROOT))
 
 from ltvm_pkg import __version__ as LTVM_VERSION  # noqa: E402
-from ltvm_pkg.completion import (  # noqa: E402
-    complete_cluster_remainder,
-    complete_kernels,
-    complete_targets,
-    complete_variants,
-    complete_vms,
-)
 from ltvm_pkg.cli import (  # noqa: E402
     EXIT_ERROR,
     cmd_build_all,
@@ -174,14 +162,14 @@ from ltvm_pkg.cli import (  # noqa: E402
     cmd_create,
     cmd_delete,
     cmd_deploy,
-    cmd_make_install,
-    cmd_make_reinstall,
-    cmd_make_uninstall,
     cmd_destroy,
     cmd_doctor,
     cmd_fetch,
     cmd_list,
     cmd_llmount,
+    cmd_make_install,
+    cmd_make_reinstall,
+    cmd_make_uninstall,
     cmd_nmi,
     cmd_prune,
     cmd_publish,
@@ -196,6 +184,13 @@ from ltvm_pkg.cli import (  # noqa: E402
     cmd_validate,
     cmd_vm_start,
     cmd_vm_stop,
+)
+from ltvm_pkg.completion import (  # noqa: E402
+    complete_cluster_remainder,
+    complete_kernels,
+    complete_targets,
+    complete_variants,
+    complete_vms,
 )
 
 log = logging.getLogger("ltvm")

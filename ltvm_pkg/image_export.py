@@ -397,7 +397,7 @@ def _package_gce(raw: Path, output: Path) -> None:
 
 
 def export_image(
-    target_config: "TargetConfig",
+    target_config: TargetConfig,
     kernel: str | None,
     output: Path,
     image_format: str = "qcow2",

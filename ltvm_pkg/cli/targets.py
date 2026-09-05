@@ -19,9 +19,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ltvm_pkg.lustre_compat import ValidationResult
-from ltvm_pkg.target_config import LustreMode
-
 from ltvm_pkg.cli.util import (
     EXIT_ERROR,
     EXIT_NOT_FOUND,
@@ -30,6 +27,8 @@ from ltvm_pkg.cli.util import (
     _load_target_args,
     _output,
 )
+from ltvm_pkg.lustre_compat import ValidationResult
+from ltvm_pkg.target_config import LustreMode
 
 
 def _cli_attr(name: str) -> Any:

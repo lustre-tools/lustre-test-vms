@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import argparse
 import platform
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest

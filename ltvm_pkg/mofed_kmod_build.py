@@ -24,7 +24,6 @@ import hashlib
 import json
 import logging
 import os
-import shutil
 import subprocess
 import tempfile
 import time
@@ -43,7 +42,7 @@ log = logging.getLogger(__name__)
 INNER_SCRIPT = Path(__file__).parent / "mofed-kmod-build-inner.sh"
 
 
-def mofed_kmod_dir(tc: "TargetConfig", kernel: str | None = None) -> Path:
+def mofed_kmod_dir(tc: TargetConfig, kernel: str | None = None) -> Path:
     """Return the per-kernel mofed-kmods cache directory.
 
     Keyed under the kernel dir (not the image dir) because the kmods
@@ -60,7 +59,7 @@ def mofed_kmod_dir(tc: "TargetConfig", kernel: str | None = None) -> Path:
     )
 
 
-def _mofed_version(tc: "TargetConfig") -> str:
+def _mofed_version(tc: TargetConfig) -> str:
     """Resolve the MOFED version for the target's variant."""
     from .target_config import DEFAULT_VARIANT
 
@@ -97,7 +96,7 @@ def _input_hash(kver: str, mofed_version: str) -> str:
     return h.hexdigest()
 
 
-def is_stale(tc: "TargetConfig", kernel: str | None = None) -> bool:
+def is_stale(tc: TargetConfig, kernel: str | None = None) -> bool:
     out_dir = mofed_kmod_dir(tc, kernel)
     meta = load_meta_safe(out_dir / "meta.json")
     if meta is None:
@@ -112,7 +111,7 @@ def is_stale(tc: "TargetConfig", kernel: str | None = None) -> bool:
 
 
 def build_mofed_kmods(
-    tc: "TargetConfig",
+    tc: TargetConfig,
     kernel: str | None = None,
     *,
     force: bool = False,

@@ -6,7 +6,6 @@ AttributeError) don't get flattened into opaque ``str(exc)`` messages.
 from __future__ import annotations
 
 import logging
-from unittest.mock import patch
 
 import pytest
 

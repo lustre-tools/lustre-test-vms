@@ -17,8 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
-from ltvm_pkg.vm_state import ClusterInfo, ClusterNotFound, ClusterNode
-
+from ltvm_pkg.vm_state import ClusterInfo, ClusterNotFound
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
 

@@ -20,21 +20,31 @@ reaches: depmod over 66 real .ko files, `modprobe lustre` actually
 loading, and make-uninstall unloading a live Lustre.
 """
 
-import argparse, os, subprocess, sys
+import argparse
+import os
+import subprocess
+import sys
 from pathlib import Path
+
 _repo = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_repo))
 
-from ltvm_pkg.local_install import (
-    LocalImage, install_staging_into_root, loaded_lustre_modules,
-    read_manifest, run_depmod_ldconfig, staging_contents, write_manifest,
-    check_is_ltvm_machine, resolve_local_image,
+from ltvm_pkg.local_install import (  # noqa: E402  (needs sys.path above)
+    check_is_ltvm_machine,
+    install_staging_into_root,
+    loaded_lustre_modules,
+    read_manifest,
+    resolve_local_image,
+    run_depmod_ldconfig,
+    staging_contents,
+    write_manifest,
 )
 
 FAILS = []
 def check(label, cond):
     print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
-    if not cond: FAILS.append(label)
+    if not cond:
+        FAILS.append(label)
 
 def sh(*a):
     return subprocess.run(a, capture_output=True, text=True)
@@ -83,7 +93,8 @@ check("manifest written", read_manifest() is not None)
 
 print("\n== 5. Uninstall through the REAL CLI command")
 os.chdir("/root/lustre-release")
-from ltvm_pkg.cli.make import cmd_make_uninstall
+from ltvm_pkg.cli.make import cmd_make_uninstall  # noqa: E402
+
 ns = argparse.Namespace(json=False, target=None, variant=None, kernel=None,
                         arch=None, force=False, force_compat=False,
                         lustre_tree=None, jobs=None, rebuild=False,
@@ -108,6 +119,7 @@ check("ssh/systemd still fine", sh("systemctl", "is-system-running").returncode 
 print("\n" + "=" * 58)
 if FAILS:
     print(f"FAILED ({len(FAILS)}):")
-    for f in FAILS: print(f"  - {f}")
+    for f in FAILS:
+        print(f"  - {f}")
     sys.exit(1)
 print("ALL CHECKS PASSED")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -553,13 +554,11 @@ def _deploy_args(
     json: bool = False,
     userspace_only: bool = False,
     force_compat: bool = False,
-) -> "argparse.Namespace":
-    import argparse as ap
-
+) -> argparse.Namespace:
     # Post-merge, cmd_deploy reads the tree from args.lustre_tree
     # (unified with other subcommands); ``build`` here is kept as the
     # test-side kwarg for readability.
-    return ap.Namespace(
+    return argparse.Namespace(
         vm=vm,
         lustre_tree=lustre_tree,
         mount=mount,
@@ -1418,7 +1417,6 @@ class TestVerifyDeployedModules:
     """A deploy that ships stale modules must not pass silently."""
 
     def _staging(self, tmp_path, mods):
-        from unittest.mock import patch
         d = tmp_path / "staging"
         d.mkdir()
         for name in mods:
@@ -1433,6 +1431,7 @@ class TestVerifyDeployedModules:
 
     def test_warns_on_mismatch(self, tmp_path, capsys):
         from unittest.mock import MagicMock, patch
+
         from ltvm_pkg.deploy import verify_deployed_modules
 
         staging = self._staging(tmp_path, ["osc.ko", "lov.ko"])
@@ -1449,6 +1448,7 @@ class TestVerifyDeployedModules:
 
     def test_silent_when_all_match(self, tmp_path, capsys):
         from unittest.mock import MagicMock, patch
+
         from ltvm_pkg.deploy import verify_deployed_modules
 
         staging = self._staging(tmp_path, ["osc.ko"])
@@ -1462,6 +1462,7 @@ class TestVerifyDeployedModules:
     def test_module_absent_on_vm_is_not_stale(self, tmp_path, capsys):
         """A staged module the VM does not have is not evidence of staleness."""
         from unittest.mock import MagicMock, patch
+
         from ltvm_pkg.deploy import verify_deployed_modules
 
         staging = self._staging(tmp_path, ["osc.ko"])
@@ -1474,6 +1475,7 @@ class TestVerifyDeployedModules:
 
     def test_ssh_failure_warns_but_does_not_raise(self, tmp_path, capsys):
         from unittest.mock import MagicMock, patch
+
         from ltvm_pkg.deploy import verify_deployed_modules
 
         staging = self._staging(tmp_path, ["osc.ko"])

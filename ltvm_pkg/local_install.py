@@ -30,8 +30,14 @@ import subprocess
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ltvm_pkg.priv import sudo_run
+
+if TYPE_CHECKING:
+    # Imported for typing only; the runtime imports are function-local
+    # so that target_config stays off this module's import path.
+    from ltvm_pkg.target_config import TargetConfig
 
 log = logging.getLogger(__name__)
 
@@ -362,7 +368,7 @@ def resolve_local_image(
     )
 
 
-def kernel_dir_matching_running(tc) -> str | None:
+def kernel_dir_matching_running(tc: TargetConfig) -> str | None:
     """Find the built kernel whose release matches the running one.
 
     Only used when nothing else names a kernel.  The alternative --

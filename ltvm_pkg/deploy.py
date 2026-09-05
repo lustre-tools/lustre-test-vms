@@ -128,8 +128,8 @@ def verify_deployed_modules(vm: VMInfo, staging: Path) -> None:
     # .../updates on others, and compressed .ko.xz is also possible.
     names = sorted(n[:-3] for n in staged)
     script = "; ".join(
-        "printf '%%s %%s\\n' %s \"$(modinfo -F srcversion %s 2>/dev/null)\""
-        % (shlex.quote(n), shlex.quote(n))
+        f"printf '%s %s\\n' {shlex.quote(n)} "
+        f'"$(modinfo -F srcversion {shlex.quote(n)} 2>/dev/null)"'
         for n in names
     )
     r = run_ssh(vm.ip, script, timeout=120)

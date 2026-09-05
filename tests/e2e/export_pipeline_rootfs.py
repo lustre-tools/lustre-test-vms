@@ -18,23 +18,31 @@ rootfs copy, the fstab UUID rewrite, the GCE guest config, the ssh
 key injection, and the oldgnu sparse tarball -- is real.
 """
 
-import json, os, subprocess, sys, tarfile
+import json
+import os
+import subprocess
+import sys
+import tarfile
 from pathlib import Path
+
 _repo = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_repo))
 
-import ltvm_pkg.image_export as ie
+import ltvm_pkg.image_export as ie  # noqa: E402  (needs sys.path above)
 
 FAILS = []
 def check(label, cond):
     print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
-    if not cond: FAILS.append(label)
+    if not cond:
+        FAILS.append(label)
 
 def sh(*a, **kw):
     return subprocess.run(a, capture_output=True, text=True, **kw)
 
 KVER = "5.14.0-503.40.1.el9_5_lustre"
-work = Path("/root/exp"); sh("rm", "-rf", str(work)); work.mkdir()
+work = Path("/root/exp")
+sh("rm", "-rf", str(work))
+work.mkdir()
 
 # ---- a small but structurally real rootfs -------------------------
 print("== 1. Build a synthetic base.ext4")
@@ -63,14 +71,16 @@ kdir = work / "kernels" / "k1"
 (kdir / "build-tree/include/config/kernel.release").write_text(KVER + "\n")
 sh("truncate", "-s", "8M", str(kdir / "vmlinuz"))
 sh("truncate", "-s", "12M", str(kdir / f"initramfs-{KVER}.img"))
-imgdir = work / "images" / "k1"; imgdir.mkdir(parents=True)
+imgdir = work / "images" / "k1"
+imgdir.mkdir(parents=True)
 os.replace(str(base), str(imgdir / "base.ext4"))
 
 sshkey = work / "id_test.pub"
 sshkey.write_text("ssh-ed25519 AAAAMYTESTKEY me@laptop\n")
 
 # ---- stub only grub2-install --------------------------------------
-stub = work / "bin"; stub.mkdir()
+stub = work / "bin"
+stub.mkdir()
 (stub / "grub2-install").write_text(
     "#!/bin/sh\n# stub: aarch64 has no i386-pc modules\n"
     'for a in "$@"; do case "$a" in --boot-directory=*) B="${a#*=}";; esac; done\n'
@@ -115,7 +125,8 @@ check("msdos label with one bootable partition",
 loop = sh("losetup", "--show", "-f", "-P", str(disk)).stdout.strip()
 check(f"loop attached: {loop}", loop.startswith("/dev/loop"))
 part = loop + "p1"
-mnt = work / "mnt"; mnt.mkdir()
+mnt = work / "mnt"
+mnt.mkdir()
 try:
     r = sh("mount", part, str(mnt))
     check(f"root partition mounts rc={r.returncode}", r.returncode == 0)
@@ -126,8 +137,8 @@ try:
     check("fstab / entry rewritten to the real filesystem UUID",
           f"UUID={uuid}" in fstab)
     check("no /dev/vda left on the / line",
-          not any(l.split()[:2] == ["/dev/vda", "/"]
-                  for l in fstab.splitlines() if l.split()))
+          not any(line.split()[:2] == ["/dev/vda", "/"]
+                  for line in fstab.splitlines() if line.split()))
     check("mount options preserved", "defaults,noatime" in fstab)
     check("the other fstab entry untouched", "/dev/vdb1" in fstab)
     check("comment preserved", fstab.startswith("# ltvm"))
@@ -177,6 +188,7 @@ else:
 print("\n" + "=" * 58)
 if FAILS:
     print(f"FAILED ({len(FAILS)}):")
-    for f in FAILS: print(f"  - {f}")
+    for f in FAILS:
+        print(f"  - {f}")
     sys.exit(1)
 print("ALL CHECKS PASSED")

@@ -10,9 +10,9 @@ import re
 import subprocess
 import sys
 import time
-from pathlib import Path
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 from .deploy import configure_test_disks
@@ -24,7 +24,6 @@ from .vm_net import (
     HOSTS_FILE,
     _real_user_ssh_dir,
     alloc_ip,
-    deploy_ssh_key,
     mac_for_name,
     provision_vm_ssh,
     register_ssh_name,
@@ -34,6 +33,7 @@ from .vm_net import (
     unregister_ssh_name,
     wait_for_ssh,
 )
+from .vm_owner import resolve_owner_id
 from .vm_state import (
     DEFAULT_TARGET,
     DISK_SIZE_BYTES,
@@ -45,7 +45,6 @@ from .vm_state import (
     MARKER,
     OVERLAYS,
     QEMU_IMG,
-    ROOT_PASSWORD,
     SOCKETS,
     SSH_TIMEOUT,
     VMInfo,
@@ -53,7 +52,6 @@ from .vm_state import (
     lustre_libdir,
     resolve_os_artifacts,
 )
-from .vm_owner import resolve_owner_id
 
 
 def _handler_error(
@@ -1617,14 +1615,10 @@ def cmd_crash_collect(args: argparse.Namespace) -> int:
     # diagnosable later when artifacts have moved on again.
     try:
         (local_dir / "kernel-build-id.txt").write_text(
-            "vmcore_kernel_build_id=%s\nvmlinux=%s\n"
-            "vmlinux_build_id=%s\nmatch=%s\n"
-            % (
-                running_build_id or "unknown",
-                vmlinux,
-                vmlinux_build_id or "unknown",
-                "yes" if running_build_id == vmlinux_build_id else "NO",
-            )
+            f"vmcore_kernel_build_id={running_build_id or 'unknown'}\n"
+            f"vmlinux={vmlinux}\n"
+            f"vmlinux_build_id={vmlinux_build_id or 'unknown'}\n"
+            f"match={'yes' if running_build_id == vmlinux_build_id else 'NO'}\n"
         )
     except OSError:
         pass

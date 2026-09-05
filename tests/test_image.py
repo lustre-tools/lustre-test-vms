@@ -742,7 +742,10 @@ class TestComputeImageSizeFromTar:
         with tarball.open("wb") as fp:
             fp.truncate(size)
         mb = image._compute_image_size_mb_from_tar(tarball)
-        expected = int(size * image._IMAGE_SIZE_FUDGE / (1024 * 1024)) + image._IMAGE_SIZE_HEADROOM_MB
+        expected = (
+            int(size * image._IMAGE_SIZE_FUDGE / (1024 * 1024))
+            + image._IMAGE_SIZE_HEADROOM_MB
+        )
         assert mb == expected
         assert mb > image._IMAGE_SIZE_FLOOR_MB
 
@@ -751,6 +754,7 @@ class TestBuildImageNotRootGated:
     def test_cli_cmd_build_image_has_no_require_root_call(self) -> None:
         """build-image and build-all must not be gated by _require_root."""
         import inspect
+
         from ltvm_pkg import cli
 
         src_image = inspect.getsource(cli.cmd_build_image)

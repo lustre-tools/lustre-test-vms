@@ -22,6 +22,37 @@ from pathlib import Path
 from typing import Any
 
 from ltvm_pkg import host_setup
+from ltvm_pkg.cli.build import (
+    _do_build_container,
+    _gate_lustre_validation,
+    _resolve_lustre_tree,
+    cmd_build_all,
+    cmd_build_container,
+    cmd_build_image,
+    cmd_build_kernel,
+    cmd_build_lustre,
+    cmd_build_mofed_kmods,
+    cmd_build_shell,
+    cmd_clean,
+    cmd_status,
+)
+from ltvm_pkg.cli.clean import cmd_prune
+from ltvm_pkg.cli.util import (
+    EXIT_ERROR,
+    EXIT_NOT_FOUND,
+    EXIT_OK,
+    _artifact_label,
+    _container_status,
+    _emit_error,
+    _error,
+    _load_target,
+    _load_target_args,
+    _maybe_print_traceback,
+    _output,
+    _print_target_header,
+    _qemu_ns,
+    _require_root,
+)
 from ltvm_pkg.deploy import deploy_to_vm, lustre_mount_vm
 from ltvm_pkg.image_build import build_image, image_status
 from ltvm_pkg.kernel_build import (
@@ -43,38 +74,6 @@ from ltvm_pkg.release_package import (
 )
 from ltvm_pkg.target_config import LustreMode, TargetConfig, list_targets
 
-from ltvm_pkg.cli.util import (
-    EXIT_ERROR,
-    EXIT_NOT_FOUND,
-    EXIT_OK,
-    _artifact_label,
-    _container_status,
-    _emit_error,
-    _error,
-    _load_target,
-    _load_target_args,
-    _maybe_print_traceback,
-    _output,
-    _print_target_header,
-    _qemu_ns,
-    _require_root,
-)
-from ltvm_pkg.cli.build import (
-    _do_build_container,
-    _gate_lustre_validation,
-    _resolve_lustre_tree,
-    cmd_build_all,
-    cmd_build_container,
-    cmd_build_image,
-    cmd_build_kernel,
-    cmd_build_lustre,
-    cmd_build_mofed_kmods,
-    cmd_build_shell,
-    cmd_clean,
-    cmd_status,
-)
-from ltvm_pkg.cli.clean import cmd_prune
-
 # GitHub repo for release downloads.  Override with LTVM_GITHUB_REPO
 # so a fork can use `ltvm fetch` / `ltvm publish` without editing
 # source.
@@ -85,6 +84,11 @@ GITHUB_REPO = os.environ.get("LTVM_GITHUB_REPO", "lustre-tools/lustre-test-vms")
 # _cli_attr indirection at call time, so order here is mostly a
 # style issue -- but keep it consistent with the "constants first,
 # submodule re-exports second" pattern.
+from ltvm_pkg.cli.cluster import cmd_cluster  # noqa: E402
+from ltvm_pkg.cli.deploy import (  # noqa: E402
+    cmd_deploy,
+    cmd_llmount,
+)
 from ltvm_pkg.cli.fetch import (  # noqa: E402
     _KVER_PREFIX_RE,
     _RHEL_RE,
@@ -98,6 +102,21 @@ from ltvm_pkg.cli.fetch import (  # noqa: E402
     cmd_delete,
     cmd_fetch,
     cmd_publish,
+)
+from ltvm_pkg.cli.make import (  # noqa: E402
+    cmd_make_install,
+    cmd_make_reinstall,
+    cmd_make_uninstall,
+)
+from ltvm_pkg.cli.setup import (  # noqa: E402
+    _current_version,
+    _git,
+    _ltvm_repo_root,
+    cmd_create,
+    cmd_destroy,
+    cmd_doctor,
+    cmd_setup,
+    cmd_update,
 )
 from ltvm_pkg.cli.targets import (  # noqa: E402
     _VALIDATE_EXIT,
@@ -120,23 +139,112 @@ from ltvm_pkg.cli.vm import (  # noqa: E402
     cmd_vm_start,
     cmd_vm_stop,
 )
-from ltvm_pkg.cli.deploy import (  # noqa: E402
-    cmd_deploy,
-    cmd_llmount,
-)
-from ltvm_pkg.cli.make import (  # noqa: E402
-    cmd_make_install,
-    cmd_make_reinstall,
-    cmd_make_uninstall,
-)
-from ltvm_pkg.cli.cluster import cmd_cluster  # noqa: E402
-from ltvm_pkg.cli.setup import (  # noqa: E402
-    _current_version,
-    _git,
-    _ltvm_repo_root,
-    cmd_create,
-    cmd_destroy,
-    cmd_doctor,
-    cmd_setup,
-    cmd_update,
-)
+
+# Every name above is re-exported, not used here: this package is a
+# compatibility hub (see the module docstring).  Listing them in
+# __all__ is what says so -- without it a linter sees 99 unused
+# imports and the obvious 'cleanup' silently breaks both
+# `from ltvm_pkg.cli import cmd_build_all` and the tests that patch
+# through this module (patch.object(cli.subprocess, 'run'), and
+# patch.object(cli_mod, '<private>') for the _-prefixed entries).
+__all__ = [
+    "Any",
+    "EXIT_ERROR",
+    "EXIT_NOT_FOUND",
+    "EXIT_OK",
+    "LustreMode",
+    "Path",
+    "SrpmNotFoundError",
+    "TargetConfig",
+    "ValidationResult",
+    "_KVER_PREFIX_RE",
+    "_RHEL_RE",
+    "_VALIDATE_EXIT",
+    "_artifact_label",
+    "_container_status",
+    "_current_version",
+    "_do_build_container",
+    "_emit_error",
+    "_error",
+    "_find_release_url",
+    "_gate_lustre_validation",
+    "_gh_api",
+    "_gh_next_link",
+    "_gh_release_upload",
+    "_git",
+    "_kernel_release_signature",
+    "_list_releases",
+    "_load_target",
+    "_load_target_args",
+    "_ltvm_repo_root",
+    "_maybe_print_traceback",
+    "_output",
+    "_print_target_header",
+    "_qemu_ns",
+    "_release_matches_kernel",
+    "_release_status",
+    "_require_root",
+    "_resolve_lustre_tree",
+    "_validation_result_to_dict",
+    "_variant_suffix_in_tag",
+    "_vm_call",
+    "argparse",
+    "build_image",
+    "build_kernel",
+    "build_lustre",
+    "cmd_build_all",
+    "cmd_build_container",
+    "cmd_build_image",
+    "cmd_build_kernel",
+    "cmd_build_lustre",
+    "cmd_build_mofed_kmods",
+    "cmd_build_shell",
+    "cmd_clean",
+    "cmd_cluster",
+    "cmd_console_log",
+    "cmd_crash_collect",
+    "cmd_create",
+    "cmd_delete",
+    "cmd_deploy",
+    "cmd_destroy",
+    "cmd_doctor",
+    "cmd_fetch",
+    "cmd_list",
+    "cmd_llmount",
+    "cmd_make_install",
+    "cmd_make_reinstall",
+    "cmd_make_uninstall",
+    "cmd_nmi",
+    "cmd_prune",
+    "cmd_publish",
+    "cmd_restore",
+    "cmd_setup",
+    "cmd_snapshot",
+    "cmd_status",
+    "cmd_target_export",
+    "cmd_target_show",
+    "cmd_targets",
+    "cmd_update",
+    "cmd_validate",
+    "cmd_vm_start",
+    "cmd_vm_stop",
+    "deploy_to_vm",
+    "fetch_target",
+    "host_setup",
+    "image_status",
+    "json",
+    "kernel_status",
+    "list_targets",
+    "load_meta_safe",
+    "logging",
+    "lustre_mount_vm",
+    "os",
+    "package_target",
+    "read_staging_meta",
+    "shlex",
+    "snapshot_lustre",
+    "staging_path",
+    "subprocess",
+    "sys",
+    "validate_target",
+]

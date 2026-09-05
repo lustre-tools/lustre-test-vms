@@ -514,9 +514,8 @@ class TestShowConfigureLog:
     """
 
     def test_prints_tail_when_log_exists(
-        self, tmp_path: Path, capsys: "object"
+        self, tmp_path: Path, capsys: object
     ) -> None:
-        import pytest
 
         cap: pytest.CaptureFixture[str] = capsys  # type: ignore[assignment]
         log = tmp_path / "config.log"
@@ -530,19 +529,17 @@ class TestShowConfigureLog:
         assert "line 1\n" not in err
 
     def test_silent_when_log_missing(
-        self, tmp_path: Path, capsys: "object"
+        self, tmp_path: Path, capsys: object
     ) -> None:
-        import pytest
 
         cap: pytest.CaptureFixture[str] = capsys  # type: ignore[assignment]
         _show_configure_log(tmp_path)
         assert cap.readouterr().err == ""
 
     def test_tail_shorter_than_file_length(
-        self, tmp_path: Path, capsys: "object"
+        self, tmp_path: Path, capsys: object
     ) -> None:
         """A log shorter than tail_lines emits the whole file."""
-        import pytest
 
         cap: pytest.CaptureFixture[str] = capsys  # type: ignore[assignment]
         log = tmp_path / "config.log"

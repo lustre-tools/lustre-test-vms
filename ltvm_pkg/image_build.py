@@ -523,7 +523,11 @@ def build_image(
             ):
         from .mofed_kmod_build import (
             build_mofed_kmods,
+        )
+        from .mofed_kmod_build import (
             is_stale as _mofed_is_stale,
+        )
+        from .mofed_kmod_build import (
             mofed_kmod_dir as _mofed_kmod_dir,
         )
         mofed_kmods_dir = _mofed_kmod_dir(target_config, kernel)
@@ -1006,23 +1010,14 @@ def _export_to_ext4(
         # only on directories (and on files that already have any
         # exec bit), so we don't accidentally mark plain data files
         # executable.
+        #
+        # The macOS and Linux branches below each build their own
+        # variant of that script; the notes above apply to both.
+        # -O ^metadata_csum,^dir_index in each works around two
+        # distinct e2fsprogs 1.46.5 bugs in `mke2fs -d`; both are
+        # re-enabled via tune2fs + e2fsck -D after the populate, so the
+        # final image has htree and checksums like a normal ext4 fs.
         size_mb = _compute_image_size_mb_from_tar(tarball)
-        extract_script_in_container = (
-            "set -e; "
-            "ROOTFS=/work/rootfs; "
-            "mkdir -p $ROOTFS; "
-            "tar -C $ROOTFS -xpf /work/rootfs.tar --exclude=dev/*; "
-            "mkdir -p $ROOTFS/dev/pts $ROOTFS/dev/shm $ROOTFS/dev/mqueue; "
-            "chmod -R u+rX $ROOTFS; "
-            # -O ^metadata_csum,^dir_index works around two distinct
-            # e2fsprogs 1.46.5 bugs in `mke2fs -d`; we re-enable both
-            # via tune2fs + e2fsck -D after the populate so the final
-            # image has htree and checksums like a normal ext4 fs.
-            "mke2fs -t ext4 -b 4096 -L rootfs -E root_owner=0:0 "
-            "-O ^metadata_csum,^dir_index "
-            f"-d $ROOTFS /work/out.ext4 {size_mb}M; "
-            "rm -rf $ROOTFS"
-        )
         if _is_macos_build_host():
             # fakeroot's DYLD interposition does not survive
             # `bash -c <script>` on macOS Sonoma -- SIP strips DYLD_*
@@ -1197,7 +1192,6 @@ def image_status(
         kernel: str -- resolved kernel name this image is paired with
         variant: str -- variant name this image belongs to
     """
-    from .target_config import DEFAULT_VARIANT
 
     variant_name = (
         target_config.variant_name if variant is None else variant

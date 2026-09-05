@@ -187,7 +187,10 @@ check("system still works (ls runs)",
 # ---------------------------------------------------------------- 5
 print("\n== 5. CLI uninstall path, with no manifest left")
 import argparse  # noqa: E402
-from ltvm_pkg.cli.make import cmd_make_uninstall, cmd_make_reinstall  # noqa: E402
+
+from ltvm_pkg.cli.make import (  # noqa: E402
+    cmd_make_uninstall,
+)
 from ltvm_pkg.priv import sudo_run  # noqa: E402
 
 sudo_run(["rm", "-f", "/var/lib/ltvm/lustre-install.json"], check=False, quiet=True)

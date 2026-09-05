@@ -17,7 +17,6 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
-
 _LTVM_PATH = str(Path(__file__).parent.parent / "ltvm")
 
 

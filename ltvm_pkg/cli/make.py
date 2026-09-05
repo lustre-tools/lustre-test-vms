@@ -24,9 +24,9 @@ from ltvm_pkg.cli.util import (
     _output,
 )
 from ltvm_pkg.local_install import (
+    MANIFEST_PATH,
     LocalImage,
     LocalInstallError,
-    MANIFEST_PATH,
     check_in_lustre_tree,
     check_is_ltvm_machine,
     check_kernel_match,

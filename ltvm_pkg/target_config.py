@@ -18,6 +18,8 @@ from typing import Any
 
 import yaml
 
+from .paths import find_ltvm_root, load_meta_safe
+
 
 class LustreMode(str, Enum):
     """Lustre build/deploy mode for a target.
@@ -31,7 +33,6 @@ class LustreMode(str, Enum):
     SERVER_ZFS = "server_zfs"
     CLIENT = "client"
 
-from .paths import find_ltvm_root, load_meta_safe
 
 log = logging.getLogger("ltvm")
 

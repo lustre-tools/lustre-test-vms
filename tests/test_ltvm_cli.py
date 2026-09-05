@@ -830,7 +830,7 @@ class TestValidationGating:
         ):
             rc = _run_main(
                 [
-                    "build", "all", 
+                    "build", "all",
                     "rocky9",
                     "--lustre-tree",
                     str(lustre_tree),
@@ -860,7 +860,7 @@ class TestValidationGating:
             with pytest.raises(SystemExit) as exc:
                 _run_main(
                     [
-                        "build", "all", 
+                        "build", "all",
                         "rocky9",
                         "--lustre-tree",
                         str(lustre_tree),
@@ -894,7 +894,7 @@ class TestValidationGating:
         ):
             rc = _run_main(
                 [
-                    "build", "all", 
+                    "build", "all",
                     "rocky9",
                     "--lustre-tree",
                     str(lustre_tree),
@@ -927,7 +927,7 @@ class TestValidationGating:
         ):
             rc = _run_main(
                 [
-                    "build", "all", 
+                    "build", "all",
                     "rocky9",
                     "--lustre-tree",
                     str(lustre_tree),
@@ -956,7 +956,7 @@ class TestValidationGating:
             with pytest.raises(SystemExit) as exc:
                 _run_main(
                     [
-                        "build", "all", 
+                        "build", "all",
                         "rocky9",
                         "--lustre-tree",
                         str(lustre_tree),
@@ -1566,11 +1566,11 @@ class TestKernelArgPropagation:
         ):
             rc = _run_main(
                 [
-                    "build", "all", 
+                    "build", "all",
                     "rocky9",
                     "--kernel",
                     "5.14-rhel9.5",
-                    
+
                     "--lustre-tree",
                     str(lustre_tree),
                 ],

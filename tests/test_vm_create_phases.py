@@ -28,16 +28,16 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from ltvm_pkg import vm_commands
 from ltvm_pkg.vm_state import DISK_SIZE_BYTES, VMInfo
-
 
 # ────────────────────────────────────────────────────────
 # Fixtures mirroring test_vm_commands.py's tmp_vmdir.

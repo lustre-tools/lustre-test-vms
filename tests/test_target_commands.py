@@ -31,16 +31,7 @@ import argparse
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
-
-from ltvm_pkg.cli.util import host_arch as _host_arch_real
-
-# Tests prepopulate artifact dirs and assert what the CLI reads back.
-# The CLI defaults arch to host_arch() when --arch isn't passed, so
-# the prepopulation has to land at the *real* host arch -- otherwise
-# x86 hosts would read aarch64 dirs and vice versa.  Capture once at
-# import time so test paths and the CLI lookup agree.
-_HOST_ARCH = _host_arch_real()
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -55,9 +46,16 @@ from ltvm_pkg.cli import (
     cmd_targets,
     cmd_validate,
 )
+from ltvm_pkg.cli.util import host_arch as _host_arch_real
 from ltvm_pkg.lustre_compat import ValidationResult
 from ltvm_pkg.target_config import LustreMode
 
+# Tests prepopulate artifact dirs and assert what the CLI reads back.
+# The CLI defaults arch to host_arch() when --arch isn't passed, so
+# the prepopulation has to land at the *real* host arch -- otherwise
+# x86 hosts would read aarch64 dirs and vice versa.  Capture once at
+# import time so test paths and the CLI lookup agree.
+_HOST_ARCH = _host_arch_real()
 
 # ---------------------------------------------------------------------------
 # Targets-yaml fixture variants (rocky9 with a pinned mofed-24 variant)
@@ -146,8 +144,9 @@ def _patch_cfg_paths(tmp_targets: Path) -> Any:
     """Return a context manager that retargets target_config's module
     constants at the fixture's tmp dir.
     """
-    import ltvm_pkg.target_config as cfg
     from contextlib import ExitStack
+
+    import ltvm_pkg.target_config as cfg
 
     es = ExitStack()
     es.enter_context(patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"))
