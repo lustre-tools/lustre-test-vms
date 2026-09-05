@@ -172,11 +172,13 @@ def detect_targets_from_os_release(
 ) -> list[str]:
     """Guess candidate ltvm targets for the running OS.
 
-    Only a fallback, for machines whose image predates the stamp.  It
-    matches on ID + major version, so it can legitimately return
-    several targets (rocky9 and rocky9-64k both match a Rocky 9 node);
-    the caller turns that into a "pass --target" error rather than
-    picking one.
+    Only a fallback, for machines whose image predates the stamp.
+    Matches on ID + major version *and* the running architecture: a
+    target built for another arch cannot be what this machine came
+    from, and without that check every Rocky 9 node matched both
+    rocky9 and rocky9-64k and got a "pass --target" error instead of
+    an answer.  Genuine ties still return several names and the caller
+    turns those into that error.
     """
     osr = _parse_os_release(path)
     os_id = osr.get("ID", "").lower()
@@ -186,6 +188,8 @@ def detect_targets_from_os_release(
     major = version_id.split(".")[0]
 
     from ltvm_pkg.target_config import TargetConfig, list_targets
+
+    machine_arch = normalize_arch(platform.machine())
 
     matches: list[str] = []
     for name in list_targets():
@@ -197,8 +201,29 @@ def detect_targets_from_os_release(
             continue
         if tc.os_version.split(".")[0] != major:
             continue
+        if normalize_arch(tc.arch) != machine_arch:
+            continue
+        if tc.status != "working":
+            # This path exists only for images built before ltvm
+            # stamped /etc/ltvm-image.json.  An experimental target is
+            # newer than the stamp, so it cannot be what produced an
+            # unstamped machine -- and counting it would make every
+            # Rocky 10 node ambiguous with the `mainline` target, which
+            # shares its userspace.  --target still names one directly.
+            continue
         matches.append(name)
     return matches
+
+
+# uname reports aarch64 on Linux and arm64 on Darwin; x86_64 also
+# answers to amd64.  targets.yaml spells them x86_64 and aarch64.
+_ARCH_ALIASES = {"arm64": "aarch64", "amd64": "x86_64"}
+
+
+def normalize_arch(arch: str) -> str:
+    """Canonical targets.yaml spelling of an architecture name."""
+    a = arch.strip().lower()
+    return _ARCH_ALIASES.get(a, a)
 
 
 def running_kernel() -> str:

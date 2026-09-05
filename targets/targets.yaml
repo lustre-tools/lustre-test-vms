@@ -70,6 +70,11 @@ targets:
           mofed_distro: rhel9.5
   # 64 KiB-page aarch64 client, to reproduce the customer ARM config
   rocky9-64k:
+    # Explicit: CONFIG_ARM64_64K_PAGES is the whole point of this
+    # target and is a no-op anywhere else, so it must not inherit the
+    # x86_64 default.  Also what keeps it from colliding with rocky9
+    # when an unstamped machine is identified from /etc/os-release.
+    arch: aarch64
     container_image: quay.io/rockylinux/rockylinux:9
     kernels:
       available:

@@ -163,14 +163,34 @@ class TestOsReleaseFallback:
         p = self._osr(tmp_path, 'ID=ubuntu\nVERSION_ID="24.04"\n')
         assert detect_targets_from_os_release(p) == ["ubuntu2404"]
 
-    def test_rocky9_is_ambiguous(self, tmp_path: Path) -> None:
-        """rocky9 and rocky9-64k are the same OS; os-release cannot
-        tell them apart, and the caller must ask for --target."""
+    def test_rocky9_resolves_despite_the_64k_target(
+        self, tmp_path: Path
+    ) -> None:
+        """rocky9 and rocky9-64k share an OS but not an architecture.
+
+        rocky9-64k is aarch64 (CONFIG_ARM64_64K_PAGES is its whole
+        point), so on an x86_64 host it cannot be what this machine
+        came from.  It used to declare no arch at all, defaulted to
+        x86_64, and made every Rocky 9 node ambiguous.
+        """
         from ltvm_pkg.local_install import detect_targets_from_os_release
 
         p = self._osr(tmp_path, 'ID=rocky\nVERSION_ID="9.7"\n')
-        assert sorted(detect_targets_from_os_release(p)) == [
-            "rocky9", "rocky9-64k"]
+        assert detect_targets_from_os_release(p) == ["rocky9"]
+
+    def test_experimental_targets_are_not_candidates(
+        self, tmp_path: Path
+    ) -> None:
+        """`mainline` is Rocky 10 userspace, so it matches by os-release.
+
+        This fallback is only for images predating the image stamp, and
+        an experimental target is newer than the stamp -- counting it
+        would make every Rocky 10 node ambiguous for no gain.
+        """
+        from ltvm_pkg.local_install import detect_targets_from_os_release
+
+        p = self._osr(tmp_path, 'ID=rocky\nVERSION_ID="10.1"\n')
+        assert detect_targets_from_os_release(p) == ["rocky10"]
 
     def test_unknown_os_gives_no_candidates(self, tmp_path: Path) -> None:
         from ltvm_pkg.local_install import detect_targets_from_os_release
