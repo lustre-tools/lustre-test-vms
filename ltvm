@@ -526,7 +526,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Force --disable-server",
     )
     blp.add_argument(
-        "--configure", help="Extra configure arguments (quoted string)"
+        "--configure",
+        help="Extra configure arguments (quoted string), e.g. "
+        "--configure --with-o2ib=yes.  The = form works too.",
     )
     blp.add_argument(
         "--jobs", type=int, default=None, help="Parallel jobs (default: nproc)"
@@ -1462,6 +1464,66 @@ def _reconcile_target_args(args: argparse.Namespace) -> int | None:
     return None
 
 
+# Options whose value is a flag for some *other* program, and so
+# almost always starts with "-".  argparse reads a space-separated
+# "-value" as the next option and fails with "expected one argument",
+# which made the documented, obvious invocation
+# `--configure --with-o2ib=yes` an error.
+_DASH_VALUED_OPTIONS = frozenset({"--configure"})
+
+
+def _known_option_strings(parser: argparse.ArgumentParser) -> set[str]:
+    """Every option string this parser and its subparsers accept.
+
+    Walks _actions/choices because argparse exposes no public view of a
+    subparser tree.  Used only to tell "a flag meant for configure"
+    from "an ltvm flag the user put in the wrong place".
+    """
+    seen: set[str] = set()
+    stack = [parser]
+    while stack:
+        cur = stack.pop()
+        for action in cur._actions:
+            seen.update(action.option_strings)
+            choices = getattr(action, "choices", None)
+            if isinstance(choices, dict):
+                stack.extend(
+                    c
+                    for c in choices.values()
+                    if isinstance(c, argparse.ArgumentParser)
+                )
+    return seen
+
+
+def _join_dash_valued_options(
+    argv: list[str], known_options: set[str]
+) -> list[str]:
+    """Rewrite `--configure --with-o2ib=yes` to the `=` form.
+
+    Only when the value looks like a flag and is not an ltvm option of
+    its own: `--configure --jobs 4` stays an error, because that is a
+    misplaced ltvm flag rather than something meant for configure.
+    `--` is left alone; it is the end-of-options marker.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in _DASH_VALUED_OPTIONS and i + 1 < len(argv):
+            value = argv[i + 1]
+            if (
+                value.startswith("-")
+                and value != "--"
+                and value not in known_options
+            ):
+                out.append(f"{tok}={value}")
+                i += 2
+                continue
+        out.append(tok)
+        i += 1
+    return out
+
+
 def main() -> int:
     parser = build_parser()
     # argcomplete hooks here when invoked via the bash completion shim
@@ -1474,7 +1536,11 @@ def main() -> int:
         argcomplete.autocomplete(parser)
     except ImportError:
         pass
-    args = parser.parse_args()
+    args = parser.parse_args(
+        _join_dash_valued_options(
+            sys.argv[1:], _known_option_strings(parser)
+        )
+    )
 
     level = logging.DEBUG if getattr(args, "verbose", False) else logging.INFO
     logging.basicConfig(level=level, format="%(name)s: %(message)s")

@@ -854,3 +854,81 @@ class TestJsonErrorShape:
             f"Got: {json_outputs[0]!r}\n"
             f'All JSON error paths must produce {{"error": "..."}}.'
         )
+
+
+class TestDashValuedOptions:
+    """`--configure --with-o2ib=yes` must work.
+
+    Its value is a flag for configure, so it starts with "-", and
+    argparse reads a space-separated "-value" as the next option.  The
+    entry point rewrites the pair into the "=" form before parsing.
+    """
+
+    @pytest.fixture()
+    def known(self) -> set[str]:
+        return ltvm._known_option_strings(ltvm.build_parser())
+
+    def test_raw_argparse_rejects_the_obvious_form(self) -> None:
+        """The bug this fixes: without the rewrite it is an error."""
+        parser = ltvm.build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                ["build", "lustre", "rocky9", "--configure", "--with-o2ib=yes"]
+            )
+
+    def test_rewrite_makes_it_parse(self, known: set[str]) -> None:
+        parser = ltvm.build_parser()
+        args = parser.parse_args(
+            ltvm._join_dash_valued_options(
+                ["build", "lustre", "rocky9", "--configure", "--with-o2ib=yes"],
+                known,
+            )
+        )
+        assert args.configure == "--with-o2ib=yes"
+
+    def test_equals_form_is_untouched(self, known: set[str]) -> None:
+        argv = ["build", "lustre", "rocky9", "--configure=--with-o2ib=yes"]
+        assert ltvm._join_dash_valued_options(argv, known) == argv
+
+    def test_multiple_flags_in_one_value(self, known: set[str]) -> None:
+        parser = ltvm.build_parser()
+        args = parser.parse_args(
+            ltvm._join_dash_valued_options(
+                [
+                    "build", "lustre", "rocky9",
+                    "--configure", "--with-o2ib=yes --enable-foo",
+                ],
+                known,
+            )
+        )
+        assert args.configure == "--with-o2ib=yes --enable-foo"
+
+    def test_a_misplaced_ltvm_flag_is_still_an_error(
+        self, known: set[str]
+    ) -> None:
+        """`--configure --jobs 4` is a mistake, not a configure flag.
+
+        Swallowing it would turn a loud error into a silently wrong
+        build, so only flags ltvm does not itself define are joined.
+        """
+        argv = ["build", "lustre", "rocky9", "--configure", "--jobs", "4"]
+        assert ltvm._join_dash_valued_options(argv, known) == argv
+
+    def test_non_flag_value_is_untouched(self, known: set[str]) -> None:
+        argv = ["build", "lustre", "rocky9", "--configure", "CFLAGS=-g"]
+        assert ltvm._join_dash_valued_options(argv, known) == argv
+
+    def test_end_of_options_marker_is_untouched(self, known: set[str]) -> None:
+        argv = ["build", "lustre", "rocky9", "--configure", "--"]
+        assert ltvm._join_dash_valued_options(argv, known) == argv
+
+    def test_trailing_option_with_no_value_is_untouched(
+        self, known: set[str]
+    ) -> None:
+        argv = ["build", "lustre", "rocky9", "--configure"]
+        assert ltvm._join_dash_valued_options(argv, known) == argv
+
+    def test_known_options_sees_into_subparsers(self, known: set[str]) -> None:
+        """--jobs lives on a subparser, not the top-level parser."""
+        assert "--jobs" in known
+        assert "--lustre-tree" in known
