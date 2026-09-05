@@ -8,6 +8,7 @@ raw ext4.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -390,6 +391,43 @@ def _lustre_inject_lines(
     return lines
 
 
+def _image_stamp_lines(
+    target_config: TargetConfig,
+    inject_dir: Path,
+    kernel_name: str,
+    kver: str | None,
+) -> list[str]:
+    """Bake this image's ltvm identity into /etc/ltvm-image.json.
+
+    ltvm can end up running *inside* the machine it built -- an ltvm
+    VM, or a cloud node booted from `ltvm target export --format gce`
+    -- where `ltvm make-install` has to know which target's build
+    container to build Lustre in.  /etc/os-release can't answer that
+    (it can't tell rocky9 from rocky9-64k, and says nothing about the
+    variant or kernel), so the answer is written down at build time.
+
+    Emitted as a COPY from the inject context rather than a `printf`
+    in a RUN line: JSON inside a shell string is exactly the
+    interpolation this codebase avoids.
+    """
+    from .local_install import IMAGE_STAMP_SCHEMA
+
+    stamp = {
+        "schema": IMAGE_STAMP_SCHEMA,
+        "target": target_config.name,
+        "arch": target_config.arch,
+        "variant": target_config.variant_name,
+        "kernel": kernel_name,
+        "kernel_version": kver or "",
+        "os_family": target_config.os_family,
+        "built": int(time.time()),
+    }
+    (inject_dir / "ltvm-image.json").write_text(
+        json.dumps(stamp, indent=2) + "\n"
+    )
+    return ["COPY ltvm-image.json /etc/ltvm-image.json"]
+
+
 def _kdump_inject_lines(
     kdir: Path,
     inject_dir: Path,
@@ -729,6 +767,9 @@ def build_image(
             kdump_lines = _kdump_inject_lines(
                 kdir, inject_dir, kver, target_config.os_family
             )
+            stamp_lines = _image_stamp_lines(
+                target_config, inject_dir, kernel_name, kver
+            )
             lustre_lines: list[str] = []
             if lustre_staging is not None:
                 if not kver:
@@ -793,6 +834,7 @@ def build_image(
                 "RUN ln -sf mount.lustre /usr/sbin/mount.lustre_tgt 2>/dev/null || true"
             )
             lines.extend(kdump_lines)
+            lines.extend(stamp_lines)
             lines.extend(lustre_lines)
 
             inject_dockerfile = inject_dir / "Dockerfile"

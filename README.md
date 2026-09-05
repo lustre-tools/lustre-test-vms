@@ -94,6 +94,10 @@ ltvm create     <name>          Create a VM (idempotent)
 ltvm start|stop|destroy <name>  VM power / removal
 ltvm list                       Show all VMs
 ltvm deploy-lustre <vm>         Deploy Lustre into a running VM
+ltvm make-install               Build + install Lustre onto THIS machine
+                                (run inside an ltvm VM or cloud node)
+ltvm make-uninstall             Remove what make-install put here
+ltvm make-reinstall             make-uninstall + make-install
 ltvm llmount <vm>               Mount Lustre in a VM
 ltvm llumount <vm>              Unmount (same as llmount --cleanup)
 ltvm doctor                     Host health check (--fix on request)

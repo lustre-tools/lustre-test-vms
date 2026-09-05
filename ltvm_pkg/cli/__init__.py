@@ -124,6 +124,11 @@ from ltvm_pkg.cli.deploy import (  # noqa: E402
     cmd_deploy,
     cmd_llmount,
 )
+from ltvm_pkg.cli.make import (  # noqa: E402
+    cmd_make_install,
+    cmd_make_reinstall,
+    cmd_make_uninstall,
+)
 from ltvm_pkg.cli.cluster import cmd_cluster  # noqa: E402
 from ltvm_pkg.cli.setup import (  # noqa: E402
     _current_version,

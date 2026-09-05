@@ -174,6 +174,9 @@ from ltvm_pkg.cli import (  # noqa: E402
     cmd_create,
     cmd_delete,
     cmd_deploy,
+    cmd_make_install,
+    cmd_make_reinstall,
+    cmd_make_uninstall,
     cmd_destroy,
     cmd_doctor,
     cmd_fetch,
@@ -1253,6 +1256,99 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _dep_tflag.completer = complete_targets  # type: ignore[attr-defined]
     sp.set_defaults(func=cmd_deploy)
+
+    # -- make-install / make-uninstall / make-reinstall --
+    # These run ON a machine ltvm built (an ltvm VM, or a cloud node
+    # booted from `ltvm target export --format gce`) and install into
+    # that machine's own /.  deploy-lustre is the build-host-side
+    # counterpart that pushes into a VM over ssh.
+    def _add_make_common(sp: argparse.ArgumentParser) -> None:
+        _mk_t = sp.add_argument(
+            "--target",
+            default=None,
+            help="OS target this machine's image came from "
+            "(default: read /etc/ltvm-image.json, else guess from "
+            "/etc/os-release)",
+        )
+        _mk_t.completer = complete_targets  # type: ignore[attr-defined]
+        sp.add_argument(
+            "--variant",
+            default=None,
+            help="Target variant (default: from the image stamp, else base)",
+        )
+        sp.add_argument(
+            "--force",
+            action="store_true",
+            help="Proceed even though this machine has no ltvm image "
+            "stamp (make-install writes into /), and let uninstall "
+            "remove module files while Lustre is still loaded",
+        )
+
+    sp = sub.add_parser(
+        "make-install",
+        parents=[common, kernel_arg, force_compat_arg],
+        help="Build a Lustre checkout and `make install` it onto THIS "
+        "machine (run inside an ltvm-built VM or cloud node)",
+    )
+    _add_make_common(sp)
+    sp.add_argument(
+        "--lustre-tree",
+        default=None,
+        help="Path to the Lustre source tree (default: cwd)",
+    )
+    sp.add_argument(
+        "--jobs", "-j", type=int, default=None,
+        help="Parallel make jobs",
+    )
+    sp.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Force a full rebuild instead of an incremental make",
+    )
+    sp.set_defaults(func=cmd_make_install)
+
+    sp = sub.add_parser(
+        "make-uninstall",
+        parents=[common],
+        help="Remove the Lustre that `ltvm make-install` put on THIS "
+        "machine",
+    )
+    _add_make_common(sp)
+    sp.add_argument(
+        "--no-unload",
+        dest="no_unload",
+        action="store_true",
+        help="Don't try to unload Lustre modules first",
+    )
+    sp.set_defaults(func=cmd_make_uninstall)
+
+    sp = sub.add_parser(
+        "make-reinstall",
+        parents=[common, kernel_arg, force_compat_arg],
+        help="make-uninstall followed by make-install, on THIS machine",
+    )
+    _add_make_common(sp)
+    sp.add_argument(
+        "--lustre-tree",
+        default=None,
+        help="Path to the Lustre source tree (default: cwd)",
+    )
+    sp.add_argument(
+        "--jobs", "-j", type=int, default=None,
+        help="Parallel make jobs",
+    )
+    sp.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Force a full rebuild instead of an incremental make",
+    )
+    sp.add_argument(
+        "--no-unload",
+        dest="no_unload",
+        action="store_true",
+        help="Don't try to unload Lustre modules first",
+    )
+    sp.set_defaults(func=cmd_make_reinstall)
 
     # -- llmount --
     sp = sub.add_parser(

@@ -190,6 +190,46 @@ operations that need it. `update`, `cluster create`, and `cluster destroy`
 still require root. `build *`, `target *`, `deploy-lustre`, `llmount`,
 `list`, `vm *`, and the remaining `cluster` actions do not.
 
+### Running ltvm inside a VM it built
+
+`deploy-lustre` runs on the build host and pushes Lustre
+*into* a VM over ssh.  The `make-*` commands are the other
+direction: ltvm running **inside** a machine it produced --
+an ltvm VM, or a cloud node booted from `ltvm target export
+--format gce` -- installing Lustre onto that machine's own
+root filesystem.
+
+```bash
+# on the node, from a Lustre checkout:
+ltvm make-install --lustre-tree ~/lustre-release
+ltvm make-uninstall
+ltvm make-reinstall --lustre-tree ~/lustre-release
+```
+
+The build still happens in the target's build container
+(the VM image ships the runtime packages, not the
+toolchain), so the node needs podman plus a
+`ltvm target fetch <target>` first.  The target is read
+from `/etc/ltvm-image.json`, which `ltvm build image` bakes
+into every image; `/etc/os-release` is the fallback for
+older images, and `--target` overrides both.
+
+`make-install` refuses to run on a machine with no image
+stamp -- it unpacks a tree onto `/`, and typing it on your
+build host would scatter Lustre across your workstation.
+`--force` overrides.
+
+`make-uninstall` works from the manifest at
+`/var/lib/ltvm/lustre-install.json` that install writes, not
+from `make uninstall` (the node has no configured source
+tree), so it removes exactly what ltvm put there.  It
+unloads Lustre modules first and refuses if they won't
+unload; `--no-unload` and `--force` override.
+
+Verified end-to-end against a real rootfs by
+[tests/e2e/local_install_rootfs.py](tests/e2e/local_install_rootfs.py)
+-- run it only in a throwaway machine.
+
 ### Clusters
 
 ```bash
