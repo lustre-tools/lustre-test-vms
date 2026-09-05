@@ -614,13 +614,19 @@ def _build_in_container(
     # on it must see the final value (a flag-only reconfigure needs the
     # same stale-.ko / conftest / lock-dir cleanup as any other).
     #
-    # --with-o2ib=no: the build container has no OFED/rdma-core-devel
-    # kernel headers, so configure's OpenIB gen2 probe fails with
-    # "cannot compile with OpenIB gen2 headers" when Lustre tries to
-    # auto-detect o2ib.  Our microVM workflow uses softroce for RDMA
-    # testing, not native IB, so skipping the LND is the right default.
-    # Callers needing real IB pass `--configure "--with-o2ib=/path"` via
-    # extra_configure.
+    # --with-o2ib=no: the build container has no *external* OFED
+    # (MOFED / rdma-core-devel) kernel headers, so Lustre's external
+    # O2IB auto-detection fails.  Our microVM workflow uses softroce
+    # for RDMA testing, not native IB, so skipping the LND keeps the
+    # default build lean.
+    #
+    # It is only the *external* probe that needs those headers.  A
+    # target whose kernel ships CONFIG_INFINIBAND and include/rdma/
+    # (rocky10 does) builds the in-kernel LND happily -- pass
+    # `--configure --with-o2ib=yes` and you get
+    # in-kernel-o2iblnd/ko2iblnd.ko, depending on the kernel's own
+    # ib_core/rdma_cm.  extra_configure is appended after this line,
+    # and autoconf takes the last spelling of a flag, so it wins.
     cfg = (
         "./configure --with-linux=/kernel --disable-gss --disable-crypto"
         " --with-o2ib=no"
