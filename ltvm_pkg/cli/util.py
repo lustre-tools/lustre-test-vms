@@ -31,6 +31,7 @@ def _cli_attr(name: str) -> Any:
 
     return getattr(_cli, name)
 
+
 # Exit codes
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -170,9 +171,7 @@ def _load_target_args(
     """
     variant = getattr(args, "variant", "base") or "base"
     arch = getattr(args, "arch", None) or host_arch()
-    tc, err = _load_target(
-        args.target, use_json, arch=arch, variant=variant
-    )
+    tc, err = _load_target(args.target, use_json, arch=arch, variant=variant)
     if tc is None:
         return None, err
     # Thread ad-hoc param overrides into the bound variant.
@@ -381,7 +380,7 @@ def kver_from_release_tag(
     core = tag.strip()
     prefix = f"{target}-{arch}-"
     if core.startswith(prefix):
-        core = core[len(prefix):]
+        core = core[len(prefix) :]
     if variant != "base" and core.endswith(f"-{variant}"):
         core = core[: -(len(variant) + 1)]
     return core
@@ -468,6 +467,7 @@ def released_kvers(
         return []
     pre = f"{variant}__"
     return sorted(
-        p.name[len(pre):] for p in d.iterdir()
+        p.name[len(pre) :]
+        for p in d.iterdir()
         if p.is_file() and p.name.startswith(pre)
     )

@@ -148,7 +148,8 @@ def verify_deployed_modules(vm: VMInfo, staging: Path) -> None:
             on_vm[parts[0]] = parts[1]
 
     stale = [
-        name for name, srcver in staged.items()
+        name
+        for name, srcver in staged.items()
         # only compare modules the VM actually has loaded on disk;
         # a staged module absent there is not evidence of staleness
         if on_vm.get(name[:-3]) and on_vm[name[:-3]] != srcver

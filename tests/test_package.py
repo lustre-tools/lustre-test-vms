@@ -176,9 +176,7 @@ class TestResolveKernel:
             "6.12-rhel10.1-6.12.0-124.56.1.el10_1",
         ):
             (kernels / d).mkdir(parents=True)
-        name, _ = _resolve_kernel(
-            tmp_path, "6.12-rhel10.1", "6.12-rhel10.0"
-        )
+        name, _ = _resolve_kernel(tmp_path, "6.12-rhel10.1", "6.12-rhel10.0")
         assert name == "6.12-rhel10.1-6.12.0-124.56.1.el10_1"
 
     def test_missing_kernels_dir_raises(self, tmp_path: Path) -> None:
@@ -217,10 +215,12 @@ def _make_fake_output(tmp: Path, variant: str = DEFAULT_VARIANT) -> Path:
     # Kernel metas carry lustre_target too; the packager validates
     # against meta_schema.KernelMeta rather than .get()-ing fields.
     (kdir / "meta.json").write_text(
-        json.dumps({
-            "kernel_version": "5.14.0-611.test",
-            "lustre_target": "5.14-rhel9.7",
-        })
+        json.dumps(
+            {
+                "kernel_version": "5.14.0-611.test",
+                "lustre_target": "5.14-rhel9.7",
+            }
+        )
     )
 
     # Container (variant-aware).
@@ -245,9 +245,7 @@ class TestPackageTarget:
         dest = tmp_path / "release"
 
         # Stub out podman-facing export so we don't need a real builder.
-        with patch(
-            "ltvm_pkg.release_package.export_build_container"
-        ) as m:
+        with patch("ltvm_pkg.release_package.export_build_container") as m:
             m.return_value = out / "container" / "image.tar"
             assets = package_target(
                 "rocky9",
@@ -281,9 +279,7 @@ class TestPackageTarget:
         out = _make_fake_output(tmp_path, variant="mofed")
         dest = tmp_path / "release"
 
-        with patch(
-            "ltvm_pkg.release_package.export_build_container"
-        ) as m:
+        with patch("ltvm_pkg.release_package.export_build_container") as m:
             m.return_value = out / "container" / "mofed" / "image.tar"
             assets = package_target(
                 "rocky9",
@@ -307,9 +303,7 @@ class TestPackageTarget:
         out = _make_fake_output(tmp_path)
         dest = tmp_path / "release"
 
-        with patch(
-            "ltvm_pkg.release_package.export_build_container"
-        ) as m:
+        with patch("ltvm_pkg.release_package.export_build_container") as m:
             m.return_value = out / "container" / "image.tar"
             assets = package_target(
                 "rocky9",
@@ -329,9 +323,7 @@ class TestPackageTarget:
         out = _make_fake_output(tmp_path)
         (out / "container" / "image.tar").unlink()
 
-        with patch(
-            "ltvm_pkg.release_package.export_build_container"
-        ) as m:
+        with patch("ltvm_pkg.release_package.export_build_container") as m:
             m.return_value = out / "container" / "image.tar"
             with pytest.raises(ValueError, match="missing artifacts"):
                 package_target(
@@ -345,9 +337,7 @@ class TestPackageTarget:
 class TestPackageBootable:
     def test_compresses_single_file(self, tmp_path: Path) -> None:
         out = _make_fake_output(tmp_path)
-        qcow2 = (
-            out / "images" / "5.14-rhel9.7" / "bootable-5.14-rhel9.7.qcow2"
-        )
+        qcow2 = out / "images" / "5.14-rhel9.7" / "bootable-5.14-rhel9.7.qcow2"
         qcow2.write_bytes(b"QCOW2\x00" * 4096)
 
         dest = tmp_path / "release"
@@ -390,8 +380,7 @@ class TestSnapshotLustreVariant:
         # the base one so a base build for the same kernel coexists
         # (nested, the base build's `rm -rf /staging/*` deleted it).
         staging = (
-            tree / ".ltvm-staging" / "rocky9" / "x86_64"
-            / "5.14-rhel9.7__mofed"
+            tree / ".ltvm-staging" / "rocky9" / "x86_64" / "5.14-rhel9.7__mofed"
         )
         modules = staging / "lib" / "modules" / "5.14.0-611.test" / "extra"
         modules.mkdir(parents=True)
@@ -409,17 +398,27 @@ class TestSnapshotLustreVariant:
         )
 
         tree.mkdir(exist_ok=True)
-        env = {**os.environ, "GIT_AUTHOR_NAME": "t",
-               "GIT_AUTHOR_EMAIL": "t@t",
-               "GIT_COMMITTER_NAME": "t",
-               "GIT_COMMITTER_EMAIL": "t@t"}
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        }
+        subprocess.run(["git", "init", "-q", str(tree)], check=True)
         subprocess.run(
-            ["git", "init", "-q", str(tree)], check=True
-        )
-        subprocess.run(
-            ["git", "-C", str(tree), "commit", "--allow-empty",
-             "-m", "init", "-q"],
-            check=True, env=env,
+            [
+                "git",
+                "-C",
+                str(tree),
+                "commit",
+                "--allow-empty",
+                "-m",
+                "init",
+                "-q",
+            ],
+            check=True,
+            env=env,
         )
 
         real_run = subprocess.run
@@ -435,9 +434,7 @@ class TestSnapshotLustreVariant:
                 return _R(0, "5.14.0-611.test SMP mod_unload", "")
             return real_run(cmd, *a, **kw)
 
-        monkeypatch.setattr(
-            "ltvm_pkg.release_package.subprocess.run", fake_run
-        )
+        monkeypatch.setattr("ltvm_pkg.release_package.subprocess.run", fake_run)
 
         dest = snapshot_lustre(
             tree, out, "rocky9", kernel="5.14-rhel9.7", variant="mofed"

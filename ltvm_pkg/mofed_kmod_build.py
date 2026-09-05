@@ -52,11 +52,7 @@ def mofed_kmod_dir(tc: TargetConfig, kernel: str | None = None) -> Path:
     coexist with the standard one.
     """
     mofed_version = _mofed_version(tc)
-    return (
-        tc.kernel_output_dir(kernel)
-        / "mofed-kmods"
-        / mofed_version
-    )
+    return tc.kernel_output_dir(kernel) / "mofed-kmods" / mofed_version
 
 
 def _mofed_version(tc: TargetConfig) -> str:
@@ -64,9 +60,7 @@ def _mofed_version(tc: TargetConfig) -> str:
     from .target_config import DEFAULT_VARIANT
 
     if tc.variant_name == DEFAULT_VARIANT:
-        raise ValueError(
-            f"target {tc.name!r} is not bound to a mofed variant"
-        )
+        raise ValueError(f"target {tc.name!r} is not bound to a mofed variant")
     v = tc.variant(tc.variant_name)
     ver = v.params.get("mofed_version")
     if not ver:
@@ -154,7 +148,9 @@ def build_mofed_kmods(
     if not force and not is_stale(tc, kernel):
         log.info(
             "MOFED kmods for %s (kernel=%s, mofed=%s) are up to date",
-            tc.name, kver, mofed_version,
+            tc.name,
+            kver,
+            mofed_version,
         )
         return out_dir
 
@@ -167,21 +163,32 @@ def build_mofed_kmods(
 
     log.info(
         "Building MOFED kmods for %s (kernel=%s, mofed=%s)...",
-        tc.name, kver, mofed_version,
+        tc.name,
+        kver,
+        mofed_version,
     )
     t0 = time.monotonic()
 
     # Bind-mount the inner script + the kernel build-tree + the output
     # directory.  Run as bash because the inner script uses bash-isms.
     cmd = [
-        "podman", "run", "--rm",
-        "--security-opt", "label=disable",
-        "--timeout", "1800",  # MOFED kmod rebuild can run 10-15 min
-        "-e", f"KVER={kver}",
-        "-v", f"{INNER_SCRIPT}:/mofed-kmod-build-inner.sh:ro",
-        "-v", f"{build_tree}:/kernel-build-tree:ro",
-        "-v", f"{out_dir}:/mofed-kmods-out",
-        "--entrypoint", "bash",
+        "podman",
+        "run",
+        "--rm",
+        "--security-opt",
+        "label=disable",
+        "--timeout",
+        "1800",  # MOFED kmod rebuild can run 10-15 min
+        "-e",
+        f"KVER={kver}",
+        "-v",
+        f"{INNER_SCRIPT}:/mofed-kmod-build-inner.sh:ro",
+        "-v",
+        f"{build_tree}:/kernel-build-tree:ro",
+        "-v",
+        f"{out_dir}:/mofed-kmods-out",
+        "--entrypoint",
+        "bash",
         container_tag,
         "/mofed-kmod-build-inner.sh",
     ]
@@ -196,15 +203,11 @@ def build_mofed_kmods(
                 r.returncode,
             )
         else:
-            raise RuntimeError(
-                f"MOFED kmod build failed (rc={r.returncode})"
-            )
+            raise RuntimeError(f"MOFED kmod build failed (rc={r.returncode})")
 
     rpms = sorted(p.name for p in out_dir.glob("*.rpm"))
     if not rpms:
-        raise RuntimeError(
-            f"MOFED kmod build produced no RPMs in {out_dir}"
-        )
+        raise RuntimeError(f"MOFED kmod build produced no RPMs in {out_dir}")
 
     # Chown RPMs back to the invoking user when running under sudo, so
     # later non-sudo `ltvm build status` / cleanup commands can read
@@ -213,6 +216,7 @@ def build_mofed_kmods(
     if sudo_user and os.getuid() == 0:
         try:
             import pwd
+
             pw = pwd.getpwnam(sudo_user)
             subprocess.run(
                 ["chown", "-R", f"{pw.pw_uid}:{pw.pw_gid}", str(out_dir)],
@@ -234,14 +238,18 @@ def build_mofed_kmods(
     _atomic_write_json(out_dir / "meta.json", meta)
     log.info(
         "MOFED kmods built: %d RPMs in %s (%.0fs)",
-        len(rpms), out_dir, elapsed,
+        len(rpms),
+        out_dir,
+        elapsed,
     )
     return out_dir
 
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
     text = json.dumps(payload, indent=2) + "\n"
-    fd, tmp_str = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.")
+    fd, tmp_str = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.name}."
+    )
     tmp = Path(tmp_str)
     try:
         with os.fdopen(fd, "w") as f:

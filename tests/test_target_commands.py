@@ -150,10 +150,13 @@ def _patch_cfg_paths(tmp_targets: Path) -> Any:
 
     es = ExitStack()
     es.enter_context(patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"))
-    es.enter_context(patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"))
+    es.enter_context(
+        patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts")
+    )
     es.enter_context(
         patch.object(
-            cfg, "TARGETS_YAML",
+            cfg,
+            "TARGETS_YAML",
             tmp_targets / "targets" / "targets.yaml",
         )
     )
@@ -199,8 +202,10 @@ class TestCmdTargetsJsonShape:
         capsys: pytest.CaptureFixture[str],
         variant_targets: Path,
     ) -> None:
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("no net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("no net")),
+        ):
             rc = cmd_targets(_ns(json=True))
         assert rc == EXIT_OK
         payload = json.loads(capsys.readouterr().out)
@@ -215,15 +220,27 @@ class TestCmdTargetsJsonShape:
         capsys: pytest.CaptureFixture[str],
         variant_targets: Path,
     ) -> None:
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("no net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("no net")),
+        ):
             cmd_targets(_ns(json=True))
         payload = json.loads(capsys.readouterr().out)
         # Every row -- header or variant -- carries this contract.
         expected = {
-            "name", "arch", "status", "kernel", "variant",
-            "is_default", "server", "default_kernel", "lustre_mode",
-            "available", "built", "local_release", "remote_release",
+            "name",
+            "arch",
+            "status",
+            "kernel",
+            "variant",
+            "is_default",
+            "server",
+            "default_kernel",
+            "lustre_mode",
+            "available",
+            "built",
+            "local_release",
+            "remote_release",
         }
         for row in payload:
             assert expected.issubset(row.keys()), (
@@ -239,8 +256,10 @@ class TestCmdTargetsJsonShape:
         is the kernel-header row (variant=None) for the default
         kernel.  Variant rows under the default kernel must NOT
         carry the default mark."""
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("no net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("no net")),
+        ):
             cmd_targets(_ns(json=True))
         rows = json.loads(capsys.readouterr().out)
         defaults = [r for r in rows if r["is_default"]]
@@ -262,16 +281,20 @@ class TestCmdTargetsJsonShape:
         """mofed-24 is pinned to 5.14-rhel9.5, so it must NOT appear
         as a variant row under 5.14-rhel9.7.  Regression guard for
         applicable_kernels() integration."""
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("no net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("no net")),
+        ):
             cmd_targets(_ns(json=True))
         rows = json.loads(capsys.readouterr().out)
         rhel97_variants = {
-            r["variant"] for r in rows
+            r["variant"]
+            for r in rows
             if r["kernel"] == "5.14-rhel9.7" and r["variant"] is not None
         }
         rhel95_variants = {
-            r["variant"] for r in rows
+            r["variant"]
+            for r in rows
             if r["kernel"] == "5.14-rhel9.5" and r["variant"] is not None
         }
         assert "mofed-24" not in rhel97_variants
@@ -287,8 +310,10 @@ class TestCmdTargetsJsonShape:
     ) -> None:
         """Per-kernel header rows carry no local/remote info -- those
         belong to the variant rows below."""
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("no net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("no net")),
+        ):
             cmd_targets(_ns(json=True))
         rows = json.loads(capsys.readouterr().out)
         headers = [r for r in rows if r["variant"] is None]
@@ -308,8 +333,10 @@ class TestCmdTargetsJsonShape:
         remote_release='?' (not '-' -- that would mean 'no release
         available' rather than 'we don't know').  Scripts use this
         to retry vs. give up."""
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("no net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("no net")),
+        ):
             cmd_targets(_ns(json=True))
         rows = json.loads(capsys.readouterr().out)
         variant_rows = [r for r in rows if r["variant"] is not None]
@@ -342,24 +369,22 @@ def _seed_image_meta(
     as built (its `built=` path for the base row reads the kernel
     meta, not the image meta).
     """
-    kdir = (
-        tmp_targets / "artifacts" / target / arch / "kernels" / kernel
-    )
+    kdir = tmp_targets / "artifacts" / target / arch / "kernels" / kernel
     kdir.mkdir(parents=True, exist_ok=True)
     (kdir / "meta.json").write_text("{}")
-    img_dir = (
-        tmp_targets / "artifacts" / target / arch / "images" / kernel
-    )
+    img_dir = tmp_targets / "artifacts" / target / arch / "images" / kernel
     if variant and variant != "base":
         img_dir = img_dir / variant
     img_dir.mkdir(parents=True, exist_ok=True)
     (img_dir / "meta.json").write_text(
-        json.dumps({
-            "target": target,
-            "input_hash": "x" * 16,
-            "with_lustre": with_lustre,
-            "lustre_version": lustre_version,
-        })
+        json.dumps(
+            {
+                "target": target,
+                "input_hash": "x" * 16,
+                "with_lustre": with_lustre,
+                "lustre_version": lustre_version,
+            }
+        )
     )
 
 
@@ -379,20 +404,30 @@ class TestCmdTargetsLustreMissing:
         # (x86_64 in the fixture); seed at that arch so the command
         # actually finds these meta.json files.
         _seed_image_meta(
-            variant_targets, "rocky9", "5.14-rhel9.7", arch="x86_64",
-            with_lustre=None, lustre_version=None,  # --no-lustre build
+            variant_targets,
+            "rocky9",
+            "5.14-rhel9.7",
+            arch="x86_64",
+            with_lustre=None,
+            lustre_version=None,  # --no-lustre build
         )
         _seed_image_meta(
-            variant_targets, "rocky9", "5.14-rhel9.5", arch="x86_64",
+            variant_targets,
+            "rocky9",
+            "5.14-rhel9.5",
+            arch="x86_64",
             with_lustre="/some/tree",
             lustre_version="2.8.0",
         )
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("net")),
+        ):
             cmd_targets(_ns(json=True))
         rows = json.loads(capsys.readouterr().out)
         by_key = {
-            (r["kernel"], r["variant"]): r for r in rows
+            (r["kernel"], r["variant"]): r
+            for r in rows
             if r["variant"] is not None
         }
         # rhel9.7 base row: lustre missing
@@ -408,11 +443,17 @@ class TestCmdTargetsLustreMissing:
         """The Local column shows `\u2713*` for no-lustre images and the
         legend footer explains it.  `\u2713` (plain) for good images."""
         _seed_image_meta(
-            variant_targets, "rocky9", "5.14-rhel9.7", arch="x86_64",
-            with_lustre=None, lustre_version=None,
+            variant_targets,
+            "rocky9",
+            "5.14-rhel9.7",
+            arch="x86_64",
+            with_lustre=None,
+            lustre_version=None,
         )
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("net")),
+        ):
             cmd_targets(_ns(json=False))
         out = capsys.readouterr().out
         # `✓*` (Local column) for the no-lustre row.
@@ -426,11 +467,17 @@ class TestCmdTargetsLustreMissing:
         variant_targets: Path,
     ) -> None:
         _seed_image_meta(
-            variant_targets, "rocky9", "5.14-rhel9.7", arch="x86_64",
-            with_lustre="/x", lustre_version="2.8.0",
+            variant_targets,
+            "rocky9",
+            "5.14-rhel9.7",
+            arch="x86_64",
+            with_lustre="/x",
+            lustre_version="2.8.0",
         )
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("net")),
+        ):
             cmd_targets(_ns(json=False))
         out = capsys.readouterr().out
         assert "\u2713*" not in out  # no false positive
@@ -449,8 +496,10 @@ class TestCmdTargetsTextOutput:
     ) -> None:
         """Block layout: a per-(target, arch) header line in words,
         then a Kernel/Local/Remote/State column line."""
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("no net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("no net")),
+        ):
             cmd_targets(_ns(json=False))
         out = capsys.readouterr().out
         lines = out.splitlines()
@@ -475,8 +524,10 @@ class TestCmdTargetsTextOutput:
     ) -> None:
         """The default kernel is marked with a literal ``(default)``
         suffix, exactly once, on the default kernel's line."""
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("no net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("no net")),
+        ):
             cmd_targets(_ns(json=False))
         out = capsys.readouterr().out
         marked = [ln for ln in out.splitlines() if "(default)" in ln]
@@ -493,8 +544,10 @@ class TestCmdTargetsTextOutput:
         """Non-base variants render as indented lines under their
         kernel; ``base`` is the kernel line itself and never appears
         as a row."""
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("no net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("no net")),
+        ):
             cmd_targets(_ns(json=False))
         out = capsys.readouterr().out
         lines = out.splitlines()
@@ -507,8 +560,10 @@ class TestCmdTargetsTextOutput:
         self,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        with patch.object(cli, "list_targets", return_value=[]), \
-                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+        with (
+            patch.object(cli, "list_targets", return_value=[]),
+            patch.object(cli, "_gh_api", side_effect=Exception("net")),
+        ):
             rc = cmd_targets(_ns(json=False))
         assert rc == EXIT_OK
         assert "No targets" in capsys.readouterr().out
@@ -519,8 +574,10 @@ class TestCmdTargetsTextOutput:
     ) -> None:
         """JSON shape must stay [] (empty list), not {} or null --
         scripts iterate with ``for row in payload``."""
-        with patch.object(cli, "list_targets", return_value=[]), \
-                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+        with (
+            patch.object(cli, "list_targets", return_value=[]),
+            patch.object(cli, "_gh_api", side_effect=Exception("net")),
+        ):
             rc = cmd_targets(_ns(json=True))
         assert rc == EXIT_OK
         assert json.loads(capsys.readouterr().out) == []
@@ -532,8 +589,10 @@ class TestCmdTargetsTextOutput:
     ) -> None:
         """An experimental target shows ``*`` next to its name and
         the legend footer is emitted."""
-        with _patch_cfg_paths(experimental_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("no net")):
+        with (
+            _patch_cfg_paths(experimental_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("no net")),
+        ):
             cmd_targets(_ns(json=False))
         out = capsys.readouterr().out
         assert "rocky9*" in out
@@ -545,8 +604,10 @@ class TestCmdTargetsTextOutput:
         variant_targets: Path,
     ) -> None:
         """When the remote is unreachable, the ``?`` legend is shown."""
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("no net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("no net")),
+        ):
             cmd_targets(_ns(json=False))
         out = capsys.readouterr().out
         assert "github unreachable" in out
@@ -558,12 +619,15 @@ class TestCmdTargetsTextOutput:
         """If TargetConfig raises ValueError for a listed target, its
         row contains an 'error: ...' message rather than aborting
         the whole listing."""
-        with patch.object(cli, "list_targets", return_value=["bogus"]), \
-                patch.object(
-                    cli, "TargetConfig",
-                    side_effect=ValueError("bad yaml"),
-                ), \
-                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+        with (
+            patch.object(cli, "list_targets", return_value=["bogus"]),
+            patch.object(
+                cli,
+                "TargetConfig",
+                side_effect=ValueError("bad yaml"),
+            ),
+            patch.object(cli, "_gh_api", side_effect=Exception("net")),
+        ):
             rc = cmd_targets(_ns(json=False))
         assert rc == EXIT_OK
         out = capsys.readouterr().out
@@ -582,15 +646,26 @@ class TestCmdTargetShow:
         capsys: pytest.CaptureFixture[str],
         variant_targets: Path,
     ) -> None:
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("net")),
+        ):
             rc = cmd_target_show(_ns(json=True))
         assert rc == EXIT_OK
         payload = json.loads(capsys.readouterr().out)
         expected_top = {
-            "name", "status", "arch", "os_family", "os_name",
-            "os_version", "container_image", "lustre_mode",
-            "default_mem", "default_kernel", "kernels", "output_dir",
+            "name",
+            "status",
+            "arch",
+            "os_family",
+            "os_name",
+            "os_version",
+            "container_image",
+            "lustre_mode",
+            "default_mem",
+            "default_kernel",
+            "kernels",
+            "output_dir",
         }
         assert expected_top.issubset(payload.keys())
         assert payload["name"] == "rocky9"
@@ -602,8 +677,10 @@ class TestCmdTargetShow:
         capsys: pytest.CaptureFixture[str],
         variant_targets: Path,
     ) -> None:
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("net")),
+        ):
             cmd_target_show(_ns(json=True))
         payload = json.loads(capsys.readouterr().out)
         ks = payload["kernels"]
@@ -611,8 +688,12 @@ class TestCmdTargetShow:
         assert len(ks) == 2  # rhel9.7 + rhel9.5
         for k in ks:
             assert {
-                "kernel", "is_default", "available",
-                "built", "local_release", "remote_release",
+                "kernel",
+                "is_default",
+                "available",
+                "built",
+                "local_release",
+                "remote_release",
             }.issubset(k.keys())
         defaults = [k for k in ks if k["is_default"]]
         assert len(defaults) == 1
@@ -627,14 +708,20 @@ class TestCmdTargetShow:
         an unbuilt kernel reports built=False."""
         # Pre-populate kernel meta for the default kernel only.
         kdir = (
-            variant_targets / "artifacts" / "rocky9" / _HOST_ARCH
-            / "kernels" / "5.14-rhel9.7"
+            variant_targets
+            / "artifacts"
+            / "rocky9"
+            / _HOST_ARCH
+            / "kernels"
+            / "5.14-rhel9.7"
         )
         kdir.mkdir(parents=True)
         (kdir / "meta.json").write_text("{}")
 
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("net")),
+        ):
             cmd_target_show(_ns(json=True))
         payload = json.loads(capsys.readouterr().out)
         by_name = {k["kernel"]: k for k in payload["kernels"]}
@@ -649,8 +736,10 @@ class TestCmdTargetShow:
         capsys: pytest.CaptureFixture[str],
         variant_targets: Path,
     ) -> None:
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("net")),
+        ):
             rc = cmd_target_show(_ns(json=False))
         assert rc == EXIT_OK
         out = capsys.readouterr().out
@@ -671,8 +760,10 @@ class TestCmdTargetShow:
         capsys: pytest.CaptureFixture[str],
         variant_targets: Path,
     ) -> None:
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("net")),
+        ):
             rc = cmd_target_show(_ns(target="no_such_target"))
         # _load_target maps ValueError -> EXIT_NOT_FOUND.
         assert rc == EXIT_NOT_FOUND
@@ -685,8 +776,10 @@ class TestCmdTargetShow:
         """For an unbuilt kernel with no remote release, both
         local_release and remote_release should be the sentinel '-'
         (not missing -- consumers want a stable shape)."""
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("net")),
+        ):
             cmd_target_show(_ns(json=True))
         payload = json.loads(capsys.readouterr().out)
         for k in payload["kernels"]:
@@ -730,11 +823,14 @@ class TestCmdValidateExitCodes:
         force: bool = False,
         use_json: bool = False,
     ) -> tuple[int, str]:
-        with _patch_cfg_paths(tmp_targets), \
-                patch.object(
-                    cli, "validate_target",
-                    return_value=_vresult(status, "msg"),
-                ):
+        with (
+            _patch_cfg_paths(tmp_targets),
+            patch.object(
+                cli,
+                "validate_target",
+                return_value=_vresult(status, "msg"),
+            ),
+        ):
             ns = _ns(
                 json=use_json,
                 lustre_tree=str(lustre_tree),
@@ -748,19 +844,25 @@ class TestCmdValidateExitCodes:
         assert rc == EXIT_OK
 
     def test_best_effort_is_ok(
-        self, tmp_targets: Path, lustre_tree: Path,
+        self,
+        tmp_targets: Path,
+        lustre_tree: Path,
     ) -> None:
         rc, _ = self._run(tmp_targets, lustre_tree, "best_effort")
         assert rc == EXIT_OK
 
     def test_refuse_returns_error(
-        self, tmp_targets: Path, lustre_tree: Path,
+        self,
+        tmp_targets: Path,
+        lustre_tree: Path,
     ) -> None:
         rc, _ = self._run(tmp_targets, lustre_tree, "refuse")
         assert rc == EXIT_ERROR
 
     def test_refuse_with_force_returns_ok(
-        self, tmp_targets: Path, lustre_tree: Path,
+        self,
+        tmp_targets: Path,
+        lustre_tree: Path,
     ) -> None:
         """--force-compat downgrades a refuse to EXIT_OK so the next
         build step can proceed."""
@@ -768,7 +870,9 @@ class TestCmdValidateExitCodes:
         assert rc == EXIT_OK
 
     def test_error_returns_not_found(
-        self, tmp_targets: Path, lustre_tree: Path,
+        self,
+        tmp_targets: Path,
+        lustre_tree: Path,
     ) -> None:
         """``error`` (parse/IO failure) is intentionally distinct
         from ``refuse`` (Lustre says no): scripts retry the former,
@@ -777,7 +881,9 @@ class TestCmdValidateExitCodes:
         assert rc == EXIT_NOT_FOUND
 
     def test_error_not_overridable_by_force(
-        self, tmp_targets: Path, lustre_tree: Path,
+        self,
+        tmp_targets: Path,
+        lustre_tree: Path,
     ) -> None:
         """--force-compat must NOT silence ``error`` -- those are
         IO/parse problems and a build attempt would fail anyway."""
@@ -792,15 +898,22 @@ class TestCmdValidateOutput:
         tmp_targets: Path,
         lustre_tree: Path,
     ) -> None:
-        with _patch_cfg_paths(tmp_targets), \
-                patch.object(
-                    cli, "validate_target",
-                    return_value=_vresult("ok", "all good"),
-                ):
+        with (
+            _patch_cfg_paths(tmp_targets),
+            patch.object(
+                cli,
+                "validate_target",
+                return_value=_vresult("ok", "all good"),
+            ),
+        ):
             cmd_validate(_ns(json=True, lustre_tree=str(lustre_tree)))
         payload = json.loads(capsys.readouterr().out)
         assert set(payload) == {
-            "status", "mode", "kernel_version", "matched_in", "message",
+            "status",
+            "mode",
+            "kernel_version",
+            "matched_in",
+            "message",
         }
         assert payload["status"] == "ok"
         assert payload["message"] == "all good"
@@ -814,11 +927,14 @@ class TestCmdValidateOutput:
         lustre_tree: Path,
     ) -> None:
         """Text output prefixes the message with [status]."""
-        with _patch_cfg_paths(tmp_targets), \
-                patch.object(
-                    cli, "validate_target",
-                    return_value=_vresult("ok", "compatible"),
-                ):
+        with (
+            _patch_cfg_paths(tmp_targets),
+            patch.object(
+                cli,
+                "validate_target",
+                return_value=_vresult("ok", "compatible"),
+            ),
+        ):
             cmd_validate(_ns(lustre_tree=str(lustre_tree)))
         out = capsys.readouterr().out
         assert "[ok]" in out
@@ -833,14 +949,15 @@ class TestCmdValidateOutput:
         """When --force-compat overrides a refuse, the line is
         prefixed with ``--force-compat:`` so logs make the
         override obvious."""
-        with _patch_cfg_paths(tmp_targets), \
-                patch.object(
-                    cli, "validate_target",
-                    return_value=_vresult("refuse", "bad combo"),
-                ):
-            cmd_validate(
-                _ns(lustre_tree=str(lustre_tree), force_compat=True)
-            )
+        with (
+            _patch_cfg_paths(tmp_targets),
+            patch.object(
+                cli,
+                "validate_target",
+                return_value=_vresult("refuse", "bad combo"),
+            ),
+        ):
+            cmd_validate(_ns(lustre_tree=str(lustre_tree), force_compat=True))
         out = capsys.readouterr().out
         assert "--force-compat" in out
         assert "bad combo" in out
@@ -868,9 +985,7 @@ class TestCmdValidateOutput:
         lustre_tree: Path,
     ) -> None:
         with _patch_cfg_paths(tmp_targets):
-            rc = cmd_validate(
-                _ns(target="bogus", lustre_tree=str(lustre_tree))
-            )
+            rc = cmd_validate(_ns(target="bogus", lustre_tree=str(lustre_tree)))
         assert rc == EXIT_NOT_FOUND
 
 
@@ -894,13 +1009,15 @@ class TestCmdTargetExport:
         the individual losetup/mount calls."""
         from ltvm_pkg import priv
 
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli.os, "getuid", return_value=1000), \
-                patch.object(priv, "sudo_prime") as sp, \
-                patch(
-                    "ltvm_pkg.image_export.export_image",
-                    side_effect=RuntimeError("stubbed"),
-                ):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli.os, "getuid", return_value=1000),
+            patch.object(priv, "sudo_prime") as sp,
+            patch(
+                "ltvm_pkg.image_export.export_image",
+                side_effect=RuntimeError("stubbed"),
+            ),
+        ):
             rc = cmd_target_export(_ns(target="rocky9"))
         sp.assert_called_once()
         # Downstream error surfaces normally; no early "needs root" exit.
@@ -915,13 +1032,15 @@ class TestCmdTargetExport:
         sudo_run will still elevate individual operations if needed."""
         from ltvm_pkg import priv
 
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli.os, "getuid", return_value=1000), \
-                patch.object(priv, "sudo_prime") as sp, \
-                patch(
-                    "ltvm_pkg.image_export.export_image",
-                    side_effect=RuntimeError("stubbed"),
-                ):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli.os, "getuid", return_value=1000),
+            patch.object(priv, "sudo_prime") as sp,
+            patch(
+                "ltvm_pkg.image_export.export_image",
+                side_effect=RuntimeError("stubbed"),
+            ),
+        ):
             rc = cmd_target_export(_ns(target="rocky9", json=True))
         sp.assert_not_called()
         assert rc == EXIT_ERROR
@@ -930,8 +1049,10 @@ class TestCmdTargetExport:
         self,
         variant_targets: Path,
     ) -> None:
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli.os, "getuid", return_value=0):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli.os, "getuid", return_value=0),
+        ):
             rc = cmd_target_export(_ns(target="no_such_target"))
         assert rc == EXIT_NOT_FOUND
 
@@ -949,15 +1070,15 @@ class TestCmdTargetExport:
         def boom(*a: Any, **kw: Any) -> None:
             raise FileExistsError(f"refuse to overwrite {out_file}")
 
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli.os, "getuid", return_value=0), \
-                patch(
-                    "ltvm_pkg.image_export.export_image",
-                    side_effect=boom,
-                ):
-            rc = cmd_target_export(
-                _ns(output=str(out_file), force=False)
-            )
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli.os, "getuid", return_value=0),
+            patch(
+                "ltvm_pkg.image_export.export_image",
+                side_effect=boom,
+            ),
+        ):
+            rc = cmd_target_export(_ns(output=str(out_file), force=False))
         assert rc == EXIT_ERROR
         err = capsys.readouterr().err
         assert "--force" in err
@@ -972,12 +1093,14 @@ class TestCmdTargetExport:
         export_image are captured and re-emitted as EXIT_ERROR."""
         out_file = tmp_path / "out.qcow2"
 
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli.os, "getuid", return_value=0), \
-                patch(
-                    "ltvm_pkg.image_export.export_image",
-                    side_effect=RuntimeError("parted blew up"),
-                ):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli.os, "getuid", return_value=0),
+            patch(
+                "ltvm_pkg.image_export.export_image",
+                side_effect=RuntimeError("parted blew up"),
+            ),
+        ):
             rc = cmd_target_export(_ns(output=str(out_file)))
         assert rc == EXIT_ERROR
         err = capsys.readouterr().err
@@ -997,8 +1120,12 @@ class TestCmdTargetExport:
         # path so the post-export stat() succeeds.
         kname = "5.14-rhel9.7"
         img_dir = (
-            variant_targets / "artifacts" / "rocky9" / _HOST_ARCH
-            / "images" / kname
+            variant_targets
+            / "artifacts"
+            / "rocky9"
+            / _HOST_ARCH
+            / "images"
+            / kname
         )
         img_dir.mkdir(parents=True)
         expected = img_dir / f"bootable-{kname}.qcow2"
@@ -1010,12 +1137,14 @@ class TestCmdTargetExport:
             captured["out"] = out
             return out
 
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli.os, "getuid", return_value=0), \
-                patch(
-                    "ltvm_pkg.image_export.export_image",
-                    side_effect=fake_export,
-                ):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli.os, "getuid", return_value=0),
+            patch(
+                "ltvm_pkg.image_export.export_image",
+                side_effect=fake_export,
+            ),
+        ):
             rc = cmd_target_export(_ns(json=True))
         assert rc == EXIT_OK
         assert captured["out"].name == f"bootable-{kname}.qcow2"
@@ -1029,8 +1158,12 @@ class TestCmdTargetExport:
         not .qcow2."""
         kname = "5.14-rhel9.7"
         img_dir = (
-            variant_targets / "artifacts" / "rocky9" / _HOST_ARCH
-            / "images" / kname
+            variant_targets
+            / "artifacts"
+            / "rocky9"
+            / _HOST_ARCH
+            / "images"
+            / kname
         )
         img_dir.mkdir(parents=True)
         expected = img_dir / f"bootable-{kname}.raw"
@@ -1043,12 +1176,14 @@ class TestCmdTargetExport:
             captured["fmt"] = kw.get("image_format")
             return out
 
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli.os, "getuid", return_value=0), \
-                patch(
-                    "ltvm_pkg.image_export.export_image",
-                    side_effect=fake_export,
-                ):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli.os, "getuid", return_value=0),
+            patch(
+                "ltvm_pkg.image_export.export_image",
+                side_effect=fake_export,
+            ),
+        ):
             cmd_target_export(_ns(format="raw"))
         assert captured["out"].name.endswith(".raw")
         assert captured["fmt"] == "raw"
@@ -1063,15 +1198,15 @@ class TestCmdTargetExport:
         out_file = tmp_path / "myout.qcow2"
         out_file.write_bytes(b"\0" * (2 * 1024 * 1024))
 
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli.os, "getuid", return_value=0), \
-                patch(
-                    "ltvm_pkg.image_export.export_image",
-                    return_value=out_file,
-                ):
-            rc = cmd_target_export(
-                _ns(json=True, output=str(out_file))
-            )
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli.os, "getuid", return_value=0),
+            patch(
+                "ltvm_pkg.image_export.export_image",
+                return_value=out_file,
+            ),
+        ):
+            rc = cmd_target_export(_ns(json=True, output=str(out_file)))
         assert rc == EXIT_OK
         payload = json.loads(capsys.readouterr().out)
         assert payload["target"] == "rocky9"
@@ -1093,15 +1228,17 @@ class TestCmdTargetsArchScoping:
     ) -> None:
         # Anchor the target to x86_64 on disk (without this,
         # _archs_for falls back to the host arch and nothing differs).
-        (
-            variant_targets / "artifacts" / "rocky9" / "x86_64" / "kernels"
-        ).mkdir(parents=True)
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("net")), \
-                patch(
-                    "ltvm_pkg.cli.util.host_arch",
-                    return_value="aarch64",
-                ):
+        (variant_targets / "artifacts" / "rocky9" / "x86_64" / "kernels").mkdir(
+            parents=True
+        )
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("net")),
+            patch(
+                "ltvm_pkg.cli.util.host_arch",
+                return_value="aarch64",
+            ),
+        ):
             cmd_targets(_ns(all_arches=False))
         out = capsys.readouterr().out
         # Fixture rows are x86_64; host is aarch64 -> blocks hidden
@@ -1116,12 +1253,14 @@ class TestCmdTargetsArchScoping:
         capsys: pytest.CaptureFixture[str],
         variant_targets: Path,
     ) -> None:
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("net")), \
-                patch(
-                    "ltvm_pkg.cli.util.host_arch",
-                    return_value="x86_64",
-                ):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("net")),
+            patch(
+                "ltvm_pkg.cli.util.host_arch",
+                return_value="x86_64",
+            ),
+        ):
             cmd_targets(_ns(all_arches=False))
         out = capsys.readouterr().out
         assert "rocky9 (x86_64)" in out
@@ -1136,11 +1275,13 @@ class TestCmdTargetsArchScoping:
         section heading and blocks never interleave."""
         # Seed both arches explicitly so rocky9 lists under each.
         for a in ("aarch64", "x86_64"):
-            (
-                variant_targets / "artifacts" / "rocky9" / a / "kernels"
-            ).mkdir(parents=True)
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+            (variant_targets / "artifacts" / "rocky9" / a / "kernels").mkdir(
+                parents=True
+            )
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("net")),
+        ):
             cmd_targets(_ns(all_arches=True))
         out = capsys.readouterr().out
         lines = out.splitlines()
@@ -1151,7 +1292,9 @@ class TestCmdTargetsArchScoping:
         x86_section = lines.index("===== x86_64 =====")
         for i, ln in enumerate(lines):
             if "(aarch64)" in ln:
-                assert i < x86_section, f"aarch64 block after x86_64 section: {ln}"
+                assert i < x86_section, (
+                    f"aarch64 block after x86_64 section: {ln}"
+                )
             if "(x86_64)" in ln:
                 assert i > x86_section, f"x86_64 block before its section: {ln}"
 
@@ -1175,8 +1318,10 @@ class TestCmdTargetsKernelPresenceFilter:
     ) -> None:
         # 9.7 built locally; 9.5 nowhere; GitHub reachable, no releases.
         self._seed_kernel_meta(variant_targets, "5.14-rhel9.7")
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", return_value=[]):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", return_value=[]),
+        ):
             cmd_targets(_ns())
         out = capsys.readouterr().out
         assert "5.14-rhel9.7" in out
@@ -1189,8 +1334,10 @@ class TestCmdTargetsKernelPresenceFilter:
         variant_targets: Path,
     ) -> None:
         self._seed_kernel_meta(variant_targets, "5.14-rhel9.7")
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", return_value=[]):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", return_value=[]),
+        ):
             cmd_targets(_ns(all_kernels=True))
         out = capsys.readouterr().out
         assert "5.14-rhel9.7" in out
@@ -1203,8 +1350,10 @@ class TestCmdTargetsKernelPresenceFilter:
     ) -> None:
         """Nothing built or published anywhere: the target block stays
         visible with a placeholder instead of vanishing."""
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", return_value=[]):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", return_value=[]),
+        ):
             cmd_targets(_ns())
         out = capsys.readouterr().out
         assert "rocky9" in out
@@ -1217,8 +1366,10 @@ class TestCmdTargetsKernelPresenceFilter:
     ) -> None:
         """GitHub down: all declared kernels stay visible (hiding
         everything unbuilt would read as 'no kernels at all')."""
-        with _patch_cfg_paths(variant_targets), \
-                patch.object(cli, "_gh_api", side_effect=Exception("net")):
+        with (
+            _patch_cfg_paths(variant_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("net")),
+        ):
             cmd_targets(_ns())
         out = capsys.readouterr().out
         assert "5.14-rhel9.7" in out

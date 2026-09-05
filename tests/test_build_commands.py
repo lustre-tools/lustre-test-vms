@@ -185,9 +185,7 @@ class TestPodmanMachineAutostop:
                 "ltvm_pkg.cli.build.should_stop_podman_machine_macos",
                 return_value=True,
             ),
-            patch(
-                "ltvm_pkg.cli.build.stop_podman_machine_macos"
-            ) as stop,
+            patch("ltvm_pkg.cli.build.stop_podman_machine_macos") as stop,
         ):
             with _podman_machine_autostop() as h:
                 h.success = True
@@ -204,9 +202,7 @@ class TestPodmanMachineAutostop:
                 "ltvm_pkg.cli.build.should_stop_podman_machine_macos",
                 return_value=True,
             ),
-            patch(
-                "ltvm_pkg.cli.build.stop_podman_machine_macos"
-            ) as stop,
+            patch("ltvm_pkg.cli.build.stop_podman_machine_macos") as stop,
         ):
             with _podman_machine_autostop():
                 pass
@@ -221,9 +217,7 @@ class TestPodmanMachineAutostop:
                 "ltvm_pkg.cli.build.should_stop_podman_machine_macos",
                 return_value=True,
             ),
-            patch(
-                "ltvm_pkg.cli.build.stop_podman_machine_macos"
-            ) as stop,
+            patch("ltvm_pkg.cli.build.stop_podman_machine_macos") as stop,
         ):
             with pytest.raises(RuntimeError):
                 with _podman_machine_autostop() as h:
@@ -240,9 +234,7 @@ class TestPodmanMachineAutostop:
             patch(
                 "ltvm_pkg.cli.build.should_stop_podman_machine_macos"
             ) as should,
-            patch(
-                "ltvm_pkg.cli.build.stop_podman_machine_macos"
-            ) as stop,
+            patch("ltvm_pkg.cli.build.stop_podman_machine_macos") as stop,
         ):
             with _podman_machine_autostop() as h:
                 h.success = True
@@ -259,9 +251,7 @@ class TestPodmanMachineAutostop:
                 "ltvm_pkg.cli.build.should_stop_podman_machine_macos",
                 return_value=False,
             ),
-            patch(
-                "ltvm_pkg.cli.build.stop_podman_machine_macos"
-            ) as stop,
+            patch("ltvm_pkg.cli.build.stop_podman_machine_macos") as stop,
         ):
             with _podman_machine_autostop() as h:
                 h.success = True
@@ -330,14 +320,18 @@ class TestCmdBuildKernelExtras:
 
         tc = _make_tc(tmp_targets)
         vr = ValidationResult(
-            status="ok", mode=None, kernel_version=None,
-            matched_in=None, message="ok",
+            status="ok",
+            mode=None,
+            kernel_version=None,
+            matched_in=None,
+            message="ok",
         )
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
             patch.object(cli_mod, "validate_target", return_value=vr),
             patch.object(
-                cli_mod, "build_kernel",
+                cli_mod,
+                "build_kernel",
                 side_effect=RuntimeError("kernel boom"),
             ),
         ):
@@ -358,8 +352,11 @@ class TestCmdBuildKernelExtras:
 
         tc = _make_tc(tmp_targets)
         vr = ValidationResult(
-            status="ok", mode=None, kernel_version=None,
-            matched_in=None, message="ok",
+            status="ok",
+            mode=None,
+            kernel_version=None,
+            matched_in=None,
+            message="ok",
         )
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
@@ -369,9 +366,14 @@ class TestCmdBuildKernelExtras:
             ) as bk,
         ):
             rc = _run_main(
-                ["build", "kernel", "rocky9",
-                 "--lustre-tree", str(lustre_tree),
-                 "--force"]
+                [
+                    "build",
+                    "kernel",
+                    "rocky9",
+                    "--lustre-tree",
+                    str(lustre_tree),
+                    "--force",
+                ]
             )
         assert rc == EXIT_OK
         _, kwargs = bk.call_args
@@ -395,7 +397,8 @@ class TestCmdBuildImageExtras:
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
             patch.object(
-                cli_mod, "build_image",
+                cli_mod,
+                "build_image",
                 side_effect=RuntimeError("image boom"),
             ),
         ):
@@ -448,8 +451,11 @@ class TestCmdBuildImageExtras:
         from ltvm_pkg.lustre_build import staging_path as _sp
 
         staging = _sp(
-            tree_abs, "rocky9", arch="x86_64",
-            kernel=tc.resolve_kernel(None), variant="base",
+            tree_abs,
+            "rocky9",
+            arch="x86_64",
+            kernel=tc.resolve_kernel(None),
+            variant="base",
         )
         staging.mkdir(parents=True)
         (staging / ".ltvm-staging-stamp").write_text("ok\n")
@@ -496,8 +502,11 @@ class TestCmdBuildLustre:
 
         tc = _make_tc(tmp_targets)
         vr = ValidationResult(
-            status="ok", mode=None, kernel_version=None,
-            matched_in=None, message="ok",
+            status="ok",
+            mode=None,
+            kernel_version=None,
+            matched_in=None,
+            message="ok",
         )
         # No build-tree on disk for tc.
         with (
@@ -531,8 +540,11 @@ class TestCmdBuildLustre:
         bt = tc.kernel_output_dir() / "build-tree"
         bt.mkdir(parents=True, exist_ok=True)
         vr = ValidationResult(
-            status="ok", mode=None, kernel_version=None,
-            matched_in=None, message="ok",
+            status="ok",
+            mode=None,
+            kernel_version=None,
+            matched_in=None,
+            message="ok",
         )
         miss_proc = MagicMock()
         miss_proc.returncode = 1
@@ -542,7 +554,8 @@ class TestCmdBuildLustre:
             # Bypass the autouse conftest fixture so the real preflight
             # fires against our stubbed `podman image exists`.
             patch.object(
-                build_mod, "_preflight_container",
+                build_mod,
+                "_preflight_container",
                 _REAL_PREFLIGHT_CONTAINER,
             ),
             patch.object(build_mod.subprocess, "run", return_value=miss_proc),
@@ -570,15 +583,19 @@ class TestCmdBuildLustre:
         bt = tc.kernel_output_dir() / "build-tree"
         bt.mkdir(parents=True, exist_ok=True)
         vr = ValidationResult(
-            status="ok", mode=None, kernel_version=None,
-            matched_in=None, message="ok",
+            status="ok",
+            mode=None,
+            kernel_version=None,
+            matched_in=None,
+            message="ok",
         )
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
             patch.object(cli_mod, "validate_target", return_value=vr),
             patch("subprocess.run", return_value=_ok_proc()),
             patch.object(
-                cli_mod, "build_lustre",
+                cli_mod,
+                "build_lustre",
                 side_effect=RuntimeError("autogen failed"),
             ),
         ):
@@ -603,8 +620,11 @@ class TestCmdBuildLustre:
         bt = tc.kernel_output_dir() / "build-tree"
         bt.mkdir(parents=True, exist_ok=True)
         vr = ValidationResult(
-            status="ok", mode=None, kernel_version=None,
-            matched_in=None, message="ok",
+            status="ok",
+            mode=None,
+            kernel_version=None,
+            matched_in=None,
+            message="ok",
         )
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
@@ -615,8 +635,14 @@ class TestCmdBuildLustre:
             ) as bl,
         ):
             rc = _run_main(
-                ["build", "lustre", "rocky9", "--lustre-tree", str(lustre_tree),
-                 "--disable-server"]
+                [
+                    "build",
+                    "lustre",
+                    "rocky9",
+                    "--lustre-tree",
+                    str(lustre_tree),
+                    "--disable-server",
+                ]
             )
         assert rc == EXIT_OK
         _, kwargs = bl.call_args
@@ -636,8 +662,11 @@ class TestCmdBuildLustre:
         bt = tc.kernel_output_dir() / "build-tree"
         bt.mkdir(parents=True, exist_ok=True)
         vr = ValidationResult(
-            status="ok", mode=None, kernel_version=None,
-            matched_in=None, message="ok",
+            status="ok",
+            mode=None,
+            kernel_version=None,
+            matched_in=None,
+            message="ok",
         )
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
@@ -648,8 +677,15 @@ class TestCmdBuildLustre:
             ) as bl,
         ):
             _run_main(
-                ["build", "lustre", "rocky9", "--lustre-tree", str(lustre_tree),
-                 "--configure", "--enable-foo --with-bar=baz"]
+                [
+                    "build",
+                    "lustre",
+                    "rocky9",
+                    "--lustre-tree",
+                    str(lustre_tree),
+                    "--configure",
+                    "--enable-foo --with-bar=baz",
+                ]
             )
         _, kwargs = bl.call_args
         extra = kwargs.get("extra_configure", [])
@@ -696,14 +732,13 @@ class TestCmdBuildShell:
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
             patch.object(
-                build_mod, "_preflight_container",
+                build_mod,
+                "_preflight_container",
                 _REAL_PREFLIGHT_CONTAINER,
             ),
             patch("subprocess.run", return_value=miss),
         ):
-            rc = _run_main(
-                ["build", "shell", "rocky9", str(tmp_path)]
-            )
+            rc = _run_main(["build", "shell", "rocky9", str(tmp_path)])
         assert rc == EXIT_ERROR
         err = capsys.readouterr().err
         assert "not found" in err
@@ -722,14 +757,13 @@ class TestCmdBuildShell:
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
             patch.object(
-                build_mod, "_preflight_container",
+                build_mod,
+                "_preflight_container",
                 _REAL_PREFLIGHT_CONTAINER,
             ),
             patch("subprocess.run", side_effect=FileNotFoundError("podman")),
         ):
-            rc = _run_main(
-                ["build", "shell", "rocky9", str(tmp_path)]
-            )
+            rc = _run_main(["build", "shell", "rocky9", str(tmp_path)])
         assert rc == EXIT_ERROR
         err = capsys.readouterr().err
         assert "podman" in err
@@ -826,8 +860,14 @@ class TestCmdBuildMofedKmods:
             ),
         ):
             rc = _run_main(
-                ["build", "mofed-kmods", "rocky9", "--variant", "mofed-24",
-                 "--json"]
+                [
+                    "build",
+                    "mofed-kmods",
+                    "rocky9",
+                    "--variant",
+                    "mofed-24",
+                    "--json",
+                ]
             )
         assert rc == EXIT_OK
         payload = json.loads(capsys.readouterr().out)
@@ -887,8 +927,11 @@ class TestVariantKernelPinPropagation:
         _add_mofed_variant(tmp_targets)
         tc = _make_tc(tmp_targets, variant="mofed-24")
         vr = ValidationResult(
-            status="ok", mode=None, kernel_version=None,
-            matched_in=None, message="ok",
+            status="ok",
+            mode=None,
+            kernel_version=None,
+            matched_in=None,
+            message="ok",
         )
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
@@ -902,9 +945,16 @@ class TestVariantKernelPinPropagation:
             patch.object(cli_mod, "build_image") as bi,
         ):
             rc = _run_main(
-                ["build", "all", "rocky9", "--yes",
-                 "--variant", "mofed-24",
-                 "--lustre-tree", str(lustre_tree)]
+                [
+                    "build",
+                    "all",
+                    "rocky9",
+                    "--yes",
+                    "--variant",
+                    "mofed-24",
+                    "--lustre-tree",
+                    str(lustre_tree),
+                ]
             )
         assert rc == EXIT_OK
         _, kwargs = bk.call_args
@@ -929,7 +979,10 @@ class TestVariantKernelPinPropagation:
         # nested inside it (nested, the base build's `rm -rf
         # /staging/*` deleted it).
         staging = (
-            lt / ".ltvm-staging" / "rocky9" / "x86_64"
+            lt
+            / ".ltvm-staging"
+            / "rocky9"
+            / "x86_64"
             / "5.14-rhel9.5__mofed-24"
         )
         staging.mkdir(parents=True)
@@ -940,8 +993,15 @@ class TestVariantKernelPinPropagation:
         ):
             bi.return_value = Path("/fake/base.ext4")
             rc = _run_main(
-                ["build", "image", "rocky9", "--variant", "mofed-24",
-                 "--lustre-tree", str(lt)]
+                [
+                    "build",
+                    "image",
+                    "rocky9",
+                    "--variant",
+                    "mofed-24",
+                    "--lustre-tree",
+                    str(lt),
+                ]
             )
         assert rc == EXIT_OK
         _, ikwargs = bi.call_args
@@ -975,8 +1035,15 @@ class TestVariantKernelPinPropagation:
             patch.object(cli_mod, "build_image") as bi,
         ):
             rc = _run_main(
-                ["build", "image", "rocky9", "--variant", "mofed-24",
-                 "--lustre-tree", str(lt)]
+                [
+                    "build",
+                    "image",
+                    "rocky9",
+                    "--variant",
+                    "mofed-24",
+                    "--lustre-tree",
+                    str(lt),
+                ]
             )
         assert rc != EXIT_OK
         err = capsys.readouterr().err
@@ -1005,7 +1072,8 @@ class TestCmdStatusFormat:
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
             patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
-                cfg, "TARGETS_YAML",
+                cfg,
+                "TARGETS_YAML",
                 tmp_targets / "targets" / "targets.yaml",
             ),
         ):
@@ -1021,16 +1089,24 @@ class TestCmdStatusFormat:
             patch(
                 "ltvm_pkg.cli.image_status",
                 return_value={
-                    "built": False, "stale": True,
-                    "kernel": "5.14-rhel9.7", "variant": "base",
+                    "built": False,
+                    "stale": True,
+                    "kernel": "5.14-rhel9.7",
+                    "variant": "base",
                 },
             ),
         ):
             rc = cli_mod.cmd_status(argparse.Namespace(json=False))
         assert rc == EXIT_OK
         out = capsys.readouterr().out
-        for col in ("Target", "Container", "Kernel",
-                    "Image-Kernel", "Variant", "Image"):
+        for col in (
+            "Target",
+            "Container",
+            "Kernel",
+            "Image-Kernel",
+            "Variant",
+            "Image",
+        ):
             assert col in out
         # The single configured target shows up as a row.
         assert "rocky9" in out
@@ -1050,7 +1126,8 @@ class TestCmdStatusFormat:
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
             patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
-                cfg, "TARGETS_YAML",
+                cfg,
+                "TARGETS_YAML",
                 tmp_targets / "targets" / "targets.yaml",
             ),
         ):
@@ -1058,13 +1135,23 @@ class TestCmdStatusFormat:
 
         # Pre-create a kernel dir + a mofed-24 variant base.ext4.
         kdir = (
-            tmp_targets / "artifacts" / "rocky9" / "x86_64" / "kernels"
+            tmp_targets
+            / "artifacts"
+            / "rocky9"
+            / "x86_64"
+            / "kernels"
             / "5.14-rhel9.5-5.14.0-503.26.1"
         )
         kdir.mkdir(parents=True)
         variant_image = (
-            tmp_targets / "artifacts" / "rocky9" / "x86_64" / "images"
-            / "5.14-rhel9.5-5.14.0-503.26.1" / "mofed-24" / "base.ext4"
+            tmp_targets
+            / "artifacts"
+            / "rocky9"
+            / "x86_64"
+            / "images"
+            / "5.14-rhel9.5-5.14.0-503.26.1"
+            / "mofed-24"
+            / "base.ext4"
         )
         variant_image.parent.mkdir(parents=True)
         variant_image.write_bytes(b"")
@@ -1118,19 +1205,22 @@ class TestCmdStatusFormat:
                 )
             # Real one for rocky9
             import ltvm_pkg.target_config as cfg
+
             with (
                 patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
                 patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
                 patch.object(
-                    cfg, "TARGETS_YAML",
+                    cfg,
+                    "TARGETS_YAML",
                     tmp_targets / "targets" / "targets.yaml",
                 ),
             ):
                 return cfg.TargetConfig("rocky9")
 
         with (
-            patch("ltvm_pkg.cli.list_targets",
-                  return_value=["broken", "rocky9"]),
+            patch(
+                "ltvm_pkg.cli.list_targets", return_value=["broken", "rocky9"]
+            ),
             patch("ltvm_pkg.cli.TargetConfig", side_effect=_tc_factory),
             patch(
                 "ltvm_pkg.cli.kernel_status",
@@ -1138,8 +1228,12 @@ class TestCmdStatusFormat:
             ),
             patch(
                 "ltvm_pkg.cli.image_status",
-                return_value={"built": False, "stale": True,
-                              "kernel": "k", "variant": "base"},
+                return_value={
+                    "built": False,
+                    "stale": True,
+                    "kernel": "k",
+                    "variant": "base",
+                },
             ),
         ):
             rc = cli_mod.cmd_status(argparse.Namespace(json=True))
@@ -1170,13 +1264,16 @@ class TestCmdCleanScoping:
             patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(cli_mod, "TargetConfig", cfg.TargetConfig),
             patch.object(
-                cfg, "TARGETS_YAML",
+                cfg,
+                "TARGETS_YAML",
                 tmp_targets / "targets" / "targets.yaml",
             ),
         ):
             args = argparse.Namespace(
-                target="rocky9", arch="aarch64",
-                all_arches=True, json=False,
+                target="rocky9",
+                arch="aarch64",
+                all_arches=True,
+                json=False,
             )
             rc = cli_mod.cmd_clean(args)
         assert rc == EXIT_ERROR
@@ -1203,13 +1300,16 @@ class TestCmdCleanScoping:
             patch.object(cfg, "ARTIFACTS_DIR", out),
             patch.object(cli_mod, "TargetConfig", cfg.TargetConfig),
             patch.object(
-                cfg, "TARGETS_YAML",
+                cfg,
+                "TARGETS_YAML",
                 tmp_targets / "targets" / "targets.yaml",
             ),
         ):
             args = argparse.Namespace(
-                target="rocky9", arch="aarch64",
-                all_arches=False, json=False,
+                target="rocky9",
+                arch="aarch64",
+                all_arches=False,
+                json=False,
             )
             rc = cli_mod.cmd_clean(args)
         assert rc == EXIT_OK
@@ -1245,13 +1345,16 @@ class TestCmdCleanScoping:
             patch.object(cfg, "ARTIFACTS_DIR", out),
             patch.object(cli_mod, "TargetConfig", cfg.TargetConfig),
             patch.object(
-                cfg, "TARGETS_YAML",
+                cfg,
+                "TARGETS_YAML",
                 tmp_targets / "targets" / "targets.yaml",
             ),
         ):
             args = argparse.Namespace(
-                target="rocky9", arch=None,
-                all_arches=False, json=True,
+                target="rocky9",
+                arch=None,
+                all_arches=False,
+                json=True,
             )
             rc = cli_mod.cmd_clean(args)
         assert rc == EXIT_OK

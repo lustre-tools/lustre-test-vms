@@ -231,9 +231,7 @@ class TestErrorHelpers:
     def test_not_found_returns_exit_not_found(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        rc = _emit_error(
-            "no such target", use_json=False, code=EXIT_NOT_FOUND
-        )
+        rc = _emit_error("no such target", use_json=False, code=EXIT_NOT_FOUND)
         assert rc == EXIT_NOT_FOUND
 
     def test_not_found_json(self, capsys: pytest.CaptureFixture[str]) -> None:
@@ -502,7 +500,8 @@ class TestCmdValidate:
         tc = self._tc(tmp_targets)
         with patch("ltvm_pkg.cli.TargetConfig", return_value=tc):
             rc = _run_main(
-                ["target", "validate", "rocky9", "--lustre-tree", str(lt)], capsys
+                ["target", "validate", "rocky9", "--lustre-tree", str(lt)],
+                capsys,
             )
         assert rc == EXIT_OK
         out = capsys.readouterr().out
@@ -523,7 +522,8 @@ class TestCmdValidate:
         tc = self._tc(tmp_targets)
         with patch("ltvm_pkg.cli.TargetConfig", return_value=tc):
             rc = _run_main(
-                ["target", "validate", "rocky9", "--lustre-tree", str(lt)], capsys
+                ["target", "validate", "rocky9", "--lustre-tree", str(lt)],
+                capsys,
             )
         assert rc == EXIT_ERROR
         out = capsys.readouterr().out
@@ -544,7 +544,14 @@ class TestCmdValidate:
         tc = self._tc(tmp_targets)
         with patch("ltvm_pkg.cli.TargetConfig", return_value=tc):
             rc = _run_main(
-                ["target", "validate", "rocky9", "--lustre-tree", str(lt), "--force-compat"],
+                [
+                    "target",
+                    "validate",
+                    "rocky9",
+                    "--lustre-tree",
+                    str(lt),
+                    "--force-compat",
+                ],
                 capsys,
             )
         assert rc == EXIT_OK
@@ -598,7 +605,14 @@ class TestCmdValidate:
         tc = self._tc(tmp_targets)
         with patch("ltvm_pkg.cli.TargetConfig", return_value=tc):
             rc = _run_main(
-                ["target", "validate", "--json", "rocky9", "--lustre-tree", str(lt)],
+                [
+                    "target",
+                    "validate",
+                    "--json",
+                    "rocky9",
+                    "--lustre-tree",
+                    str(lt),
+                ],
                 capsys,
             )
         assert rc == EXIT_OK
@@ -830,7 +844,8 @@ class TestValidationGating:
         ):
             rc = _run_main(
                 [
-                    "build", "all",
+                    "build",
+                    "all",
                     "rocky9",
                     "--lustre-tree",
                     str(lustre_tree),
@@ -860,7 +875,8 @@ class TestValidationGating:
             with pytest.raises(SystemExit) as exc:
                 _run_main(
                     [
-                        "build", "all",
+                        "build",
+                        "all",
                         "rocky9",
                         "--lustre-tree",
                         str(lustre_tree),
@@ -894,7 +910,8 @@ class TestValidationGating:
         ):
             rc = _run_main(
                 [
-                    "build", "all",
+                    "build",
+                    "all",
                     "rocky9",
                     "--lustre-tree",
                     str(lustre_tree),
@@ -927,7 +944,8 @@ class TestValidationGating:
         ):
             rc = _run_main(
                 [
-                    "build", "all",
+                    "build",
+                    "all",
                     "rocky9",
                     "--lustre-tree",
                     str(lustre_tree),
@@ -956,7 +974,8 @@ class TestValidationGating:
             with pytest.raises(SystemExit) as exc:
                 _run_main(
                     [
-                        "build", "all",
+                        "build",
+                        "all",
                         "rocky9",
                         "--lustre-tree",
                         str(lustre_tree),
@@ -988,7 +1007,8 @@ class TestValidationGating:
             with pytest.raises(SystemExit) as exc:
                 _run_main(
                     [
-                        "build", "kernel",
+                        "build",
+                        "kernel",
                         "rocky9",
                         "--lustre-tree",
                         str(lustre_tree),
@@ -1018,7 +1038,8 @@ class TestValidationGating:
         ):
             rc = _run_main(
                 [
-                    "build", "kernel",
+                    "build",
+                    "kernel",
                     "rocky9",
                     "--lustre-tree",
                     str(lustre_tree),
@@ -1049,7 +1070,8 @@ class TestValidationGating:
             with pytest.raises(SystemExit) as exc:
                 _run_main(
                     [
-                        "build", "lustre",
+                        "build",
+                        "lustre",
                         "rocky9",
                         "--lustre-tree",
                         str(lustre_tree),
@@ -1089,7 +1111,8 @@ class TestValidationGating:
         ):
             rc = _run_main(
                 [
-                    "build", "lustre",
+                    "build",
+                    "lustre",
                     "rocky9",
                     "--lustre-tree",
                     str(lustre_tree),
@@ -1134,9 +1157,7 @@ class TestValidationGating:
             ),
             patch.object(cli_mod, "snapshot_lustre") as snap,
             patch.object(cli_mod, "_resolve_lustre_tree") as rl,
-            patch.object(
-                cli_mod, "package_target", return_value=assets
-            ) as pt,
+            patch.object(cli_mod, "package_target", return_value=assets) as pt,
             patch.object(cli_mod, "_gh_release_upload") as upl,
         ):
             rc = _run_main(
@@ -1425,7 +1446,8 @@ class TestKernelArgPropagation:
             mock_bi.return_value = Path("/fake/base.ext4")
             rc = _run_main(
                 [
-                    "build", "image",
+                    "build",
+                    "image",
                     "rocky9",
                     "--kernel",
                     "5.14-rhel9.5",
@@ -1460,7 +1482,8 @@ class TestKernelArgPropagation:
             mock_bi.return_value = Path("/fake/base.ext4")
             rc = _run_main(
                 [
-                    "build", "image",
+                    "build",
+                    "image",
                     "rocky9",
                     "--kernel",
                     "5.14-rhel9.7",
@@ -1496,7 +1519,8 @@ class TestKernelArgPropagation:
             mock_bi.return_value = Path("/fake/base.ext4")
             rc = _run_main(
                 [
-                    "build", "image",
+                    "build",
+                    "image",
                     "rocky9",
                     "--lustre-tree",
                     str(lt),
@@ -1557,20 +1581,18 @@ class TestKernelArgPropagation:
             patch.object(cli_mod, "TargetConfig", return_value=tc),
             patch.object(cli_mod, "validate_target", return_value=vr),
             patch.object(cli_mod, "_do_build_container"),
-            patch.object(
-                cli_mod, "build_kernel", return_value={"ok": True}
-            ),
+            patch.object(cli_mod, "build_kernel", return_value={"ok": True}),
             patch.object(cli_mod, "build_lustre", return_value={"ok": True}),
             patch.object(cli_mod, "snapshot_lustre"),
             patch.object(cli_mod, "build_image") as mock_bi,
         ):
             rc = _run_main(
                 [
-                    "build", "all",
+                    "build",
+                    "all",
                     "rocky9",
                     "--kernel",
                     "5.14-rhel9.5",
-
                     "--lustre-tree",
                     str(lustre_tree),
                 ],
@@ -1610,12 +1632,16 @@ class TestKernelArgPropagation:
             patch.object(
                 cli_mod,
                 "build_kernel",
-                side_effect=lambda *a, **kw: calls.append("kernel") or {"ok": True},
+                side_effect=lambda *a, **kw: (
+                    calls.append("kernel") or {"ok": True}
+                ),
             ),
             patch.object(
                 cli_mod,
                 "build_lustre",
-                side_effect=lambda *a, **kw: calls.append("lustre") or {"ok": True},
+                side_effect=lambda *a, **kw: (
+                    calls.append("lustre") or {"ok": True}
+                ),
             ),
             patch.object(
                 cli_mod,
@@ -1630,7 +1656,8 @@ class TestKernelArgPropagation:
         ):
             rc = _run_main(
                 [
-                    "build", "all",
+                    "build",
+                    "all",
                     "rocky9",
                     "--lustre-tree",
                     str(lustre_tree),
@@ -1944,8 +1971,17 @@ class TestCmdTargetsPerKernelRows:
         assert defaults[0]["kernel"] == "5.14-rhel9.7"
         # All rows have the required columns
         for r in payload:
-            assert set(["name", "arch", "kernel", "lustre_mode",
-                        "local_release", "remote_release", "is_default"]) <= set(r.keys())
+            assert set(
+                [
+                    "name",
+                    "arch",
+                    "kernel",
+                    "lustre_mode",
+                    "local_release",
+                    "remote_release",
+                    "is_default",
+                ]
+            ) <= set(r.keys())
 
     def test_release_status_kernel_signature_filters_remote(self) -> None:
         from ltvm_pkg.cli import _release_status

@@ -23,12 +23,18 @@ def test_softroce_rxe0_active(vm_name) -> None:  # type: ignore[no-untyped-def]
     """
     name = vm_name()
     proc = run_ltvm(
-        "create", name,
-        "--mem", "2048",
-        "--vcpus", "1",
-        "--mdt-disks", "0",
-        "--ost-disks", "0",
-        "--nic", "softroce",
+        "create",
+        name,
+        "--mem",
+        "2048",
+        "--vcpus",
+        "1",
+        "--mdt-disks",
+        "0",
+        "--ost-disks",
+        "0",
+        "--nic",
+        "softroce",
         timeout=240,
     )
     assert proc.returncode == 0, (
@@ -47,9 +53,7 @@ def test_softroce_rxe0_active(vm_name) -> None:  # type: ignore[no-untyped-def]
         out,
         re.MULTILINE,
     )
-    assert m is not None, (
-        f"no rxe link parsed from `rdma link show`:\n{out}"
-    )
+    assert m is not None, f"no rxe link parsed from `rdma link show`:\n{out}"
     rxe_name, state, netdev = m.group(1), m.group(2), m.group(3)
     assert rxe_name == "rxe0", (
         f"expected rxe0 (first softroce), got {rxe_name!r}"
@@ -57,9 +61,7 @@ def test_softroce_rxe0_active(vm_name) -> None:  # type: ignore[no-untyped-def]
     assert state == "ACTIVE", (
         f"rxe0 state is {state!r}, expected ACTIVE:\n{out}"
     )
-    assert netdev == "eth1", (
-        f"rxe0 netdev is {netdev!r}, expected eth1:\n{out}"
-    )
+    assert netdev == "eth1", f"rxe0 netdev is {netdev!r}, expected eth1:\n{out}"
 
     # 2. modinfo rdma_rxe: the module must be in the image.
     rc, out, err = ssh_run(name, "modinfo rdma_rxe")
@@ -74,6 +76,4 @@ def test_softroce_rxe0_active(vm_name) -> None:  # type: ignore[no-untyped-def]
     m = re.search(r"\bmtu\s+(\d+)\b", out)
     assert m is not None, f"mtu not found in ip -d link:\n{out}"
     mtu = int(m.group(1))
-    assert mtu >= 4200, (
-        f"eth1 mtu is {mtu}, expected >= 4200 (softroce hook)"
-    )
+    assert mtu >= 4200, f"eth1 mtu is {mtu}, expected >= 4200 (softroce hook)"

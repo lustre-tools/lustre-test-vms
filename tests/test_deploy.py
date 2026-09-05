@@ -461,9 +461,7 @@ class TestCmdDeployPerKernelStaging:
 
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
-            patch(
-                "ltvm_pkg.cli.deploy_to_vm", side_effect=fake_deploy_to_vm
-            ),
+            patch("ltvm_pkg.cli.deploy_to_vm", side_effect=fake_deploy_to_vm),
             patch("subprocess.run") as run_mock,
         ):
             # If _staging_is_fresh does get invoked it calls `find`,
@@ -596,9 +594,7 @@ class TestCmdDeployErrorPaths:
         # TargetConfig is never even instantiated when VM lookup fails.
         tc_mock.assert_not_called()
 
-    def test_no_target_and_no_os_id_errors(
-        self, tmp_sockets: Path
-    ) -> None:
+    def test_no_target_and_no_os_id_errors(self, tmp_sockets: Path) -> None:
         """VM with no os_id and no --target gives a clear error."""
         from ltvm_pkg import cli as cli_mod
 
@@ -713,7 +709,10 @@ class TestCmdDeployErrorPaths:
                 "ltvm_pkg.cli.deploy_to_vm",
                 side_effect=RuntimeError("ssh died"),
             ),
-            patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")),
+            patch(
+                "subprocess.run",
+                return_value=MagicMock(returncode=0, stdout=""),
+            ),
         ):
             rc = cli_mod.cmd_deploy(args)
         assert rc == 1
@@ -942,7 +941,9 @@ class TestCmdDeployVariantPropagation:
 
         args = _deploy_args(vm="co1-mofed", lustre_tree=str(build_path))
         with (
-            patch.object(cli_mod, "TargetConfig", return_value=_stub_tc()) as tc_mock,
+            patch.object(
+                cli_mod, "TargetConfig", return_value=_stub_tc()
+            ) as tc_mock,
             patch(
                 "ltvm_pkg.cli.deploy_to_vm",
                 side_effect=fake_deploy_to_vm,
@@ -1050,13 +1051,23 @@ class TestCmdDeployKernelMismatch:
 
         assert rc == 1
         # find the ltvm build lustre subprocess
-        build_calls = [c for c in run_calls if isinstance(c, list)
-                       and len(c) >= 3 and c[0:3] == ["ltvm", "build", "lustre"]]
+        build_calls = [
+            c
+            for c in run_calls
+            if isinstance(c, list)
+            and len(c) >= 3
+            and c[0:3] == ["ltvm", "build", "lustre"]
+        ]
         # Could also be sudo-prefixed
         if not build_calls:
-            build_calls = [c for c in run_calls if isinstance(c, list)
-                           and "ltvm" in c and "build" in c
-                           and "lustre" in c]
+            build_calls = [
+                c
+                for c in run_calls
+                if isinstance(c, list)
+                and "ltvm" in c
+                and "build" in c
+                and "lustre" in c
+            ]
         assert build_calls, f"build subprocess not found in {run_calls}"
         cmd = build_calls[0]
         assert "--kernel" in cmd
@@ -1094,7 +1105,9 @@ class TestCmdDeployForceCompat:
         )
         with (
             patch.object(cli_mod, "TargetConfig", return_value=_stub_tc()),
-            patch.object(cli_mod, "_gate_lustre_validation", side_effect=fake_gate),
+            patch.object(
+                cli_mod, "_gate_lustre_validation", side_effect=fake_gate
+            ),
             # Build subprocess fails -> stops before deploy.
             patch(
                 "subprocess.run",
@@ -1140,9 +1153,7 @@ class TestCmdDeployForceCompat:
         # caller is the top-level dispatch table which converts it to rc.
         with (
             patch.object(cli_mod, "TargetConfig", return_value=_stub_tc()),
-            patch.object(
-                cli_mod, "validate_target", return_value=hard_err
-            ),
+            patch.object(cli_mod, "validate_target", return_value=hard_err),
             patch("ltvm_pkg.cli.deploy_to_vm") as deploy_mock,
         ):
             with pytest.raises(SystemExit) as exc:
@@ -1318,9 +1329,7 @@ class TestCmdDeployMountAndKver:
 class TestCmdLlmount:
     """cmd_llmount returns SystemExit codes from the underlying handler."""
 
-    def test_no_cleanup_passes_flag_through(
-        self, tmp_sockets: Path
-    ) -> None:
+    def test_no_cleanup_passes_flag_through(self, tmp_sockets: Path) -> None:
         import argparse as ap
 
         from ltvm_pkg import cli as cli_mod
@@ -1362,9 +1371,7 @@ class TestCmdLlmount:
         assert rc == 0
         assert captured["cleanup"] is True
 
-    def test_systemexit_nonzero_propagates_rc(
-        self, tmp_sockets: Path
-    ) -> None:
+    def test_systemexit_nonzero_propagates_rc(self, tmp_sockets: Path) -> None:
         import argparse as ap
 
         from ltvm_pkg import cli as cli_mod
@@ -1403,9 +1410,7 @@ class TestCmdLlmount:
 
         from ltvm_pkg import cli as cli_mod
 
-        with patch(
-            "ltvm_pkg.vm_commands.cmd_llmount", return_value=None
-        ):
+        with patch("ltvm_pkg.vm_commands.cmd_llmount", return_value=None):
             args = ap.Namespace(
                 vm="co1-ret", json=False, timeout=300, cleanup=False
             )
@@ -1427,6 +1432,7 @@ class TestVerifyDeployedModules:
         class V:
             ip = "10.0.0.1"
             name = "co1-test"
+
         return V()
 
     def test_warns_on_mismatch(self, tmp_path, capsys):
@@ -1435,11 +1441,16 @@ class TestVerifyDeployedModules:
         from ltvm_pkg.deploy import verify_deployed_modules
 
         staging = self._staging(tmp_path, ["osc.ko", "lov.ko"])
-        with patch("ltvm_pkg.deploy.read_modinfo_field",
-                   side_effect=lambda p, f: "STAGED_" + p.name), \
-             patch("ltvm_pkg.deploy.run_ssh") as ssh:
+        with (
+            patch(
+                "ltvm_pkg.deploy.read_modinfo_field",
+                side_effect=lambda p, f: "STAGED_" + p.name,
+            ),
+            patch("ltvm_pkg.deploy.run_ssh") as ssh,
+        ):
             ssh.return_value = MagicMock(
-                returncode=0, stdout="osc STAGED_osc.ko\nlov OLDBUILD\n")
+                returncode=0, stdout="osc STAGED_osc.ko\nlov OLDBUILD\n"
+            )
             verify_deployed_modules(self._vm(), staging)
         err = capsys.readouterr().err
         assert "do not match" in err
@@ -1452,9 +1463,13 @@ class TestVerifyDeployedModules:
         from ltvm_pkg.deploy import verify_deployed_modules
 
         staging = self._staging(tmp_path, ["osc.ko"])
-        with patch("ltvm_pkg.deploy.read_modinfo_field",
-                   side_effect=lambda p, f: "SAME"), \
-             patch("ltvm_pkg.deploy.run_ssh") as ssh:
+        with (
+            patch(
+                "ltvm_pkg.deploy.read_modinfo_field",
+                side_effect=lambda p, f: "SAME",
+            ),
+            patch("ltvm_pkg.deploy.run_ssh") as ssh,
+        ):
             ssh.return_value = MagicMock(returncode=0, stdout="osc SAME\n")
             verify_deployed_modules(self._vm(), staging)
         assert capsys.readouterr().err == ""
@@ -1466,9 +1481,13 @@ class TestVerifyDeployedModules:
         from ltvm_pkg.deploy import verify_deployed_modules
 
         staging = self._staging(tmp_path, ["osc.ko"])
-        with patch("ltvm_pkg.deploy.read_modinfo_field",
-                   side_effect=lambda p, f: "SAME"), \
-             patch("ltvm_pkg.deploy.run_ssh") as ssh:
+        with (
+            patch(
+                "ltvm_pkg.deploy.read_modinfo_field",
+                side_effect=lambda p, f: "SAME",
+            ),
+            patch("ltvm_pkg.deploy.run_ssh") as ssh,
+        ):
             ssh.return_value = MagicMock(returncode=0, stdout="osc \n")
             verify_deployed_modules(self._vm(), staging)
         assert capsys.readouterr().err == ""
@@ -1479,9 +1498,13 @@ class TestVerifyDeployedModules:
         from ltvm_pkg.deploy import verify_deployed_modules
 
         staging = self._staging(tmp_path, ["osc.ko"])
-        with patch("ltvm_pkg.deploy.read_modinfo_field",
-                   side_effect=lambda p, f: "SAME"), \
-             patch("ltvm_pkg.deploy.run_ssh") as ssh:
+        with (
+            patch(
+                "ltvm_pkg.deploy.read_modinfo_field",
+                side_effect=lambda p, f: "SAME",
+            ),
+            patch("ltvm_pkg.deploy.run_ssh") as ssh,
+        ):
             ssh.return_value = MagicMock(returncode=255, stdout="")
             verify_deployed_modules(self._vm(), staging)
         assert "could not verify" in capsys.readouterr().err

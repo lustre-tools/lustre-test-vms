@@ -25,6 +25,7 @@ def _atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
 
     _priv_atomic_write(path, text, mode=mode)
 
+
 # ── constants ────────────────────────────────────────────
 # Configurable via environment variables; defaults match the
 # standard install layout from `ltvm setup`.
@@ -227,9 +228,7 @@ def resolve_os_artifacts(
             if cand.is_dir():
                 kernel_dirname = kernel_suffix
             elif matching_kernel_dirs(kernels_root, kernel_suffix):
-                kernel_dirname = resolve_kernel_dir(
-                    kernels_root, kernel_suffix
-                )
+                kernel_dirname = resolve_kernel_dir(kernels_root, kernel_suffix)
         if kernel_dirname is None and kernels_root.is_dir():
             any_built = sorted(
                 d.name for d in kernels_root.iterdir() if d.is_dir()
@@ -381,7 +380,9 @@ class VMInfo:
     base_image: str = ""  # base image name (e.g. rocky9-base.ext4)
     os_id: str = ""  # OS identifier (e.g. rocky9, ubuntu24)
     arch: str = "x86_64"  # CPU architecture (x86_64, aarch64)
-    creator: str = ""  # username that created the VM (SUDO_USER, or "" for legacy)
+    creator: str = (
+        ""  # username that created the VM (SUDO_USER, or "" for legacy)
+    )
     # Opaque lifecycle owner/session ID.  New creates always set this from
     # --owner-id, LTVM_OWNER_ID, or a typed pid:<n> fallback.  None preserves
     # compatibility with .info files written before ownership was introduced.

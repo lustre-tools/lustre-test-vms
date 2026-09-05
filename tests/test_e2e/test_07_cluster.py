@@ -40,16 +40,20 @@ CLUSTER_DEPLOY_TIMEOUT = 720
 def _tap_exists(tap: str) -> bool:
     r = subprocess.run(
         ["ip", "link", "show", "dev", tap],
-        check=False, capture_output=True, text=True, timeout=5,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
     )
     return r.returncode == 0
 
 
 def _tap_for(name: str) -> str:
     import hashlib
-    suffix = name if len(name) <= 11 else hashlib.md5(
-        name.encode()
-    ).hexdigest()[:11]
+
+    suffix = (
+        name if len(name) <= 11 else hashlib.md5(name.encode()).hexdigest()[:11]
+    )
     return f"tap-{suffix}"
 
 
@@ -77,9 +81,7 @@ def _skip_on_cluster_bug(
 
 def test_cluster_create_deploy_destroy(cluster_name) -> None:  # type: ignore[no-untyped-def]
     """Minimal 2-node cluster: create, deploy+mount, probe, destroy."""
-    assert LUSTRE_TREE.is_dir(), (
-        f"~/lustre-release missing at {LUSTRE_TREE}"
-    )
+    assert LUSTRE_TREE.is_dir(), f"~/lustre-release missing at {LUSTRE_TREE}"
 
     cname, mds, oss = cluster_name()
     mds_tap = _tap_for(mds)
@@ -90,9 +92,13 @@ def test_cluster_create_deploy_destroy(cluster_name) -> None:  # type: ignore[no
     # 1024 MiB per node keeps the cluster under ~2 GiB total, which
     # fits alongside the other dev VMs the host normally carries.
     proc = run_ltvm(
-        "cluster", "create", cname,
-        "--mem", "1024",
-        "--vcpus", "1",
+        "cluster",
+        "create",
+        cname,
+        "--mem",
+        "1024",
+        "--vcpus",
+        "1",
         f"mgs+mds:{mds}:1",
         f"oss:{oss}:3",
         timeout=360,
@@ -108,8 +114,11 @@ def test_cluster_create_deploy_destroy(cluster_name) -> None:  # type: ignore[no
 
     # ---- deploy + mount ----
     proc = run_ltvm(
-        "cluster", "deploy", cname,
-        "--build", str(LUSTRE_TREE),
+        "cluster",
+        "deploy",
+        cname,
+        "--build",
+        str(LUSTRE_TREE),
         "--mount",
         timeout=CLUSTER_DEPLOY_TIMEOUT,
     )
@@ -122,7 +131,12 @@ def test_cluster_create_deploy_destroy(cluster_name) -> None:  # type: ignore[no
     # as one arg sends it to bash as a single word and trips
     # "command not found" (rc=127).
     proc = run_ltvm(
-        "cluster", "exec", cname, "mds", "lctl", "dl",
+        "cluster",
+        "exec",
+        cname,
+        "mds",
+        "lctl",
+        "dl",
         timeout=30,
     )
     if proc.returncode != 0:
@@ -140,7 +154,12 @@ def test_cluster_create_deploy_destroy(cluster_name) -> None:  # type: ignore[no
 
     # ---- probe: oss shows OSTs ----
     proc = run_ltvm(
-        "cluster", "exec", cname, "oss", "lctl", "dl",
+        "cluster",
+        "exec",
+        cname,
+        "oss",
+        "lctl",
+        "dl",
         timeout=30,
     )
     if proc.returncode != 0:

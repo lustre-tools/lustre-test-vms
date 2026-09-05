@@ -148,7 +148,10 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         if vm_kernel_name:
             deploy_kernel = tc.resolve_kernel(vm_kernel_name)
     staging = _staging_path(
-        build_path, target, arch=vm_arch, kernel=deploy_kernel,
+        build_path,
+        target,
+        arch=vm_arch,
+        kernel=deploy_kernel,
         variant=vm.variant,
     )
     # If the bundled-snapshot path is involved we DON'T require a
@@ -315,7 +318,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 tc,
                 build_path,
                 force=args.force_compat,
-                kernel_build_tree=tc.kernel_output_dir(kernel=deploy_kernel) / "build-tree",
+                kernel_build_tree=tc.kernel_output_dir(kernel=deploy_kernel)
+                / "build-tree",
                 kernel=deploy_kernel,
             )
             build_cmd = [

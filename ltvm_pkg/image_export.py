@@ -118,9 +118,7 @@ def _check_gnu_tar() -> None:
     a tarball Google's image import rejects.
     """
     if shutil.which("tar") is None:
-        raise RuntimeError(
-            "tar not found on PATH -- needed for --format gce"
-        )
+        raise RuntimeError("tar not found on PATH -- needed for --format gce")
     r = subprocess.run(
         ["tar", "--version"], capture_output=True, text=True, check=False
     )
@@ -141,8 +139,15 @@ def _check_host_tools(image_format: str = "qcow2") -> dict[str, str]:
     a node that just wants a GCE image is a install-this-for-nothing
     error.
     """
-    needed = ["parted", "mkfs.ext4", "losetup", "mount", "umount",
-              "e2fsck", "blkid"]
+    needed = [
+        "parted",
+        "mkfs.ext4",
+        "losetup",
+        "mount",
+        "umount",
+        "e2fsck",
+        "blkid",
+    ]
     if image_format == "qcow2":
         needed.append("qemu-img")
     missing = [t for t in needed if shutil.which(t) is None]
@@ -172,7 +177,8 @@ def _losetup_attach(image: Path) -> str:
     """losetup --partscan and return the /dev/loopN device."""
     r = sudo_run(
         ["losetup", "--show", "-f", "-P", str(image)],
-        check=True, quiet=True,
+        check=True,
+        quiet=True,
     )
     return r.stdout.strip()
 
@@ -182,7 +188,9 @@ def _losetup_detach(dev: str) -> None:
 
 
 def _write_grub_cfg(
-    boot_dir: Path, kver: str, fs_uuid: str,
+    boot_dir: Path,
+    kver: str,
+    fs_uuid: str,
     grub_install: str = "grub2-install",
 ) -> None:
     """Write a minimal serial-friendly grub.cfg.
@@ -220,7 +228,8 @@ def _write_grub_cfg(
 def _fs_uuid(dev: str) -> str:
     r = sudo_run(
         ["blkid", "-s", "UUID", "-o", "value", dev],
-        check=True, quiet=True,
+        check=True,
+        quiet=True,
     )
     uuid = r.stdout.strip()
     if not uuid:
@@ -266,8 +275,11 @@ def _rewrite_fstab_root(dst_mnt: Path, fs_uuid: str) -> None:
     replaced = False
     for line in lines:
         fields = line.split()
-        if (not line.lstrip().startswith("#")
-                and len(fields) >= 2 and fields[1] == "/"):
+        if (
+            not line.lstrip().startswith("#")
+            and len(fields) >= 2
+            and fields[1] == "/"
+        ):
             fields[0] = f"UUID={fs_uuid}"
             out.append("  ".join(fields))
             replaced = True
@@ -364,7 +376,8 @@ def _apply_gce_guest_config(dst_mnt: Path) -> None:
     _ensure_dir(wants)
     sudo_run(
         ["ln", "-sf", "/" + unit, str(wants / "NetworkManager.service")],
-        check=False, quiet=True,
+        check=False,
+        quiet=True,
     )
 
 
@@ -385,13 +398,19 @@ def _package_gce(raw: Path, output: Path) -> None:
     """
     if raw.name != _GCE_DISK_NAME:
         raise RuntimeError(
-            f"GCE tarball member must be named {_GCE_DISK_NAME}, "
-            f"got {raw.name}"
+            f"GCE tarball member must be named {_GCE_DISK_NAME}, got {raw.name}"
         )
     log.info("Packing %s -> %s (oldgnu tar.gz)", raw.name, output)
     subprocess.run(
-        ["tar", "--format=oldgnu", "-Sczf", str(output),
-         "-C", str(raw.parent), _GCE_DISK_NAME],
+        [
+            "tar",
+            "--format=oldgnu",
+            "-Sczf",
+            str(output),
+            "-C",
+            str(raw.parent),
+            _GCE_DISK_NAME,
+        ],
         check=True,
     )
 
@@ -454,9 +473,7 @@ def export_image(
             f"Build first: ltvm build kernel {target_config.name}"
         )
 
-    kver_file = (
-        kdir / "build-tree" / "include" / "config" / "kernel.release"
-    )
+    kver_file = kdir / "build-tree" / "include" / "config" / "kernel.release"
     if not kver_file.exists():
         raise FileNotFoundError(
             f"Cannot read kernel release from {kver_file}. "
@@ -478,7 +495,11 @@ def export_image(
         size_mb = _round_up_gib_mb(size_mb)
     log.info(
         "Exporting %s (kernel %s) -> %s (%s, ~%d MiB)",
-        target_config.name, kernel_name, output, image_format, size_mb,
+        target_config.name,
+        kernel_name,
+        output,
+        image_format,
+        size_mb,
     )
 
     tmpdir = Path(tempfile.mkdtemp(prefix="ltvm-export-"))
@@ -494,13 +515,24 @@ def export_image(
         # 1. Create a sparse raw disk and partition it.
         with raw.open("wb") as fp:
             fp.truncate(size_mb * 1024 * 1024)
-        _run([
-            "parted", "-s", str(raw),
-            "mklabel", "msdos",
-            "mkpart", "primary", "ext4",
-            f"{_PART_OFFSET_MIB}MiB", "100%",
-            "set", "1", "boot", "on",
-        ])
+        _run(
+            [
+                "parted",
+                "-s",
+                str(raw),
+                "mklabel",
+                "msdos",
+                "mkpart",
+                "primary",
+                "ext4",
+                f"{_PART_OFFSET_MIB}MiB",
+                "100%",
+                "set",
+                "1",
+                "boot",
+                "on",
+            ]
+        )
 
         # 2. Attach loop (with partscan) and format the root partition.
         loop = _losetup_attach(raw)
@@ -517,10 +549,15 @@ def export_image(
         src_loop = _losetup_attach(base_ext4)
         _run(["mount", "-o", "ro", src_loop, str(src_mnt)])
         _run(["mount", part, str(dst_mnt)])
-        _run([
-            "cp", "-a", "--reflink=auto",
-            f"{src_mnt}/.", str(dst_mnt),
-        ])
+        _run(
+            [
+                "cp",
+                "-a",
+                "--reflink=auto",
+                f"{src_mnt}/.",
+                str(dst_mnt),
+            ]
+        )
         _run(["umount", str(src_mnt)])
         _losetup_detach(src_loop)
         src_loop = None
@@ -534,10 +571,14 @@ def export_image(
         _run(["cp", "-p", str(vmlinuz), str(boot / f"vmlinuz-{kver}")])
         initramfs_src = kdir / f"initramfs-{kver}.img"
         if initramfs_src.exists():
-            _run([
-                "cp", "-p", str(initramfs_src),
-                str(boot / f"initramfs-{kver}.img"),
-            ])
+            _run(
+                [
+                    "cp",
+                    "-p",
+                    str(initramfs_src),
+                    str(boot / f"initramfs-{kver}.img"),
+                ]
+            )
         elif not (boot / f"initramfs-{kver}.img").exists():
             log.warning(
                 "No initramfs for %s; boot will likely fail. "
@@ -559,13 +600,15 @@ def export_image(
         if ssh_key is not None:
             _inject_ssh_key(dst_mnt, ssh_key)
 
-        _run([
-            grub_install,
-            "--target=i386-pc",
-            f"--boot-directory={boot}",
-            "--modules=part_msdos ext2 biosdisk",
-            loop,
-        ])
+        _run(
+            [
+                grub_install,
+                "--target=i386-pc",
+                f"--boot-directory={boot}",
+                "--modules=part_msdos ext2 biosdisk",
+                loop,
+            ]
+        )
 
         # 6. Tidy up.
         _run(["umount", str(dst_mnt)])
@@ -580,17 +623,27 @@ def export_image(
         elif image_format == "gce":
             _package_gce(raw, output)
         else:
-            _run([
-                "qemu-img", "convert", "-f", "raw", "-O", "qcow2",
-                "-c",
-                str(raw), str(output),
-            ])
+            _run(
+                [
+                    "qemu-img",
+                    "convert",
+                    "-f",
+                    "raw",
+                    "-O",
+                    "qcow2",
+                    "-c",
+                    str(raw),
+                    str(output),
+                ]
+            )
 
         elapsed = time.monotonic() - t0
         size_final_mb = output.stat().st_size / (1024 * 1024)
         log.info(
             "Wrote %s (%.0f MiB, %.0fs)",
-            output, size_final_mb, elapsed,
+            output,
+            size_final_mb,
+            elapsed,
         )
         return output
 

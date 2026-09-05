@@ -72,7 +72,7 @@ _ARCH_TABLE: dict[str, dict[str, str]] = {
 
 
 _ARCH_ALIASES: dict[str, str] = {
-    "arm64": "aarch64",   # macOS platform.machine() reports arm64
+    "arm64": "aarch64",  # macOS platform.machine() reports arm64
     "amd64": "x86_64",
 }
 
@@ -88,8 +88,7 @@ def cross_info(target_arch: str, host_arch: str) -> CrossInfo:
     host_arch = normalize_arch(host_arch)
     if target_arch not in _ARCH_TABLE:
         raise ValueError(
-            f"unknown target_arch={target_arch!r}; "
-            f"known: {sorted(_ARCH_TABLE)}"
+            f"unknown target_arch={target_arch!r}; known: {sorted(_ARCH_TABLE)}"
         )
     t = _ARCH_TABLE[target_arch]
     return CrossInfo(

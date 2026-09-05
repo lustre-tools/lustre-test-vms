@@ -252,6 +252,7 @@ def _find_release_url(
             if dot > 0:
                 stem = stem[:dot]
         return stem
+
     for rel in releases:
         tag = rel.get("tag_name", "")
         if tag != tag_prefix and not tag.startswith(tag_prefix + "-"):
@@ -295,7 +296,11 @@ def _find_release_url(
         hint += f" kernel-signature={kernel_signature!r}"
     if variant != "base":
         hint += f" variant={variant!r}"
-    kind = "published bootable image" if mode == "bootable" else "published artifacts"
+    kind = (
+        "published bootable image"
+        if mode == "bootable"
+        else "published artifacts"
+    )
     raise RuntimeError(
         f"No {kind} found for '{target}'{hint}\n"
         f"  Available releases: {', '.join(avail)}\n"
@@ -389,9 +394,9 @@ def _tag_file_date(tag_file: Any) -> str:
     from datetime import datetime
 
     try:
-        return datetime.fromtimestamp(
-            tag_file.stat().st_mtime
-        ).strftime("%Y-%m-%d")
+        return datetime.fromtimestamp(tag_file.stat().st_mtime).strftime(
+            "%Y-%m-%d"
+        )
     except OSError:
         return ""
 
@@ -490,9 +495,7 @@ def _replace_scope(
             if variant == DEFAULT_VARIANT:
                 victims.append(kdir)
             img = root / "images" / kdir.name
-            victims.append(
-                img if variant == DEFAULT_VARIANT else img / variant
-            )
+            victims.append(img if variant == DEFAULT_VARIANT else img / variant)
     return victims
 
 
@@ -563,7 +566,9 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     if not target:
-        return _error("target required (e.g. ltvm target fetch rocky9)", use_json)
+        return _error(
+            "target required (e.g. ltvm target fetch rocky9)", use_json
+        )
 
     from ltvm_pkg.target_config import ARTIFACTS_DIR
 
@@ -574,6 +579,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     assert tc is not None
     if not use_json:
         from ltvm_pkg.cli.util import _print_target_header
+
         _print_target_header(
             tc, kernel=kernel, variant=variant, action="Fetching"
         )
@@ -604,8 +610,12 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
         if dry_run:
             _dry_run_report(
-                url, target=target, arch=arch, variant=variant,
-                mode="bootable", use_json=use_json,
+                url,
+                target=target,
+                arch=arch,
+                variant=variant,
+                mode="bootable",
+                use_json=use_json,
             )
             return EXIT_OK
 
@@ -619,8 +629,12 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         if not use_json:
             print(f"  Bootable disk at: {path}")
         _output(
-            {"target": target, "variant": variant, "path": str(path),
-             "mode": "bootable"},
+            {
+                "target": target,
+                "variant": variant,
+                "path": str(path),
+                "mode": "bootable",
+            },
             use_json,
         )
         return EXIT_OK
@@ -683,9 +697,14 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         # cases below.  Users expect --dry-run to show what fetch
         # sees, not get short-circuited by idempotency checks.
         _dry_run_report(
-            url, target=target, arch=arch, variant=variant,
-            mode="ecosystem", use_json=use_json,
-            existing_tag=existing_tag, release_tag=release_tag,
+            url,
+            target=target,
+            arch=arch,
+            variant=variant,
+            mode="ecosystem",
+            use_json=use_json,
+            existing_tag=existing_tag,
+            release_tag=release_tag,
         )
         return EXIT_OK
 
@@ -704,7 +723,10 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         if not replace:
             if not use_json:
                 print(f"  Already up to date ({release_tag})")
-            result = {"target": target, "path": str(ARTIFACTS_DIR / target / arch)}
+            result = {
+                "target": target,
+                "path": str(ARTIFACTS_DIR / target / arch),
+            }
             _output(result, use_json)
             return EXIT_OK
     elif release_tag and existing_tag and existing_tag != release_tag:
@@ -743,9 +765,14 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
     if dry_run:
         _dry_run_report(
-            url, target=target, arch=arch, variant=variant,
-            mode="ecosystem", use_json=use_json,
-            existing_tag=existing_tag, release_tag=release_tag,
+            url,
+            target=target,
+            arch=arch,
+            variant=variant,
+            mode="ecosystem",
+            use_json=use_json,
+            existing_tag=existing_tag,
+            release_tag=release_tag,
         )
         return EXIT_OK
 
@@ -821,7 +848,9 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         if len(avail) > 1:
             alt = next((k for k in avail if k != default_k), None)
             if alt is not None:
-                print(f"  # or pass --kernel {alt} to select a different kernel")
+                print(
+                    f"  # or pass --kernel {alt} to select a different kernel"
+                )
 
     return EXIT_OK
 
@@ -845,10 +874,16 @@ def _gh_release_upload(
     try:
         create = subprocess.run(
             [
-                "gh", "release", "create", tag,
-                "--repo", _cli.GITHUB_REPO,
-                "--title", tag,
-                "--notes", notes,
+                "gh",
+                "release",
+                "create",
+                tag,
+                "--repo",
+                _cli.GITHUB_REPO,
+                "--title",
+                tag,
+                "--notes",
+                notes,
             ],
             capture_output=True,
             text=True,
@@ -869,8 +904,14 @@ def _gh_release_upload(
             print(f"  Uploading {a.name} ({size_mb:.0f} MB)...")
         r = subprocess.run(
             [
-                "gh", "release", "upload", tag, str(a),
-                "--repo", _cli.GITHUB_REPO, "--clobber",
+                "gh",
+                "release",
+                "upload",
+                tag,
+                str(a),
+                "--repo",
+                _cli.GITHUB_REPO,
+                "--clobber",
             ],
         )
         if r.returncode != 0:
@@ -919,9 +960,7 @@ def cmd_publish(args: argparse.Namespace) -> int:
             action = "Packaging"
         else:
             action = "Publishing"
-        _print_target_header(
-            tc, kernel=kernel, variant=variant, action=action
-        )
+        _print_target_header(tc, kernel=kernel, variant=variant, action=action)
 
     if image_mode:
         from ltvm_pkg.release_package import package_bootable
@@ -954,7 +993,8 @@ def cmd_publish(args: argparse.Namespace) -> int:
         if not use_json:
             print(f"  Tag: {tag}")
         exit_code, err_msg = _cli_attr("_gh_release_upload")(
-            tag, [asset],
+            tag,
+            [asset],
             notes=(
                 f"Bootable disk image for {args.target} ({variant}) -- "
                 f"self-contained, no ltvm runtime required"
@@ -968,8 +1008,13 @@ def cmd_publish(args: argparse.Namespace) -> int:
         if not use_json:
             print(f"  Published: {url}")
         _output(
-            {"target": args.target, "tag": tag, "asset": str(asset),
-             "url": url, "mode": "bootable"},
+            {
+                "target": args.target,
+                "tag": tag,
+                "asset": str(asset),
+                "url": url,
+                "mode": "bootable",
+            },
             use_json,
         )
         return EXIT_OK
@@ -998,15 +1043,14 @@ def cmd_publish(args: argparse.Namespace) -> int:
             _declared_default_kernel,
             _resolve_kernel,
         )
+
         kernel_name, kernel_dir = _resolve_kernel(
             tc.output_dir,
             kernel,
             _declared_default_kernel(tc.name, tc.arch, variant),
         )
         snap_root = kernel_dir / "lustre-artifacts"
-        snap_dir = (
-            snap_root if variant == "base" else snap_root / variant
-        )
+        snap_dir = snap_root if variant == "base" else snap_root / variant
         if not (snap_dir / ".ltvm-snapshot.json").exists():
             lustre_tree = getattr(args, "lustre_tree", None)
             if lustre_tree:
@@ -1046,8 +1090,11 @@ def cmd_publish(args: argparse.Namespace) -> int:
         print(f"Packaging {args.target}{v_hint}...")
     try:
         assets = _cli_attr("package_target")(
-            args.target, tc.output_dir,
-            kernel=kernel, arch=tc.arch, variant=variant,
+            args.target,
+            tc.output_dir,
+            kernel=kernel,
+            arch=tc.arch,
+            variant=variant,
             dest_dir=getattr(args, "output", None),
             include_lustre=not no_lustre,
         )
@@ -1069,7 +1116,7 @@ def cmd_publish(args: argparse.Namespace) -> int:
     # read).  Variant is embedded in the manifest name for free.
     if not tag:
         manifest_name = assets["manifest"].name
-        tag = manifest_name[len("manifest-"): -len(".json")]
+        tag = manifest_name[len("manifest-") : -len(".json")]
 
     if not use_json:
         print(f"  Tag: {tag}")
@@ -1078,7 +1125,8 @@ def cmd_publish(args: argparse.Namespace) -> int:
     # Upload EVERYTHING including the manifest so fetch can find it.
     to_upload = list(assets.values())
     exit_code, err_msg = _cli_attr("_gh_release_upload")(
-        tag, to_upload,
+        tag,
+        to_upload,
         notes=f"Pre-built artifacts for {args.target} (variant={variant})",
         use_json=use_json,
     )
@@ -1159,7 +1207,9 @@ def cmd_delete(args: argparse.Namespace) -> int:
             if all_arches
             else [ARTIFACTS_DIR / target / tc.arch]
         )
-        existing = [(p, _dir_size_bytes(p)) for p in preview_paths if p.exists()]
+        existing = [
+            (p, _dir_size_bytes(p)) for p in preview_paths if p.exists()
+        ]
         if not existing:
             for p in preview_paths:
                 print(f"nothing to delete at {p}")
@@ -1262,17 +1312,20 @@ def cmd_delete(args: argparse.Namespace) -> int:
         )
 
     cmd = [
-        "gh", "release", "delete", tag,
-        "--repo", _cli.GITHUB_REPO, "--yes",
+        "gh",
+        "release",
+        "delete",
+        tag,
+        "--repo",
+        _cli.GITHUB_REPO,
+        "--yes",
     ]
     if cleanup_tag:
         cmd.append("--cleanup-tag")
     try:
         r = subprocess.run(cmd, capture_output=True, text=True)
     except FileNotFoundError:
-        return _error(
-            "gh CLI not found (https://cli.github.com/)", use_json
-        )
+        return _error("gh CLI not found (https://cli.github.com/)", use_json)
     if r.returncode != 0:
         return _error(
             f"gh release delete failed (rc={r.returncode}): "
@@ -1280,8 +1333,12 @@ def cmd_delete(args: argparse.Namespace) -> int:
             use_json,
         )
     _output(
-        {"target": target, "tag": tag, "deleted": True,
-         "cleanup_tag": cleanup_tag},
+        {
+            "target": target,
+            "tag": tag,
+            "deleted": True,
+            "cleanup_tag": cleanup_tag,
+        },
         use_json,
     )
     return EXIT_OK

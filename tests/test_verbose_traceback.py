@@ -10,7 +10,9 @@ import logging
 import pytest
 
 
-def test_traceback_hidden_by_default(capsys: pytest.CaptureFixture[str]) -> None:
+def test_traceback_hidden_by_default(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     from ltvm_pkg.cli import _emit_error
 
     # Pretend we're in an except block with a live exception.

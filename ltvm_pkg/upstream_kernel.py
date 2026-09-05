@@ -122,7 +122,9 @@ def tarball_url(version: str) -> str:
     return f"{CDN_URL}/v{major}.x/linux-{version}.tar.xz"
 
 
-def fetch_releases(url: str = RELEASES_URL, timeout: float = 30.0) -> list[dict]:
+def fetch_releases(
+    url: str = RELEASES_URL, timeout: float = 30.0
+) -> list[dict]:
     """Fetch kernel.org's releases.json and return its ``releases`` list.
 
     Uses curl rather than urllib to inherit the proxy configuration the
@@ -241,7 +243,9 @@ def resolve(spec: str, releases: list[dict]) -> UpstreamRelease:
             "kernel.org no longer lists series %s; falling back to the "
             "%s release. Pass an exact version (e.g. %s.4) to pin a "
             "point release.",
-            spec, spec, spec,
+            spec,
+            spec,
+            spec,
         )
         return UpstreamRelease(version=spec, source=tarball_url(spec))
 

@@ -722,7 +722,11 @@ class TestInstallPodmanMacos:
         def which(cmd: str) -> str | None:
             which_calls.append(cmd)
             if cmd == "podman":
-                return None if len(which_calls) == 1 else "/opt/homebrew/bin/podman"
+                return (
+                    None
+                    if len(which_calls) == 1
+                    else "/opt/homebrew/bin/podman"
+                )
             if cmd == "brew":
                 return "/opt/homebrew/bin/brew"
             return None
@@ -934,7 +938,7 @@ class TestInstallPodmanMacos:
         ):
             started = install_podman_macos()
 
-        assert started is False               # applehv default already running
+        assert started is False  # applehv default already running
         assert not any("rm" in c for c in run_calls)
         assert not any("machine" in c and "init" in c for c in run_calls)
 

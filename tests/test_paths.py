@@ -22,8 +22,10 @@ class TestReadModinfoField:
     def test_reads_declared_fields(self, tmp_path: Path) -> None:
         ko = self._ko(
             tmp_path,
-            {"vermagic": "5.14.0-611.55.1.el9_7_lustre SMP mod_unload",
-             "version": "2.17.58"},
+            {
+                "vermagic": "5.14.0-611.55.1.el9_7_lustre SMP mod_unload",
+                "version": "2.17.58",
+            },
         )
         assert read_modinfo_field(ko, "version") == "2.17.58"
         assert read_modinfo_field(ko, "vermagic").startswith("5.14.0-611")
@@ -62,9 +64,7 @@ class TestReadModinfoField:
         assert read_modinfo_field(ko, "version") is None
         assert read_modinfo_field(ko, "license") == "GPL"
 
-    def test_non_elf_and_missing_file_return_none(
-        self, tmp_path: Path
-    ) -> None:
+    def test_non_elf_and_missing_file_return_none(self, tmp_path: Path) -> None:
         junk = tmp_path / "junk.ko"
         junk.write_bytes(b"not an elf\x00vermagic=1.2.3\x00")
         assert read_modinfo_field(junk, "vermagic") is None

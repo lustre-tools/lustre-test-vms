@@ -70,7 +70,7 @@ def read_modinfo_field(ko_path: Path, field: str) -> str | None:
     needle = f"{field}=".encode()
     for entry in section.split(b"\x00"):
         if entry.startswith(needle):
-            return entry[len(needle):].decode("utf-8", errors="replace")
+            return entry[len(needle) :].decode("utf-8", errors="replace")
     return None
 
 
@@ -96,12 +96,12 @@ def _elf_section(data: bytes, want: bytes) -> bytes | None:
     end = "<" if data[5] == 1 else ">"
     try:
         if is64:
-            e_shoff, = struct.unpack_from(end + "Q", data, 0x28)
+            (e_shoff,) = struct.unpack_from(end + "Q", data, 0x28)
             e_shentsize, e_shnum, e_shstrndx = struct.unpack_from(
                 end + "HHH", data, 0x3A
             )
         else:
-            e_shoff, = struct.unpack_from(end + "I", data, 0x20)
+            (e_shoff,) = struct.unpack_from(end + "I", data, 0x20)
             e_shentsize, e_shnum, e_shstrndx = struct.unpack_from(
                 end + "HHH", data, 0x2E
             )
@@ -110,7 +110,7 @@ def _elf_section(data: bytes, want: bytes) -> bytes | None:
 
         def sh(i: int) -> tuple[int, int, int]:
             off = e_shoff + i * e_shentsize
-            name, = struct.unpack_from(end + "I", data, off)
+            (name,) = struct.unpack_from(end + "I", data, off)
             if is64:
                 s_off, s_size = struct.unpack_from(end + "QQ", data, off + 0x18)
             else:
@@ -118,14 +118,14 @@ def _elf_section(data: bytes, want: bytes) -> bytes | None:
             return name, s_off, s_size
 
         _, str_off, str_size = sh(e_shstrndx)
-        strtab = data[str_off:str_off + str_size]
+        strtab = data[str_off : str_off + str_size]
         for i in range(e_shnum):
             name_off, s_off, s_size = sh(i)
             nul = strtab.find(b"\x00", name_off)
             if nul < 0:
                 continue
             if strtab[name_off:nul] == want:
-                return data[s_off:s_off + s_size]
+                return data[s_off : s_off + s_size]
     except (struct.error, IndexError):
         return None
     return None

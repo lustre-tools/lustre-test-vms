@@ -68,9 +68,7 @@ def sudo_prime(reason: str) -> None:
     """
     if os.geteuid() == 0:
         return
-    if _run(
-        ["sudo", "-n", "true"], check=False, quiet=True
-    ).returncode == 0:
+    if _run(["sudo", "-n", "true"], check=False, quiet=True).returncode == 0:
         return
     log.info("%s -- prompting for sudo credentials now.", reason)
     _run(["sudo", "-v"])
@@ -147,9 +145,7 @@ def atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
             sudo_run(["mkdir", "-p", str(parent)], quiet=True)
 
     if os.access(str(parent), os.W_OK):
-        fd, tmp = tempfile.mkstemp(
-            dir=str(parent), prefix=f".{path.name}."
-        )
+        fd, tmp = tempfile.mkstemp(dir=str(parent), prefix=f".{path.name}.")
         try:
             with os.fdopen(fd, "w") as f:
                 f.write(text)
@@ -170,9 +166,7 @@ def atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
         with os.fdopen(fd, "w") as f:
             f.write(text)
         owner = invoking_user()
-        own_args = (
-            ["-o", owner[0], "-g", owner[1]] if owner is not None else []
-        )
+        own_args = ["-o", owner[0], "-g", owner[1]] if owner is not None else []
         sudo_run(
             [
                 "install",
@@ -186,9 +180,7 @@ def atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
         )
         sudo_run(["mv", "-f", str(dest_tmp), str(path)], quiet=True)
     finally:
-        sudo_run(
-            ["rm", "-f", str(dest_tmp)], check=False, quiet=True
-        )
+        sudo_run(["rm", "-f", str(dest_tmp)], check=False, quiet=True)
         try:
             os.unlink(tmp)
         except OSError:

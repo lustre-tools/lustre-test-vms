@@ -30,9 +30,12 @@ HOSTS_FILE = Path("/etc/hosts")
 # UserKnownHostsFile=/dev/null, silently polluting known_hosts on
 # every deploy).
 SSH_OPTS = [
-    "-o", "StrictHostKeyChecking=no",
-    "-o", "UserKnownHostsFile=/dev/null",
-    "-o", "LogLevel=ERROR",
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "-o",
+    "LogLevel=ERROR",
 ]
 
 
@@ -45,9 +48,13 @@ def sshpass_ssh_argv(
     """argv for `sshpass ssh [opts] root@<ip> <command>`."""
     opts = SSH_OPTS + (extra_opts or [])
     return [
-        "sshpass", "-p", ROOT_PASSWORD, "ssh",
+        "sshpass",
+        "-p",
+        ROOT_PASSWORD,
+        "ssh",
         *opts,
-        f"root@{ip}", command,
+        f"root@{ip}",
+        command,
     ]
 
 
@@ -64,9 +71,13 @@ def sshpass_scp_argv(
     """
     opts = SSH_OPTS + (extra_opts or [])
     return [
-        "sshpass", "-p", ROOT_PASSWORD, "scp",
+        "sshpass",
+        "-p",
+        ROOT_PASSWORD,
+        "scp",
         *opts,
-        src, dst,
+        src,
+        dst,
     ]
 
 
@@ -129,6 +140,7 @@ def _chown_to_real_user(path: Path) -> None:
     if not sudo_user or sudo_user == "root":
         return
     import pwd as _pwd
+
     try:
         pw = _pwd.getpwnam(sudo_user)
     except KeyError:
@@ -166,7 +178,7 @@ def extra_tap_for_name(name: str, idx: int) -> str:
     # base is already at its 15-char limit; re-hash with the index
     # folded in so the combined ifname fits.
     h = hashlib.md5(f"{name}|{idx}".encode()).hexdigest()
-    return f"tap-{h[:11 - len(suffix)]}{suffix}"
+    return f"tap-{h[: 11 - len(suffix)]}{suffix}"
 
 
 def mac_for_name(name: str) -> str:
@@ -281,6 +293,7 @@ def reload_dns() -> None:
     location differs.
     """
     from .host_setup import DNSMASQ_PID_PATH, is_macos
+
     pid_path: Path
     if is_macos():
         pid_path = DNSMASQ_PID_PATH
@@ -314,9 +327,7 @@ def reload_dns() -> None:
         raise RuntimeError(
             f"failed to reload dnsmasq: kill SIGHUP {pid}: {e}"
         ) from e
-    r = sudo_run(
-        ["kill", "-HUP", str(pid)], check=False, quiet=True
-    )
+    r = sudo_run(["kill", "-HUP", str(pid)], check=False, quiet=True)
     if r.returncode != 0:
         raise RuntimeError(
             f"failed to reload dnsmasq: sudo kill SIGHUP {pid} "
@@ -340,6 +351,7 @@ def _real_user_ssh_dir() -> tuple[str, Path]:
     real_user = os.environ.get("SUDO_USER")
     if not real_user:
         import getpass
+
         real_user = getpass.getuser()
     if real_user == "root":
         return real_user, Path("/root/.ssh")
@@ -544,9 +556,12 @@ def run_ssh(
         ip,
         command,
         extra_opts=[
-            "-o", "ConnectTimeout=5",
-            "-o", "ServerAliveInterval=10",
-            "-o", "ServerAliveCountMax=3",
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "ServerAliveInterval=10",
+            "-o",
+            "ServerAliveCountMax=3",
         ],
     )
     return run(ssh_cmd, timeout=timeout)

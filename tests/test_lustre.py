@@ -298,7 +298,9 @@ class TestLustreStatus:
     def test_built_against_from_stamp(self, tmp_path: Path) -> None:
         lt = self._make_lustre(tmp_path)
         kt = self._make_kernel(tmp_path, "5.14.0-427.el9")
-        (lt / f".ltvm-kernel-{self.TARGET}-x86_64").write_text("5.14.0-427.el9\n")
+        (lt / f".ltvm-kernel-{self.TARGET}-x86_64").write_text(
+            "5.14.0-427.el9\n"
+        )
         status = lustre_status(lt, kt, target=self.TARGET)
         assert status["built_against"] == "5.14.0-427.el9"
 
@@ -385,15 +387,15 @@ class TestStagingCoexistence:
         (sa / "usr" / "sbin").mkdir(parents=True)
         (sa / "usr" / "sbin" / "mount.lustre").write_text("A")
         (sa / "lib" / "modules" / "5.14.0-A" / "extra").mkdir(parents=True)
-        (sa / "lib" / "modules" / "5.14.0-A" / "extra" / "lustre.ko").write_text(
-            "A"
-        )
+        (
+            sa / "lib" / "modules" / "5.14.0-A" / "extra" / "lustre.ko"
+        ).write_text("A")
         (sb / "usr" / "sbin").mkdir(parents=True)
         (sb / "usr" / "sbin" / "mount.lustre").write_text("B")
         (sb / "lib" / "modules" / "5.14.0-B" / "extra").mkdir(parents=True)
-        (sb / "lib" / "modules" / "5.14.0-B" / "extra" / "lustre.ko").write_text(
-            "B"
-        )
+        (
+            sb / "lib" / "modules" / "5.14.0-B" / "extra" / "lustre.ko"
+        ).write_text("B")
         assert sa.is_dir() and sb.is_dir()
         assert (sa / "usr" / "sbin" / "mount.lustre").read_text() == "A"
         assert (sb / "usr" / "sbin" / "mount.lustre").read_text() == "B"
@@ -426,9 +428,7 @@ class TestKernelChangeDistclean:
         return lustre, kernel
 
     def test_kernel_change_invokes_distclean(self, tmp_path: Path) -> None:
-        lustre, kernel = self._full_tree(
-            tmp_path, "5.14.0-old", "5.14.0-new"
-        )
+        lustre, kernel = self._full_tree(tmp_path, "5.14.0-old", "5.14.0-new")
         captured_scripts = []
 
         def mock_run(cmd, *args, **kwargs):
@@ -447,12 +447,8 @@ class TestKernelChangeDistclean:
                 "ltvm_pkg.lustre_build.run_podman_with_cleanup",
                 side_effect=mock_run,
             ),
-            patch(
-                "ltvm_pkg.lustre_build._container_exists", return_value=True
-            ),
-            patch(
-                "ltvm_pkg.target_config.TargetConfig"
-            ) as mock_tc,
+            patch("ltvm_pkg.lustre_build._container_exists", return_value=True),
+            patch("ltvm_pkg.target_config.TargetConfig") as mock_tc,
         ):
             mock_tc.return_value.resolve_kernel.return_value = "5.14-rhel9.7"
             try:

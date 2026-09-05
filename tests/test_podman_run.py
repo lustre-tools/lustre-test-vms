@@ -62,8 +62,12 @@ class TestCidfileInjection:
             captured.append(list(cmd))
             return FakeProc()
 
-        with patch("ltvm_pkg.podman_run.subprocess.Popen", side_effect=fake_popen):
-            run_podman_with_cleanup(["podman", "run", "--rm", "busybox", "true"])
+        with patch(
+            "ltvm_pkg.podman_run.subprocess.Popen", side_effect=fake_popen
+        ):
+            run_podman_with_cleanup(
+                ["podman", "run", "--rm", "busybox", "true"]
+            )
 
         assert len(captured) == 1
         cmd = captured[0]
@@ -94,7 +98,9 @@ class TestCidfileInjection:
             captured.append(list(cmd))
             return FakeProc()
 
-        with patch("ltvm_pkg.podman_run.subprocess.Popen", side_effect=fake_popen):
+        with patch(
+            "ltvm_pkg.podman_run.subprocess.Popen", side_effect=fake_popen
+        ):
             run_podman_with_cleanup(["podman", "build", "-t", "foo", "."])
 
         assert captured[0] == ["podman", "build", "-t", "foo", "."]
@@ -115,7 +121,9 @@ class TestCidfileInjection:
             captured.append(list(cmd))
             return FakeProc()
 
-        with patch("ltvm_pkg.podman_run.subprocess.Popen", side_effect=fake_popen):
+        with patch(
+            "ltvm_pkg.podman_run.subprocess.Popen", side_effect=fake_popen
+        ):
             run_podman_with_cleanup(
                 ["podman", "run", "--cidfile", "/tmp/explicit", "busybox"]
             )
@@ -195,11 +203,7 @@ class TestCleanupEofDetection:
             "'http://d/.../wait': EOF\n"
         )
         script = tmp_path / "run.sh"
-        script.write_text(
-            "#!/bin/sh\n"
-            f"printf '%s' {repr(eof)} >&2\n"
-            "exit 126\n"
-        )
+        script.write_text(f"#!/bin/sh\nprintf '%s' {repr(eof)} >&2\nexit 126\n")
         script.chmod(0o755)
 
         # check=True should NOT raise -- cleanup_eof suppresses it.
@@ -213,9 +217,7 @@ class TestCleanupEofDetection:
     ) -> None:
         script = tmp_path / "run.sh"
         script.write_text(
-            "#!/bin/sh\n"
-            "echo 'make: *** [vmlinux] Error 1' >&2\n"
-            "exit 2\n"
+            "#!/bin/sh\necho 'make: *** [vmlinux] Error 1' >&2\nexit 2\n"
         )
         script.chmod(0o755)
 

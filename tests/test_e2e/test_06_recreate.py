@@ -34,7 +34,10 @@ def _tap_exists(tap: str) -> bool:
     """
     r = subprocess.run(
         ["ip", "link", "show", "dev", tap],
-        check=False, capture_output=True, text=True, timeout=5,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
     )
     return r.returncode == 0
 
@@ -73,9 +76,10 @@ def _tap_for(name: str) -> str:
     assertion pass against a stale TAP.
     """
     import hashlib
-    suffix = name if len(name) <= 11 else hashlib.md5(
-        name.encode()
-    ).hexdigest()[:11]
+
+    suffix = (
+        name if len(name) <= 11 else hashlib.md5(name.encode()).hexdigest()[:11]
+    )
     return f"tap-{suffix}"
 
 
@@ -88,11 +92,16 @@ def test_destroy_then_recreate_restores_artifacts(vm_name) -> None:  # type: ign
 
     # ---- create #1 ----
     proc = run_ltvm(
-        "create", name,
-        "--mem", "1024",
-        "--vcpus", "1",
-        "--mdt-disks", "0",
-        "--ost-disks", "0",
+        "create",
+        name,
+        "--mem",
+        "1024",
+        "--vcpus",
+        "1",
+        "--mdt-disks",
+        "0",
+        "--ost-disks",
+        "0",
         timeout=180,
     )
     assert proc.returncode == 0, (
@@ -119,9 +128,7 @@ def test_destroy_then_recreate_restores_artifacts(vm_name) -> None:  # type: ign
     )
 
     assert not info.exists(), f"leak: {info} still present after destroy"
-    assert not overlay.exists(), (
-        f"leak: {overlay} still present after destroy"
-    )
+    assert not overlay.exists(), f"leak: {overlay} still present after destroy"
     assert not _tap_exists(tap), (
         f"leak: TAP {tap!r} still present after destroy"
     )
@@ -131,11 +138,16 @@ def test_destroy_then_recreate_restores_artifacts(vm_name) -> None:  # type: ign
 
     # ---- create #2 (same name) ----
     proc = run_ltvm(
-        "create", name,
-        "--mem", "1024",
-        "--vcpus", "1",
-        "--mdt-disks", "0",
-        "--ost-disks", "0",
+        "create",
+        name,
+        "--mem",
+        "1024",
+        "--vcpus",
+        "1",
+        "--mdt-disks",
+        "0",
+        "--ost-disks",
+        "0",
         timeout=180,
     )
     assert proc.returncode == 0, (

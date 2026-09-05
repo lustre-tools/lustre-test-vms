@@ -129,9 +129,7 @@ class TestClusterInfoRoundTrip:
 class TestClusterInfoCorruptLoad:
     """ClusterInfo.load raises RuntimeError with an actionable message on corrupt state."""
 
-    def test_corrupt_json_raises_runtime_error(
-        self, tmp_sockets: Path
-    ) -> None:
+    def test_corrupt_json_raises_runtime_error(self, tmp_sockets: Path) -> None:
         (tmp_sockets / "bad.cluster").write_text("{not valid json")
         with pytest.raises(RuntimeError, match="cluster create"):
             ClusterInfo.load("bad")
@@ -218,9 +216,7 @@ class TestStagingPath:
         from ltvm_pkg.lustre_build import staging_path
 
         p1 = staging_path(tmp_path, "rocky9", "x86_64", kernel="5.14-rhel9.7")
-        p2 = staging_path(
-            tmp_path, "rocky9", "aarch64", kernel="5.14-rhel9.7"
-        )
+        p2 = staging_path(tmp_path, "rocky9", "aarch64", kernel="5.14-rhel9.7")
         assert p1 != p2
 
     def test_different_targets_different_paths(self, tmp_path: Path) -> None:

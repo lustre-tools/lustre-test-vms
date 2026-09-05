@@ -67,9 +67,7 @@ class TestCheckPodmanMachineMacos:
                 "ltvm_pkg.host_setup.shutil.which",
                 return_value="/opt/homebrew/bin/podman",
             ),
-            patch(
-                "ltvm_pkg.host_setup.subprocess.run", return_value=fake
-            ),
+            patch("ltvm_pkg.host_setup.subprocess.run", return_value=fake),
         ):
             with pytest.raises(PodmanMachineError) as exc:
                 check_podman_machine_macos()
@@ -108,9 +106,7 @@ class TestCheckPodmanMachineMacos:
                 "ltvm_pkg.host_setup.shutil.which",
                 return_value="/opt/homebrew/bin/podman",
             ),
-            patch(
-                "ltvm_pkg.host_setup.subprocess.run", return_value=fake
-            ),
+            patch("ltvm_pkg.host_setup.subprocess.run", return_value=fake),
         ):
             check_podman_machine_macos()
 
@@ -165,9 +161,7 @@ class TestCliPreflight:
         monkeypatch.setattr(
             build_mod,
             "check_podman_machine_macos",
-            MagicMock(
-                side_effect=PodmanMachineError("need podman machine")
-            ),
+            MagicMock(side_effect=PodmanMachineError("need podman machine")),
         )
         rc = _run_main(["build", "kernel", "rocky9"])
         assert rc == EXIT_ERROR
@@ -183,9 +177,7 @@ class TestCliPreflight:
         monkeypatch.setattr(
             build_mod,
             "check_podman_machine_macos",
-            MagicMock(
-                side_effect=PodmanMachineError("need podman machine")
-            ),
+            MagicMock(side_effect=PodmanMachineError("need podman machine")),
         )
         rc = _run_main(["build", "image", "rocky9"])
         assert rc == EXIT_ERROR
@@ -201,9 +193,7 @@ class TestCliPreflight:
         monkeypatch.setattr(
             build_mod,
             "check_podman_machine_macos",
-            MagicMock(
-                side_effect=PodmanMachineError("need podman machine")
-            ),
+            MagicMock(side_effect=PodmanMachineError("need podman machine")),
         )
         rc = _run_main(["build", "lustre", "rocky9"])
         assert rc == EXIT_ERROR
@@ -219,9 +209,7 @@ class TestCliPreflight:
         monkeypatch.setattr(
             build_mod,
             "check_podman_machine_macos",
-            MagicMock(
-                side_effect=PodmanMachineError("need podman machine")
-            ),
+            MagicMock(side_effect=PodmanMachineError("need podman machine")),
         )
         rc = _run_main(["build", "all", "rocky9"])
         assert rc == EXIT_ERROR
@@ -238,13 +226,9 @@ class TestCliPreflight:
         monkeypatch.setattr(
             build_mod,
             "check_podman_machine_macos",
-            MagicMock(
-                side_effect=PodmanMachineError("need podman machine")
-            ),
+            MagicMock(side_effect=PodmanMachineError("need podman machine")),
         )
-        rc = _run_main(
-            ["build", "shell", "rocky9", str(tmp_path)]
-        )
+        rc = _run_main(["build", "shell", "rocky9", str(tmp_path)])
         assert rc == EXIT_ERROR
         assert "need podman machine" in capsys.readouterr().err
 
@@ -258,9 +242,7 @@ class TestCliPreflight:
         monkeypatch.setattr(
             build_mod,
             "check_podman_machine_macos",
-            MagicMock(
-                side_effect=PodmanMachineError("need podman machine")
-            ),
+            MagicMock(side_effect=PodmanMachineError("need podman machine")),
         )
         rc = _run_main(
             ["build", "mofed-kmods", "rocky9", "--variant", "mofed-24"]
@@ -268,7 +250,6 @@ class TestCliPreflight:
         # Either the preflight fires (EXIT_ERROR) or an earlier arg
         # validation path does; in both cases we should NOT reach EXIT_OK.
         assert rc != EXIT_OK
-
 
 
 class TestPreflightContainerHelper:
@@ -396,7 +377,8 @@ class TestCliContainerPreflight:
 
         self._install_missing_container(monkeypatch)
         monkeypatch.setattr(
-            cli_mod, "_do_build_container",
+            cli_mod,
+            "_do_build_container",
             MagicMock(return_value="ltvm-build-rocky9"),
         )
         rc = _run_main(["build", "container", "rocky9"])
@@ -413,27 +395,39 @@ class TestCliContainerPreflight:
 
         self._install_missing_container(monkeypatch)
         monkeypatch.setattr(
-            cli_mod, "_do_build_container",
+            cli_mod,
+            "_do_build_container",
             MagicMock(return_value="ltvm-build-rocky9"),
         )
         monkeypatch.setattr(
-            cli_mod, "_resolve_lustre_tree",
+            cli_mod,
+            "_resolve_lustre_tree",
             MagicMock(return_value=(tmp_path, None)),
         )
         monkeypatch.setattr(
-            cli_mod, "_gate_lustre_validation", MagicMock(return_value=None),
+            cli_mod,
+            "_gate_lustre_validation",
+            MagicMock(return_value=None),
         )
         monkeypatch.setattr(
-            cli_mod, "build_kernel", MagicMock(return_value={"ok": True}),
+            cli_mod,
+            "build_kernel",
+            MagicMock(return_value={"ok": True}),
         )
         monkeypatch.setattr(
-            cli_mod, "build_lustre", MagicMock(return_value={"ok": True}),
+            cli_mod,
+            "build_lustre",
+            MagicMock(return_value={"ok": True}),
         )
         monkeypatch.setattr(
-            cli_mod, "snapshot_lustre", MagicMock(),
+            cli_mod,
+            "snapshot_lustre",
+            MagicMock(),
         )
         monkeypatch.setattr(
-            cli_mod, "build_image", MagicMock(return_value=tmp_path),
+            cli_mod,
+            "build_image",
+            MagicMock(return_value=tmp_path),
         )
         rc = _run_main(["build", "all", "rocky9", "--yes"])
         err = capsys.readouterr().err
@@ -469,9 +463,7 @@ class TestAutostopConcurrency:
 
         stops: list[int] = []
         monkeypatch.setattr(bmod, "is_macos", lambda: True)
-        monkeypatch.setattr(
-            bmod, "podman_in_use_elsewhere", lambda: in_use
-        )
+        monkeypatch.setattr(bmod, "podman_in_use_elsewhere", lambda: in_use)
         monkeypatch.setattr(
             bmod, "should_stop_podman_machine_macos", lambda: True
         )

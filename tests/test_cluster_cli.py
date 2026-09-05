@@ -218,8 +218,15 @@ class TestClusterCreateArgs:
 
     def test_vcpus_and_mem_flags_parsed(self) -> None:
         cmd_cluster(
-            _ns("create", "co1", "--vcpus", "8", "--mem", "8192",
-                "mgs+mds:co1-mds:1")
+            _ns(
+                "create",
+                "co1",
+                "--vcpus",
+                "8",
+                "--mem",
+                "8192",
+                "mgs+mds:co1-mds:1",
+            )
         )
         ns = self._captured_ns()
         assert ns.vcpus == 8
@@ -227,17 +234,14 @@ class TestClusterCreateArgs:
 
     def test_target_flag_form(self) -> None:
         cmd_cluster(
-            _ns("create", "co1", "--target", "rocky10",
-                "mgs+mds:co1-mds:1")
+            _ns("create", "co1", "--target", "rocky10", "mgs+mds:co1-mds:1")
         )
         ns = self._captured_ns()
         assert ns.os == "rocky10"
 
     def test_positional_target_form(self) -> None:
         """Bare token between cluster name and first spec is the target."""
-        cmd_cluster(
-            _ns("create", "co1", "rocky10", "mgs+mds:co1-mds:1")
-        )
+        cmd_cluster(_ns("create", "co1", "rocky10", "mgs+mds:co1-mds:1"))
         ns = self._captured_ns()
         assert ns.os == "rocky10"
         # Positional target must be stripped from `nodes` -- otherwise
@@ -328,9 +332,7 @@ class TestClusterCreateArgs:
         passes (we have 4 args), so the secondary check at line 2846
         must catch it.
         """
-        rc = cmd_cluster(
-            _ns("create", "--vcpus", "8", "--mem", "4096")
-        )
+        rc = cmd_cluster(_ns("create", "--vcpus", "8", "--mem", "4096"))
         assert rc == EXIT_ERROR
         assert not self.handler.called
 
@@ -640,9 +642,7 @@ class TestCmdClusterListBehavior:
         self, tmp_sockets: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         _save_cluster(name="co1")
-        with patch.object(
-            vm_cluster, "VMInfo"
-        ) as mock_vm:
+        with patch.object(vm_cluster, "VMInfo") as mock_vm:
             mock_vm.load.side_effect = VMNotFound("co1-mds")
             vm_cluster.cmd_cluster_list(argparse.Namespace())
         out = capsys.readouterr().out
@@ -654,9 +654,7 @@ class TestCmdClusterListBehavior:
     ) -> None:
         """Race: .cluster file vanishes between all_names() and load()."""
         with (
-            patch.object(
-                ClusterInfo, "all_names", return_value=["phantom"]
-            ),
+            patch.object(ClusterInfo, "all_names", return_value=["phantom"]),
             patch.object(
                 ClusterInfo, "load", side_effect=ClusterNotFound("phantom")
             ),
@@ -676,7 +674,8 @@ class TestCmdClusterListBehavior:
                 ClusterInfo, "all_names", return_value=["broken", "ok"]
             ),
             patch.object(
-                ClusterInfo, "load",
+                ClusterInfo,
+                "load",
                 side_effect=[
                     RuntimeError("invalid JSON in /tmp/broken.cluster"),
                     MagicMock(get_nodes=MagicMock(return_value=[])),
@@ -694,11 +693,10 @@ class TestCmdClusterListBehavior:
     ) -> None:
         """ValueError from cluster loader is also recovered from."""
         with (
+            patch.object(ClusterInfo, "all_names", return_value=["bad"]),
             patch.object(
-                ClusterInfo, "all_names", return_value=["bad"]
-            ),
-            patch.object(
-                ClusterInfo, "load",
+                ClusterInfo,
+                "load",
                 side_effect=ValueError("missing required field: nodes"),
             ),
         ):
@@ -713,9 +711,7 @@ class TestCmdClusterStatusBehavior:
 
     def test_missing_cluster_raises(self, tmp_sockets: Path) -> None:
         with pytest.raises(ClusterNotFound):
-            vm_cluster.cmd_cluster_status(
-                argparse.Namespace(name="phantom")
-            )
+            vm_cluster.cmd_cluster_status(argparse.Namespace(name="phantom"))
 
     def test_status_output_format(
         self, tmp_sockets: Path, capsys: pytest.CaptureFixture[str]
@@ -795,9 +791,7 @@ class TestCmdClusterDestroyBehavior:
 
     def test_missing_cluster_raises(self, tmp_sockets: Path) -> None:
         with pytest.raises(ClusterNotFound):
-            vm_cluster.cmd_cluster_destroy(
-                argparse.Namespace(name="phantom")
-            )
+            vm_cluster.cmd_cluster_destroy(argparse.Namespace(name="phantom"))
 
     def test_destroy_unlinks_cluster_file(
         self, tmp_sockets: Path, capsys: pytest.CaptureFixture[str]
@@ -810,9 +804,7 @@ class TestCmdClusterDestroyBehavior:
             patch.object(vm_cluster, "VMInfo") as mock_vm,
             patch.object(vm_cluster, "kill_qemu"),
             patch.object(vm_cluster, "unregister_ssh_name"),
-            patch(
-                "ltvm_pkg.vm_commands._destroy_vm_artifacts"
-            ) as mock_destroy,
+            patch("ltvm_pkg.vm_commands._destroy_vm_artifacts") as mock_destroy,
         ):
             mock_vm.load.return_value = MagicMock()
             vm_cluster.cmd_cluster_destroy(argparse.Namespace(name="co1"))
@@ -830,9 +822,7 @@ class TestCmdClusterDestroyBehavior:
             patch.object(vm_cluster, "VMInfo") as mock_vm,
             patch.object(vm_cluster, "kill_qemu"),
             patch.object(vm_cluster, "unregister_ssh_name"),
-            patch(
-                "ltvm_pkg.vm_commands._destroy_vm_artifacts"
-            ) as mock_destroy,
+            patch("ltvm_pkg.vm_commands._destroy_vm_artifacts") as mock_destroy,
         ):
             mock_vm.load.side_effect = VMNotFound("any")
             vm_cluster.cmd_cluster_destroy(argparse.Namespace(name="co1"))
@@ -890,9 +880,7 @@ class TestCmdClusterExecBehavior:
                 )
         mock_vm.load.assert_called_with("co1-mds")
 
-    def test_quoted_single_arg_passed_verbatim(
-        self, tmp_sockets: Path
-    ) -> None:
+    def test_quoted_single_arg_passed_verbatim(self, tmp_sockets: Path) -> None:
         """Regression for lustre_test_vms_v2-b0h.
 
         When the user types `ltvm cluster exec co1 oss 'lctl dl'`,
@@ -924,9 +912,7 @@ class TestCmdClusterExecBehavior:
         assert ssh.call_args.args[1] == "lctl dl"
         assert "'" not in ssh.call_args.args[1]
 
-    def test_multi_arg_still_quoted_safely(
-        self, tmp_sockets: Path
-    ) -> None:
+    def test_multi_arg_still_quoted_safely(self, tmp_sockets: Path) -> None:
         """The quoted-single-arg fix must not regress the splitting
         case where shlex.join protects args with spaces / globs.
         `command=['echo', 'hello world']` must transport as
@@ -962,9 +948,7 @@ class TestCmdClusterExecBehavior:
                 )
             )
 
-    def test_exec_propagates_remote_returncode(
-        self, tmp_sockets: Path
-    ) -> None:
+    def test_exec_propagates_remote_returncode(self, tmp_sockets: Path) -> None:
         """Non-zero rc from run_ssh propagates via sys.exit(rc)."""
         _save_cluster(name="co1")
         completed = MagicMock(stdout="", stderr="boom", returncode=42)
@@ -1071,8 +1055,12 @@ class TestClusterCreateRefusesExistingVMs:
                 argparse.Namespace(
                     name="co9",
                     nodes=["mgs+mds:co9-mds:1", "oss:co9-oss:3"],
-                    vcpus=2, mem=None, os=None, arch=None,
-                    disk_size=None, nic=None,
+                    vcpus=2,
+                    mem=None,
+                    os=None,
+                    arch=None,
+                    disk_size=None,
+                    nic=None,
                 )
             )
         # Aborted before spawning any `ltvm create`/`ltvm destroy`.

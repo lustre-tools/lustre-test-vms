@@ -333,15 +333,21 @@ class TestSrpmFallbackUrls:
         )
 
     def test_non_rocky_url_no_fallback(self) -> None:
-        assert _srpm_fallback_urls("https://example.com/srpms", "kernel-x.src.rpm") == []
+        assert (
+            _srpm_fallback_urls("https://example.com/srpms", "kernel-x.src.rpm")
+            == []
+        )
 
     def test_non_el_srpm_no_fallback(self) -> None:
         assert _srpm_fallback_urls(self._PUB, "kernel-something.src.rpm") == []
 
     def test_el_major_mismatch_no_fallback(self) -> None:
-        assert _srpm_fallback_urls(
-            self._PUB, "kernel-4.18.0-553.89.1.el8_10.src.rpm"
-        ) == []
+        assert (
+            _srpm_fallback_urls(
+                self._PUB, "kernel-4.18.0-553.89.1.el8_10.src.rpm"
+            )
+            == []
+        )
 
 
 # ------------------------------------------------------------------
@@ -530,11 +536,12 @@ class TestEnsureContainerImage:
         emulation)."""
         cfg = self._make_target_config(tmp_path)
         cfg.arch = "x86_64"
-        with patch(
-            "ltvm_pkg.kernel_build.subprocess.run"
-        ) as mock_run, patch(
-            "ltvm_pkg.cross_compile.platform.machine",
-            return_value="x86_64",
+        with (
+            patch("ltvm_pkg.kernel_build.subprocess.run") as mock_run,
+            patch(
+                "ltvm_pkg.cross_compile.platform.machine",
+                return_value="x86_64",
+            ),
         ):
             _ensure_container_image(cfg)
         assert self._platform_after(mock_run.call_args[0][0]) == "linux/amd64"
@@ -548,11 +555,12 @@ class TestEnsureContainerImage:
         and silently bypassed the cross-compile code path."""
         cfg = self._make_target_config(tmp_path)
         cfg.arch = "x86_64"  # target
-        with patch(
-            "ltvm_pkg.kernel_build.subprocess.run"
-        ) as mock_run, patch(
-            "ltvm_pkg.cross_compile.platform.machine",
-            return_value="aarch64",  # host
+        with (
+            patch("ltvm_pkg.kernel_build.subprocess.run") as mock_run,
+            patch(
+                "ltvm_pkg.cross_compile.platform.machine",
+                return_value="aarch64",  # host
+            ),
         ):
             _ensure_container_image(cfg)
         plat = self._platform_after(mock_run.call_args[0][0])
@@ -567,11 +575,12 @@ class TestEnsureContainerImage:
         """Symmetric case: x86_64 host targeting aarch64."""
         cfg = self._make_target_config(tmp_path)
         cfg.arch = "aarch64"  # target
-        with patch(
-            "ltvm_pkg.kernel_build.subprocess.run"
-        ) as mock_run, patch(
-            "ltvm_pkg.cross_compile.platform.machine",
-            return_value="x86_64",  # host
+        with (
+            patch("ltvm_pkg.kernel_build.subprocess.run") as mock_run,
+            patch(
+                "ltvm_pkg.cross_compile.platform.machine",
+                return_value="x86_64",  # host
+            ),
         ):
             _ensure_container_image(cfg)
         plat = self._platform_after(mock_run.call_args[0][0])
@@ -729,9 +738,7 @@ class TestApplySrpmOverride:
         assert result["series"] == "6.12-rhel10.0.series"
 
     def test_override_does_not_mutate_input(self) -> None:
-        apply_srpm_override(
-            self._TI, "6.12.0-55.41.1.el10_0", "6.12-rhel10.0"
-        )
+        apply_srpm_override(self._TI, "6.12.0-55.41.1.el10_0", "6.12-rhel10.0")
         assert self._TI["lnxrel"] == "55.43.1.el10_0"
 
     def test_invalid_override_raises(self) -> None:
@@ -769,6 +776,7 @@ class TestKernelOutputsComplete:
     def test_no_modules(self, tmp_path: Path) -> None:
         self._make_complete(tmp_path)
         import shutil as _sh
+
         _sh.rmtree(tmp_path / "modules")
         (tmp_path / "modules").mkdir()
         assert not _kernel_outputs_complete(tmp_path)
@@ -787,9 +795,7 @@ class TestRunKernelPodman:
         mod.mkdir(parents=True)
         (mod / "kernel.ko").write_bytes(b"x")
 
-    def test_cleanup_eof_with_outputs_is_success(
-        self, tmp_path: Path
-    ) -> None:
+    def test_cleanup_eof_with_outputs_is_success(self, tmp_path: Path) -> None:
         self._populate_outputs(tmp_path)
         fake = MagicMock()
         fake.returncode = 126
@@ -799,9 +805,7 @@ class TestRunKernelPodman:
         ):
             _run_kernel_podman(["podman", "run", "foo"], tmp_path)
 
-    def test_cleanup_eof_without_outputs_raises(
-        self, tmp_path: Path
-    ) -> None:
+    def test_cleanup_eof_without_outputs_raises(self, tmp_path: Path) -> None:
         import subprocess as _subprocess
 
         fake = MagicMock()
@@ -860,6 +864,7 @@ class TestArchiveOutgoingVmlinux:
 
     def test_no_vmlinux_is_a_noop(self, tmp_path):
         from ltvm_pkg import kernel_build
+
         assert kernel_build.archive_outgoing_vmlinux(tmp_path) is None
 
     def test_prunes_to_keep_limit(self, tmp_path):

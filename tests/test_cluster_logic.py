@@ -348,7 +348,9 @@ class TestGenerateLocalShRunas:
         import subprocess
 
         r = subprocess.run(
-            ["bash", "-n"], input=self._text(), text=True,
+            ["bash", "-n"],
+            input=self._text(),
+            text=True,
             capture_output=True,
         )
         assert r.returncode == 0, r.stderr

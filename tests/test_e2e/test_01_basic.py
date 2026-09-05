@@ -33,11 +33,16 @@ def test_basic_create_ssh_destroy(vm_name, tmp_path: Path) -> None:  # type: ign
     # some fat off the default.  --ost-disks 0 / --mdt-disks 0 keeps
     # the overlay footprint minimal.
     proc = run_ltvm(
-        "create", name,
-        "--mem", "2048",
-        "--vcpus", "1",
-        "--mdt-disks", "0",
-        "--ost-disks", "0",
+        "create",
+        name,
+        "--mem",
+        "2048",
+        "--vcpus",
+        "1",
+        "--mdt-disks",
+        "0",
+        "--ost-disks",
+        "0",
         timeout=180,
     )
     assert proc.returncode == 0, (
@@ -57,9 +62,7 @@ def test_basic_create_ssh_destroy(vm_name, tmp_path: Path) -> None:  # type: ign
     assert rc == 0, f"ssh ip addr failed rc={rc}: {err}"
     # Expected: "eth0  UP  192.168.100.xx/24"
     tokens = out.split()
-    assert "UP" in tokens, (
-        f"eth0 not UP in `ip -br` output: {out!r}"
-    )
+    assert "UP" in tokens, f"eth0 not UP in `ip -br` output: {out!r}"
     has_ipv4 = any("/" in t and t.split("/")[0].count(".") == 3 for t in tokens)
     assert has_ipv4, f"no IPv4 on eth0: {out!r}"
 
@@ -72,11 +75,7 @@ def test_basic_create_ssh_destroy(vm_name, tmp_path: Path) -> None:  # type: ign
         f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
     )
 
-    assert not info.exists(), (
-        f"after destroy, {info} still exists -- leak"
-    )
+    assert not info.exists(), f"after destroy, {info} still exists -- leak"
     # ssh must now fail (host removed from /etc/hosts + VM gone).
     rc, _, _ = ssh_run(name, "true", timeout=5)
-    assert rc != 0, (
-        f"ssh to destroyed VM {name!r} still succeeded"
-    )
+    assert rc != 0, f"ssh to destroyed VM {name!r} still succeeded"

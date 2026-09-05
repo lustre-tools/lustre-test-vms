@@ -42,9 +42,7 @@ def tmp_vmdir(tmp_path: Path) -> Iterator[Path]:
 
 
 @pytest.fixture
-def doctor_env(
-    tmp_vmdir: Path, tmp_path: Path
-) -> Iterator[dict]:
+def doctor_env(tmp_vmdir: Path, tmp_path: Path) -> Iterator[dict]:
     """Isolate cmd_doctor from host /etc/hosts, ssh config, and
     `ip link`, and from every other checker it would trip on."""
     fake_hosts = tmp_path / "hosts"
@@ -62,15 +60,9 @@ def doctor_env(
             "ltvm_pkg.vm_commands._real_user_ssh_dir",
             return_value=("root", fake_ssh_dir),
         ),
-        patch(
-            "ltvm_pkg.vm_commands.run", return_value=ip_out
-        ) as mock_run,
-        patch(
-            "ltvm_pkg.vm_commands._check_export_tools", return_value=[]
-        ),
-        patch(
-            "ltvm_pkg.vm_commands.is_running", return_value=False
-        ),
+        patch("ltvm_pkg.vm_commands.run", return_value=ip_out) as mock_run,
+        patch("ltvm_pkg.vm_commands._check_export_tools", return_value=[]),
+        patch("ltvm_pkg.vm_commands.is_running", return_value=False),
     ):
         # cmd_doctor reads vm_commands.HOSTS_FILE (re-exported from
         # vm_net), so redirect that module attribute to the fake.
@@ -122,9 +114,7 @@ class TestDoctorStalePid:
         assert "stale PID: ghost" in out
         assert rc != 0  # issues present -> non-zero exit without --fix
 
-    def test_fix_resets_pid(
-        self, tmp_vmdir: Path, doctor_env: dict
-    ) -> None:
+    def test_fix_resets_pid(self, tmp_vmdir: Path, doctor_env: dict) -> None:
         v = VMInfo(name="pid-reset", ip="10.0.0.1", pid=99999)
         v.save()
         rc = vm_commands.cmd_doctor(_make_args(fix=True))
@@ -225,9 +215,7 @@ class TestDoctorOrphanSocketFiles:
         assert "orphan info lock" in out
         assert rc != 0
 
-    def test_fix_removes_all(
-        self, tmp_vmdir: Path, doctor_env: dict
-    ) -> None:
+    def test_fix_removes_all(self, tmp_vmdir: Path, doctor_env: dict) -> None:
         files = [
             tmp_vmdir / "sockets" / "v.pid",
             tmp_vmdir / "sockets" / "v.log",
@@ -253,9 +241,7 @@ class TestDoctorStaleHosts:
         doctor_env: dict,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        doctor_env["hosts"].write_text(
-            f"10.0.0.99 dead-vm {MARKER}:dead-vm\n"
-        )
+        doctor_env["hosts"].write_text(f"10.0.0.99 dead-vm {MARKER}:dead-vm\n")
         rc = vm_commands.cmd_doctor(_make_args(fix=False))
         out = capsys.readouterr().out
         assert "stale hosts entry: dead-vm" in out
@@ -264,12 +250,8 @@ class TestDoctorStaleHosts:
     def test_fix_calls_unregister(
         self, tmp_vmdir: Path, doctor_env: dict
     ) -> None:
-        doctor_env["hosts"].write_text(
-            f"10.0.0.99 dead2 {MARKER}:dead2\n"
-        )
-        with patch(
-            "ltvm_pkg.vm_commands.unregister_ssh_name"
-        ) as mock_unreg:
+        doctor_env["hosts"].write_text(f"10.0.0.99 dead2 {MARKER}:dead2\n")
+        with patch("ltvm_pkg.vm_commands.unregister_ssh_name") as mock_unreg:
             vm_commands.cmd_doctor(_make_args(fix=True))
         mock_unreg.assert_called_with("dead2")
 
@@ -328,16 +310,12 @@ class TestDoctorOrphanTaps:
                 "ltvm_pkg.vm_commands._real_user_ssh_dir",
                 return_value=("root", ssh_dir),
             ),
-            patch(
-                "ltvm_pkg.vm_commands.run", return_value=ip_out
-            ) as mock_run,
+            patch("ltvm_pkg.vm_commands.run", return_value=ip_out) as mock_run,
             patch(
                 "ltvm_pkg.vm_commands._check_export_tools",
                 return_value=[],
             ),
-            patch(
-                "ltvm_pkg.vm_commands.is_running", return_value=False
-            ),
+            patch("ltvm_pkg.vm_commands.is_running", return_value=False),
         ):
             rc = vm_commands.cmd_doctor(_make_args(fix=False))
         out = capsys.readouterr().out
@@ -427,9 +405,7 @@ class TestDoctorInteractivePrompt:
         assert "run with --fix" in out
         assert rc != 0
 
-    def test_tty_yes_runs_fix(
-        self, tmp_vmdir: Path, doctor_env: dict
-    ) -> None:
+    def test_tty_yes_runs_fix(self, tmp_vmdir: Path, doctor_env: dict) -> None:
         (tmp_vmdir / "overlays" / "promptfix.qcow2").write_bytes(b"\x00")
         with (
             patch("sys.stdin.isatty", return_value=True),
@@ -473,7 +449,9 @@ class TestDoctorDiskUsage:
 
         Usage = namedtuple("Usage", "total used free")
         # 500GB total, plenty free.
-        plenty = Usage(total=500 * 1024**3, used=100 * 1024**3, free=400 * 1024**3)
+        plenty = Usage(
+            total=500 * 1024**3, used=100 * 1024**3, free=400 * 1024**3
+        )
         with patch("shutil.disk_usage", return_value=plenty):
             rc = vm_commands.cmd_doctor(_make_args(fix=False))
         out = capsys.readouterr().out

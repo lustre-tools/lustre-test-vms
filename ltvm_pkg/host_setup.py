@@ -70,9 +70,7 @@ def check_podman_machine_macos() -> None:
             timeout=10,
         )
     except (OSError, subprocess.SubprocessError) as e:
-        raise PodmanMachineError(
-            f"failed to query podman machine: {e}"
-        ) from e
+        raise PodmanMachineError(f"failed to query podman machine: {e}") from e
 
     machines: list[dict[str, Any]] = []
     if r.returncode == 0 and r.stdout.strip():
@@ -102,9 +100,7 @@ def check_podman_machine_macos() -> None:
             timeout=180,
         )
     except (OSError, subprocess.SubprocessError) as e:
-        raise PodmanMachineError(
-            f"failed to start podman machine: {e}"
-        ) from e
+        raise PodmanMachineError(f"failed to start podman machine: {e}") from e
 
 
 log = logging.getLogger(__name__)
@@ -128,9 +124,7 @@ SOCKET_VMNET_PLIST_PATH = Path(
 )
 
 DNSMASQ_PLIST_LABEL = "io.github.ltvm.dnsmasq"
-DNSMASQ_PLIST_PATH = Path(
-    f"/Library/LaunchDaemons/{DNSMASQ_PLIST_LABEL}.plist"
-)
+DNSMASQ_PLIST_PATH = Path(f"/Library/LaunchDaemons/{DNSMASQ_PLIST_LABEL}.plist")
 DNSMASQ_CONF_PATH = Path("/usr/local/etc/ltvm-dnsmasq.conf")
 DNSMASQ_PID_PATH = Path("/var/run/ltvm-dnsmasq.pid")
 
@@ -773,9 +767,7 @@ def install_socket_vmnet_launchd_macos(force: bool = False) -> None:
             # but the daemon binds its Unix socket there -- without this
             # mkdir the plist boots, fails ENOENT on bind(), and respawns
             # forever ("ERROR| socket_bindlisten: No such file or directory").
-            _sudo_run(
-                ["mkdir", "-p", str(socket_vmnet_socket_path().parent)]
-            )
+            _sudo_run(["mkdir", "-p", str(socket_vmnet_socket_path().parent)])
             _sudo_run(
                 [
                     "install",
@@ -870,17 +862,11 @@ def install_dnsmasq_macos(force: bool = False) -> None:
 
     # Conf file: write under sudo with root:wheel 0644.
     cur_conf = (
-        DNSMASQ_CONF_PATH.read_text()
-        if DNSMASQ_CONF_PATH.exists()
-        else ""
+        DNSMASQ_CONF_PATH.read_text() if DNSMASQ_CONF_PATH.exists() else ""
     )
     if cur_conf != desired_conf or force:
-        _sudo_prime(
-            f"Installing {DNSMASQ_CONF_PATH} requires root"
-        )
-        _sudo_run(
-            ["mkdir", "-p", str(DNSMASQ_CONF_PATH.parent)]
-        )
+        _sudo_prime(f"Installing {DNSMASQ_CONF_PATH} requires root")
+        _sudo_run(["mkdir", "-p", str(DNSMASQ_CONF_PATH.parent)])
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".conf", delete=False
         ) as tf:
@@ -888,8 +874,17 @@ def install_dnsmasq_macos(force: bool = False) -> None:
             tmp_conf = tf.name
         try:
             _sudo_run(
-                ["install", "-m", "0644", "-o", "root", "-g",
-                 "wheel", tmp_conf, str(DNSMASQ_CONF_PATH)]
+                [
+                    "install",
+                    "-m",
+                    "0644",
+                    "-o",
+                    "root",
+                    "-g",
+                    "wheel",
+                    tmp_conf,
+                    str(DNSMASQ_CONF_PATH),
+                ]
             )
         finally:
             Path(tmp_conf).unlink(missing_ok=True)
@@ -900,14 +895,10 @@ def install_dnsmasq_macos(force: bool = False) -> None:
     # when the plist contents change so launchd picks up the new
     # ProgramArguments.
     cur_plist = (
-        DNSMASQ_PLIST_PATH.read_text()
-        if DNSMASQ_PLIST_PATH.exists()
-        else ""
+        DNSMASQ_PLIST_PATH.read_text() if DNSMASQ_PLIST_PATH.exists() else ""
     )
     if cur_plist != desired_plist or force:
-        _sudo_prime(
-            f"Installing {DNSMASQ_PLIST_PATH} requires root"
-        )
+        _sudo_prime(f"Installing {DNSMASQ_PLIST_PATH} requires root")
         _sudo_run(["mkdir", "-p", "/var/log/ltvm-dnsmasq"])
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".plist", delete=False
@@ -916,15 +907,23 @@ def install_dnsmasq_macos(force: bool = False) -> None:
             tmp_plist = tf.name
         try:
             _sudo_run(
-                ["install", "-m", "0644", "-o", "root", "-g",
-                 "wheel", tmp_plist, str(DNSMASQ_PLIST_PATH)]
+                [
+                    "install",
+                    "-m",
+                    "0644",
+                    "-o",
+                    "root",
+                    "-g",
+                    "wheel",
+                    tmp_plist,
+                    str(DNSMASQ_PLIST_PATH),
+                ]
             )
         finally:
             Path(tmp_plist).unlink(missing_ok=True)
         if _dnsmasq_daemon_loaded():
             _sudo_run(
-                ["launchctl", "bootout",
-                 f"system/{DNSMASQ_PLIST_LABEL}"],
+                ["launchctl", "bootout", f"system/{DNSMASQ_PLIST_LABEL}"],
                 check=False,
             )
         log.info("Installed %s", DNSMASQ_PLIST_PATH)
@@ -932,15 +931,11 @@ def install_dnsmasq_macos(force: bool = False) -> None:
 
     if not _dnsmasq_daemon_loaded():
         _sudo_prime("Loading the ltvm-dnsmasq launchd job requires root")
-        _sudo_run(
-            ["launchctl", "bootstrap", "system",
-             str(DNSMASQ_PLIST_PATH)]
-        )
+        _sudo_run(["launchctl", "bootstrap", "system", str(DNSMASQ_PLIST_PATH)])
         log.info("Loaded %s", DNSMASQ_PLIST_LABEL)
     elif needs_reload:
         _sudo_run(
-            ["launchctl", "kickstart", "-k",
-             f"system/{DNSMASQ_PLIST_LABEL}"]
+            ["launchctl", "kickstart", "-k", f"system/{DNSMASQ_PLIST_LABEL}"]
         )
 
 
@@ -1030,8 +1025,12 @@ def _podman_machine_memory(name: str) -> int | None:
     try:
         r = subprocess.run(
             [
-                "podman", "machine", "inspect", name,
-                "--format", "{{.Resources.Memory}}",
+                "podman",
+                "machine",
+                "inspect",
+                name,
+                "--format",
+                "{{.Resources.Memory}}",
             ],
             capture_output=True,
             text=True,
@@ -1064,7 +1063,10 @@ Pinning applehv sidesteps that whole failure mode.
 """
 
 _PODMAN_PROVIDER_CONF = (
-    Path.home() / ".config" / "containers" / "containers.conf.d"
+    Path.home()
+    / ".config"
+    / "containers"
+    / "containers.conf.d"
     / "ltvm-machine-provider.conf"
 )
 
@@ -1096,12 +1098,14 @@ def _pin_podman_provider_applehv() -> None:
         _PODMAN_PROVIDER_CONF.write_text(body)
         log.info(
             "Pinned podman machine provider to %s (%s)",
-            LTVM_PODMAN_PROVIDER, _PODMAN_PROVIDER_CONF,
+            LTVM_PODMAN_PROVIDER,
+            _PODMAN_PROVIDER_CONF,
         )
     except OSError as e:
         log.warning(
             "could not pin podman provider to %s: %s",
-            LTVM_PODMAN_PROVIDER, e,
+            LTVM_PODMAN_PROVIDER,
+            e,
         )
 
 
@@ -1116,11 +1120,17 @@ def _podman_machine_init_applehv() -> None:
     log.info(
         "Initializing podman machine on the %s backend "
         "(podman machine init --memory=%s)...",
-        LTVM_PODMAN_PROVIDER, PODMAN_MACHINE_MEMORY_MIB,
+        LTVM_PODMAN_PROVIDER,
+        PODMAN_MACHINE_MEMORY_MIB,
     )
     _run(
-        ["podman", "machine", "init",
-         "--memory", str(PODMAN_MACHINE_MEMORY_MIB)],
+        [
+            "podman",
+            "machine",
+            "init",
+            "--memory",
+            str(PODMAN_MACHINE_MEMORY_MIB),
+        ],
         env=_podman_provider_env(),
     )
 
@@ -1180,10 +1190,12 @@ def install_podman_macos(force: bool = False) -> bool:
                 nm,
             )
             prov_env = _podman_provider_env("libkrun")
-            _run(["podman", "machine", "stop", nm],
-                 check=False, env=prov_env)
-            _run(["podman", "machine", "rm", "--force", nm],
-                 check=False, env=prov_env)
+            _run(["podman", "machine", "stop", nm], check=False, env=prov_env)
+            _run(
+                ["podman", "machine", "rm", "--force", nm],
+                check=False,
+                env=prov_env,
+            )
         _podman_machine_init_applehv()
         machines = _podman_machine_list_macos()
         usable = [m for m in machines if m.get("VMType") != "libkrun"]
@@ -1200,15 +1212,26 @@ def install_podman_macos(force: bool = False) -> bool:
             )
             running = bool(m.get("Running"))
             if running:
-                _run(["podman", "machine", "stop", name],
-                     env=_podman_provider_env())
-            _run([
-                "podman", "machine", "set", name,
-                "--memory", str(PODMAN_MACHINE_MEMORY_MIB),
-            ], env=_podman_provider_env())
+                _run(
+                    ["podman", "machine", "stop", name],
+                    env=_podman_provider_env(),
+                )
+            _run(
+                [
+                    "podman",
+                    "machine",
+                    "set",
+                    name,
+                    "--memory",
+                    str(PODMAN_MACHINE_MEMORY_MIB),
+                ],
+                env=_podman_provider_env(),
+            )
             if running:
-                _run(["podman", "machine", "start", name],
-                     env=_podman_provider_env())
+                _run(
+                    ["podman", "machine", "start", name],
+                    env=_podman_provider_env(),
+                )
                 m["Running"] = True
 
     target = _default_or_first(usable)
@@ -1372,7 +1395,9 @@ def install_qemu_macos(force: bool = False) -> None:
         _sudo_run(["mkdir", "-p", str(share_dir)], quiet=True)
         share_link = share_dir / "qemu"
         _sudo_run(["rm", "-f", str(share_link)], quiet=True)
-        _sudo_run(["ln", "-s", str(brew_share_qemu), str(share_link)], quiet=True)
+        _sudo_run(
+            ["ln", "-s", str(brew_share_qemu), str(share_link)], quiet=True
+        )
 
     ver_r = _run_quiet(
         [str(QEMU_PREFIX / "bin" / "qemu-system-x86_64"), "--version"],
@@ -1440,9 +1465,7 @@ def install_image_tools_macos(force: bool = False) -> None:
             continue
         link = bin_dir / tool
         need_link = (
-            force
-            or not link.is_symlink()
-            or link.resolve() != src.resolve()
+            force or not link.is_symlink() or link.resolve() != src.resolve()
         )
         if not need_link:
             continue
@@ -1748,7 +1771,8 @@ def setup_network(host: HostInfo, subnet: str = DEFAULT_SUBNET) -> None:
                 ["modprobe", "br_netfilter"],
                 capture_output=True,
                 text=True,
-            ).returncode == 0
+            ).returncode
+            == 0
         )
     except FileNotFoundError:
         br_netfilter_ok = False
@@ -2156,10 +2180,7 @@ def _render_ltvm_launcher(python: str, script: str) -> str:
     /usr/bin/python3 shadowing a brew python) can't send ltvm through a
     Python that fails its own 3.10 floor check.
     """
-    return (
-        "#!/bin/sh\n"
-        f"exec '{python}' '{script}' \"$@\"\n"
-    )
+    return f"#!/bin/sh\nexec '{python}' '{script}' \"$@\"\n"
 
 
 def _desired_ltvm_launcher(repo_ltvm: Path) -> str:
@@ -2257,8 +2278,7 @@ def _run_setup_macos(
     )
     if "qemu" in active or need_launcher:
         _sudo_prime(
-            "Installing ltvm on macOS needs sudo for /opt/qemu and "
-            f"{link}"
+            f"Installing ltvm on macOS needs sudo for /opt/qemu and {link}"
         )
 
     if "qemu" in active:
@@ -2285,8 +2305,10 @@ def _run_setup_macos(
         log.info("Install complete.")
         log.info("")
         log.info("Note: VMs use socket_vmnet (vmnet-shared) for networking;")
-        log.info("a small dnsmasq is bound to %s for VM<->VM name resolution.",
-                 DEFAULT_VMNET_GATEWAY)
+        log.info(
+            "a small dnsmasq is bound to %s for VM<->VM name resolution.",
+            DEFAULT_VMNET_GATEWAY,
+        )
         log.info("")
         log.info("Next:")
         log.info("  ltvm target fetch rocky9")

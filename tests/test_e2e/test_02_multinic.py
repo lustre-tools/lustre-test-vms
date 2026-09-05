@@ -33,12 +33,12 @@ from .conftest import run_ltvm, ssh_run, wait_ssh
 # lnet.conf body (the string between quotes in `networks="..."`),
 # expected count of interfaces with an IPv4 address.
 _CASES: list[tuple[str, list[str], str, int]] = [
-    ("default",          [],                        "tcp0(eth0)",               1),
-    ("one-tcp",          ["tcp"],                   "tcp0(eth1)",               2),
-    ("two-tcp",          ["tcp", "tcp"],            "tcp0(eth1),tcp1(eth2)",    3),
-    ("one-softroce",     ["softroce"],              "o2ib0(eth1)",              2),
-    ("tcp-plus-softroce", ["tcp", "softroce"],      "tcp0(eth1),o2ib0(eth2)",   3),
-    ("two-softroce",     ["softroce", "softroce"],  "o2ib0(eth1),o2ib1(eth2)",  3),
+    ("default", [], "tcp0(eth0)", 1),
+    ("one-tcp", ["tcp"], "tcp0(eth1)", 2),
+    ("two-tcp", ["tcp", "tcp"], "tcp0(eth1),tcp1(eth2)", 3),
+    ("one-softroce", ["softroce"], "o2ib0(eth1)", 2),
+    ("tcp-plus-softroce", ["tcp", "softroce"], "tcp0(eth1),o2ib0(eth2)", 3),
+    ("two-softroce", ["softroce", "softroce"], "o2ib0(eth1),o2ib1(eth2)", 3),
 ]
 
 
@@ -60,11 +60,16 @@ def test_nic_combination(  # type: ignore[no-untyped-def]
         extra += ["--nic", n]
 
     proc = run_ltvm(
-        "create", name,
-        "--mem", "2048",
-        "--vcpus", "1",
-        "--mdt-disks", "0",
-        "--ost-disks", "0",
+        "create",
+        name,
+        "--mem",
+        "2048",
+        "--vcpus",
+        "1",
+        "--mdt-disks",
+        "0",
+        "--ost-disks",
+        "0",
         *extra,
         timeout=240,
     )
@@ -92,7 +97,7 @@ def test_nic_combination(  # type: ignore[no-untyped-def]
     # fc_nic_ips= allocated + rc.local applied IPs to every ethN.
     rc, out, err = ssh_run(
         name,
-        "ip -4 -br addr | awk '$1 != \"lo\" && $3 != \"\" {print}'",
+        'ip -4 -br addr | awk \'$1 != "lo" && $3 != "" {print}\'',
     )
     assert rc == 0, f"ssh ip -br addr failed rc={rc}: {err}"
     lines = [ln for ln in out.splitlines() if ln.strip()]

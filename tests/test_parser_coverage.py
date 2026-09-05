@@ -895,8 +895,11 @@ class TestDashValuedOptions:
         args = parser.parse_args(
             ltvm._join_dash_valued_options(
                 [
-                    "build", "lustre", "rocky9",
-                    "--configure", "--with-o2ib=yes --enable-foo",
+                    "build",
+                    "lustre",
+                    "rocky9",
+                    "--configure",
+                    "--with-o2ib=yes --enable-foo",
                 ],
                 known,
             )

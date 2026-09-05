@@ -110,9 +110,17 @@ def _producer_metadata() -> dict[str, str]:
     if "ltvm_version" not in info:
         try:
             r = subprocess.run(
-                ["git", "-C", str(Path(__file__).parent), "describe",
-                 "--always", "--dirty"],
-                capture_output=True, text=True, check=False,
+                [
+                    "git",
+                    "-C",
+                    str(Path(__file__).parent),
+                    "describe",
+                    "--always",
+                    "--dirty",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
             )
             if r.returncode == 0 and r.stdout.strip():
                 info["ltvm_version"] = r.stdout.strip()
@@ -145,15 +153,11 @@ def _kernel_asset_name(target: str, arch: str, kver: str) -> str:
     return f"kernel-{target}-{arch}-{kver}.tar.zst"
 
 
-def _image_asset_name(
-    target: str, arch: str, kver: str, variant: str
-) -> str:
+def _image_asset_name(target: str, arch: str, kver: str, variant: str) -> str:
     return f"image-{target}-{arch}-{kver}{_variant_suffix(variant)}.tar.zst"
 
 
-def _lustre_asset_name(
-    target: str, arch: str, kver: str, variant: str
-) -> str:
+def _lustre_asset_name(target: str, arch: str, kver: str, variant: str) -> str:
     return f"lustre-{target}-{arch}-{kver}{_variant_suffix(variant)}.tar.zst"
 
 
@@ -161,14 +165,11 @@ def _bootable_asset_name(
     target: str, arch: str, kver: str, variant: str, ext: str = "qcow2"
 ) -> str:
     return (
-        f"bootable-{target}-{arch}-{kver}{_variant_suffix(variant)}"
-        f".{ext}.zst"
+        f"bootable-{target}-{arch}-{kver}{_variant_suffix(variant)}.{ext}.zst"
     )
 
 
-def _manifest_name(
-    target: str, arch: str, kver: str, variant: str
-) -> str:
+def _manifest_name(target: str, arch: str, kver: str, variant: str) -> str:
     return f"manifest-{target}-{arch}-{kver}{_variant_suffix(variant)}.json"
 
 
@@ -216,9 +217,7 @@ def _tar_zstd(
     --exclude after -C).
     """
     _check_zstd()
-    compress_prog = (
-        f"zstd -{ZSTD_LEVEL} -T{ZSTD_THREADS} --long={ZSTD_LONG}"
-    )
+    compress_prog = f"zstd -{ZSTD_LEVEL} -T{ZSTD_THREADS} --long={ZSTD_LONG}"
     cmd = ["tar", f"--use-compress-program={compress_prog}"]
     for pat in exclude or []:
         cmd += ["--exclude", pat]
@@ -358,7 +357,6 @@ def _resolve_kernel(
             f"Run 'ltvm build kernel <target>' to build one."
         )
 
-
     candidates = [
         d
         for d in kernels_dir.iterdir()
@@ -454,9 +452,7 @@ def export_build_container(
             "podman not found -- install podman to package targets"
         )
     if check.returncode != 0:
-        v_hint = (
-            "" if variant == DEFAULT_VARIANT else f" --variant {variant}"
-        )
+        v_hint = "" if variant == DEFAULT_VARIANT else f" --variant {variant}"
         raise RuntimeError(
             f"Build container '{container_tag}' not found in podman storage.\n"
             f"  Run: ltvm build container {target_name}{v_hint}"
@@ -515,9 +511,7 @@ def snapshot_lustre(
         lustre_tree, target, arch=arch, kernel=kernel_name, variant=variant
     )
     if not staging_src.is_dir():
-        v_hint = (
-            "" if variant == DEFAULT_VARIANT else f" --variant {variant}"
-        )
+        v_hint = "" if variant == DEFAULT_VARIANT else f" --variant {variant}"
         raise ValueError(
             f"No staging directory at {staging_src} -- "
             f"run `ltvm build lustre {target} --kernel {kernel_name} "
@@ -567,9 +561,7 @@ def snapshot_lustre(
         )
 
     dest_parent = kernel_dir / "lustre-artifacts"
-    dest = (
-        dest_parent if variant == DEFAULT_VARIANT else dest_parent / variant
-    )
+    dest = dest_parent if variant == DEFAULT_VARIANT else dest_parent / variant
     print(f"  Snapshotting Lustre staging tree to {dest}")
     print(f"    Staging: {staging_src}")
     print(f"    Source:  {lustre_tree}")
@@ -630,9 +622,7 @@ def snapshot_lustre(
 # ---------------------------------------------------------------------------
 
 
-def _asset_entry(
-    kind: str, path: Path, tar_base: Path
-) -> dict[str, Any]:
+def _asset_entry(kind: str, path: Path, tar_base: Path) -> dict[str, Any]:
     """Build a manifest entry for a packaged asset."""
     stat = path.stat()
     return {
@@ -741,7 +731,8 @@ def package_target(
         # artifacts/ itself also stops packaging litter from ending up
         # next to build artifacts.
         dest_dir = (
-            output_dir.parent.parent / "publish"
+            output_dir.parent.parent
+            / "publish"
             / f"{target_name}-{arch}-{variant}"
         )
     dest_dir = Path(dest_dir)
@@ -816,11 +807,13 @@ def package_target(
     # ---- lustre asset (optional) ----
     lustre_parent = kernel_dir / "lustre-artifacts"
     lustre_src = (
-        lustre_parent
-        if variant == DEFAULT_VARIANT
-        else lustre_parent / variant
+        lustre_parent if variant == DEFAULT_VARIANT else lustre_parent / variant
     )
-    if include_lustre and lustre_src.is_dir() and (lustre_src / ".ltvm-snapshot.json").exists():
+    if (
+        include_lustre
+        and lustre_src.is_dir()
+        and (lustre_src / ".ltvm-snapshot.json").exists()
+    ):
         lustre_rel = lustre_src.relative_to(tar_base)
         lus_asset = dest_dir / _lustre_asset_name(
             target_name, arch, kver, variant
@@ -836,9 +829,7 @@ def package_target(
             if variant == DEFAULT_VARIANT
             else []
         )
-        _tar_zstd(
-            tar_base, [str(lustre_rel)], lus_asset, exclude=lus_exclude
-        )
+        _tar_zstd(tar_base, [str(lustre_rel)], lus_asset, exclude=lus_exclude)
         assets["lustre"] = lus_asset
 
     # ---- manifest ----
@@ -851,27 +842,20 @@ def package_target(
         "kernel_version": kver,
         "variant": variant,
         "assets": [
-            _asset_entry(kind, path, tar_base)
-            for kind, path in assets.items()
+            _asset_entry(kind, path, tar_base) for kind, path in assets.items()
         ],
     }
     # Pick up lustre_commit from the snapshot meta if present.
     if "lustre" in assets:
-        snap_meta = load_meta_safe(
-            lustre_src / ".ltvm-snapshot.json"
-        )
+        snap_meta = load_meta_safe(lustre_src / ".ltvm-snapshot.json")
         if snap_meta is not None:
             manifest["lustre_commit"] = snap_meta.get("lustre_commit")
 
-    manifest_path = dest_dir / _manifest_name(
-        target_name, arch, kver, variant
-    )
+    manifest_path = dest_dir / _manifest_name(target_name, arch, kver, variant)
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     assets["manifest"] = manifest_path
 
-    total_mb = sum(
-        p.stat().st_size for p in assets.values()
-    ) / (1024 * 1024)
+    total_mb = sum(p.stat().st_size for p in assets.values()) / (1024 * 1024)
     print(f"    Total published size: {total_mb:.0f} MB")
 
     return assets
@@ -912,9 +896,7 @@ def package_bootable(
         qcow2_path = paths["image_dir"] / f"bootable-{kernel_name}.qcow2"
     qcow2_path = Path(qcow2_path)
     if not qcow2_path.exists():
-        v_hint = (
-            "" if variant == DEFAULT_VARIANT else f" --variant {variant}"
-        )
+        v_hint = "" if variant == DEFAULT_VARIANT else f" --variant {variant}"
         raise FileNotFoundError(
             f"bootable qcow2 not found at {qcow2_path}.\n"
             f"  Run: ltvm target export {target_name}{v_hint} --format qcow2"
@@ -932,7 +914,8 @@ def package_bootable(
 
     if dest_dir is None:
         dest_dir = (
-            output_dir.parent.parent / "publish"
+            output_dir.parent.parent
+            / "publish"
             / f"{target_name}-{arch}-{variant}-bootable"
         )
     dest_dir = Path(dest_dir)
@@ -944,8 +927,10 @@ def package_bootable(
     print(f"  [bootable]  {out.name}")
     _zstd_file(qcow2_path, out)
     size_mb = out.stat().st_size / (1024 * 1024)
-    print(f"    Compressed: {size_mb:.0f} MB "
-          f"(from {qcow2_path.stat().st_size / (1024 * 1024):.0f} MB)")
+    print(
+        f"    Compressed: {size_mb:.0f} MB "
+        f"(from {qcow2_path.stat().st_size / (1024 * 1024):.0f} MB)"
+    )
     if out.stat().st_size > 2 * 1024 * 1024 * 1024:
         print(
             f"  WARNING: {out.name} is larger than GitHub's 2 GiB asset "
@@ -976,10 +961,14 @@ def _download(url: str, dest: Path, *, quiet: bool = False) -> None:
     else:
         flags = ["-fSL", "--progress-bar"]
     flags += [
-        "--connect-timeout", "15",
-        "--max-time", "1800",
-        "--retry", "3",
-        "--retry-delay", "5",
+        "--connect-timeout",
+        "15",
+        "--max-time",
+        "1800",
+        "--retry",
+        "3",
+        "--retry-delay",
+        "5",
         "--retry-all-errors",
     ]
     try:
@@ -1106,8 +1095,7 @@ def fetch_target(
             size = asset["size"]
             tarball = td / name
             print(
-                f"    [{asset['kind']}] {name} "
-                f"({size / (1024 * 1024):.0f} MB)"
+                f"    [{asset['kind']}] {name} ({size / (1024 * 1024):.0f} MB)"
             )
             _download(url_prefix + name, tarball)
             _expect_sha256(tarball, sha, expected_size=size)
@@ -1121,9 +1109,7 @@ def fetch_target(
         )
 
     # Load the build container into podman storage.
-    paths = _variant_paths(
-        target_dir, manifest["kernel"], variant
-    )
+    paths = _variant_paths(target_dir, manifest["kernel"], variant)
     container_image = paths["container_dir"] / "image.tar"
     if not container_image.exists():
         raise RuntimeError(
@@ -1181,9 +1167,7 @@ def fetch_bootable(
     # so parse it back out.
     name = asset_url.rsplit("/", 1)[-1]
     if not name.endswith(".zst"):
-        raise ValueError(
-            f"bootable URL should end in .zst: {asset_url}"
-        )
+        raise ValueError(f"bootable URL should end in .zst: {asset_url}")
     decompressed_name = name[: -len(".zst")]
     # Parse kver out of the asset name.
     # bootable-<target>-<arch>-<kver>[-<variant>].<ext>

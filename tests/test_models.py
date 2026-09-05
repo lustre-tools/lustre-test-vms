@@ -151,9 +151,7 @@ class TestVMInfoNicsField:
         loaded = VMInfo.load("twonic")
         assert loaded.nics == ["tcp", "tcp"]
 
-    def test_nics_with_colon_arg_round_trip(
-        self, tmp_sockets: Path
-    ) -> None:
+    def test_nics_with_colon_arg_round_trip(self, tmp_sockets: Path) -> None:
         """NICs whose storage string has ':' (e.g. passthrough) survive.
 
         VMInfo joins on '|' so that a spec like
@@ -409,25 +407,33 @@ class TestResolveOsArtifactsPerKernel:
         )
         return tmp_path
 
-    def test_named_kernel_selects_matching_image(
-        self, tmp_path: Path
-    ) -> None:
+    def test_named_kernel_selects_matching_image(self, tmp_path: Path) -> None:
         from ltvm_pkg import vm_state
 
         root = self._setup(tmp_path)
         from ltvm_pkg import target_config as tc_mod
+
         with (
             patch.object(vm_state, "_LTVM_ROOT", root),
-            patch.object(vm_state, "TARGETS_YAML", root / "targets" / "targets.yaml"),
-            patch.object(tc_mod, "TARGETS_YAML", root / "targets" / "targets.yaml"),
+            patch.object(
+                vm_state, "TARGETS_YAML", root / "targets" / "targets.yaml"
+            ),
+            patch.object(
+                tc_mod, "TARGETS_YAML", root / "targets" / "targets.yaml"
+            ),
             patch.object(tc_mod, "TARGETS_DIR", root / "targets"),
             patch.object(tc_mod, "ARTIFACTS_DIR", root / "artifacts"),
         ):
             arts = vm_state.resolve_os_artifacts("rocky9", kernel="6.1-rhel9.7")
         assert arts.kernel.parent.name == "6.1-rhel9.7"
         assert arts.image == (
-            root / "artifacts" / "rocky9" / "x86_64" / "images"
-            / "6.1-rhel9.7" / "base.ext4"
+            root
+            / "artifacts"
+            / "rocky9"
+            / "x86_64"
+            / "images"
+            / "6.1-rhel9.7"
+            / "base.ext4"
         )
 
     def test_default_uses_default_kernel_image(self, tmp_path: Path) -> None:
@@ -435,10 +441,15 @@ class TestResolveOsArtifactsPerKernel:
 
         root = self._setup(tmp_path)
         from ltvm_pkg import target_config as tc_mod
+
         with (
             patch.object(vm_state, "_LTVM_ROOT", root),
-            patch.object(vm_state, "TARGETS_YAML", root / "targets" / "targets.yaml"),
-            patch.object(tc_mod, "TARGETS_YAML", root / "targets" / "targets.yaml"),
+            patch.object(
+                vm_state, "TARGETS_YAML", root / "targets" / "targets.yaml"
+            ),
+            patch.object(
+                tc_mod, "TARGETS_YAML", root / "targets" / "targets.yaml"
+            ),
             patch.object(tc_mod, "TARGETS_DIR", root / "targets"),
             patch.object(tc_mod, "ARTIFACTS_DIR", root / "artifacts"),
         ):
@@ -450,15 +461,27 @@ class TestResolveOsArtifactsPerKernel:
 
         root = self._setup(tmp_path)
         # Remove the 6.1 image to force the failure path.
-        (root / "artifacts" / "rocky9" / "x86_64" / "images" / "6.1-rhel9.7" / "base.ext4").unlink()
+        (
+            root
+            / "artifacts"
+            / "rocky9"
+            / "x86_64"
+            / "images"
+            / "6.1-rhel9.7"
+            / "base.ext4"
+        ).unlink()
         from ltvm_pkg import target_config as tc_mod
+
         with (
             patch.object(vm_state, "_LTVM_ROOT", root),
-            patch.object(vm_state, "TARGETS_YAML", root / "targets" / "targets.yaml"),
-            patch.object(tc_mod, "TARGETS_YAML", root / "targets" / "targets.yaml"),
+            patch.object(
+                vm_state, "TARGETS_YAML", root / "targets" / "targets.yaml"
+            ),
+            patch.object(
+                tc_mod, "TARGETS_YAML", root / "targets" / "targets.yaml"
+            ),
             patch.object(tc_mod, "TARGETS_DIR", root / "targets"),
             patch.object(tc_mod, "ARTIFACTS_DIR", root / "artifacts"),
         ):
             with pytest.raises(FileNotFoundError, match="build image"):
                 vm_state.resolve_os_artifacts("rocky9", kernel="6.1-rhel9.7")
-

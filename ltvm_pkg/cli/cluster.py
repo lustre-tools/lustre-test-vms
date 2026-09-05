@@ -111,10 +111,7 @@ def cmd_cluster(args: argparse.Namespace) -> int:
                 # surfaces per-node with the usual follow-up-issue hint.
                 nics.append(cargs[i + 1])
                 i += 2
-            elif (
-                cargs[i] in ("--owner", "--owner-id")
-                and i + 1 < len(cargs)
-            ):
+            elif cargs[i] in ("--owner", "--owner-id") and i + 1 < len(cargs):
                 owner_id = cargs[i + 1]
                 i += 2
             elif cargs[i].startswith("--"):
@@ -151,8 +148,11 @@ def cmd_cluster(args: argparse.Namespace) -> int:
                     hint="ltvm cluster create <name> "
                     "[TARGET | --target TARGET] <role:vm[:disks]> ...",
                 )
-        if pos_target is not None and os_target is not None \
-                and pos_target != os_target:
+        if (
+            pos_target is not None
+            and os_target is not None
+            and pos_target != os_target
+        ):
             return _error(
                 f"--target {os_target!r} conflicts with positional "
                 f"target {pos_target!r}; pass only one",
@@ -192,10 +192,7 @@ def cmd_cluster(args: argparse.Namespace) -> int:
         force_compat = False
         i = 1
         while i < len(cargs):
-            if (
-                cargs[i] in ("--build", "--lustre-tree")
-                and i + 1 < len(cargs)
-            ):
+            if cargs[i] in ("--build", "--lustre-tree") and i + 1 < len(cargs):
                 build_path = cargs[i + 1]
                 i += 2
             elif cargs[i] == "--mount":

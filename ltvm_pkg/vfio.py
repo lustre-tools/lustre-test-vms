@@ -79,9 +79,7 @@ def current_driver(bdf: str) -> str | None:
     """
     dev_dir = _pci_device_dir(bdf)
     if not dev_dir.exists():
-        raise VfioError(
-            f"PCI device {bdf} not found under {dev_dir}"
-        )
+        raise VfioError(f"PCI device {bdf} not found under {dev_dir}")
     driver_link = dev_dir / "driver"
     if not driver_link.exists() and not driver_link.is_symlink():
         return None
@@ -113,9 +111,7 @@ def bind_to_vfio(bdf: str) -> str | None:
     """
     dev_dir = _pci_device_dir(bdf)
     if not dev_dir.exists():
-        raise VfioError(
-            f"PCI device {bdf} not found under {dev_dir}"
-        )
+        raise VfioError(f"PCI device {bdf} not found under {dev_dir}")
 
     from_driver = current_driver(bdf)
     if from_driver == "vfio-pci":
@@ -181,9 +177,7 @@ def rebind(bdf: str, driver: str) -> None:
     """
     dev_dir = _pci_device_dir(bdf)
     if not dev_dir.exists():
-        raise VfioError(
-            f"PCI device {bdf} not found under {dev_dir}"
-        )
+        raise VfioError(f"PCI device {bdf} not found under {dev_dir}")
     target_dir = _pci_driver_dir(driver)
     if not target_dir.exists():
         raise VfioError(
@@ -218,8 +212,7 @@ def iommu_enabled() -> bool:
 
     tokens = cmdline.split()
     cmdline_ok = any(
-        t in ("intel_iommu=on", "amd_iommu=on", "iommu=pt")
-        for t in tokens
+        t in ("intel_iommu=on", "amd_iommu=on", "iommu=pt") for t in tokens
     )
     if not cmdline_ok:
         return False
@@ -257,9 +250,7 @@ def resolve_ifname_to_bdf(ifname: str) -> str:
     try:
         target = device_link.resolve()
     except OSError as exc:
-        raise VfioError(
-            f"failed resolving {device_link}: {exc}"
-        ) from exc
+        raise VfioError(f"failed resolving {device_link}: {exc}") from exc
 
     # The resolved path for a PCI-backed netdev ends in the BDF.
     # Sanity-check format before returning.

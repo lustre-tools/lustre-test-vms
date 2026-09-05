@@ -15,16 +15,21 @@ def _make_target_config(
     kver: str = "5.14.0-1.el9.x86_64",
 ) -> MagicMock:
     """Return a MagicMock TargetConfig with a populated on-disk layout."""
-    image_dir = tmp_path / "artifacts" / name / "x86_64" / "images" / kernel_name
-    kernel_dir = tmp_path / "artifacts" / name / "x86_64" / "kernels" / kernel_name
+    image_dir = (
+        tmp_path / "artifacts" / name / "x86_64" / "images" / kernel_name
+    )
+    kernel_dir = (
+        tmp_path / "artifacts" / name / "x86_64" / "kernels" / kernel_name
+    )
     image_dir.mkdir(parents=True)
     (kernel_dir / "build-tree" / "include" / "config").mkdir(parents=True)
 
     # Fake artifacts.  Sizes are what _image_size_mb rounds on.
     (image_dir / "base.ext4").write_bytes(b"\0" * (1024 * 1024))  # 1 MiB
     (kernel_dir / "vmlinuz").write_bytes(b"\0" * (8 * 1024 * 1024))  # 8 MiB
-    (kernel_dir / "build-tree" / "include" / "config" /
-     "kernel.release").write_text(kver + "\n")
+    (
+        kernel_dir / "build-tree" / "include" / "config" / "kernel.release"
+    ).write_text(kver + "\n")
 
     tc = MagicMock()
     tc.name = name
@@ -38,8 +43,11 @@ class TestCheckHostTools:
     def test_missing_core_tool_raises(self) -> None:
         import ltvm_pkg.image_export as ie
 
-        with patch.object(ie.shutil, "which",
-                          side_effect=lambda x: None if x == "parted" else "/u/bin/x"):
+        with patch.object(
+            ie.shutil,
+            "which",
+            side_effect=lambda x: None if x == "parted" else "/u/bin/x",
+        ):
             with pytest.raises(RuntimeError, match="parted"):
                 ie._check_host_tools()
 
@@ -119,8 +127,9 @@ class TestWriteGrubCfg:
 
         boot = tmp_path / "boot"
         boot.mkdir()
-        ie._write_grub_cfg(boot, "5.14.0-test", "abc-uuid-1234",
-                           grub_install="grub2-install")
+        ie._write_grub_cfg(
+            boot, "5.14.0-test", "abc-uuid-1234", grub_install="grub2-install"
+        )
 
         cfg = (boot / "grub2" / "grub.cfg").read_text()
         assert "abc-uuid-1234" in cfg
@@ -141,14 +150,17 @@ class TestWriteGrubCfg:
 
         boot = tmp_path / "boot"
         boot.mkdir()
-        ie._write_grub_cfg(boot, "kv", "uuid", grub_install="/u/bin/grub-install")
+        ie._write_grub_cfg(
+            boot, "kv", "uuid", grub_install="/u/bin/grub-install"
+        )
         assert (boot / "grub" / "grub.cfg").exists()
         assert not (boot / "grub2" / "grub.cfg").exists()
 
         boot2 = tmp_path / "boot2"
         boot2.mkdir()
-        ie._write_grub_cfg(boot2, "kv", "uuid",
-                           grub_install="/u/bin/grub2-install")
+        ie._write_grub_cfg(
+            boot2, "kv", "uuid", grub_install="/u/bin/grub2-install"
+        )
         assert (boot2 / "grub2" / "grub.cfg").exists()
         assert not (boot2 / "grub" / "grub.cfg").exists()
 
@@ -184,8 +196,11 @@ class TestExportImageGuards:
         # Delete base.ext4 after fixture put it there.
         (tc.image_output_dir.return_value / "base.ext4").unlink()
 
-        with patch.object(ie, "_check_host_tools", return_value={
-                "grub_install": "grub-install"}):
+        with patch.object(
+            ie,
+            "_check_host_tools",
+            return_value={"grub_install": "grub-install"},
+        ):
             with pytest.raises(FileNotFoundError, match="base.ext4"):
                 ie.export_image(tc, None, tmp_path / "o.qcow2")
 
@@ -195,8 +210,11 @@ class TestExportImageGuards:
         tc = _make_target_config(tmp_path)
         (tc.kernel_output_dir.return_value / "vmlinuz").unlink()
 
-        with patch.object(ie, "_check_host_tools", return_value={
-                "grub_install": "grub-install"}):
+        with patch.object(
+            ie,
+            "_check_host_tools",
+            return_value={"grub_install": "grub-install"},
+        ):
             with pytest.raises(FileNotFoundError, match="vmlinuz"):
                 ie.export_image(tc, None, tmp_path / "o.qcow2")
 
@@ -205,11 +223,13 @@ class TestExportImageGuards:
 
         tc = _make_target_config(tmp_path)
         kdir = tc.kernel_output_dir.return_value
-        (kdir / "build-tree" / "include" / "config" /
-         "kernel.release").unlink()
+        (kdir / "build-tree" / "include" / "config" / "kernel.release").unlink()
 
-        with patch.object(ie, "_check_host_tools", return_value={
-                "grub_install": "grub-install"}):
+        with patch.object(
+            ie,
+            "_check_host_tools",
+            return_value={"grub_install": "grub-install"},
+        ):
             with pytest.raises(FileNotFoundError, match="kernel release"):
                 ie.export_image(tc, None, tmp_path / "o.qcow2")
 
@@ -226,7 +246,8 @@ class TestCliWiring:
 
         root = _P(__file__).resolve().parent.parent
         loader = importlib.machinery.SourceFileLoader(
-            "ltvm_script_export", str(root / "ltvm"))
+            "ltvm_script_export", str(root / "ltvm")
+        )
         mod = loader.load_module()  # type: ignore[deprecated]
         parser = mod.build_parser()
 
@@ -234,8 +255,15 @@ class TestCliWiring:
         # at the argparse level -- failure would mean the subcommand
         # didn't register.
         ns = parser.parse_args(
-            ["target", "export", "rocky9", "--format", "raw",
-             "--output", "/tmp/x.raw"]
+            [
+                "target",
+                "export",
+                "rocky9",
+                "--format",
+                "raw",
+                "--output",
+                "/tmp/x.raw",
+            ]
         )
         assert ns.func.__name__ == "cmd_target_export"
         assert ns.target == "rocky9"
@@ -256,20 +284,28 @@ class TestCliWiring:
 
         tc = _make_target_config(tmp_path)
         args = argparse.Namespace(
-            target="rocky9", arch=None, kernel=None,
-            output=str(tmp_path / "out.qcow2"), format="qcow2",
-            force=False, json=False,
+            target="rocky9",
+            arch=None,
+            kernel=None,
+            output=str(tmp_path / "out.qcow2"),
+            format="qcow2",
+            force=False,
+            json=False,
         )
         # Make _load_target_args succeed so we reach sudo_prime, then
         # short-circuit export_image with a clean error to avoid
         # touching real losetup/mount.
         import ltvm_pkg.image_export as ie
 
-        with patch.object(priv, "sudo_prime") as sp, \
-             patch.object(cli_targets, "_load_target_args",
-                          return_value=(tc, None)), \
-             patch.object(ie, "export_image",
-                          side_effect=RuntimeError("stubbed")):
+        with (
+            patch.object(priv, "sudo_prime") as sp,
+            patch.object(
+                cli_targets, "_load_target_args", return_value=(tc, None)
+            ),
+            patch.object(
+                ie, "export_image", side_effect=RuntimeError("stubbed")
+            ),
+        ):
             rc = cli.cmd_target_export(args)
         sp.assert_called_once()
         assert rc == cli.EXIT_ERROR
@@ -323,8 +359,10 @@ class TestHostSetupDeps:
 
         host = MagicMock()
         host.pkg_mgr = "apt"
-        with patch.object(host_setup.shutil, "which", return_value="/u/bin/x"), \
-             patch.object(host_setup, "_pkg_install") as install:
+        with (
+            patch.object(host_setup.shutil, "which", return_value="/u/bin/x"),
+            patch.object(host_setup, "_pkg_install") as install,
+        ):
             host_setup.check_prerequisites(host)
 
         # When everything is installed, _pkg_install is only called for
@@ -333,8 +371,10 @@ class TestHostSetupDeps:
         def which(name: str) -> str | None:
             return None if name == "parted" else "/u/bin/" + name
 
-        with patch.object(host_setup.shutil, "which", side_effect=which), \
-             patch.object(host_setup, "_pkg_install") as install:
+        with (
+            patch.object(host_setup.shutil, "which", side_effect=which),
+            patch.object(host_setup, "_pkg_install") as install,
+        ):
             host_setup.check_prerequisites(host)
         pkgs = [a for call in install.call_args_list for a in call.args]
         assert "parted" in pkgs
@@ -348,8 +388,10 @@ class TestHostSetupDeps:
         def which(name: str) -> str | None:
             return None if name == "grub-install" else "/u/bin/" + name
 
-        with patch.object(host_setup.shutil, "which", side_effect=which), \
-             patch.object(host_setup, "_pkg_install") as install:
+        with (
+            patch.object(host_setup.shutil, "which", side_effect=which),
+            patch.object(host_setup, "_pkg_install") as install,
+        ):
             host_setup.check_prerequisites(host)
         pkgs = [a for call in install.call_args_list for a in call.args]
         assert "grub-pc-bin" in pkgs
@@ -363,8 +405,10 @@ class TestHostSetupDeps:
         def which(name: str) -> str | None:
             return None if name == "grub2-install" else "/u/bin/" + name
 
-        with patch.object(host_setup.shutil, "which", side_effect=which), \
-             patch.object(host_setup, "_pkg_install") as install:
+        with (
+            patch.object(host_setup.shutil, "which", side_effect=which),
+            patch.object(host_setup, "_pkg_install") as install,
+        ):
             host_setup.check_prerequisites(host)
         pkgs = [a for call in install.call_args_list for a in call.args]
         assert "grub2-pc" in pkgs
@@ -388,8 +432,9 @@ def _has_gnu_tar() -> bool:
 
     if _shutil.which("tar") is None:
         return False
-    r = _sp.run(["tar", "--version"], capture_output=True, text=True,
-                check=False)
+    r = _sp.run(
+        ["tar", "--version"], capture_output=True, text=True, check=False
+    )
     return "GNU tar" in (r.stdout or "")
 
 
@@ -402,7 +447,7 @@ class TestGceSizing:
 
         assert ie._round_up_gib_mb(1) == 1024
         assert ie._round_up_gib_mb(1023) == 1024
-        assert ie._round_up_gib_mb(1024) == 1024      # already exact
+        assert ie._round_up_gib_mb(1024) == 1024  # already exact
         assert ie._round_up_gib_mb(1025) == 2048
         assert ie._round_up_gib_mb(4600) == 5120
 
@@ -433,8 +478,10 @@ class TestGnuTarCheck:
         import ltvm_pkg.image_export as ie
 
         fake = MagicMock(stdout="bsdtar 3.5.3 - libarchive 3.5.3\n")
-        with patch.object(ie.shutil, "which", return_value="/usr/bin/tar"), \
-             patch.object(ie.subprocess, "run", return_value=fake):
+        with (
+            patch.object(ie.shutil, "which", return_value="/usr/bin/tar"),
+            patch.object(ie.subprocess, "run", return_value=fake),
+        ):
             with pytest.raises(RuntimeError, match="GNU tar is required"):
                 ie._check_gnu_tar()
 
@@ -442,8 +489,10 @@ class TestGnuTarCheck:
         import ltvm_pkg.image_export as ie
 
         fake = MagicMock(stdout="tar (GNU tar) 1.34\n")
-        with patch.object(ie.shutil, "which", return_value="/usr/bin/tar"), \
-             patch.object(ie.subprocess, "run", return_value=fake):
+        with (
+            patch.object(ie.shutil, "which", return_value="/usr/bin/tar"),
+            patch.object(ie.subprocess, "run", return_value=fake),
+        ):
             ie._check_gnu_tar()  # no raise
 
     def test_only_checked_for_gce(self) -> None:
@@ -451,8 +500,10 @@ class TestGnuTarCheck:
         fail on a host whose tar is bsdtar."""
         import ltvm_pkg.image_export as ie
 
-        with patch.object(ie.shutil, "which", return_value="/u/bin/x"), \
-             patch.object(ie, "_check_gnu_tar") as chk:
+        with (
+            patch.object(ie.shutil, "which", return_value="/u/bin/x"),
+            patch.object(ie, "_check_gnu_tar") as chk,
+        ):
             ie._check_host_tools("qcow2")
             chk.assert_not_called()
             ie._check_host_tools("gce")
@@ -470,9 +521,7 @@ class TestFstabRewrite:
 
         etc = tmp_path / "etc"
         etc.mkdir()
-        (etc / "fstab").write_text(
-            "/dev/vda  /  ext4  defaults,noatime  0 1\n"
-        )
+        (etc / "fstab").write_text("/dev/vda  /  ext4  defaults,noatime  0 1\n")
         ie._rewrite_fstab_root(tmp_path, "1111-2222")
 
         text = (etc / "fstab").read_text()
@@ -481,9 +530,7 @@ class TestFstabRewrite:
         # Mount options must survive the rewrite.
         assert "defaults,noatime" in text
 
-    def test_preserves_comments_and_other_mounts(
-        self, tmp_path: Path
-    ) -> None:
+    def test_preserves_comments_and_other_mounts(self, tmp_path: Path) -> None:
         import ltvm_pkg.image_export as ie
 
         etc = tmp_path / "etc"
@@ -521,9 +568,7 @@ class TestFstabRewrite:
 
 
 class TestInjectSshKey:
-    def test_appends_without_dropping_shared_key(
-        self, tmp_path: Path
-    ) -> None:
+    def test_appends_without_dropping_shared_key(self, tmp_path: Path) -> None:
         """The image already carries the shared inter-VM ltvm key in
         root's authorized_keys; clobbering it would break cluster
         ssh, so injection must append."""
@@ -602,10 +647,15 @@ class TestGceGuestConfig:
         with patch.object(ie, "sudo_run"):
             ie._apply_gce_guest_config(root)
 
-        prof = (root / "etc" / "NetworkManager" / "system-connections"
-                / "ltvm-gce.nmconnection")
+        prof = (
+            root
+            / "etc"
+            / "NetworkManager"
+            / "system-connections"
+            / "ltvm-gce.nmconnection"
+        )
         text = prof.read_text()
-        assert "method=auto" in text          # DHCP
+        assert "method=auto" in text  # DHCP
         assert "interface-name=eth0" in text  # grub pins net.ifnames=0
         # NM silently ignores a group/world-readable keyfile.
         assert prof.stat().st_mode & 0o777 == 0o600
@@ -617,15 +667,20 @@ class TestGceGuestConfig:
         with patch.object(ie, "sudo_run") as sr:
             ie._apply_gce_guest_config(root)
 
-        ln_calls = [c.args[0] for c in sr.call_args_list
-                    if c.args and c.args[0][0] == "ln"]
+        ln_calls = [
+            c.args[0]
+            for c in sr.call_args_list
+            if c.args and c.args[0][0] == "ln"
+        ]
         assert len(ln_calls) == 1
         argv = ln_calls[0]
-        assert argv[:3] == ["ln", "-sf",
-                            "/usr/lib/systemd/system/NetworkManager.service"]
+        assert argv[:3] == [
+            "ln",
+            "-sf",
+            "/usr/lib/systemd/system/NetworkManager.service",
+        ]
         assert argv[3].endswith(
-            "etc/systemd/system/multi-user.target.wants/"
-            "NetworkManager.service"
+            "etc/systemd/system/multi-user.target.wants/NetworkManager.service"
         )
 
     def test_finds_debian_unit_path(self, tmp_path: Path) -> None:
@@ -638,13 +693,14 @@ class TestGceGuestConfig:
         with patch.object(ie, "sudo_run") as sr:
             ie._apply_gce_guest_config(tmp_path)
 
-        ln_calls = [c.args[0] for c in sr.call_args_list
-                    if c.args and c.args[0][0] == "ln"]
+        ln_calls = [
+            c.args[0]
+            for c in sr.call_args_list
+            if c.args and c.args[0][0] == "ln"
+        ]
         assert ln_calls[0][2] == "/lib/systemd/system/NetworkManager.service"
 
-    def test_no_dangling_symlink_when_unit_absent(
-        self, tmp_path: Path
-    ) -> None:
+    def test_no_dangling_symlink_when_unit_absent(self, tmp_path: Path) -> None:
         """A .wants symlink to a unit that isn't there just makes
         systemd complain, so skip it and warn instead."""
         import ltvm_pkg.image_export as ie
@@ -653,12 +709,18 @@ class TestGceGuestConfig:
         with patch.object(ie, "sudo_run") as sr:
             ie._apply_gce_guest_config(root)
 
-        assert not [c for c in sr.call_args_list
-                    if c.args and c.args[0][0] == "ln"]
+        assert not [
+            c for c in sr.call_args_list if c.args and c.args[0][0] == "ln"
+        ]
         # The profile is still written -- harmless, and correct if the
         # user enables NM themselves.
-        assert (root / "etc" / "NetworkManager" / "system-connections"
-                / "ltvm-gce.nmconnection").exists()
+        assert (
+            root
+            / "etc"
+            / "NetworkManager"
+            / "system-connections"
+            / "ltvm-gce.nmconnection"
+        ).exists()
 
 
 class TestPackageGce:
@@ -690,8 +752,9 @@ class TestPackageGce:
         with pytest.raises(RuntimeError, match="disk.raw"):
             ie._package_gce(raw, tmp_path / "o.tar.gz")
 
-    @pytest.mark.skipif(not _has_gnu_tar(),
-                        reason="needs GNU tar (export is Linux-only anyway)")
+    @pytest.mark.skipif(
+        not _has_gnu_tar(), reason="needs GNU tar (export is Linux-only anyway)"
+    )
     def test_real_tarball_has_bare_disk_raw(self, tmp_path: Path) -> None:
         """End-to-end on the packaging step: the tarball GCE receives
         must contain exactly one member, named `disk.raw`, at the
@@ -730,11 +793,15 @@ class TestExportImageGceGuards:
 
         tc = _make_target_config(tmp_path)
         (tc.image_output_dir.return_value / "base.ext4").unlink()
-        with patch.object(ie, "_check_host_tools", return_value={
-                "grub_install": "grub-install"}):
+        with patch.object(
+            ie,
+            "_check_host_tools",
+            return_value={"grub_install": "grub-install"},
+        ):
             with pytest.raises(FileNotFoundError, match="base.ext4"):
-                ie.export_image(tc, None, tmp_path / "o.tar.gz",
-                                image_format="gce")
+                ie.export_image(
+                    tc, None, tmp_path / "o.tar.gz", image_format="gce"
+                )
 
     def test_disk_size_smaller_than_rootfs_rejected(
         self, tmp_path: Path
@@ -743,23 +810,24 @@ class TestExportImageGceGuards:
 
         tc = _make_target_config(tmp_path)
         # Fixture needs 1 + 8 + 512 = 521 MiB; 0 GiB can't hold it.
-        with patch.object(ie, "_check_host_tools", return_value={
-                "grub_install": "grub-install"}):
+        with patch.object(
+            ie,
+            "_check_host_tools",
+            return_value={"grub_install": "grub-install"},
+        ):
             with pytest.raises(ValueError, match="too small"):
-                ie.export_image(tc, None, tmp_path / "o.qcow2",
-                                disk_size_gb=0)
+                ie.export_image(tc, None, tmp_path / "o.qcow2", disk_size_gb=0)
 
-    def test_missing_ssh_key_file_rejected_early(
-        self, tmp_path: Path
-    ) -> None:
+    def test_missing_ssh_key_file_rejected_early(self, tmp_path: Path) -> None:
         """Caught before any disk work: discovering a typo'd key path
         after a multi-minute export would be miserable."""
         import ltvm_pkg.image_export as ie
 
         tc = _make_target_config(tmp_path)
         with pytest.raises(FileNotFoundError, match="ssh key"):
-            ie.export_image(tc, None, tmp_path / "o.qcow2",
-                            ssh_key=tmp_path / "nope.pub")
+            ie.export_image(
+                tc, None, tmp_path / "o.qcow2", ssh_key=tmp_path / "nope.pub"
+            )
 
 
 class TestGceCliWiring:
@@ -769,20 +837,31 @@ class TestGceCliWiring:
 
         root = _P(__file__).resolve().parent.parent
         loader = importlib.machinery.SourceFileLoader(
-            "ltvm_script_gce", str(root / "ltvm"))
+            "ltvm_script_gce", str(root / "ltvm")
+        )
         mod = loader.load_module()  # type: ignore[deprecated]
         return mod.build_parser()
 
     def test_format_gce_parses(self) -> None:
         ns = self._parser().parse_args(
-            ["target", "export", "rocky9", "--format", "gce"])
+            ["target", "export", "rocky9", "--format", "gce"]
+        )
         assert ns.format == "gce"
 
     def test_new_flags_parse(self) -> None:
-        ns = self._parser().parse_args([
-            "target", "export", "rocky9", "--format", "gce",
-            "--disk-size-gb", "20", "--ssh-key", "/tmp/k.pub",
-        ])
+        ns = self._parser().parse_args(
+            [
+                "target",
+                "export",
+                "rocky9",
+                "--format",
+                "gce",
+                "--disk-size-gb",
+                "20",
+                "--ssh-key",
+                "/tmp/k.pub",
+            ]
+        )
         assert ns.disk_size_gb == 20
         assert ns.ssh_key == "/tmp/k.pub"
 
@@ -795,8 +874,7 @@ class TestGceCliWiring:
     def test_extension_mapping(self) -> None:
         from ltvm_pkg.cli.targets import _EXPORT_EXT
 
-        assert _EXPORT_EXT == {
-            "qcow2": "qcow2", "raw": "raw", "gce": "tar.gz"}
+        assert _EXPORT_EXT == {"qcow2": "qcow2", "raw": "raw", "gce": "tar.gz"}
 
     def test_gce_default_output_name_and_hints(
         self, tmp_path: Path, capsys
@@ -820,14 +898,23 @@ class TestGceCliWiring:
             return produced
 
         args = argparse.Namespace(
-            target="rocky9", arch=None, kernel=None, output=None,
-            format="gce", force=False, json=False,
-            disk_size_gb=20, ssh_key=None,
+            target="rocky9",
+            arch=None,
+            kernel=None,
+            output=None,
+            format="gce",
+            force=False,
+            json=False,
+            disk_size_gb=20,
+            ssh_key=None,
         )
-        with patch.object(priv, "sudo_prime"), \
-             patch.object(cli_targets, "_load_target_args",
-                          return_value=(tc, None)), \
-             patch.object(ie, "export_image", side_effect=fake_export):
+        with (
+            patch.object(priv, "sudo_prime"),
+            patch.object(
+                cli_targets, "_load_target_args", return_value=(tc, None)
+            ),
+            patch.object(ie, "export_image", side_effect=fake_export),
+        ):
             rc = cli.cmd_target_export(args)
 
         assert rc == cli.EXIT_OK
@@ -858,14 +945,23 @@ class TestGceCliWiring:
             return produced
 
         args = argparse.Namespace(
-            target="rocky9", arch=None, kernel=None, output=None,
-            format="qcow2", force=False, json=False,
-            disk_size_gb=None, ssh_key=None,
+            target="rocky9",
+            arch=None,
+            kernel=None,
+            output=None,
+            format="qcow2",
+            force=False,
+            json=False,
+            disk_size_gb=None,
+            ssh_key=None,
         )
-        with patch.object(priv, "sudo_prime"), \
-             patch.object(cli_targets, "_load_target_args",
-                          return_value=(tc, None)), \
-             patch.object(ie, "export_image", side_effect=fake_export):
+        with (
+            patch.object(priv, "sudo_prime"),
+            patch.object(
+                cli_targets, "_load_target_args", return_value=(tc, None)
+            ),
+            patch.object(ie, "export_image", side_effect=fake_export),
+        ):
             rc = cli.cmd_target_export(args)
 
         assert rc == cli.EXIT_OK
@@ -879,28 +975,34 @@ class TestHostToolsAreFormatSpecific:
     def _which(self, absent: str):
         def which(name: str) -> str | None:
             return None if name == absent else f"/u/bin/{name}"
+
         return which
 
     def test_gce_does_not_need_qemu_img(self) -> None:
         import ltvm_pkg.image_export as ie
 
-        with patch.object(ie.shutil, "which",
-                          side_effect=self._which("qemu-img")), \
-             patch.object(ie, "_check_gnu_tar"):
+        with (
+            patch.object(
+                ie.shutil, "which", side_effect=self._which("qemu-img")
+            ),
+            patch.object(ie, "_check_gnu_tar"),
+        ):
             ie._check_host_tools("gce")  # no raise
 
     def test_raw_does_not_need_qemu_img(self) -> None:
         import ltvm_pkg.image_export as ie
 
-        with patch.object(ie.shutil, "which",
-                          side_effect=self._which("qemu-img")):
+        with patch.object(
+            ie.shutil, "which", side_effect=self._which("qemu-img")
+        ):
             ie._check_host_tools("raw")  # no raise
 
     def test_qcow2_still_needs_qemu_img(self) -> None:
         import ltvm_pkg.image_export as ie
 
-        with patch.object(ie.shutil, "which",
-                          side_effect=self._which("qemu-img")):
+        with patch.object(
+            ie.shutil, "which", side_effect=self._which("qemu-img")
+        ):
             with pytest.raises(RuntimeError, match="qemu-img"):
                 ie._check_host_tools("qcow2")
 
@@ -908,7 +1010,8 @@ class TestHostToolsAreFormatSpecific:
         import ltvm_pkg.image_export as ie
 
         for fmt in ("qcow2", "raw", "gce"):
-            with patch.object(ie.shutil, "which",
-                              side_effect=self._which("losetup")):
+            with patch.object(
+                ie.shutil, "which", side_effect=self._which("losetup")
+            ):
                 with pytest.raises(RuntimeError, match="losetup"):
                     ie._check_host_tools(fmt)

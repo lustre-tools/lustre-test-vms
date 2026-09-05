@@ -198,7 +198,9 @@ class TestApplyUpdateInterpreterPinning:
         # so we need to patch the module-level path lookup.  The
         # cleanest seam is __file__ itself.
         with (
-            patch.object(uc, "__file__", str(repo / "ltvm_pkg" / "update_check.py")),
+            patch.object(
+                uc, "__file__", str(repo / "ltvm_pkg" / "update_check.py")
+            ),
             patch.object(uc.subprocess, "run") as mock_run,
             patch("platform.system", return_value="Linux"),
         ):
@@ -210,10 +212,13 @@ class TestApplyUpdateInterpreterPinning:
         # (We don't pin the order argument by argument -- just check the
         # install command included sys.executable as the python.)
         install_calls = [
-            c for c in mock_run.call_args_list
+            c
+            for c in mock_run.call_args_list
             if "install" in c.args[0] and "git" not in c.args[0]
         ]
-        assert install_calls, f"no install call seen in {mock_run.call_args_list}"
+        assert install_calls, (
+            f"no install call seen in {mock_run.call_args_list}"
+        )
         argv = install_calls[0].args[0]
         assert argv[0] == "sudo"
         assert argv[1] == sys.executable
@@ -232,7 +237,9 @@ class TestApplyUpdateInterpreterPinning:
         (repo / "ltvm").write_text("# stub\n")
 
         with (
-            patch.object(uc, "__file__", str(repo / "ltvm_pkg" / "update_check.py")),
+            patch.object(
+                uc, "__file__", str(repo / "ltvm_pkg" / "update_check.py")
+            ),
             patch.object(uc.subprocess, "run") as mock_run,
             patch("platform.system", return_value="Darwin"),
         ):
@@ -240,7 +247,8 @@ class TestApplyUpdateInterpreterPinning:
             uc._apply_update()
 
         install_calls = [
-            c for c in mock_run.call_args_list
+            c
+            for c in mock_run.call_args_list
             if "install" in c.args[0] and "git" not in c.args[0]
         ]
         assert install_calls

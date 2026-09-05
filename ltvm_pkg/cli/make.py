@@ -84,7 +84,9 @@ def _resolve_machine(
 
 
 def _build_lustre_locally(
-    args: argparse.Namespace, image: LocalImage, lustre_tree: Path,
+    args: argparse.Namespace,
+    image: LocalImage,
+    lustre_tree: Path,
     use_json: bool,
 ) -> tuple[dict | None, int | None]:
     """`make install DESTDIR=<staging>` inside the build container.
@@ -132,8 +134,10 @@ def _build_lustre_locally(
 
         enable_server = tc.lustre_mode != LustreMode.CLIENT
         if not use_json:
-            print(f"  Building Lustre for {image.target} "
-                  f"(kernel {image.kernel}) in the build container...")
+            print(
+                f"  Building Lustre for {image.target} "
+                f"(kernel {image.kernel}) in the build container..."
+            )
         try:
             meta = _cli_attr("build_lustre")(
                 lustre_tree,
@@ -171,9 +175,11 @@ def _do_install(args: argparse.Namespace, use_json: bool) -> int:
     if not use_json:
         print(f"  ltvm machine: {evidence}")
         print(f"  Lustre tree:  {lustre_tree}")
-        print(f"  Machine: {image.target} ({image.arch}, variant "
-              f"{image.variant}, kernel {image.kernel}) "
-              f"[detected via {image.source}]")
+        print(
+            f"  Machine: {image.target} ({image.arch}, variant "
+            f"{image.variant}, kernel {image.kernel}) "
+            f"[detected via {image.source}]"
+        )
 
     meta, err = _build_lustre_locally(args, image, lustre_tree, use_json)
     if err is not None:
@@ -212,8 +218,10 @@ def _do_install(args: argparse.Namespace, use_json: bool) -> int:
     }
     _output(payload, use_json)
     if not use_json:
-        print(f"  Installed {len(files)} files into /  "
-              f"(manifest: {MANIFEST_PATH})")
+        print(
+            f"  Installed {len(files)} files into /  "
+            f"(manifest: {MANIFEST_PATH})"
+        )
     return EXIT_OK
 
 

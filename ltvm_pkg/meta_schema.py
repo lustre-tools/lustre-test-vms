@@ -41,6 +41,7 @@ class _BaseMeta(TypedDict):
 
 class ContainerMeta(_BaseMeta, total=False):
     """meta.json schema for build containers."""
+
     image_tag: str  # required in practice; set by cmd_build_all
 
 
@@ -50,6 +51,7 @@ class KernelMeta(_BaseMeta, total=False):
     Required: kernel_version, lustre_target, patches_applied,
     vmlinux_bytes, vmlinuz_bytes, built_at.
     """
+
     kernel_version: str
     lustre_target: str
     kernel_dir: str
@@ -66,6 +68,7 @@ class ImageMeta(_BaseMeta, total=False):
     Required: build_date, kernel_name, image_size_mb, build_seconds,
     packages. Optional: with_lustre.
     """
+
     build_date: str
     kernel_name: str
     image_size_mb: float
@@ -80,7 +83,9 @@ _CONTAINER_REQUIRED = ("image_tag",)
 _IMAGE_REQUIRED = ("kernel_name", "build_date")
 
 
-def _require(meta: Mapping[str, Any], fields: tuple[str, ...], path: object) -> None:
+def _require(
+    meta: Mapping[str, Any], fields: tuple[str, ...], path: object
+) -> None:
     missing = [k for k in fields if not meta.get(k)]
     if missing:
         raise RuntimeError(

@@ -292,8 +292,11 @@ class TestKdumpInjectLines:
     """_kdump_inject_lines bakes vmlinuz + initramfs into the image."""
 
     def _setup_kdir(
-        self, tmp_path: Path, with_vmlinuz: bool = True,
-        with_kconfig: bool = False, with_vmlinux: bool = False,
+        self,
+        tmp_path: Path,
+        with_vmlinuz: bool = True,
+        with_kconfig: bool = False,
+        with_vmlinux: bool = False,
     ) -> tuple[Path, Path]:
         kdir = tmp_path / "kernel"
         kdir.mkdir()
@@ -312,9 +315,7 @@ class TestKdumpInjectLines:
         import ltvm_pkg.image_build as image
 
         kdir, inject = self._setup_kdir(tmp_path)
-        lines = image._kdump_inject_lines(
-            kdir, inject, "5.14.0-foo", "rhel"
-        )
+        lines = image._kdump_inject_lines(kdir, inject, "5.14.0-foo", "rhel")
 
         text = "\n".join(lines)
         assert "COPY vmlinuz /boot/vmlinuz-5.14.0-foo" in text
@@ -325,12 +326,8 @@ class TestKdumpInjectLines:
     def test_debian_emits_update_initramfs(self, tmp_path: Path) -> None:
         import ltvm_pkg.image_build as image
 
-        kdir, inject = self._setup_kdir(
-            tmp_path, with_kconfig=True
-        )
-        lines = image._kdump_inject_lines(
-            kdir, inject, "5.14.0-foo", "debian"
-        )
+        kdir, inject = self._setup_kdir(tmp_path, with_kconfig=True)
+        lines = image._kdump_inject_lines(kdir, inject, "5.14.0-foo", "debian")
 
         text = "\n".join(lines)
         assert "COPY vmlinuz /boot/vmlinuz-5.14.0-foo" in text
@@ -346,9 +343,7 @@ class TestKdumpInjectLines:
         import ltvm_pkg.image_build as image
 
         kdir, inject = self._setup_kdir(tmp_path)
-        lines = image._kdump_inject_lines(
-            kdir, inject, "5.14.0-foo", "debian"
-        )
+        lines = image._kdump_inject_lines(kdir, inject, "5.14.0-foo", "debian")
         text = "\n".join(lines)
         assert "COPY kconfig" not in text
         assert "update-initramfs" in text
@@ -366,9 +361,7 @@ class TestKdumpInjectLines:
         kdir, inject = self._setup_kdir(
             tmp_path, with_vmlinuz=False, with_vmlinux=True
         )
-        lines = image._kdump_inject_lines(
-            kdir, inject, "5.14.0-foo", "rhel"
-        )
+        lines = image._kdump_inject_lines(kdir, inject, "5.14.0-foo", "rhel")
         text = "\n".join(lines)
         assert "COPY vmlinuz /boot/vmlinuz-5.14.0-foo" in text
         assert "dracut" not in text
@@ -380,8 +373,7 @@ class TestKdumpInjectLines:
 
         kdir, inject = self._setup_kdir(tmp_path, with_vmlinuz=False)
         assert (
-            image._kdump_inject_lines(kdir, inject, "5.14.0-foo", "rhel")
-            == []
+            image._kdump_inject_lines(kdir, inject, "5.14.0-foo", "rhel") == []
         )
 
 
@@ -411,9 +403,7 @@ class TestLustreInjectLines:
         # Pin to the Linux build path: COPY <dir>/ <target>.  The macOS
         # branch (ADD <tar.gz> <target>) is exercised separately so a
         # single test stays readable.
-        with patch.object(
-            image, "_is_macos_build_host", return_value=False
-        ):
+        with patch.object(image, "_is_macos_build_host", return_value=False):
             lines = image._lustre_inject_lines(
                 staging, inject, "5.14.0-foo", "rhel"
             )
@@ -434,9 +424,7 @@ class TestLustreInjectLines:
         inject = tmp_path / "inject"
         inject.mkdir()
 
-        with patch.object(
-            image, "_is_macos_build_host", return_value=False
-        ):
+        with patch.object(image, "_is_macos_build_host", return_value=False):
             lines = image._lustre_inject_lines(
                 staging, inject, "6.1.0-deb", "debian"
             )
@@ -528,19 +516,12 @@ class TestBuildImageWithLustre:
 
         lt = tmp_path / "tree"
         lt.mkdir()
-        staging = staging_path(
-            lt, "rocky9", arch="x86_64", kernel=kernel_dir
-        )
+        staging = staging_path(lt, "rocky9", arch="x86_64", kernel=kernel_dir)
         (staging / "lib" / "modules" / "5.14.0-foo" / "extra").mkdir(
             parents=True
         )
         (
-            staging
-            / "lib"
-            / "modules"
-            / "5.14.0-foo"
-            / "extra"
-            / "lustre.ko"
+            staging / "lib" / "modules" / "5.14.0-foo" / "extra" / "lustre.ko"
         ).write_text("M")
         (staging / "usr" / "sbin").mkdir(parents=True)
         (staging / "usr" / "sbin" / "mount.lustre").write_text("X")
@@ -594,13 +575,11 @@ class TestBuildImageWithLustre:
         staging = tmp_path / "staging"
         staging.mkdir()
         (staging / ".ltvm-staging-meta.json").write_text(
-            '{"module_symvers_sha256": "aaaa",'
-            ' "lustre_modules_sha256": "zzzz"}'
+            '{"module_symvers_sha256": "aaaa", "lustre_modules_sha256": "zzzz"}'
         )
         h0 = _lustre_staging_hash_input(staging)
         (staging / ".ltvm-staging-meta.json").write_text(
-            '{"module_symvers_sha256": "bbbb",'
-            ' "lustre_modules_sha256": "zzzz"}'
+            '{"module_symvers_sha256": "bbbb", "lustre_modules_sha256": "zzzz"}'
         )
         h1 = _lustre_staging_hash_input(staging)
         assert h0 != h1
@@ -731,7 +710,10 @@ class TestComputeImageSizeFromTar:
 
         tarball = tmp_path / "r.tar"
         tarball.write_bytes(b"\0" * 1024)
-        assert image._compute_image_size_mb_from_tar(tarball) == image._IMAGE_SIZE_FLOOR_MB
+        assert (
+            image._compute_image_size_mb_from_tar(tarball)
+            == image._IMAGE_SIZE_FLOOR_MB
+        )
 
     def test_large_tar_scales_with_fudge(self, tmp_path: Path) -> None:
         import ltvm_pkg.image_build as image

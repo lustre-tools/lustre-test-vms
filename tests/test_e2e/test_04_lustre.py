@@ -47,11 +47,16 @@ def test_lustre_deploy_mount_write_remount(vm_name) -> None:  # type: ignore[no-
     # the minimum that mounts cleanly; llmount.sh won't bring up
     # lustre without at least one OST.
     proc = run_ltvm(
-        "create", name,
-        "--mem", "2048",
-        "--vcpus", "2",
-        "--mdt-disks", "1",
-        "--ost-disks", "2",
+        "create",
+        name,
+        "--mem",
+        "2048",
+        "--vcpus",
+        "2",
+        "--mdt-disks",
+        "1",
+        "--ost-disks",
+        "2",
         timeout=240,
     )
     assert proc.returncode == 0, (
@@ -64,8 +69,10 @@ def test_lustre_deploy_mount_write_remount(vm_name) -> None:  # type: ignore[no-
     # against a stale .ltvm-staging takes ~60-90s on this host, and
     # the --mount step runs llmount.sh which does its own formatall.
     proc = run_ltvm(
-        "deploy-lustre", name,
-        "--build", str(LUSTRE_TREE),
+        "deploy-lustre",
+        name,
+        "--build",
+        str(LUSTRE_TREE),
         "--mount",
         timeout=600,
     )
@@ -93,9 +100,7 @@ def test_lustre_deploy_mount_write_remount(vm_name) -> None:  # type: ignore[no-
     )
     assert rc == 0, f"dd + md5sum failed rc={rc}: {err}"
     md5_before = out.split()[0]
-    assert len(md5_before) == 32, (
-        f"bad md5 output: {out!r}"
-    )
+    assert len(md5_before) == 32, f"bad md5 output: {out!r}"
 
     # Unmount via the user-facing `ltvm llmount --cleanup`.
     proc = run_ltvm("llmount", name, "--cleanup", timeout=120)
@@ -122,8 +127,7 @@ def test_lustre_deploy_mount_write_remount(vm_name) -> None:  # type: ignore[no-
     )
     rc, out, err = ssh_run(name, remount_cmd, timeout=180)
     assert rc == 0, (
-        f"NOFORMAT=1 llmount.sh failed rc={rc}\n"
-        f"stdout:\n{out}\nstderr:\n{err}"
+        f"NOFORMAT=1 llmount.sh failed rc={rc}\nstdout:\n{out}\nstderr:\n{err}"
     )
 
     # Lustre should be remounted.

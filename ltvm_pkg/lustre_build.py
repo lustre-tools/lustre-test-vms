@@ -443,9 +443,7 @@ def _hit_clock_skew(lustre_tree: Path, since: float) -> bool:
     try:
         if log.stat().st_mtime < since:
             return False
-        return "older than distributed files" in log.read_text(
-            errors="ignore"
-        )
+        return "older than distributed files" in log.read_text(errors="ignore")
     except OSError:
         return False
 
@@ -562,12 +560,12 @@ def _build_in_container(
             # .pc files) AND /usr/lib/pkgconfig (where source-built
             # autotools packages like the WhamCloud e2fsprogs default,
             # since their configure picks --libdir=${prefix}/lib).
-            f"export CROSS_CC_FLAGS=\"--sysroot={sysroot} "
-            f"-isystem {sysroot}/usr/include\" "
-            f"CROSS_PKG_CONFIG_LIBDIR=\"{sysroot}/usr/lib64/pkgconfig:"
+            f'export CROSS_CC_FLAGS="--sysroot={sysroot} '
+            f'-isystem {sysroot}/usr/include" '
+            f'CROSS_PKG_CONFIG_LIBDIR="{sysroot}/usr/lib64/pkgconfig:'
             f"{sysroot}/usr/lib/pkgconfig:"
-            f"{sysroot}/usr/share/pkgconfig\" "
-            f"CROSS_PKG_CONFIG_SYSROOT_DIR=\"{sysroot}\" && "
+            f'{sysroot}/usr/share/pkgconfig" '
+            f'CROSS_PKG_CONFIG_SYSROOT_DIR="{sysroot}" && '
             # Lustre's userspace links against the WhamCloud-patched
             # ext2fs / libcom_err, which has no RHEL package -- the build
             # container builds it natively from source at container-build
@@ -589,7 +587,8 @@ def _build_in_container(
             f"dpkg --add-architecture {xinfo.deb_arch} && "
             r"grep -rl '^Types:' /etc/apt/sources.list.d/*.sources 2>/dev/null "
             r"| xargs -I{} sed -i '/^Architectures:/d; /^Types:/a Architectures: "
-            + host_deb_arch(host_machine) + r"' {} && "
+            + host_deb_arch(host_machine)
+            + r"' {} && "
             f"printf 'Types: deb\\n"
             f"URIs: {xinfo.apt_sources_url}\\n"
             f"Suites: noble noble-updates\\n"
@@ -603,9 +602,9 @@ def _build_in_container(
             f"libnl-3-dev:{xinfo.deb_arch} libnl-genl-3-dev:{xinfo.deb_arch} "
             f"libaio-dev:{xinfo.deb_arch} libkeyutils-dev:{xinfo.deb_arch} "
             f"2>&1 | tail -5 && "
-            f"export CROSS_CC_FLAGS=\"\" "
-            f"CROSS_PKG_CONFIG_LIBDIR=\"/usr/lib/{xinfo.multiarch_triple}/pkgconfig\" "
-            f"CROSS_PKG_CONFIG_SYSROOT_DIR=\"\"; "
+            f'export CROSS_CC_FLAGS="" '
+            f'CROSS_PKG_CONFIG_LIBDIR="/usr/lib/{xinfo.multiarch_triple}/pkgconfig" '
+            f'CROSS_PKG_CONFIG_SYSROOT_DIR=""; '
             f"fi"
         )
 
@@ -752,8 +751,7 @@ fi""")
     # by design.
     libtool_silent = " LIBTOOLFLAGS=--silent"
     noise_filter = (
-        " 2> >(awk "
-        "'!/libtool: warning: .* has not been installed/' >&2)"
+        " 2> >(awk '!/libtool: warning: .* has not been installed/' >&2)"
     )
     script_parts.append(
         f"make{make_cross} -j{jobs}{libtool_silent}{noise_filter}"
@@ -782,13 +780,14 @@ fi""")
     try:
         from .target_config import TargetConfig
 
-        resolved_kernel = TargetConfig(target, arch=arch).resolve_kernel(
-            kernel
-        )
+        resolved_kernel = TargetConfig(target, arch=arch).resolve_kernel(kernel)
     except Exception:
         resolved_kernel = kernel or kver
     host_staging = staging_path(
-        lustre_tree, target, arch=arch, kernel=resolved_kernel,
+        lustre_tree,
+        target,
+        arch=arch,
+        kernel=resolved_kernel,
         variant=variant,
     )
     host_staging.mkdir(parents=True, exist_ok=True)
@@ -829,7 +828,11 @@ fi""")
     # with a uid mapping that leaves /ccache itself unreadable to
     # container-root.  Sharing the same naming convention as the
     # kernel-build ccache so a target's runs accumulate in one tree.
-    ccache_dir = lustre_tree.parent / ".ltvm-ccache" / container_tag.removeprefix("ltvm-build-")
+    ccache_dir = (
+        lustre_tree.parent
+        / ".ltvm-ccache"
+        / container_tag.removeprefix("ltvm-build-")
+    )
     ccache_dir.mkdir(parents=True, exist_ok=True)
     # Cross-builds need access to common build helpers (build-e2fsprogs.sh
     # is run in the cross sysroot to produce x86_64/aarch64 ext2fs.pc that
@@ -892,8 +895,11 @@ fi""")
         r = run_podman_with_cleanup(cmd)
         if r.returncode == 0:
             break
-        has_ko = any((host_staging / "lib" / "modules").rglob("*.ko")) \
-            if (host_staging / "lib" / "modules").is_dir() else False
+        has_ko = (
+            any((host_staging / "lib" / "modules").rglob("*.ko"))
+            if (host_staging / "lib" / "modules").is_dir()
+            else False
+        )
         if getattr(r, "cleanup_eof", False) and has_ko:
             print(
                 f"--- WARNING: Lustre build finished but podman cleanup "
@@ -1040,7 +1046,9 @@ def lustre_status(
         # only kernel-keyed subdirs do.
         base = Path(lustre_tree) / ".ltvm-staging" / target / arch
         ko_count = (
-            sum(len(list(d.rglob("*.ko"))) for d in base.iterdir() if d.is_dir())
+            sum(
+                len(list(d.rglob("*.ko"))) for d in base.iterdir() if d.is_dir()
+            )
             if base.is_dir()
             else 0
         )

@@ -324,7 +324,7 @@ class TestChangeLogFormats:
     def test_distro_headings_are_not_read_as_kernels(
         self, tmp_path: Path
     ) -> None:
-        """"RHEL 10", "Vanilla" and the ----- rules are headings, not versions."""
+        """ "RHEL 10", "Vanilla" and the ----- rules are headings, not versions."""
         cl = parse_changelog(_tree_with_changelog(tmp_path, CHANGELOG_GROUPED))
         every = (
             cl.server_primary

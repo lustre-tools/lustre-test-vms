@@ -68,7 +68,7 @@ def _release_status(
     prefix = f"{target}-{arch}-"
 
     def _trim(tag: str) -> str:
-        return tag[len(prefix):] if tag.startswith(prefix) else tag
+        return tag[len(prefix) :] if tag.startswith(prefix) else tag
 
     # Release tags are recorded per (kernel, variant), so this is an
     # exact lookup -- no need to guess from a single arch-wide tag
@@ -110,9 +110,7 @@ def _release_status(
                     stem = name[: -len(".json")]
                     last_seg = stem.rsplit("-", 1)[-1]
                     # Variant suffixes are alphabetic; kvers end in digits.
-                    if last_seg and not any(
-                        ch.isdigit() for ch in last_seg
-                    ):
+                    if last_seg and not any(ch.isdigit() for ch in last_seg):
                         continue
                 else:
                     if not name.endswith(f"-{variant}.json"):
@@ -149,7 +147,8 @@ def _variant_suffix_in_tag(tag: str) -> str | None:
 
 
 def _filter_rows(
-    rows: list[dict[str, Any]], scope: str | None,
+    rows: list[dict[str, Any]],
+    scope: str | None,
 ) -> list[dict[str, Any]]:
     """Apply the ``local`` / ``remote`` filter to the row list.
 
@@ -212,6 +211,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
     # shows one row inviting a local build.
     from ltvm_pkg.cli.util import host_arch
     from ltvm_pkg.target_config import ARTIFACTS_DIR
+
     explicit_arch = getattr(args, "arch", None)
     host_a = host_arch()
     _KNOWN_ARCHES = ("x86_64", "aarch64")
@@ -278,14 +278,16 @@ def cmd_targets(args: argparse.Namespace) -> int:
                     # Honor variant kernel-pin: a pinned variant only
                     # surfaces under its single declared kernel (see
                     # lustre_test_vms_v2-stp).
-                    if (
-                        variant != "base"
-                        and kname not in tc.applicable_kernels(variant)
+                    if variant != "base" and kname not in tc.applicable_kernels(
+                        variant
                     ):
                         continue
                     local, remote = _release_status(
-                        name, tc.arch, all_releases,
-                        kernel_signature=signature, variant=variant,
+                        name,
+                        tc.arch,
+                        all_releases,
+                        kernel_signature=signature,
+                        variant=variant,
                     )
                     # "Built" here = a variant-specific image meta exists on
                     # disk.  The kernel meta is variant-independent, so
@@ -315,7 +317,9 @@ def cmd_targets(args: argparse.Namespace) -> int:
                             / "meta.json"
                         )
                         try:
-                            meta_doc = _cli_attr("load_meta_safe")(img_meta_path)
+                            meta_doc = _cli_attr("load_meta_safe")(
+                                img_meta_path
+                            )
                         except Exception:
                             meta_doc = None
                         if meta_doc is not None:
@@ -516,9 +520,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
             # state (matches build status, which only rows variants
             # that are actually built).
             for e in kept:
-                e["variants"] = [
-                    v for v in e["variants"] if _row_present(v)
-                ]
+                e["variants"] = [v for v in e["variants"] if _row_present(v)]
 
     # Never interleave arches: render one section per arch, each with
     # its own heading when more than one arch is shown.
@@ -564,9 +566,8 @@ def cmd_targets(args: argparse.Namespace) -> int:
         for entry in blk["kernels"]:
             hdr_row = entry["header"]
             kname = hdr_row["kernel"]
-            is_default = (
-                hdr_row["is_default"]
-                or kname == hdr_row.get("default_kernel")
+            is_default = hdr_row["is_default"] or kname == hdr_row.get(
+                "default_kernel"
             )
             label = f"{kname} (default)" if is_default else kname
             if entry["base"] is not None:
@@ -659,14 +660,16 @@ def cmd_target_show(args: argparse.Namespace) -> int:
             avail = "fetch"
         else:
             avail = "build"
-        kernels.append({
-            "kernel": kname,
-            "is_default": kname == tc.default_kernel,
-            "available": avail,
-            "built": built,
-            "local_release": local,
-            "remote_release": remote,
-        })
+        kernels.append(
+            {
+                "kernel": kname,
+                "is_default": kname == tc.default_kernel,
+                "available": avail,
+                "built": built,
+                "local_release": local,
+                "remote_release": remote,
+            }
+        )
 
     payload = {
         "name": tc.name,
@@ -687,11 +690,15 @@ def cmd_target_show(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
         return EXIT_OK
 
-    print(f"target:           {payload['name']}"
-          + (f"  ({payload['status']})" if payload['status'] != 'working' else ""))
+    print(
+        f"target:           {payload['name']}"
+        + (f"  ({payload['status']})" if payload["status"] != "working" else "")
+    )
     print(f"arch:             {payload['arch']}")
-    print(f"os:               {payload['os_family']} / "
-          f"{payload['os_name']} {payload['os_version']}")
+    print(
+        f"os:               {payload['os_family']} / "
+        f"{payload['os_name']} {payload['os_version']}"
+    )
     print(f"container image:  {payload['container_image']}")
     print(f"lustre mode:      {payload['lustre_mode']}")
     print(f"default mem:      {payload['default_mem']} MB")
@@ -732,9 +739,7 @@ def cmd_target_export(args: argparse.Namespace) -> int:
     if not use_json:
         from ltvm_pkg.priv import sudo_prime
 
-        sudo_prime(
-            "ltvm target export needs root for losetup/mount"
-        )
+        sudo_prime("ltvm target export needs root for losetup/mount")
 
     from ltvm_pkg.cli.util import _print_target_header
     from ltvm_pkg.image_export import export_image
@@ -746,7 +751,8 @@ def cmd_target_export(args: argparse.Namespace) -> int:
 
     if not use_json:
         _print_target_header(
-            tc, kernel=kernel,
+            tc,
+            kernel=kernel,
             variant=getattr(args, "variant", None) or "base",
             action="Exporting",
         )
@@ -761,13 +767,16 @@ def cmd_target_export(args: argparse.Namespace) -> int:
     ssh_key = getattr(args, "ssh_key", None)
     try:
         result = export_image(
-            tc, kernel, out, image_format=fmt, force=args.force,
+            tc,
+            kernel,
+            out,
+            image_format=fmt,
+            force=args.force,
             disk_size_gb=getattr(args, "disk_size_gb", None),
             ssh_key=Path(ssh_key).expanduser() if ssh_key else None,
         )
     except FileExistsError as e:
-        return _error(str(e), use_json,
-                      hint="Re-run with --force to overwrite")
+        return _error(str(e), use_json, hint="Re-run with --force to overwrite")
     except (FileNotFoundError, RuntimeError, ValueError) as e:
         return _error(str(e), use_json)
 
@@ -780,8 +789,9 @@ def cmd_target_export(args: argparse.Namespace) -> int:
     }
     _output(payload, use_json)
     if fmt == "gce" and not use_json:
-        _print_gce_next_steps(result, tc.name, kernel_name,
-                              have_ssh_key=ssh_key is not None)
+        _print_gce_next_steps(
+            result, tc.name, kernel_name, have_ssh_key=ssh_key is not None
+        )
     return EXIT_OK
 
 

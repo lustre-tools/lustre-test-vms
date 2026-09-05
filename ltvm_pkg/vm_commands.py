@@ -107,9 +107,7 @@ def _with_vm_stopped(
             try:
                 launch_qemu(vm)
                 if register_before_wait:
-                    provision_vm_ssh(
-                        vm, SSH_TIMEOUT, register_before_wait=True
-                    )
+                    provision_vm_ssh(vm, SSH_TIMEOUT, register_before_wait=True)
                 else:
                     provision_vm_ssh(vm, SSH_TIMEOUT)
                 _seed_kdump_boot(vm)
@@ -326,13 +324,13 @@ def parse_nic_spec(raw: str) -> tuple[str, str]:
     nic_arg = parts[1] if len(parts) > 1 else ""
     if nic_type not in _NIC_TYPES_ALL:
         valid = ", ".join(_NIC_TYPES_ALL)
-        die(
-            f"unknown --nic type {nic_type!r}: valid types are: {valid}"
-        )
+        die(f"unknown --nic type {nic_type!r}: valid types are: {valid}")
     return nic_type, nic_arg
 
 
-_BDF_RE = re.compile(r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F]$")
+_BDF_RE = re.compile(
+    r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F]$"
+)
 
 
 def validate_nic_spec(raw: str) -> str:
@@ -496,10 +494,7 @@ def _allocate_and_persist_vm(
             # Track the invoking human.  SUDO_USER preserves the legacy
             # ``sudo ltvm create`` path; the unified privilege model runs
             # the command as the user and elevates only individual writes.
-            creator=(
-                os.environ.get("SUDO_USER", "")
-                or getpass.getuser()
-            ),
+            creator=(os.environ.get("SUDO_USER", "") or getpass.getuser()),
             owner_id=args.owner_id,
             variant=variant,
             nics=list(extra_nic_types),
@@ -603,7 +598,9 @@ def _resolve_os_and_kernel(
     return os_arts, image, kernel, kver, os_target, variant
 
 
-def _validate_create_bounds(args: argparse.Namespace) -> tuple[list[str], list[str]]:
+def _validate_create_bounds(
+    args: argparse.Namespace,
+) -> tuple[list[str], list[str]]:
     """Validate bounds/specs that must die() before any on-disk VM
     state is touched.  Returns (extra_nic_types, passthrough_bdfs).
     """
@@ -639,11 +636,13 @@ def _validate_create_bounds(args: argparse.Namespace) -> tuple[list[str], list[s
     # The actual vfio bind happens later in the launch block, inside
     # the rollback umbrella so a failed create rebinds the device.
     passthrough_bdfs = [
-        spec.split(":", 1)[1] for spec in extra_nic_types
+        spec.split(":", 1)[1]
+        for spec in extra_nic_types
         if spec.startswith("passthrough:")
     ]
     if passthrough_bdfs:
         from ltvm_pkg import vfio as _vfio
+
         if not _vfio.iommu_enabled():
             die(
                 "passthrough requires host IOMMU; boot with "
@@ -652,7 +651,9 @@ def _validate_create_bounds(args: argparse.Namespace) -> tuple[list[str], list[s
             )
         for bdf in passthrough_bdfs:
             if not (Path("/sys/bus/pci/devices") / bdf).is_dir():
-                die(f"passthrough device {bdf!r} not found in /sys/bus/pci/devices")
+                die(
+                    f"passthrough device {bdf!r} not found in /sys/bus/pci/devices"
+                )
 
     return extra_nic_types, passthrough_bdfs
 
@@ -690,9 +691,7 @@ def _sudo_checked(cmd: list[str]) -> None:
             raise RuntimeError(
                 f"sudo {cmd[0]} failed (rc={r.returncode}): {msg}"
             )
-        raise RuntimeError(
-            f"sudo {cmd[0]} failed (rc={r.returncode})"
-        )
+        raise RuntimeError(f"sudo {cmd[0]} failed (rc={r.returncode})")
 
 
 def _create_disks(vm: VMInfo, image: str) -> None:
@@ -754,12 +753,14 @@ def _create_disks(vm: VMInfo, image: str) -> None:
         # exist -- are root-owned at this point.
         sudo_run(
             ["rm", "-f", str(vm.overlay_path)],
-            check=False, quiet=True,
+            check=False,
+            quiet=True,
         )
         for n in range(1, vm.mdt_disks + vm.ost_disks + 1):
             sudo_run(
                 ["rm", "-f", str(vm.disk_path(n))],
-                check=False, quiet=True,
+                check=False,
+                quiet=True,
             )
         raise
 
@@ -784,7 +785,8 @@ def _chown_disks_to_sudo_user(vm: VMInfo) -> None:
     ]
     sudo_run(
         ["chown", f"{target_user}:", *(str(f) for f in files)],
-        check=False, quiet=True,
+        check=False,
+        quiet=True,
     )
 
 
@@ -799,6 +801,7 @@ def _launch_and_wait(vm: VMInfo, passthrough_bdfs: list[str]) -> None:
     # so a launch failure restores host networking.
     if passthrough_bdfs:
         from ltvm_pkg import vfio as _vfio
+
         for bdf in passthrough_bdfs:
             try:
                 from_drv = _vfio.bind_to_vfio(bdf)
@@ -862,6 +865,7 @@ def _rollback_launch_failure(vm: VMInfo) -> None:
     # the host's network state is unchanged from a failed create.
     if vm.passthrough_drivers:
         from ltvm_pkg import vfio as _vfio
+
         for bdf, drv in vm.passthrough_drivers.items():
             if not drv:
                 continue
@@ -999,7 +1003,8 @@ def _destroy_vm_artifacts(name: str) -> None:
     if sudo_fallback:
         sudo_run(
             ["rm", "-f", *(str(f) for f in sudo_fallback)],
-            check=False, quiet=True,
+            check=False,
+            quiet=True,
         )
 
 
@@ -1023,6 +1028,7 @@ def cmd_destroy(args: argparse.Namespace) -> None:
         # vfio-bound device.
         if passthrough_rebinds:
             from ltvm_pkg import vfio as _vfio
+
             for bdf, drv in passthrough_rebinds.items():
                 if not drv:
                     continue
@@ -1366,7 +1372,9 @@ def _elf_build_id(path) -> str | None:
     try:
         out = subprocess.run(
             ["readelf", "-n", str(path)],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True,
+            text=True,
+            timeout=120,
         ).stdout
     except Exception:
         return None
@@ -1402,14 +1410,14 @@ def _vm_kernel_build_id(vm) -> str | None:
 
     i = 0
     while i + 12 <= len(data):
-        namesz = int.from_bytes(data[i:i + 4], "little")
-        descsz = int.from_bytes(data[i + 4:i + 8], "little")
-        ntype = int.from_bytes(data[i + 8:i + 12], "little")
-        name = data[i + 12:i + 12 + namesz].rstrip(b"\0")
+        namesz = int.from_bytes(data[i : i + 4], "little")
+        descsz = int.from_bytes(data[i + 4 : i + 8], "little")
+        ntype = int.from_bytes(data[i + 8 : i + 12], "little")
+        name = data[i + 12 : i + 12 + namesz].rstrip(b"\0")
         off = i + 12 + ((namesz + 3) // 4) * 4
         # NT_GNU_BUILD_ID == 3
         if ntype == 3 and name == b"GNU" and descsz:
-            return data[off:off + descsz].hex()
+            return data[off : off + descsz].hex()
         i = off + ((descsz + 3) // 4) * 4
     return None
 
@@ -1465,8 +1473,7 @@ def cmd_crash_collect(args: argparse.Namespace) -> int:
         else:
             return _handler_error(
                 args,
-                f"\nVM '{args.name}' did not come back after "
-                f"{args.wait + 5}s",
+                f"\nVM '{args.name}' did not come back after {args.wait + 5}s",
                 EXIT_TIMEOUT,
             )
     elif not is_running(vm):
@@ -1494,8 +1501,7 @@ def cmd_crash_collect(args: argparse.Namespace) -> int:
     except subprocess.TimeoutExpired as e:
         return _handler_error(
             args,
-            f"timed out after {e.timeout}s probing /var/crash on "
-            f"'{args.name}'",
+            f"timed out after {e.timeout}s probing /var/crash on '{args.name}'",
             EXIT_TIMEOUT,
         )
     if r.returncode != 0:
@@ -1532,8 +1538,7 @@ def cmd_crash_collect(args: argparse.Namespace) -> int:
         local_vmcore.unlink(missing_ok=True)
         return _handler_error(
             args,
-            f"timed out after {e.timeout}s copying vmcore from "
-            f"'{args.name}'",
+            f"timed out after {e.timeout}s copying vmcore from '{args.name}'",
             EXIT_TIMEOUT,
         )
     if r.returncode != 0:
@@ -1550,9 +1555,7 @@ def cmd_crash_collect(args: argparse.Namespace) -> int:
     # look next to vm.kernel (which usually points to vmlinuz).  We always
     # prefer vmlinux over vmlinuz because drgn needs full debug symbols.
     if not vm.os_id:
-        raise RuntimeError(
-            f"VM '{vm.name}' has no os_id; recreate it"
-        )
+        raise RuntimeError(f"VM '{vm.name}' has no os_id; recreate it")
     vmlinux: Path | None = None
     try:
         arts = resolve_os_artifacts(vm.os_id, arch=vm.arch)
@@ -1706,9 +1709,7 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
             "to delete snapshot",
             register_before_wait=True,
             get_error=lambda: (
-                f"snapshot delete failed: {delete_err}"
-                if delete_err
-                else None
+                f"snapshot delete failed: {delete_err}" if delete_err else None
             ),
         ):
             r = run(
@@ -1717,9 +1718,7 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
             if r.returncode != 0:
                 delete_err = (r.stderr or "qemu-img failed").strip()
             else:
-                print(
-                    f"snapshot '{delete_tag}' deleted from {vm.name}"
-                )
+                print(f"snapshot '{delete_tag}' deleted from {vm.name}")
         if delete_err:
             die(f"snapshot delete failed: {delete_err}")
         return
@@ -1826,8 +1825,10 @@ def _check_export_tools() -> list[str]:
             warnings.append(
                 f"missing host tool: {tool} (needed by `ltvm target export`)"
             )
-    if _shutil.which("grub2-install") is None and \
-            _shutil.which("grub-install") is None:
+    if (
+        _shutil.which("grub2-install") is None
+        and _shutil.which("grub-install") is None
+    ):
         warnings.append(
             "missing host tool: grub2-install/grub-install "
             "(needed by `ltvm target export`)"
@@ -1861,7 +1862,9 @@ def _check_artifacts_disk_usage() -> tuple[list[str], str | None]:
 
     from .target_config import ARTIFACTS_DIR
 
-    probe_path = ARTIFACTS_DIR if ARTIFACTS_DIR.exists() else ARTIFACTS_DIR.parent
+    probe_path = (
+        ARTIFACTS_DIR if ARTIFACTS_DIR.exists() else ARTIFACTS_DIR.parent
+    )
     if not probe_path.exists():
         return [], None
     try:

@@ -69,13 +69,17 @@ class TestInfoLock:
 
 class TestInvokingUser:
     def test_none_when_plain_root(self) -> None:
-        with patch.dict(os.environ, {}, clear=True), \
-             patch.object(os, "geteuid", return_value=0):
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(os, "geteuid", return_value=0),
+        ):
             assert priv.invoking_user() is None
 
     def test_prefers_sudo_user(self) -> None:
-        with patch.dict(os.environ, {"SUDO_USER": "root"}, clear=True), \
-             patch.object(os, "geteuid", return_value=0):
+        with (
+            patch.dict(os.environ, {"SUDO_USER": "root"}, clear=True),
+            patch.object(os, "geteuid", return_value=0),
+        ):
             assert priv.invoking_user() is None
 
     def test_reports_current_user_unprivileged(self) -> None:
@@ -115,11 +119,11 @@ class TestAtomicWriteOwnership:
 
             return R()
 
-        with patch.object(priv, "sudo_run", side_effect=fake_sudo), \
-             patch.object(os, "access", return_value=False), \
-             patch.object(
-                 priv, "invoking_user", return_value=("paf", "paf")
-             ):
+        with (
+            patch.object(priv, "sudo_run", side_effect=fake_sudo),
+            patch.object(os, "access", return_value=False),
+            patch.object(priv, "invoking_user", return_value=("paf", "paf")),
+        ):
             priv.atomic_write(dest, "K=v\n")
 
         install = next(c for c in calls if c[0] == "install")
@@ -141,9 +145,11 @@ class TestAtomicWriteOwnership:
 
             return R()
 
-        with patch.object(priv, "sudo_run", side_effect=fake_sudo), \
-             patch.object(os, "access", return_value=False), \
-             patch.object(priv, "invoking_user", return_value=None):
+        with (
+            patch.object(priv, "sudo_run", side_effect=fake_sudo),
+            patch.object(os, "access", return_value=False),
+            patch.object(priv, "invoking_user", return_value=None),
+        ):
             priv.atomic_write(dest, "K=v\n")
 
         install = next(c for c in calls if c[0] == "install")

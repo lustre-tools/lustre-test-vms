@@ -553,10 +553,10 @@ class TestCmdConsoleLog:
 
 
 LIBDIR = "/usr/lib64/lustre"
-_MOUNT_CMD = f"dmsetup remove_all; cd {LIBDIR}/tests && LUSTRE={LIBDIR} bash llmount.sh"
-_CLEANUP_CMD = (
-    f"cd {LIBDIR}/tests && LUSTRE={LIBDIR} bash llmountcleanup.sh && lustre_rmmod"
+_MOUNT_CMD = (
+    f"dmsetup remove_all; cd {LIBDIR}/tests && LUSTRE={LIBDIR} bash llmount.sh"
 )
+_CLEANUP_CMD = f"cd {LIBDIR}/tests && LUSTRE={LIBDIR} bash llmountcleanup.sh && lustre_rmmod"
 
 
 class TestCmdLlmount:
@@ -731,6 +731,7 @@ class TestSeedKdumpBoot:
     def _ssh_results(self, present: bool):
         """Return a side_effect fn where only the `test -f` probe
         varies with *present*; every other command succeeds."""
+
         def _fn(ip, cmd, **kw):
             r = MagicMock()
             if cmd.startswith("test -f"):
@@ -740,6 +741,7 @@ class TestSeedKdumpBoot:
             r.stdout = ""
             r.stderr = ""
             return r
+
         return _fn
 
     def test_fast_path_no_scp_no_dracut(self, tmp_path: Path) -> None:
@@ -750,9 +752,7 @@ class TestSeedKdumpBoot:
                 side_effect=self._ssh_results(present=True),
             ) as mock_ssh,
             patch("ltvm_pkg.vm_commands.run") as mock_run,
-            patch(
-                "ltvm_pkg.target_config.TargetConfig"
-            ) as mock_tc,
+            patch("ltvm_pkg.target_config.TargetConfig") as mock_tc,
         ):
             mock_tc.return_value.os_family = "rhel"
             vm_commands._seed_kdump_boot(vm)
@@ -771,18 +771,14 @@ class TestSeedKdumpBoot:
                 side_effect=self._ssh_results(present=True),
             ) as mock_ssh,
             patch("ltvm_pkg.vm_commands.run") as mock_run,
-            patch(
-                "ltvm_pkg.target_config.TargetConfig"
-            ) as mock_tc,
+            patch("ltvm_pkg.target_config.TargetConfig") as mock_tc,
         ):
             mock_tc.return_value.os_family = "debian"
             vm_commands._seed_kdump_boot(vm)
 
         mock_run.assert_not_called()
         cmds = [c.args[1] for c in mock_ssh.call_args_list]
-        assert any(
-            "test -f /var/lib/kdump/initrd.img-" in c for c in cmds
-        )
+        assert any("test -f /var/lib/kdump/initrd.img-" in c for c in cmds)
         assert any("kdump-config load" in c for c in cmds)
         assert not any("update-initramfs" in c for c in cmds)
 
@@ -794,12 +790,8 @@ class TestSeedKdumpBoot:
                 "ltvm_pkg.vm_commands.run_ssh",
                 side_effect=self._ssh_results(present=False),
             ) as mock_ssh,
-            patch(
-                "ltvm_pkg.vm_commands.run", return_value=scp_rc
-            ) as mock_run,
-            patch(
-                "ltvm_pkg.target_config.TargetConfig"
-            ) as mock_tc,
+            patch("ltvm_pkg.vm_commands.run", return_value=scp_rc) as mock_run,
+            patch("ltvm_pkg.target_config.TargetConfig") as mock_tc,
         ):
             mock_tc.return_value.os_family = "rhel"
             vm_commands._seed_kdump_boot(vm)
@@ -843,7 +835,10 @@ class TestCmdCreateChown:
             patch("ltvm_pkg.vm_commands.resolve_os_artifacts") as mock_arts,
             patch("ltvm_pkg.vm_commands.alloc_ip") as mock_alloc,
             patch("ltvm_pkg.vm_commands.tap_for_name", return_value="tap0"),
-            patch("ltvm_pkg.vm_commands.mac_for_name", return_value="AA:BB:CC:DD:EE:FF"),
+            patch(
+                "ltvm_pkg.vm_commands.mac_for_name",
+                return_value="AA:BB:CC:DD:EE:FF",
+            ),
             patch("ltvm_pkg.vm_commands.run") as mock_run,
             patch(
                 "ltvm_pkg.vm_commands.sudo_run",
@@ -873,7 +868,9 @@ class TestCmdCreateChown:
 
             mock_alloc.side_effect = fake_alloc
 
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            mock_run.return_value = MagicMock(
+                returncode=0, stdout="", stderr=""
+            )
 
             with patch(
                 "ltvm_pkg.vm_commands.load_meta_safe",
@@ -919,11 +916,15 @@ class TestCmdCrashCollectOutdir:
             mod_dir=None,
         )
         raw_outdir = getattr(args, "outdir", None)
-        resolved = Path(raw_outdir) if raw_outdir else Path.home() / "ltvm-crashes"
+        resolved = (
+            Path(raw_outdir) if raw_outdir else Path.home() / "ltvm-crashes"
+        )
         assert resolved == Path.home() / "ltvm-crashes"
         assert str(resolved).startswith(str(Path.home()))
 
-    def test_explicit_outdir_respected(self, tmp_vmdir: Path, tmp_path: Path) -> None:
+    def test_explicit_outdir_respected(
+        self, tmp_vmdir: Path, tmp_path: Path
+    ) -> None:
         explicit = str(tmp_path / "my-crashes")
         _seed_vm_files(tmp_vmdir, "co1-crash2")
         with (
@@ -960,9 +961,7 @@ class TestHandlerError:
     """_handler_error emits JSON to stdout or text to stderr based on
     args.json, and returns the caller-supplied exit code."""
 
-    def test_json_mode_stdout(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_json_mode_stdout(self, capsys: pytest.CaptureFixture[str]) -> None:
         args = argparse.Namespace(json=True)
         rc = vm_commands._handler_error(args, "boom", code=7)
         assert rc == 7
@@ -971,9 +970,7 @@ class TestHandlerError:
         assert json.loads(captured.out) == {"error": "boom"}
         assert captured.err == ""
 
-    def test_text_mode_stderr(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_text_mode_stderr(self, capsys: pytest.CaptureFixture[str]) -> None:
         args = argparse.Namespace(json=False)
         rc = vm_commands._handler_error(args, "bad thing")
         # Default code is EXIT_ERROR (1)
@@ -1157,9 +1154,7 @@ class TestCmdStart:
         _seed_vm_files(tmp_vmdir, "b")
         args = argparse.Namespace(names=["a", "b"])
         with (
-            patch(
-                "ltvm_pkg.vm_commands.is_running", return_value=False
-            ),
+            patch("ltvm_pkg.vm_commands.is_running", return_value=False),
             patch("ltvm_pkg.vm_commands.launch_qemu") as mock_launch,
             patch("ltvm_pkg.vm_commands.provision_vm_ssh") as mock_prov,
             patch("ltvm_pkg.vm_commands._seed_kdump_boot"),
@@ -1187,9 +1182,7 @@ class TestCmdStart:
         _seed_vm_files(tmp_vmdir, "up")
         args = argparse.Namespace(names=["up"])
         with (
-            patch(
-                "ltvm_pkg.vm_commands.is_running", return_value=True
-            ),
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
             patch("ltvm_pkg.vm_commands.launch_qemu") as mock_launch,
             patch("ltvm_pkg.vm_commands.provision_vm_ssh") as mock_prov,
             patch("ltvm_pkg.vm_commands._seed_kdump_boot") as mock_seed,
@@ -1209,9 +1202,11 @@ class TestCmdStart:
         _seed_vm_files(tmp_vmdir, "up")
         _seed_vm_files(tmp_vmdir, "down")
         args = argparse.Namespace(names=["up", "down"])
+
         # is_running(vm) -> True for 'up', False for 'down'.
         def fake_is_running(vm: VMInfo) -> bool:
             return vm.name == "up"
+
         with (
             patch(
                 "ltvm_pkg.vm_commands.is_running",
@@ -1251,9 +1246,7 @@ class TestCmdNmi:
         r = MagicMock(returncode=0, stdout="", stderr="")
         with (
             patch("ltvm_pkg.vm_commands.is_running", return_value=True),
-            patch(
-                "ltvm_pkg.vm_commands.run_ssh", return_value=r
-            ) as mock_ssh,
+            patch("ltvm_pkg.vm_commands.run_ssh", return_value=r) as mock_ssh,
             patch("ltvm_pkg.vm_commands._qmp_nmi") as mock_nmi,
         ):
             rc = vm_commands.cmd_nmi(args)
@@ -1339,9 +1332,7 @@ class TestQmpNmi:
             b'{"return": {}}\n',
         ]
         sock = self._fake_socket(frames)
-        with patch(
-            "socket.socket", return_value=sock
-        ):
+        with patch("socket.socket", return_value=sock):
             # Must not raise.
             vm_commands._qmp_nmi(qmp)
         # Sent two commands: qmp_capabilities + inject-nmi
@@ -1378,9 +1369,7 @@ class TestQmpNmi:
         ):
             vm_commands._qmp_nmi(qmp)
 
-    def test_socket_closed_before_greeting_raises(
-        self, tmp_path: Path
-    ) -> None:
+    def test_socket_closed_before_greeting_raises(self, tmp_path: Path) -> None:
         qmp = tmp_path / "q.qmp"
         sock = self._fake_socket([])  # empty -> recv returns b""
         with (
@@ -1403,12 +1392,8 @@ class TestCmdSnapshot:
         args = argparse.Namespace(name="snap-ok", tag="v1", delete=None)
         run_ok = MagicMock(returncode=0, stdout="", stderr="")
         with (
-            patch(
-                "ltvm_pkg.vm_commands.is_running", return_value=False
-            ),
-            patch(
-                "ltvm_pkg.vm_commands.run", return_value=run_ok
-            ) as mock_run,
+            patch("ltvm_pkg.vm_commands.is_running", return_value=False),
+            patch("ltvm_pkg.vm_commands.run", return_value=run_ok) as mock_run,
         ):
             vm_commands.cmd_snapshot(args)
         # qemu-img snapshot -c v1 <overlay>
@@ -1421,9 +1406,7 @@ class TestCmdSnapshot:
         args = argparse.Namespace(name="snap-fail", tag="v1", delete=None)
         run_fail = MagicMock(returncode=1, stdout="", stderr="disk busy")
         with (
-            patch(
-                "ltvm_pkg.vm_commands.is_running", return_value=False
-            ),
+            patch("ltvm_pkg.vm_commands.is_running", return_value=False),
             patch("ltvm_pkg.vm_commands.run", return_value=run_fail),
             pytest.raises(SystemExit),
         ):
@@ -1436,12 +1419,8 @@ class TestCmdSnapshot:
         args = argparse.Namespace(name="snap-del", tag=None, delete="v1")
         run_ok = MagicMock(returncode=0, stdout="", stderr="")
         with (
-            patch(
-                "ltvm_pkg.vm_commands.is_running", return_value=False
-            ),
-            patch(
-                "ltvm_pkg.vm_commands.run", return_value=run_ok
-            ) as mock_run,
+            patch("ltvm_pkg.vm_commands.is_running", return_value=False),
+            patch("ltvm_pkg.vm_commands.run", return_value=run_ok) as mock_run,
         ):
             vm_commands.cmd_snapshot(args)
         cmd = mock_run.call_args.args[0]
@@ -1467,29 +1446,21 @@ class TestCmdRestore:
         _seed_vm_files(tmp_vmdir, "list-snap")
         args = argparse.Namespace(name="list-snap", tag=None)
         run_ok = MagicMock(returncode=0, stdout="", stderr="")
-        with patch(
-            "ltvm_pkg.vm_commands.run", return_value=run_ok
-        ) as mock_run:
+        with patch("ltvm_pkg.vm_commands.run", return_value=run_ok) as mock_run:
             vm_commands.cmd_restore(args)
         # -l means list; capture_output=False so the user sees output
         cmd = mock_run.call_args.args[0]
         assert "snapshot" in cmd and "-l" in cmd
         assert "snapshots for list-snap" in capsys.readouterr().out
 
-    def test_missing_tag_dies_before_stop(
-        self, tmp_vmdir: Path
-    ) -> None:
+    def test_missing_tag_dies_before_stop(self, tmp_vmdir: Path) -> None:
         """A bad tag dies BEFORE we stop the VM -- a stopped VM with a
         failed restore is worse than a running VM with an error."""
         _seed_vm_files(tmp_vmdir, "res-bad")
         args = argparse.Namespace(name="res-bad", tag="nope")
-        run_ok = MagicMock(
-            returncode=0, stdout=self._SNAP_LIST_V1, stderr=""
-        )
+        run_ok = MagicMock(returncode=0, stdout=self._SNAP_LIST_V1, stderr="")
         with (
-            patch(
-                "ltvm_pkg.vm_commands.is_running", return_value=True
-            ),
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
             patch("ltvm_pkg.vm_commands.run", return_value=run_ok),
             patch("ltvm_pkg.vm_commands.kill_qemu") as mock_kill,
             pytest.raises(SystemExit),
@@ -1502,16 +1473,10 @@ class TestCmdRestore:
     ) -> None:
         _seed_vm_files(tmp_vmdir, "res-ok")
         args = argparse.Namespace(name="res-ok", tag="v1")
-        run_ok = MagicMock(
-            returncode=0, stdout=self._SNAP_LIST_V1, stderr=""
-        )
+        run_ok = MagicMock(returncode=0, stdout=self._SNAP_LIST_V1, stderr="")
         with (
-            patch(
-                "ltvm_pkg.vm_commands.is_running", return_value=False
-            ),
-            patch(
-                "ltvm_pkg.vm_commands.run", return_value=run_ok
-            ) as mock_run,
+            patch("ltvm_pkg.vm_commands.is_running", return_value=False),
+            patch("ltvm_pkg.vm_commands.run", return_value=run_ok) as mock_run,
         ):
             vm_commands.cmd_restore(args)
         # Second run call is the apply (-a)

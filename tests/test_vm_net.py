@@ -52,10 +52,9 @@ class TestExtraTapForName:
             assert name.endswith(f"-{idx}")
 
     def test_different_index_different_name(self) -> None:
-        assert (
-            vm_net.extra_tap_for_name("co1-mds", 1)
-            != vm_net.extra_tap_for_name("co1-mds", 2)
-        )
+        assert vm_net.extra_tap_for_name(
+            "co1-mds", 1
+        ) != vm_net.extra_tap_for_name("co1-mds", 2)
 
     def test_distinct_from_mgmt_tap(self) -> None:
         """The mgmt TAP (tap_for_name) must not collide with any extras."""
@@ -78,22 +77,19 @@ class TestExtraMacForName:
 
     def test_distinct_from_mgmt_mac(self) -> None:
         """Must not collide with the mgmt NIC MAC for the same VM."""
-        assert (
-            vm_net.extra_mac_for_name("co1-mds", 1)
-            != vm_net.mac_for_name("co1-mds")
+        assert vm_net.extra_mac_for_name("co1-mds", 1) != vm_net.mac_for_name(
+            "co1-mds"
         )
 
     def test_different_index_different_mac(self) -> None:
-        assert (
-            vm_net.extra_mac_for_name("co1-mds", 1)
-            != vm_net.extra_mac_for_name("co1-mds", 2)
-        )
+        assert vm_net.extra_mac_for_name(
+            "co1-mds", 1
+        ) != vm_net.extra_mac_for_name("co1-mds", 2)
 
     def test_deterministic(self) -> None:
-        assert (
-            vm_net.extra_mac_for_name("co1-mds", 1)
-            == vm_net.extra_mac_for_name("co1-mds", 1)
-        )
+        assert vm_net.extra_mac_for_name(
+            "co1-mds", 1
+        ) == vm_net.extra_mac_for_name("co1-mds", 1)
 
     def test_index_zero_is_rejected(self) -> None:
         with pytest.raises(ValueError):
@@ -126,9 +122,7 @@ class TestMacForName:
 
 
 @pytest.fixture
-def tmp_vmdir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Path:
+def tmp_vmdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Redirect VM_DIR, SOCKETS, and the lock path into tmp_path.
 
     alloc_ip looks up existing VMs via VMInfo.all_names()/load(), which
@@ -183,9 +177,7 @@ class TestAllocIp:
             assert second_list[0] != first
 
     def test_explicit_ip_respected(self, tmp_vmdir: Path) -> None:
-        with vm_net.alloc_ip(
-            "explicit", explicit_ip="192.168.100.77"
-        ) as ips:
+        with vm_net.alloc_ip("explicit", explicit_ip="192.168.100.77") as ips:
             assert ips == ["192.168.100.77"]
 
     def test_explicit_ip_in_use_dies(self, tmp_vmdir: Path) -> None:

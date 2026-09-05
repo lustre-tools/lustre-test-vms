@@ -41,13 +41,17 @@ from ltvm_pkg.local_install import (  # noqa: E402  (needs sys.path above)
 )
 
 FAILS = []
+
+
 def check(label, cond):
     print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
     if not cond:
         FAILS.append(label)
 
+
 def sh(*a):
     return subprocess.run(a, capture_output=True, text=True)
+
 
 kver = os.uname().release
 staging = Path("/root/staging")
@@ -64,8 +68,10 @@ files, dirs = staging_contents(staging)
 kos = [f for f in files if f.endswith(".ko")]
 check(f"found {len(kos)} real .ko modules", len(kos) > 50)
 check("found mount.lustre", any(f.endswith("sbin/mount.lustre") for f in files))
-check("modules target the RUNNING kernel",
-      any(f"lib/modules/{kver}/" in f for f in files))
+check(
+    "modules target the RUNNING kernel",
+    any(f"lib/modules/{kver}/" in f for f in files),
+)
 
 print("\n== 3. Install onto the real VM root")
 install_staging_into_root(staging)
@@ -80,7 +86,10 @@ check("depmod picked up lustre.ko", "lustre.ko" in dep)
 
 print("\n== 4. Actually load the modules (the real test of depmod)")
 r = sh("modprobe", "lustre")
-check(f"modprobe lustre rc={r.returncode} {r.stderr.strip()[:80]}", r.returncode == 0)
+check(
+    f"modprobe lustre rc={r.returncode} {r.stderr.strip()[:80]}",
+    r.returncode == 0,
+)
 loaded = loaded_lustre_modules()
 print(f"     loaded: {', '.join(loaded) or 'none'}")
 check("lustre module is live", "lustre" in loaded)
@@ -95,10 +104,19 @@ print("\n== 5. Uninstall through the REAL CLI command")
 os.chdir("/root/lustre-release")
 from ltvm_pkg.cli.make import cmd_make_uninstall  # noqa: E402
 
-ns = argparse.Namespace(json=False, target=None, variant=None, kernel=None,
-                        arch=None, force=False, force_compat=False,
-                        lustre_tree=None, jobs=None, rebuild=False,
-                        no_unload=False)
+ns = argparse.Namespace(
+    json=False,
+    target=None,
+    variant=None,
+    kernel=None,
+    arch=None,
+    force=False,
+    force_compat=False,
+    lustre_tree=None,
+    jobs=None,
+    rebuild=False,
+    no_unload=False,
+)
 rc = cmd_make_uninstall(ns)
 check(f"make-uninstall returned {rc}", rc == 0)
 
@@ -108,13 +126,20 @@ print(f"     still loaded: {', '.join(still) or 'none'}")
 check("modules were unloaded", still == [])
 check("lfs removed", not Path("/usr/bin/lfs").exists())
 check("mount.lustre removed", not Path("/usr/sbin/mount.lustre").exists())
-check("no lustre .ko left",
-      not list(Path(f"/lib/modules/{kver}/extra").rglob("lustre.ko")))
+check(
+    "no lustre .ko left",
+    not list(Path(f"/lib/modules/{kver}/extra").rglob("lustre.ko")),
+)
 check("manifest cleared", read_manifest() is None)
 check("/lib still a symlink", Path("/lib").is_symlink())
-check("shared dirs intact", Path("/usr/sbin").is_dir() and Path("/etc").is_dir())
+check(
+    "shared dirs intact", Path("/usr/sbin").is_dir() and Path("/etc").is_dir()
+)
 check("system still works", sh("ls", "/").returncode == 0)
-check("ssh/systemd still fine", sh("systemctl", "is-system-running").returncode in (0, 1))
+check(
+    "ssh/systemd still fine",
+    sh("systemctl", "is-system-running").returncode in (0, 1),
+)
 
 print("\n" + "=" * 58)
 if FAILS:

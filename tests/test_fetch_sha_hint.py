@@ -48,9 +48,7 @@ class TestExpectSha256Hints:
         assert "re-uploaded after the manifest" in msg
         assert "ltvm target publish" in msg
 
-    def test_size_match_emits_network_hint(
-        self, tmp_path: Path
-    ) -> None:
+    def test_size_match_emits_network_hint(self, tmp_path: Path) -> None:
         f = tmp_path / "asset"
         _write(f, b"x" * 100)
         with pytest.raises(RuntimeError) as ei:
@@ -65,9 +63,7 @@ class TestExpectSha256Hints:
         # Should not falsely accuse a stale manifest when size agrees.
         assert "manifest" not in msg or "manifest says" not in msg
 
-    def test_no_size_arg_keeps_legacy_message(
-        self, tmp_path: Path
-    ) -> None:
+    def test_no_size_arg_keeps_legacy_message(self, tmp_path: Path) -> None:
         """Older callers (fetch_bootable) don't pass expected_size; the
         function must still raise without crashing -- and the legacy
         message body is still present."""

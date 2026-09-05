@@ -86,13 +86,9 @@ class TestCurrentDriver:
 
 
 class TestBindToVfio:
-    def test_happy_path_records_write_sequence(
-        self, fake_sysfs: Path
-    ) -> None:
+    def test_happy_path_records_write_sequence(self, fake_sysfs: Path) -> None:
         _make_pci_device(fake_sysfs, BDF, driver="mlx5_core")
-        _make_driver_dir(
-            fake_sysfs / "bus" / "pci" / "drivers" / "vfio-pci"
-        )
+        _make_driver_dir(fake_sysfs / "bus" / "pci" / "drivers" / "vfio-pci")
 
         from_drv = vfio.bind_to_vfio(BDF)
 
@@ -106,20 +102,14 @@ class TestBindToVfio:
         # bind got the BDF
         assert (vfio_dir / "bind").read_text() == f"{BDF}\n"
 
-    def test_already_bound_to_vfio_is_noop(
-        self, fake_sysfs: Path
-    ) -> None:
+    def test_already_bound_to_vfio_is_noop(self, fake_sysfs: Path) -> None:
         _make_pci_device(fake_sysfs, BDF, driver="vfio-pci")
         # Need a vfio-pci driver dir so the branch is reachable
         # even though we short-circuit before using it.
-        _make_driver_dir(
-            fake_sysfs / "bus" / "pci" / "drivers" / "vfio-pci"
-        )
+        _make_driver_dir(fake_sysfs / "bus" / "pci" / "drivers" / "vfio-pci")
         assert vfio.bind_to_vfio(BDF) is None
 
-    def test_unbound_device_skips_unbind(
-        self, fake_sysfs: Path
-    ) -> None:
+    def test_unbound_device_skips_unbind(self, fake_sysfs: Path) -> None:
         """No current driver -> no unbind write, but new_id + bind
         still happen."""
         _make_pci_device(fake_sysfs, BDF, driver=None)
@@ -133,15 +123,11 @@ class TestBindToVfio:
         assert (vfio_dir / "bind").read_text() == f"{BDF}\n"
 
     def test_missing_device_raises(self, fake_sysfs: Path) -> None:
-        _make_driver_dir(
-            fake_sysfs / "bus" / "pci" / "drivers" / "vfio-pci"
-        )
+        _make_driver_dir(fake_sysfs / "bus" / "pci" / "drivers" / "vfio-pci")
         with pytest.raises(vfio.VfioError, match="not found"):
             vfio.bind_to_vfio("0000:99:99.9")
 
-    def test_missing_vfio_driver_raises(
-        self, fake_sysfs: Path
-    ) -> None:
+    def test_missing_vfio_driver_raises(self, fake_sysfs: Path) -> None:
         _make_pci_device(fake_sysfs, BDF, driver="mlx5_core")
         # vfio-pci driver dir absent
         with pytest.raises(
@@ -169,9 +155,7 @@ class TestBindToVfio:
 
 
 class TestRebind:
-    def test_rebind_from_vfio_back_to_mlx5(
-        self, fake_sysfs: Path
-    ) -> None:
+    def test_rebind_from_vfio_back_to_mlx5(self, fake_sysfs: Path) -> None:
         _make_pci_device(fake_sysfs, BDF, driver="vfio-pci")
         mlx_dir = _make_driver_dir(
             fake_sysfs / "bus" / "pci" / "drivers" / "mlx5_core"
@@ -183,9 +167,7 @@ class TestRebind:
         assert (vfio_dir / "unbind").read_text() == f"{BDF}\n"
         assert (mlx_dir / "bind").read_text() == f"{BDF}\n"
 
-    def test_rebind_already_bound_is_noop(
-        self, fake_sysfs: Path
-    ) -> None:
+    def test_rebind_already_bound_is_noop(self, fake_sysfs: Path) -> None:
         _make_pci_device(fake_sysfs, BDF, driver="mlx5_core")
         mlx_dir = fake_sysfs / "bus" / "pci" / "drivers" / "mlx5_core"
         # No writes should happen.
@@ -205,17 +187,11 @@ class TestRebind:
         self, fake_sysfs: Path
     ) -> None:
         _make_pci_device(fake_sysfs, BDF, driver="vfio-pci")
-        with pytest.raises(
-            vfio.VfioError, match="target driver 'mlx5_core'"
-        ):
+        with pytest.raises(vfio.VfioError, match="target driver 'mlx5_core'"):
             vfio.rebind(BDF, "mlx5_core")
 
-    def test_rebind_missing_device_raises(
-        self, fake_sysfs: Path
-    ) -> None:
-        _make_driver_dir(
-            fake_sysfs / "bus" / "pci" / "drivers" / "mlx5_core"
-        )
+    def test_rebind_missing_device_raises(self, fake_sysfs: Path) -> None:
+        _make_driver_dir(fake_sysfs / "bus" / "pci" / "drivers" / "mlx5_core")
         with pytest.raises(vfio.VfioError, match="not found"):
             vfio.rebind("0000:99:99.9", "mlx5_core")
 
@@ -235,9 +211,7 @@ class TestIommuEnabled:
         for i in range(n):
             (groups / str(i)).mkdir()
 
-    def test_intel_iommu_on_with_groups(
-        self, fake_sysfs: Path
-    ) -> None:
+    def test_intel_iommu_on_with_groups(self, fake_sysfs: Path) -> None:
         self._set_cmdline(fake_sysfs, "ro quiet intel_iommu=on\n")
         self._make_groups(fake_sysfs, 3)
         assert vfio.iommu_enabled() is True
@@ -247,9 +221,7 @@ class TestIommuEnabled:
         self._make_groups(fake_sysfs, 1)
         assert vfio.iommu_enabled() is True
 
-    def test_cmdline_set_but_no_groups(
-        self, fake_sysfs: Path
-    ) -> None:
+    def test_cmdline_set_but_no_groups(self, fake_sysfs: Path) -> None:
         """The guardrail case: cmdline says on, but IOMMU didn't
         actually wire up (e.g. VT-d off in BIOS)."""
         self._set_cmdline(fake_sysfs, "intel_iommu=on\n")
@@ -284,9 +256,7 @@ class TestResolveIfnameToBdf:
         with pytest.raises(vfio.VfioError, match="not found"):
             vfio.resolve_ifname_to_bdf("nope0")
 
-    def test_netdev_without_pci_parent(
-        self, fake_sysfs: Path
-    ) -> None:
+    def test_netdev_without_pci_parent(self, fake_sysfs: Path) -> None:
         """Virtual interfaces (bridge, tap, veth) have no 'device'
         symlink under /sys/class/net/<name>/."""
         net_dir = fake_sysfs / "class" / "net" / "br0"

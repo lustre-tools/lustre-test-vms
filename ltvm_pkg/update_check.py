@@ -40,9 +40,9 @@ log = logging.getLogger(__name__)
 REPO_SLUG = "lustre-tools/lustre-test-vms"
 CHECK_INTERVAL = timedelta(hours=24)
 
-_CONFIG_DIR = Path(
-    os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")
-) / "ltvm"
+_CONFIG_DIR = (
+    Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "ltvm"
+)
 _CONFIG_FILE = _CONFIG_DIR / "config.json"
 
 
@@ -63,7 +63,9 @@ def _load_config() -> dict[str, Any]:
     try:
         data = json.loads(_CONFIG_FILE.read_text())
     except (OSError, json.JSONDecodeError):
-        log.warning("ltvm config at %s is unreadable; using defaults", _CONFIG_FILE)
+        log.warning(
+            "ltvm config at %s is unreadable; using defaults", _CONFIG_FILE
+        )
         return json.loads(json.dumps(_DEFAULT_CONFIG))
     # Merge defaults so a partial config still works.
     out = json.loads(json.dumps(_DEFAULT_CONFIG))
@@ -79,7 +81,9 @@ def _save_config(cfg: dict[str, Any]) -> None:
 
 
 def _bump_last_check(cfg: dict[str, Any]) -> None:
-    cfg["update_check"]["last_check_iso"] = datetime.now(timezone.utc).isoformat()
+    cfg["update_check"]["last_check_iso"] = datetime.now(
+        timezone.utc
+    ).isoformat()
     _save_config(cfg)
 
 
@@ -134,7 +138,10 @@ def _local_hash() -> str | None:
     try:
         r = subprocess.run(
             ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, check=True, timeout=2,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=2,
         )
         return r.stdout.strip() or None
     except (subprocess.SubprocessError, FileNotFoundError, OSError):
@@ -151,11 +158,15 @@ def _remote_hash() -> str | None:
     try:
         r = subprocess.run(
             [
-                "git", "ls-remote",
+                "git",
+                "ls-remote",
                 f"https://github.com/{REPO_SLUG}.git",
                 "refs/heads/master",
             ],
-            capture_output=True, text=True, check=True, timeout=5,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
         )
     except (subprocess.SubprocessError, FileNotFoundError, OSError):
         return None
@@ -181,9 +192,17 @@ def _is_newer(local: str, remote: str) -> bool:
     try:
         # If remote is an ancestor of local, we're ahead (or equal): no update.
         r = subprocess.run(
-            ["git", "-C", str(repo), "merge-base", "--is-ancestor",
-             remote, local],
-            capture_output=True, timeout=3,
+            [
+                "git",
+                "-C",
+                str(repo),
+                "merge-base",
+                "--is-ancestor",
+                remote,
+                local,
+            ],
+            capture_output=True,
+            timeout=3,
         )
         if r.returncode == 0:
             return False
@@ -246,6 +265,7 @@ def _apply_update() -> bool:
     # and sudos selectively for the operations that need it; Linux
     # install needs root throughout.
     import platform
+
     if platform.system() == "Darwin":
         print(f"  Running {installer} install...")
         cmd = [py, str(installer), "install"]

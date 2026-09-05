@@ -341,7 +341,9 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     # would do the same later.  Adopting is also wrong on its own
     # terms, since an existing VM won't have the disk layout the role
     # implies.
-    taken = [n.name for n in node_specs if (SOCKETS / f"{n.name}.info").exists()]
+    taken = [
+        n.name for n in node_specs if (SOCKETS / f"{n.name}.info").exists()
+    ]
     if taken:
         die(
             f"VM(s) already exist: {', '.join(taken)}\n"
@@ -481,9 +483,7 @@ def _deploy_one_node(
 
     vm = VMInfo.load(node_name)
     if not vm.os_id:
-        raise RuntimeError(
-            f"VM '{vm.name}' has no os_id; recreate it"
-        )
+        raise RuntimeError(f"VM '{vm.name}' has no os_id; recreate it")
     target = vm.os_id
     # Pass vm.arch + kernel so the staging dir matches what
     # build-lustre wrote.  Staging is keyed per-kernel so two kernels'
@@ -501,7 +501,10 @@ def _deploy_one_node(
             f"cannot resolve kernel for {node_name}: vm.kernel is unset",
         )
     staging = _staging_path(
-        lustre_tree, target, arch=vm_arch, kernel=deploy_kernel,
+        lustre_tree,
+        target,
+        arch=vm_arch,
+        kernel=deploy_kernel,
         variant=vm.variant,
     )
     try:
@@ -565,9 +568,7 @@ def _parallel_cluster_op(
         for future in as_completed(futures):
             name, rc, output = future.result()
             if rc != 0:
-                print(
-                    f"\n--- {name}: {failure_verb} (rc={rc}) ---\n{output}"
-                )
+                print(f"\n--- {name}: {failure_verb} (rc={rc}) ---\n{output}")
                 failed.append(name)
             else:
                 print(f"  {name}: {success_verb}")
@@ -856,7 +857,10 @@ def cmd_cluster_ssh(args: argparse.Namespace) -> None:
 
     vm = VMInfo.load(matched.name)
     ssh_args = [
-        "sshpass", "-p", ROOT_PASSWORD, "ssh",
+        "sshpass",
+        "-p",
+        ROOT_PASSWORD,
+        "ssh",
         *SSH_OPTS,
         f"root@{vm.ip}",
         *args.command,

@@ -101,9 +101,10 @@ class TestAptSourcesUrl:
         )
 
     def test_arm64_uses_ports(self) -> None:
-        assert "ports.ubuntu.com" in cross_info(
-            "aarch64", "x86_64"
-        ).apt_sources_url
+        assert (
+            "ports.ubuntu.com"
+            in cross_info("aarch64", "x86_64").apt_sources_url
+        )
 
 
 class TestUnknownArch:
@@ -149,19 +150,22 @@ class TestHostPodmanPlatform:
     target arch, so cross-compile actually fires."""
 
     def test_host_x86_64(self) -> None:
-        with patch("ltvm_pkg.cross_compile.platform.machine",
-                   return_value="x86_64"):
+        with patch(
+            "ltvm_pkg.cross_compile.platform.machine", return_value="x86_64"
+        ):
             assert host_podman_platform() == "linux/amd64"
 
     def test_host_aarch64(self) -> None:
-        with patch("ltvm_pkg.cross_compile.platform.machine",
-                   return_value="aarch64"):
+        with patch(
+            "ltvm_pkg.cross_compile.platform.machine", return_value="aarch64"
+        ):
             assert host_podman_platform() == "linux/arm64"
 
     def test_host_arm64_darwin(self) -> None:
         """Apple Silicon host targeting x86_64 Linux: the podman
         platform must be linux/arm64 (native on the Mac) so the
         container runs at full speed and the cross toolchain fires."""
-        with patch("ltvm_pkg.cross_compile.platform.machine",
-                   return_value="arm64"):
+        with patch(
+            "ltvm_pkg.cross_compile.platform.machine", return_value="arm64"
+        ):
             assert host_podman_platform() == "linux/arm64"

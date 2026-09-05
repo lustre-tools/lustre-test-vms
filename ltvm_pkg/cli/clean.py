@@ -118,7 +118,8 @@ def _short_prefix(full_dirname: str, declared_shorts: list[str]) -> str:
     declared short matches -- those entries are off-list.
     """
     matches = [
-        s for s in declared_shorts
+        s
+        for s in declared_shorts
         if full_dirname == s or full_dirname.startswith(s + "-")
     ]
     if not matches:
@@ -212,9 +213,15 @@ def _scan_target(
             # Keep the N most recent in this group, mark the rest
             # superseded.  --keep 0 sweeps the whole group (still
             # blocked from touching protected groups unless --force).
-            kept_count = max(keep, 1) if is_protected_group and not force else keep
+            kept_count = (
+                max(keep, 1) if is_protected_group and not force else keep
+            )
             if kept_count > 0:
-                doomed = dirs_sorted[:-kept_count] if kept_count <= len(dirs_sorted) else []
+                doomed = (
+                    dirs_sorted[:-kept_count]
+                    if kept_count <= len(dirs_sorted)
+                    else []
+                )
             else:
                 doomed = list(dirs_sorted)
             report.skipped += len(dirs_sorted) - len(doomed)
@@ -278,13 +285,9 @@ def _scan_target(
 
             for variant_name, idir in image_dirs:
                 if kernel_orphan:
-                    reason = (
-                        f"orphan image (no kernel for {kdir.name!r})"
-                    )
+                    reason = f"orphan image (no kernel for {kdir.name!r})"
                 elif kernel_pruned:
-                    reason = (
-                        f"image of pruned kernel {kdir.name!r}"
-                    )
+                    reason = f"image of pruned kernel {kdir.name!r}"
                 else:
                     # Kernel survives; image is fine.  (Aging-only
                     # cleanup of standalone images is a follow-up;
@@ -366,7 +369,8 @@ def cmd_prune(args: argparse.Namespace) -> int:
     for t in targets:
         for a in _arches_for_target(t, arch_flag):
             r = _scan_target(
-                t, a,
+                t,
+                a,
                 keep=keep,
                 older_than_days=older_than_days,
                 force=force,
@@ -416,9 +420,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
             for c in all_candidates
         ],
         "removed": [str(c.path) for c in removed],
-        "errors": [
-            {"path": str(p), "error": msg} for p, msg in apply_errors
-        ],
+        "errors": [{"path": str(p), "error": msg} for p, msg in apply_errors],
         "total_bytes": total_bytes,
     }
 
@@ -438,9 +440,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
     print(hdr)
     print("-" * len(hdr))
     for c in all_candidates:
-        age = (
-            f"{c.age_days:.0f}d" if c.age_days is not None else "?"
-        )
+        age = f"{c.age_days:.0f}d" if c.age_days is not None else "?"
         print(
             f"{c.target:<10} {c.arch:<8} {c.kind:<18} "
             f"{age:>6} {_format_bytes(c.bytes):>10}  {c.path}"

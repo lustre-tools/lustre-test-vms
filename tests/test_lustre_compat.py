@@ -692,7 +692,10 @@ base/ext4-htree-lock.patch
 
 
 def _make_ldiskfs_tree(
-    tmp_path: Path, series_stem: str, series_content: str, patches: dict[str, str]
+    tmp_path: Path,
+    series_stem: str,
+    series_content: str,
+    patches: dict[str, str],
 ) -> Path:
     """Build a minimal ldiskfs directory with a series file and patch files."""
     series_dir = tmp_path / "ldiskfs" / "kernel_patches" / "series"
@@ -761,7 +764,10 @@ class TestParseLdiskfsSeriesFile:
         result = parse_ldiskfs_series_file(tmp_path, stem)
         assert len(result) == 3
         patches_root = tmp_path / "ldiskfs" / "kernel_patches" / "patches"
-        assert result[0] == patches_root / "linux-5.16" / "ext4-inode-version.patch"
+        assert (
+            result[0]
+            == patches_root / "linux-5.16" / "ext4-inode-version.patch"
+        )
         assert result[1] == patches_root / "linux-6.10" / "ext4-prealloc.patch"
         assert result[2] == patches_root / "base" / "ext4-htree-lock.patch"
 
@@ -833,14 +839,12 @@ def _make_ldiskfs_validate_tree(
         "KERNEL_SRPM=kernel-${lnxmaj}-${lnxrel}.src.rpm\n"
         "SERIES=6.8-ubuntu2404.series\n"
     )
-    (tree / "lustre/kernel_patches/targets/6.8-ubuntu2404.target.in").write_text(
-        target_body
-    )
+    (
+        tree / "lustre/kernel_patches/targets/6.8-ubuntu2404.target.in"
+    ).write_text(target_body)
     series_dir = tree / "ldiskfs" / "kernel_patches" / "series"
     series_dir.mkdir(parents=True)
-    (series_dir / f"{series_stem}.series").write_text(
-        "subdir/test.patch\n"
-    )
+    (series_dir / f"{series_stem}.series").write_text("subdir/test.patch\n")
     patches_dir = tree / "ldiskfs" / "kernel_patches" / "patches" / "subdir"
     patches_dir.mkdir(parents=True)
     (patches_dir / "test.patch").write_text(patch_content)

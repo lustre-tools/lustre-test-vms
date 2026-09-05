@@ -180,13 +180,25 @@ class TestKernelOutputDir:
     def test_default_path(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
         expected = (
-            tmp_targets / "artifacts" / "rocky9" / "x86_64" / "kernels" / "5.14-rhel9.7"
+            tmp_targets
+            / "artifacts"
+            / "rocky9"
+            / "x86_64"
+            / "kernels"
+            / "5.14-rhel9.7"
         )
         assert tc.kernel_output_dir() == expected
 
     def test_custom_kernel_path(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
-        expected = tmp_targets / "artifacts" / "rocky9" / "x86_64" / "kernels" / "custom"
+        expected = (
+            tmp_targets
+            / "artifacts"
+            / "rocky9"
+            / "x86_64"
+            / "kernels"
+            / "custom"
+        )
         assert tc.kernel_output_dir("custom") == expected
 
 
@@ -218,14 +230,24 @@ class TestOutputDirs:
         # Default: paired with the target's default kernel.
         assert (
             tc.image_output_dir()
-            == tmp_targets / "artifacts" / "rocky9" / "x86_64" / "images" / "5.14-rhel9.7"
+            == tmp_targets
+            / "artifacts"
+            / "rocky9"
+            / "x86_64"
+            / "images"
+            / "5.14-rhel9.7"
         )
 
     def test_image_output_dir_explicit_kernel(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
         assert (
             tc.image_output_dir("5.14-rhel9.5")
-            == tmp_targets / "artifacts" / "rocky9" / "x86_64" / "images" / "5.14-rhel9.5"
+            == tmp_targets
+            / "artifacts"
+            / "rocky9"
+            / "x86_64"
+            / "images"
+            / "5.14-rhel9.5"
         )
 
     def test_image_output_dir_distinct_per_kernel(
@@ -337,6 +359,7 @@ class TestInputHash:
             h2 = tc.input_hash("image")
         assert h1 != h2
 
+
 class TestStaleness:
     def test_stale_when_no_meta(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
@@ -388,7 +411,12 @@ class TestWriteMeta:
         tc = _make_config(tmp_targets)
         tc.write_meta("container", build_date="2024-01-01")
         meta_path = (
-            tmp_targets / "artifacts" / "rocky9" / "x86_64" / "container" / "meta.json"
+            tmp_targets
+            / "artifacts"
+            / "rocky9"
+            / "x86_64"
+            / "container"
+            / "meta.json"
         )
         assert meta_path.exists()
         data = json.loads(meta_path.read_text())
@@ -568,7 +596,12 @@ class TestIsStaleCorruption:
         assert tc.is_stale("container") is False
         # Corrupt the file mid-flight
         meta_file = (
-            tmp_targets / "artifacts" / "rocky9" / "x86_64" / "container" / "meta.json"
+            tmp_targets
+            / "artifacts"
+            / "rocky9"
+            / "x86_64"
+            / "container"
+            / "meta.json"
         )
         meta_file.write_text("{garbage")
         # Must not raise
@@ -632,9 +665,7 @@ class TestVariants:
       - kernel artifact ignores variant (kernel is shared).
     """
 
-    def _yaml_with_variant(
-        self, tmp_targets: Path, variants: dict
-    ) -> None:
+    def _yaml_with_variant(self, tmp_targets: Path, variants: dict) -> None:
         data = yaml.safe_load(
             (tmp_targets / "targets" / "targets.yaml").read_text()
         )
@@ -713,7 +744,12 @@ class TestVariants:
         self._yaml_with_variant(tmp_targets, {"mofed": {}})
         tc = _make_config(tmp_targets)
         base_meta = (
-            tmp_targets / "artifacts" / "rocky9" / "x86_64" / "container" / "meta.json"
+            tmp_targets
+            / "artifacts"
+            / "rocky9"
+            / "x86_64"
+            / "container"
+            / "meta.json"
         )
         assert tc.meta_path("container") == base_meta
         assert tc.meta_path("container", variant="mofed") == (
@@ -745,9 +781,7 @@ class TestVariants:
         assert tc.input_hash("container") != tc.input_hash(
             "container", variant="mofed"
         )
-        assert tc.input_hash("image") != tc.input_hash(
-            "image", variant="mofed"
-        )
+        assert tc.input_hash("image") != tc.input_hash("image", variant="mofed")
 
     def test_variant_params_change_invalidates_variant_only(
         self, tmp_targets: Path
@@ -921,7 +955,8 @@ class TestVariantKernelPin:
         tc = _make_config(tmp_targets)
         assert tc.applicable_kernels("mofed") == ["5.14-rhel9.5"]
         assert set(tc.applicable_kernels("base")) == {
-            "5.14-rhel9.7", "5.14-rhel9.5"
+            "5.14-rhel9.7",
+            "5.14-rhel9.5",
         }
 
     def test_applicable_kernels_unpinned(self, tmp_targets: Path) -> None:
@@ -932,7 +967,8 @@ class TestVariantKernelPin:
         _write_targets_yaml(tmp_targets / "targets", data)
         tc = _make_config(tmp_targets)
         assert set(tc.applicable_kernels("mofed")) == {
-            "5.14-rhel9.7", "5.14-rhel9.5"
+            "5.14-rhel9.7",
+            "5.14-rhel9.5",
         }
 
     def test_unknown_pin_rejected(self, tmp_targets: Path) -> None:
@@ -952,16 +988,15 @@ class TestVariantKernelPin:
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
             patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
-                cfg, "TARGETS_YAML",
+                cfg,
+                "TARGETS_YAML",
                 tmp_targets / "targets" / "targets.yaml",
             ),
         ):
             tc = cfg.TargetConfig("rocky9", variant="mofed")
         assert tc.resolve_kernel(None) == "5.14-rhel9.5"
 
-    def test_resolve_kernel_mismatch_rejected(
-        self, tmp_targets: Path
-    ) -> None:
+    def test_resolve_kernel_mismatch_rejected(self, tmp_targets: Path) -> None:
         import ltvm_pkg.target_config as cfg
 
         self._pin_yaml(tmp_targets, "5.14-rhel9.5")
@@ -969,7 +1004,8 @@ class TestVariantKernelPin:
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
             patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
-                cfg, "TARGETS_YAML",
+                cfg,
+                "TARGETS_YAML",
                 tmp_targets / "targets" / "targets.yaml",
             ),
         ):
@@ -989,7 +1025,8 @@ class TestVariantKernelPin:
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),
             patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(
-                cfg, "TARGETS_YAML",
+                cfg,
+                "TARGETS_YAML",
                 tmp_targets / "targets" / "targets.yaml",
             ),
         ):
@@ -1097,7 +1134,9 @@ class TestSchemaValidation:
                 "kernal": "5.14-rhel9.5",
             }
         }
-        with pytest.raises(ValueError, match="variant.*unrecognized key.*kernal"):
+        with pytest.raises(
+            ValueError, match="variant.*unrecognized key.*kernal"
+        ):
             self._load(tmp_targets, data)
 
     def test_kernel_entry_unknown_key_rejected(self, tmp_targets: Path) -> None:
@@ -1108,7 +1147,9 @@ class TestSchemaValidation:
         with pytest.raises(ValueError, match="kernels.available entry.*srpm"):
             self._load(tmp_targets, data)
 
-    def test_kernel_entry_missing_name_rejected(self, tmp_targets: Path) -> None:
+    def test_kernel_entry_missing_name_rejected(
+        self, tmp_targets: Path
+    ) -> None:
         data = self._data()
         data["targets"]["rocky9"]["kernels"]["available"] = [
             {"srpm_version": "5.14.0-611.13.1.el9_7"},
@@ -1133,7 +1174,9 @@ class TestSchemaValidation:
     def test_missing_os_metadata_rejected(self, tmp_targets: Path) -> None:
         data = self._data()
         del data["targets"]["rocky9"]["os_version"]
-        with pytest.raises(ValueError, match="missing required key.*os_version"):
+        with pytest.raises(
+            ValueError, match="missing required key.*os_version"
+        ):
             self._load(tmp_targets, data)
 
     def test_pinned_entry_form_accepted(self, tmp_targets: Path) -> None:

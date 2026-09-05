@@ -56,8 +56,18 @@ MANIFEST_SCHEMA = "ltvm-lustre-install/1"
 # Kernel modules Lustre loads.  Ordered leaf-first so rmmod has a
 # chance without dependency juggling.
 _LUSTRE_MODULES = (
-    "lustre", "lmv", "mdc", "osc", "lov", "fid", "fld", "ptlrpc",
-    "obdclass", "ksocklnd", "lnet", "libcfs",
+    "lustre",
+    "lmv",
+    "mdc",
+    "osc",
+    "lov",
+    "fid",
+    "fld",
+    "ptlrpc",
+    "obdclass",
+    "ksocklnd",
+    "lnet",
+    "libcfs",
 )
 
 # rm/rmdir batch size.  Well under ARG_MAX, and keeps a failure
@@ -67,12 +77,32 @@ _RM_CHUNK = 500
 # Directories we never rmdir even when a prune leaves them empty.
 # rmdir refuses non-empty dirs anyway; this is the second lock on the
 # door, because these are the ones where being wrong is unrecoverable.
-_NEVER_PRUNE = frozenset((
-    "", ".", "usr", "etc", "lib", "lib64", "bin", "sbin", "var", "opt",
-    "usr/bin", "usr/sbin", "usr/lib", "usr/lib64", "usr/share",
-    "usr/include", "usr/local", "var/lib", "var/run", "etc/init.d",
-    "lib/modules", "usr/lib/modules",
-))
+_NEVER_PRUNE = frozenset(
+    (
+        "",
+        ".",
+        "usr",
+        "etc",
+        "lib",
+        "lib64",
+        "bin",
+        "sbin",
+        "var",
+        "opt",
+        "usr/bin",
+        "usr/sbin",
+        "usr/lib",
+        "usr/lib64",
+        "usr/share",
+        "usr/include",
+        "usr/local",
+        "var/lib",
+        "var/run",
+        "etc/init.d",
+        "lib/modules",
+        "usr/lib/modules",
+    )
+)
 
 
 # Files the image build drops in that only ltvm puts there.  These are
@@ -99,10 +129,10 @@ class LocalImage:
     target: str
     arch: str
     variant: str
-    kernel: str            # kernel artifact dir name, e.g. 5.14-rhel9.7-1.el9
-    kernel_version: str    # uname -r form, e.g. 5.14.0-503.ltvm.el9.x86_64
+    kernel: str  # kernel artifact dir name, e.g. 5.14-rhel9.7-1.el9
+    kernel_version: str  # uname -r form, e.g. 5.14.0-503.ltvm.el9.x86_64
     os_family: str
-    source: str            # "stamp" | "os-release" | "explicit"
+    source: str  # "stamp" | "os-release" | "explicit"
 
 
 # ----------------------------------------------------------------------
@@ -134,7 +164,9 @@ def read_image_stamp(path: Path | None = None) -> LocalImage | None:
         log.warning(
             "Image stamp %s has schema %r, expected %r -- ignoring it; "
             "pass --target to say which target this machine is",
-            path, schema, IMAGE_STAMP_SCHEMA,
+            path,
+            schema,
+            IMAGE_STAMP_SCHEMA,
         )
         return None
     try:
@@ -307,7 +339,7 @@ def check_in_lustre_tree(path: Path | None = None) -> Path:
     matching half of that pair.  Running either from somewhere else
     is a mistake worth catching before anything touches /.
     """
-    tree = (Path(path).expanduser().resolve() if path else Path.cwd())
+    tree = Path(path).expanduser().resolve() if path else Path.cwd()
     if not tree.is_dir():
         raise LocalInstallError(f"Not a directory: {tree}")
     missing = [m for m in _LUSTRE_TREE_MARKERS if not (tree / m).exists()]
@@ -353,11 +385,18 @@ def resolve_local_image(
             target = candidates[0]
             log.warning(
                 "No %s -- guessed target %r from /etc/os-release.  Pass "
-                "--target to be sure.", IMAGE_STAMP_PATH, target,
+                "--target to be sure.",
+                IMAGE_STAMP_PATH,
+                target,
             )
         image = LocalImage(
-            target=target, arch="", variant="base", kernel="",
-            kernel_version="", os_family="", source="os-release",
+            target=target,
+            arch="",
+            variant="base",
+            kernel="",
+            kernel_version="",
+            os_family="",
+            source="os-release",
         )
 
     target = explicit_target or image.target
@@ -379,7 +418,8 @@ def resolve_local_image(
         if wanted is not None:
             log.info(
                 "Matched running kernel %s to built kernel %s",
-                running_kernel(), wanted,
+                running_kernel(),
+                wanted,
             )
     kernel = tc.resolve_kernel(wanted)
     return LocalImage(
@@ -472,9 +512,7 @@ def staging_contents(staging: Path) -> tuple[list[str], list[str]]:
     return files, dirs
 
 
-def install_staging_into_root(
-    staging: Path, root: Path = Path("/")
-) -> None:
+def install_staging_into_root(staging: Path, root: Path = Path("/")) -> None:
     """Unpack the DESTDIR tree at *staging* onto *root*.
 
     tar rather than `cp -a`: `--keep-directory-symlink` stops the
@@ -495,10 +533,17 @@ def install_staging_into_root(
     assert src.stdout is not None
     try:
         dst = subprocess.Popen(
-            _sudo_argv([
-                "tar", "xf", "-", "-C", str(root),
-                "--keep-directory-symlink", "--no-same-owner",
-            ]),
+            _sudo_argv(
+                [
+                    "tar",
+                    "xf",
+                    "-",
+                    "-C",
+                    str(root),
+                    "--keep-directory-symlink",
+                    "--no-same-owner",
+                ]
+            ),
             stdin=src.stdout,
         )
     finally:
@@ -615,7 +660,8 @@ def unload_lustre_modules() -> tuple[bool, str]:
     still = loaded_lustre_modules()
     if still:
         return False, (
-            "still loaded after unload attempt: " + ", ".join(still)
+            "still loaded after unload attempt: "
+            + ", ".join(still)
             + " (unmount Lustre and stop any targets first)"
         )
     return True, "unloaded Lustre modules"
@@ -648,7 +694,7 @@ def remove_installed_files(files: list[str], root: Path = Path("/")) -> int:
             targets.append(str(p))
 
     for i in range(0, len(targets), _RM_CHUNK):
-        chunk = targets[i:i + _RM_CHUNK]
+        chunk = targets[i : i + _RM_CHUNK]
         r = sudo_run(["rm", "-f", *chunk], check=False, quiet=True)
         if r.returncode != 0:
             log.warning("rm exited %d: %s", r.returncode, r.stderr.strip())

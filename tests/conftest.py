@@ -40,9 +40,7 @@ def _write_targets_yaml(targets_dir: Path, data: dict | None = None) -> None:
     )
 
 
-def _make_config(
-    tmp_targets: Path, arch: str | None = None
-) -> TargetConfig:
+def _make_config(tmp_targets: Path, arch: str | None = None) -> TargetConfig:
     """Instantiate a TargetConfig with patched paths."""
     import ltvm_pkg.target_config as cfg
 
@@ -81,9 +79,7 @@ def _neutralize_container_preflight() -> object:
     podman state, so treat the preflight as a pass unless a test opts
     out by re-patching ``_preflight_container``.
     """
-    with patch(
-        "ltvm_pkg.cli.build._preflight_container", return_value=None
-    ):
+    with patch("ltvm_pkg.cli.build._preflight_container", return_value=None):
         yield
 
 
@@ -187,11 +183,11 @@ def make_fake_ko(modinfo: dict[str, str]) -> bytes:
 
     eh = bytearray(ehsize)
     eh[0:4] = b"\x7fELF"
-    eh[4] = 2          # ELFCLASS64
-    eh[5] = 1          # little endian
-    eh[6] = 1          # EV_CURRENT
-    struct.pack_into("<H", eh, 0x10, 1)        # e_type = ET_REL
-    struct.pack_into("<Q", eh, 0x28, shoff)    # e_shoff
+    eh[4] = 2  # ELFCLASS64
+    eh[5] = 1  # little endian
+    eh[6] = 1  # EV_CURRENT
+    struct.pack_into("<H", eh, 0x10, 1)  # e_type = ET_REL
+    struct.pack_into("<Q", eh, 0x28, shoff)  # e_shoff
     struct.pack_into("<HHH", eh, 0x3A, shentsize, shnum, 2)
 
     def sh(name_off: int, off: int, size: int) -> bytes:
@@ -201,11 +197,13 @@ def make_fake_ko(modinfo: dict[str, str]) -> bytes:
         struct.pack_into("<QQ", s, 0x18, off, size)
         return bytes(s)
 
-    return b"".join([
-        bytes(eh),
-        sh(0, 0, 0),                                   # SHN_UNDEF
-        sh(1, modinfo_off, len(entries)),              # ".modinfo"
-        sh(10, shstrtab_off, len(shstrtab)),           # ".shstrtab"
-        entries,
-        shstrtab,
-    ])
+    return b"".join(
+        [
+            bytes(eh),
+            sh(0, 0, 0),  # SHN_UNDEF
+            sh(1, modinfo_off, len(entries)),  # ".modinfo"
+            sh(10, shstrtab_off, len(shstrtab)),  # ".shstrtab"
+            entries,
+            shstrtab,
+        ]
+    )

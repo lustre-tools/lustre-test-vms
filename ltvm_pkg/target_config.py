@@ -72,18 +72,36 @@ _DEFAULTS = {
 # a misspelled key (e.g. 'configure_arg') would otherwise be silently
 # ignored by its accessor while still perturbing every artifact's
 # input hash via base_data -- the worst of both worlds.
-_KNOWN_TARGET_KEYS = frozenset({
-    "arch", "os_family", "os_name", "os_version", "container_image",
-    "configure_args", "default_mem", "kernel_deb_source",
-    "kernel_upstream", "kernels",
-    "lustre", "srpm_url", "status", "variants",
-})
+_KNOWN_TARGET_KEYS = frozenset(
+    {
+        "arch",
+        "os_family",
+        "os_name",
+        "os_version",
+        "container_image",
+        "configure_args",
+        "default_mem",
+        "kernel_deb_source",
+        "kernel_upstream",
+        "kernels",
+        "lustre",
+        "srpm_url",
+        "status",
+        "variants",
+    }
+)
 _KNOWN_KERNELS_KEYS = frozenset({"available", "config", "default"})
 _KNOWN_KERNEL_ENTRY_KEYS = frozenset({"name", "srpm_version"})
 _KNOWN_LUSTRE_KEYS = frozenset({"mode"})
-_KNOWN_VARIANT_KEYS = frozenset({
-    "container_overlay", "image_overlay", "kernel", "packages", "params",
-})
+_KNOWN_VARIANT_KEYS = frozenset(
+    {
+        "container_overlay",
+        "image_overlay",
+        "kernel",
+        "packages",
+        "params",
+    }
+)
 
 _COPY_RE = re.compile(r"^\s*COPY\s+(\S+)", re.MULTILINE)
 
@@ -123,9 +141,7 @@ class Variant:
         # Overlay paths in YAML are relative to the repo's targets/
         # directory so they can reference shared snippets.  We resolve
         # relative to TARGETS_DIR, not target_dir, for that reason.
-        self.container_overlay: Path | None = (
-            (TARGETS_DIR / co) if co else None
-        )
+        self.container_overlay: Path | None = (TARGETS_DIR / co) if co else None
         self.image_overlay: Path | None = (TARGETS_DIR / io) if io else None
         self.packages: list[str] = list(self._data.get("packages", []))
         self.params: dict[str, Any] = dict(self._data.get("params", {}))
@@ -241,7 +257,10 @@ def _warn_if_ambiguous(kernels_dir: Path, name: str, chosen: str) -> None:
     log.warning(
         "%r matches %d built kernels; using %s (also built: %s). "
         "Pass --kernel <full-name> to pick a specific one.",
-        name, len(matches), chosen, others,
+        name,
+        len(matches),
+        chosen,
+        others,
     )
 
 
@@ -441,7 +460,8 @@ class TargetConfig:
         # build/fetch header (describe_action), so a missing key would
         # otherwise crash with a raw KeyError mid-command.
         missing = [
-            k for k in ("os_name", "os_version", "container_image")
+            k
+            for k in ("os_name", "os_version", "container_image")
             if k not in self._data
         ]
         if missing:
@@ -662,7 +682,9 @@ class TargetConfig:
         per-kernel overrides (see :meth:`kernel_overrides`).  Only names
         are returned here.
         """
-        result = [self._kernel_entry_name(e) for e in self._raw_kernel_entries()]
+        result = [
+            self._kernel_entry_name(e) for e in self._raw_kernel_entries()
+        ]
         if self.default_kernel not in result:
             result.insert(0, self.default_kernel)
         return result

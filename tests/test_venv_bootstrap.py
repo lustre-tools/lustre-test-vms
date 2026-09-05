@@ -40,9 +40,7 @@ class TestVenvFloorHelper:
         (venv / "bin").mkdir(parents=True)
         py = venv / "bin" / "python"
         py.touch()
-        (venv / "pyvenv.cfg").write_text(
-            "home = /usr/bin\nversion = 3.12.13\n"
-        )
+        (venv / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 3.12.13\n")
         assert ltvm._venv_meets_floor(py, (3, 10)) is True
 
     def test_returns_false_for_old_python(self, tmp_path: Path) -> None:
@@ -50,9 +48,7 @@ class TestVenvFloorHelper:
         (venv / "bin").mkdir(parents=True)
         py = venv / "bin" / "python"
         py.touch()
-        (venv / "pyvenv.cfg").write_text(
-            "home = /usr/bin\nversion = 3.9.25\n"
-        )
+        (venv / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 3.9.25\n")
         assert ltvm._venv_meets_floor(py, (3, 10)) is False
 
     def test_missing_cfg_assumes_usable(self, tmp_path: Path) -> None:
@@ -74,9 +70,7 @@ class TestVenvFloorHelper:
         (venv / "pyvenv.cfg").write_text("home = /usr/bin\nversion = ???\n")
         assert ltvm._venv_meets_floor(py, (3, 10)) is True
 
-    def test_version_info_key_also_recognized(
-        self, tmp_path: Path
-    ) -> None:
+    def test_version_info_key_also_recognized(self, tmp_path: Path) -> None:
         """uv-style cfgs sometimes use 'version_info' instead of 'version'."""
         venv = tmp_path / ".venv"
         (venv / "bin").mkdir(parents=True)
@@ -106,9 +100,7 @@ class TestStaleVenvIntegration:
         (venv / "bin").mkdir(parents=True)
         # Touch a non-executable placeholder so .exists() is True.
         (venv / "bin" / "python").write_text("#!/bin/false\n")
-        (venv / "pyvenv.cfg").write_text(
-            "home = /usr/bin\nversion = 3.9.25\n"
-        )
+        (venv / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 3.9.25\n")
 
         # Stub script: mirror just the bootstrap.  Skip the rest of ltvm
         # so the test doesn't depend on yaml/argcomplete being absent

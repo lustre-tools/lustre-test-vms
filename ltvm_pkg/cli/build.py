@@ -207,8 +207,7 @@ def _cross_arch_warning(host: str, target: str) -> str:
     lines = [
         "",
         f"!!  Cross-compiling: host={host} target={target}",
-        "!!  These VM-image tools will be missing from the resulting "
-        "image:",
+        "!!  These VM-image tools will be missing from the resulting image:",
         bullets,
         "!!  Install them inside the VM via dnf if needed at test time.",
     ]
@@ -221,10 +220,8 @@ def _cross_arch_warning(host: str, target: str) -> str:
             "HVF can't",
             "!!  run x86_64 guests).  Expect ~10x slower boot, longer "
             "SSH waits",
-            "!!  (LTVM_SSH_TIMEOUT=600 recommended), and occasional "
-            "guest-side",
-            "!!  oddities that don't appear under KVM.  Use the native "
-            "aarch64",
+            "!!  (LTVM_SSH_TIMEOUT=600 recommended), and occasional guest-side",
+            "!!  oddities that don't appear under KVM.  Use the native aarch64",
             "!!  path for routine work.",
         ]
     return "\n".join(lines) + "\n"
@@ -282,7 +279,8 @@ def _cmd_build_all_body(
         tc,
         lustre_tree,
         force=args.force_compat,
-        kernel_build_tree=tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree",
+        kernel_build_tree=tc.kernel_output_dir(kernel=resolved_kernel)
+        / "build-tree",
         kernel=resolved_kernel,
     )
 
@@ -361,9 +359,7 @@ def _cmd_build_all_body(
     if skip_lustre and not use_json:
         print("==> Skipping Lustre build and snapshot (--skip-lustre)")
     if not skip_lustre and not use_json:
-        print(
-            f"==> Building Lustre against {full_kernel} kernel tree..."
-        )
+        print(f"==> Building Lustre against {full_kernel} kernel tree...")
     build_tree = tc.kernel_output_dir(kernel=full_kernel) / "build-tree"
     if not skip_lustre:
         try:
@@ -487,7 +483,9 @@ def cmd_build_kernel(args: argparse.Namespace) -> int:
         # tarball, and neither takes a Lustre patch series.
         lustre_tree = None
         if not tc.kernel_deb_source and not tc.is_upstream:
-            lustre_tree, err_msg = _cli_attr("_resolve_lustre_tree")(args.lustre_tree)
+            lustre_tree, err_msg = _cli_attr("_resolve_lustre_tree")(
+                args.lustre_tree
+            )
             if err_msg:
                 return _error(
                     err_msg,
@@ -505,7 +503,8 @@ def cmd_build_kernel(args: argparse.Namespace) -> int:
 
         if not use_json:
             _print_target_header(
-                tc, kernel=kernel,
+                tc,
+                kernel=kernel,
                 variant=getattr(args, "variant", None) or "base",
                 action="Building kernel",
             )
@@ -560,14 +559,16 @@ def cmd_build_mofed_kmods(args: argparse.Namespace) -> int:
 
     if not use_json:
         _print_target_header(
-            tc, kernel=getattr(args, "kernel", None),
+            tc,
+            kernel=getattr(args, "kernel", None),
             variant=tc.variant_name,
             action="Building MOFED kmods",
         )
 
     try:
         out_dir = build_mofed_kmods(
-            tc, kernel=getattr(args, "kernel", None),
+            tc,
+            kernel=getattr(args, "kernel", None),
             force=getattr(args, "force", False),
         )
     except (FileNotFoundError, ValueError, RuntimeError) as e:
@@ -620,14 +621,20 @@ def cmd_build_image(args: argparse.Namespace) -> int:
             # the two sides compute different staging keys and the image
             # build refuses to find staging the lustre build just produced.
             lustre_tree = (
-                Path(args.lustre_tree).resolve() if args.lustre_tree
+                Path(args.lustre_tree).resolve()
+                if args.lustre_tree
                 else Path(os.getcwd()).resolve()
             )
             candidate = staging_path(
-                lustre_tree, args.target, arch=tc.arch,
-                kernel=resolved_kernel, variant=tc.variant_name,
+                lustre_tree,
+                args.target,
+                arch=tc.arch,
+                kernel=resolved_kernel,
+                variant=tc.variant_name,
             )
-            build_tree = tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree"
+            build_tree = (
+                tc.kernel_output_dir(kernel=resolved_kernel) / "build-tree"
+            )
             if not candidate.exists():
                 hint_lines = [
                     f"checked: {candidate}",
@@ -667,7 +674,8 @@ def cmd_build_image(args: argparse.Namespace) -> int:
 
         if not use_json:
             _print_target_header(
-                tc, kernel=kernel,
+                tc,
+                kernel=kernel,
                 variant=getattr(args, "variant", None) or "base",
                 action="Building image",
             )
@@ -768,13 +776,9 @@ def cmd_clean(args: argparse.Namespace) -> int:
                 shutil.rmtree(p)
             except OSError as e:
                 return _error(f"Failed to remove {p}: {e}", use_json)
-            wiped.append(
-                {"path": str(p), "bytes": size, "removed": True}
-            )
+            wiped.append({"path": str(p), "bytes": size, "removed": True})
         else:
-            wiped.append(
-                {"path": str(p), "bytes": 0, "removed": False}
-            )
+            wiped.append({"path": str(p), "bytes": 0, "removed": False})
 
     result = {
         "target": target,
@@ -822,7 +826,9 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
         lustre_tree_arg = getattr(args, "lustre_tree_pos", None) or getattr(
             args, "lustre_tree", None
         )
-        lustre_tree, err_msg = _cli_attr("_resolve_lustre_tree")(lustre_tree_arg)
+        lustre_tree, err_msg = _cli_attr("_resolve_lustre_tree")(
+            lustre_tree_arg
+        )
         if err_msg:
             return _error(
                 err_msg,
@@ -866,7 +872,8 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
 
         if not use_json:
             _print_target_header(
-                tc, kernel=kernel,
+                tc,
+                kernel=kernel,
                 variant=tc.variant_name,
                 action="Building Lustre",
             )

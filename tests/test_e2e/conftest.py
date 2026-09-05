@@ -58,6 +58,7 @@ def _sudo_user_home() -> Path:
     if sudo_user:
         try:
             import pwd
+
             return Path(pwd.getpwnam(sudo_user).pw_dir)
         except (KeyError, ImportError):
             pass
@@ -70,10 +71,14 @@ def _sudo_user_home() -> Path:
 LUSTRE_TREE = _sudo_user_home() / "lustre-release"
 
 SSH_OPTS = [
-    "-o", "StrictHostKeyChecking=no",
-    "-o", "UserKnownHostsFile=/dev/null",
-    "-o", "ConnectTimeout=5",
-    "-o", "LogLevel=ERROR",
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "-o",
+    "ConnectTimeout=5",
+    "-o",
+    "LogLevel=ERROR",
 ]
 
 # Distinctive prefix so tests can't collide with hand-run dev VMs.
@@ -140,16 +145,18 @@ def pytest_collection_modifyitems(
         return
     # Only apply to items under this directory.
     here = Path(__file__).parent.resolve()
-    scoped = [it for it in items if here in Path(it.fspath).parents or
-              Path(it.fspath).parent == here]
+    scoped = [
+        it
+        for it in items
+        if here in Path(it.fspath).parents or Path(it.fspath).parent == here
+    ]
     if not scoped:
         return
 
     reason = None
     if os.geteuid() != 0:
         reason = (
-            "tests/test_e2e requires root; "
-            "run as `sudo pytest tests/test_e2e/`"
+            "tests/test_e2e requires root; run as `sudo pytest tests/test_e2e/`"
         )
     elif not LTVM_BIN.exists():
         reason = f"ltvm binary missing at {LTVM_BIN}"
@@ -187,7 +194,10 @@ def _destroy(name: str) -> None:
     try:
         subprocess.run(
             ["sudo", "-n", str(LTVM_BIN), "destroy", name],
-            check=False, capture_output=True, text=True, timeout=60,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
     except (OSError, subprocess.TimeoutExpired):
         pass
@@ -249,7 +259,10 @@ def _cluster_destroy(name: str) -> None:
     try:
         subprocess.run(
             ["sudo", "-n", str(LTVM_BIN), "cluster", "destroy", name],
-            check=False, capture_output=True, text=True, timeout=180,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=180,
         )
     except (OSError, subprocess.TimeoutExpired):
         pass
@@ -319,13 +332,14 @@ def run_ltvm(
     """
     return subprocess.run(
         ["sudo", "-n", str(LTVM_BIN), *args],
-        check=check, capture_output=True, text=True, timeout=timeout,
+        check=check,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
 
 
-def ssh_run(
-    name: str, command: str, timeout: int = 30
-) -> tuple[int, str, str]:
+def ssh_run(name: str, command: str, timeout: int = 30) -> tuple[int, str, str]:
     """Run `command` over ssh to the VM.  Returns (rc, stdout, stderr).
 
     We deliberately do NOT use -q so failure output is visible; we
@@ -334,7 +348,10 @@ def ssh_run(
     """
     proc = subprocess.run(
         ["ssh", *SSH_OPTS, name, command],
-        check=False, capture_output=True, text=True, timeout=timeout,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -416,9 +433,7 @@ def pytest_runtest_makereport(
 
     # Sanitise nodeid for path component.
     safe_id = item.nodeid.replace("/", "_").replace("::", "__")
-    safe_id = "".join(
-        c if c.isalnum() or c in "-._" else "_" for c in safe_id
-    )
+    safe_id = "".join(c if c.isalnum() or c in "-._" else "_" for c in safe_id)
     base_dir = FAILURE_CAPTURE_ROOT / safe_id
 
     for vm in vms:
@@ -433,7 +448,8 @@ def pytest_runtest_makereport(
             # Also capture pytest stderr/longrepr.
             longrepr = str(report.longrepr) if report.longrepr else ""
             (vm_dir / "pytest-longrepr.txt").write_text(
-                longrepr, encoding="utf-8",
+                longrepr,
+                encoding="utf-8",
             )
         except OSError:
             pass

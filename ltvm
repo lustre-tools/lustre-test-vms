@@ -23,8 +23,7 @@ if sys.version_info < (3, 10):
         "error: ltvm requires Python 3.10+; this is Python %d.%d.%d\n"  # noqa: UP031
         "hint (macOS):       brew install python@3.13  (or use pyenv)\n"
         "hint (Rocky/RHEL 8): dnf install python3.11 && "
-        "python3.11 ./ltvm <args>\n"
-        % sys.version_info[:3]
+        "python3.11 ./ltvm <args>\n" % sys.version_info[:3]
     )
     sys.exit(1)
 
@@ -439,7 +438,8 @@ def build_parser() -> argparse.ArgumentParser:
             "--lustre-tree", help="Path to Lustre source tree (default: cwd)"
         )
         sp.add_argument(
-            "-y", "--yes",
+            "-y",
+            "--yes",
             action="store_true",
             default=False,
             help="Skip the interactive 'Proceed?' confirmation",
@@ -574,8 +574,7 @@ def build_parser() -> argparse.ArgumentParser:
     target_parser = sub.add_parser(
         "target",
         parents=[common],
-        help="Target OS management "
-        "(list/show/clean/validate/fetch/publish)",
+        help="Target OS management (list/show/clean/validate/fetch/publish)",
     )
     target_sub = target_parser.add_subparsers(
         dest="target_action", metavar="<action>"
@@ -656,8 +655,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--remote",
         action="store_true",
         default=False,
-        help="Delete the published GitHub release instead of "
-        "local artifacts",
+        help="Delete the published GitHub release instead of local artifacts",
     )
     tdp.add_argument(
         "--all-arches",
@@ -680,8 +678,7 @@ def build_parser() -> argparse.ArgumentParser:
     _tdp_variant = tdp.add_argument(
         "--variant",
         default="base",
-        help="(--remote) Variant to select when resolving tag "
-        "(default: base)",
+        help="(--remote) Variant to select when resolving tag (default: base)",
     )
     _tdp_variant.completer = complete_variants  # type: ignore[attr-defined]
     tdp.add_argument(
@@ -699,7 +696,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="(--remote) Also delete the git tag",
     )
     tdp.add_argument(
-        "-y", "--yes",
+        "-y",
+        "--yes",
         action="store_true",
         default=False,
         help="(--remote) Confirm deletion (required for remote)",
@@ -794,32 +792,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_target_arg(tep, required=True)
     tep.add_argument(
-        "--output", "-o", default=None,
+        "--output",
+        "-o",
+        default=None,
         help="Output file (default: "
         "artifacts/<target>/<arch>/images/<kernel>/bootable-<kernel>.<ext>; "
         "gce-<kernel>.tar.gz for --format gce)",
     )
     tep.add_argument(
-        "--format", choices=["qcow2", "raw", "gce"], default="qcow2",
+        "--format",
+        choices=["qcow2", "raw", "gce"],
+        default="qcow2",
         help="Output format (default: qcow2).  'gce' writes the "
         "disk.raw tar.gz that Google Compute Engine's custom-image "
         "import expects, and configures the guest for DHCP.",
     )
     tep.add_argument(
-        "--disk-size-gb", dest="disk_size_gb", type=int, default=None,
+        "--disk-size-gb",
+        dest="disk_size_gb",
+        type=int,
+        default=None,
         help="Grow the exported disk to this many GiB instead of "
         "sizing it to the rootfs.  Must be at least as large as the "
         "rootfs needs.",
     )
     tep.add_argument(
-        "--ssh-key", dest="ssh_key", default=None,
+        "--ssh-key",
+        dest="ssh_key",
+        default=None,
         help="Public key file to append to root's authorized_keys "
         "inside the image.  Recommended for --format gce: GCE's "
         "metadata key injection needs a guest agent the image "
         "doesn't ship.",
     )
     tep.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Overwrite --output if it already exists",
     )
     tep.set_defaults(func=cmd_target_export)
@@ -1046,9 +1054,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="VM inspection and crash/snapshot ops "
         "(console-log/crash-collect/nmi/snapshot/restore)",
     )
-    vm_sub = vm_parser.add_subparsers(
-        dest="vm_action", metavar="<action>"
-    )
+    vm_sub = vm_parser.add_subparsers(dest="vm_action", metavar="<action>")
 
     vclp = vm_sub.add_parser(
         "console-log",
@@ -1294,7 +1300,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the Lustre source tree (default: cwd)",
     )
     sp.add_argument(
-        "--jobs", "-j", type=int, default=None,
+        "--jobs",
+        "-j",
+        type=int,
+        default=None,
         help="Parallel make jobs",
     )
     sp.add_argument(
@@ -1307,8 +1316,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser(
         "make-uninstall",
         parents=[common],
-        help="Remove the Lustre that `ltvm make-install` put on THIS "
-        "machine",
+        help="Remove the Lustre that `ltvm make-install` put on THIS machine",
     )
     _add_make_common(sp)
     sp.add_argument(
@@ -1338,7 +1346,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the Lustre source tree (default: cwd)",
     )
     sp.add_argument(
-        "--jobs", "-j", type=int, default=None,
+        "--jobs",
+        "-j",
+        type=int,
+        default=None,
         help="Parallel make jobs",
     )
     sp.add_argument(
@@ -1356,7 +1367,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # -- llmount --
     sp = sub.add_parser(
-        "llmount", parents=[common], help="Mount (or unmount) Lustre inside a VM"
+        "llmount",
+        parents=[common],
+        help="Mount (or unmount) Lustre inside a VM",
     )
     _llm_vm = sp.add_argument("vm", help="VM name")
     _llm_vm.completer = complete_vms  # type: ignore[attr-defined]
@@ -1537,9 +1550,7 @@ def main() -> int:
     except ImportError:
         pass
     args = parser.parse_args(
-        _join_dash_valued_options(
-            sys.argv[1:], _known_option_strings(parser)
-        )
+        _join_dash_valued_options(sys.argv[1:], _known_option_strings(parser))
     )
 
     level = logging.DEBUG if getattr(args, "verbose", False) else logging.INFO

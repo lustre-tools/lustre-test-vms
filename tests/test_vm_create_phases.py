@@ -102,8 +102,13 @@ def _make_arts(tmp_vmdir: Path, kver_name: str = "5.14") -> MagicMock:
 
 
 @contextmanager
-def _create_env(tmp_vmdir: Path, *, run_rc: int = 0, meta: dict | None = None,
-                run_side_effect: Any = None) -> Iterator[dict]:
+def _create_env(
+    tmp_vmdir: Path,
+    *,
+    run_rc: int = 0,
+    meta: dict | None = None,
+    run_side_effect: Any = None,
+) -> Iterator[dict]:
     """Full mock scaffold for driving cmd_create through disk alloc
     and launch without touching real QEMU / SSH / IP alloc.
 
@@ -131,7 +136,9 @@ def _create_env(tmp_vmdir: Path, *, run_rc: int = 0, meta: dict | None = None,
 
     with (
         patch("ltvm_pkg.vm_commands.resolve_os_artifacts", return_value=arts),
-        patch("ltvm_pkg.vm_commands.alloc_ip", side_effect=fake_alloc) as m_alloc,
+        patch(
+            "ltvm_pkg.vm_commands.alloc_ip", side_effect=fake_alloc
+        ) as m_alloc,
         patch("ltvm_pkg.vm_commands.tap_for_name", return_value="tap-x"),
         patch(
             "ltvm_pkg.vm_commands.mac_for_name",
@@ -208,9 +215,7 @@ class TestCreateDiskAllocation:
         """--disk-size 200M threads to VMInfo.disk_size (208 MiB)."""
         with _create_env(tmp_vmdir) as env:
             vm_commands.cmd_create(
-                _create_args(
-                    name="co1-200m", mdt_disks=1, disk_size="200M"
-                )
+                _create_args(name="co1-200m", mdt_disks=1, disk_size="200M")
             )
         vm = VMInfo.load("co1-200m")
         assert vm.disk_size == 200 * (1 << 20)
@@ -301,13 +306,13 @@ class TestCreateKernelResolution:
 class TestCreateNicValidation:
     """--nic specs are validated before any VM state is written."""
 
-    def test_invalid_nic_dies_before_allocation(
-        self, tmp_vmdir: Path
-    ) -> None:
+    def test_invalid_nic_dies_before_allocation(self, tmp_vmdir: Path) -> None:
         """An unknown --nic type must die before alloc_ip / disks / .info."""
         arts = _make_arts(tmp_vmdir)
         with (
-            patch("ltvm_pkg.vm_commands.resolve_os_artifacts", return_value=arts),
+            patch(
+                "ltvm_pkg.vm_commands.resolve_os_artifacts", return_value=arts
+            ),
             patch("ltvm_pkg.vm_commands.alloc_ip") as m_alloc,
             patch("ltvm_pkg.vm_commands.run") as m_run,
             pytest.raises(SystemExit),
@@ -321,9 +326,7 @@ class TestCreateNicValidation:
 
     def test_tcp_nic_persisted_on_vminfo(self, tmp_vmdir: Path) -> None:
         with _create_env(tmp_vmdir):
-            vm_commands.cmd_create(
-                _create_args(name="co1-tcp", nic=["tcp"])
-            )
+            vm_commands.cmd_create(_create_args(name="co1-tcp", nic=["tcp"]))
         vm = VMInfo.load("co1-tcp")
         assert vm.nics == ["tcp"]
 
@@ -335,15 +338,15 @@ class TestCreateNicValidation:
         # wouldn't die for a different reason than IOMMU.
         bdf = "0000:85:00.1"
         with (
-            patch("ltvm_pkg.vm_commands.resolve_os_artifacts", return_value=arts),
+            patch(
+                "ltvm_pkg.vm_commands.resolve_os_artifacts", return_value=arts
+            ),
             patch("ltvm_pkg.vm_commands.alloc_ip") as m_alloc,
             patch("ltvm_pkg.vfio.iommu_enabled", return_value=False),
             pytest.raises(SystemExit),
         ):
             vm_commands.cmd_create(
-                _create_args(
-                    name="co1-pt-iommu", nic=[f"passthrough:{bdf}"]
-                )
+                _create_args(name="co1-pt-iommu", nic=[f"passthrough:{bdf}"])
             )
         m_alloc.assert_not_called()
 
@@ -351,7 +354,9 @@ class TestCreateNicValidation:
         """passthrough NIC with a non-existent BDF dies before alloc."""
         arts = _make_arts(tmp_vmdir)
         with (
-            patch("ltvm_pkg.vm_commands.resolve_os_artifacts", return_value=arts),
+            patch(
+                "ltvm_pkg.vm_commands.resolve_os_artifacts", return_value=arts
+            ),
             patch("ltvm_pkg.vm_commands.alloc_ip") as m_alloc,
             patch("ltvm_pkg.vfio.iommu_enabled", return_value=True),
             pytest.raises(SystemExit),
@@ -486,7 +491,9 @@ class TestCreateRollback:
 
         run_ok = MagicMock(returncode=0, stdout="", stderr="")
         with (
-            patch("ltvm_pkg.vm_commands.resolve_os_artifacts", return_value=arts),
+            patch(
+                "ltvm_pkg.vm_commands.resolve_os_artifacts", return_value=arts
+            ),
             patch("ltvm_pkg.vm_commands.alloc_ip", side_effect=fake_alloc),
             patch("ltvm_pkg.vm_commands.tap_for_name", return_value="tap-x"),
             patch(
@@ -509,15 +516,11 @@ class TestCreateRollback:
             ),
             pytest.raises(RuntimeError, match="qemu boom"),
         ):
-            vm_commands.cmd_create(
-                _create_args(name="co1-fails", mdt_disks=1)
-            )
+            vm_commands.cmd_create(_create_args(name="co1-fails", mdt_disks=1))
         # .info gone, overlay gone, disk gone
         assert not (tmp_vmdir / "sockets" / "co1-fails.info").exists()
         assert not (tmp_vmdir / "overlays" / "co1-fails.qcow2").exists()
-        assert not (
-            tmp_vmdir / "overlays" / "co1-fails-disk1.img"
-        ).exists()
+        assert not (tmp_vmdir / "overlays" / "co1-fails-disk1.img").exists()
 
     def test_launch_failure_preserves_qemu_log(
         self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
@@ -544,7 +547,9 @@ class TestCreateRollback:
             raise RuntimeError("launch failed")
 
         with (
-            patch("ltvm_pkg.vm_commands.resolve_os_artifacts", return_value=arts),
+            patch(
+                "ltvm_pkg.vm_commands.resolve_os_artifacts", return_value=arts
+            ),
             patch("ltvm_pkg.vm_commands.alloc_ip", side_effect=fake_alloc),
             patch("ltvm_pkg.vm_commands.tap_for_name", return_value="tap-y"),
             patch(

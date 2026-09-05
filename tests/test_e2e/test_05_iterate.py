@@ -28,18 +28,21 @@ from .conftest import LUSTRE_TREE, run_ltvm, ssh_run, wait_ssh
 
 def test_deploy_lustre_is_idempotent(vm_name) -> None:  # type: ignore[no-untyped-def]
     """Two back-to-back deploy-lustres: mount survives, version stays same."""
-    assert LUSTRE_TREE.is_dir(), (
-        f"~/lustre-release missing at {LUSTRE_TREE}"
-    )
+    assert LUSTRE_TREE.is_dir(), f"~/lustre-release missing at {LUSTRE_TREE}"
 
     name = vm_name()
 
     proc = run_ltvm(
-        "create", name,
-        "--mem", "2048",
-        "--vcpus", "2",
-        "--mdt-disks", "1",
-        "--ost-disks", "2",
+        "create",
+        name,
+        "--mem",
+        "2048",
+        "--vcpus",
+        "2",
+        "--mdt-disks",
+        "1",
+        "--ost-disks",
+        "2",
         timeout=240,
     )
     assert proc.returncode == 0, (
@@ -50,8 +53,10 @@ def test_deploy_lustre_is_idempotent(vm_name) -> None:  # type: ignore[no-untype
 
     # First deploy + mount.
     proc = run_ltvm(
-        "deploy-lustre", name,
-        "--build", str(LUSTRE_TREE),
+        "deploy-lustre",
+        name,
+        "--build",
+        str(LUSTRE_TREE),
         "--mount",
         timeout=600,
     )
@@ -88,8 +93,10 @@ def test_deploy_lustre_is_idempotent(vm_name) -> None:  # type: ignore[no-untype
     # because the mount is already up; if deploy still tries to
     # re-run llmount.sh that'd be an idempotency bug worth catching.
     proc = run_ltvm(
-        "deploy-lustre", name,
-        "--build", str(LUSTRE_TREE),
+        "deploy-lustre",
+        name,
+        "--build",
+        str(LUSTRE_TREE),
         timeout=600,
     )
     assert proc.returncode == 0, (

@@ -110,6 +110,7 @@ def _podman_platform(target_config: TargetConfig) -> list[str]:
     if not _is_cross_build(target_config):
         return []
     from .cross_compile import podman_platform_for
+
     return ["--platform", podman_platform_for(target_config.arch)]
 
 
@@ -253,6 +254,7 @@ def _lustre_staging_hash_input(staging: Path) -> bytes:
 
 def _is_macos_build_host() -> bool:
     import sys as _sys
+
     return _sys.platform == "darwin"
 
 
@@ -305,8 +307,19 @@ def _stage_subtree(
         # falls outside the machine's subuid range, e.g. LDAP uids).
         env = {**os.environ, "COPYFILE_DISABLE": "1"}
         subprocess.run(
-            ["tar", "--numeric-owner", "--uid", "0", "--gid", "0",
-             "-C", str(src), "-czf", str(archive), "."],
+            [
+                "tar",
+                "--numeric-owner",
+                "--uid",
+                "0",
+                "--gid",
+                "0",
+                "-C",
+                str(src),
+                "-czf",
+                str(archive),
+                ".",
+            ],
             env=env,
             check=True,
         )
@@ -339,9 +352,7 @@ def _lustre_inject_lines(
     """
     lines: list[str] = []
 
-    modules_src = (
-        staging / "lib" / "modules" / kver / "extra"
-    )
+    modules_src = staging / "lib" / "modules" / kver / "extra"
     if modules_src.is_dir():
         lines.append(
             _stage_subtree(
@@ -385,8 +396,7 @@ def _lustre_inject_lines(
     # but currently all our targets share this invocation.
     _ = os_family
     lines.append(
-        "RUN ln -sf mount.lustre "
-        "/usr/sbin/mount.lustre_tgt 2>/dev/null || true"
+        "RUN ln -sf mount.lustre /usr/sbin/mount.lustre_tgt 2>/dev/null || true"
     )
     return lines
 
@@ -515,12 +525,12 @@ def build_image(
     # not).  Their hash folds into the image hash so changing kernel or
     # mofed_version invalidates the image.
     from .target_config import DEFAULT_VARIANT
+
     mofed_kmods_dir: Path | None = None
     mofed_kmods_hash_input: bytes = b""
-    if target_config.variant_name != DEFAULT_VARIANT and \
-            target_config.variant(target_config.variant_name).params.get(
-                "mofed_version"
-            ):
+    if target_config.variant_name != DEFAULT_VARIANT and target_config.variant(
+        target_config.variant_name
+    ).params.get("mofed_version"):
         from .mofed_kmod_build import (
             build_mofed_kmods,
         )
@@ -530,12 +540,18 @@ def build_image(
         from .mofed_kmod_build import (
             mofed_kmod_dir as _mofed_kmod_dir,
         )
+
         mofed_kmods_dir = _mofed_kmod_dir(target_config, kernel)
-        if force or _mofed_is_stale(target_config, kernel) or \
-                not any(mofed_kmods_dir.glob("*.rpm")):
+        if (
+            force
+            or _mofed_is_stale(target_config, kernel)
+            or not any(mofed_kmods_dir.glob("*.rpm"))
+        ):
             log.info("MOFED kmods missing or stale -- building first...")
             mofed_kmods_dir = build_mofed_kmods(
-                target_config, kernel=kernel, force=force,
+                target_config,
+                kernel=kernel,
+                force=force,
             )
         # Hash the produced RPM names + sizes so image rebuilds when
         # the kmod set changes (e.g. mofed_version bump).
@@ -560,9 +576,7 @@ def build_image(
             kernel=kernel_name,
             variant=target_config.variant_name,
         )
-        if not lustre_staging.is_dir() or not any(
-            lustre_staging.rglob("*.ko")
-        ):
+        if not lustre_staging.is_dir() or not any(lustre_staging.rglob("*.ko")):
             raise FileNotFoundError(
                 f"No Lustre staging at {lustre_staging} -- "
                 f"run: ltvm build lustre {target_config.name} "
@@ -760,9 +774,19 @@ def build_image(
                     # host uid in the rootless userns (see _stage_subtree).
                     env = {**os.environ, "COPYFILE_DISABLE": "1"}
                     subprocess.run(
-                        ["tar", "--numeric-owner", "--uid", "0", "--gid",
-                         "0", "-C", str(mod_dest), "-czf",
-                         str(archive), "."],
+                        [
+                            "tar",
+                            "--numeric-owner",
+                            "--uid",
+                            "0",
+                            "--gid",
+                            "0",
+                            "-C",
+                            str(mod_dest),
+                            "-czf",
+                            str(archive),
+                            ".",
+                        ],
                         env=env,
                         check=True,
                     )
@@ -814,7 +838,8 @@ def build_image(
                 for rpm in mofed_kmods_dir.glob("*.rpm"):
                     shutil.copy2(rpm, kmod_dest / rpm.name)
                 log.info(
-                    "Including %d MOFED kmod RPMs", len(list(kmod_dest.iterdir()))
+                    "Including %d MOFED kmod RPMs",
+                    len(list(kmod_dest.iterdir())),
                 )
                 lines.append("COPY mofed-kmods/ /tmp/mofed-kmods/")
                 # --nodeps because the kmod RPMs Require kernel-core =
@@ -1055,13 +1080,17 @@ def _export_to_ext4(
                 f"-d $ROOTFS /tmp/out.ext4 {size_mb}M >&2; "
                 "cat /tmp/out.ext4"
             )
-            with open(str(tarball), "rb") as fin, \
-                    open(tmpfile, "wb") as fout:
+            with open(str(tarball), "rb") as fin, open(tmpfile, "wb") as fout:
                 subprocess.run(
                     [
-                        "podman", "run", "--rm", "-i",
+                        "podman",
+                        "run",
+                        "--rm",
+                        "-i",
                         container_tag,
-                        "bash", "-c", in_container_script,
+                        "bash",
+                        "-c",
+                        in_container_script,
                     ],
                     stdin=fin,
                     stdout=fout,
@@ -1193,9 +1222,7 @@ def image_status(
         variant: str -- variant name this image belongs to
     """
 
-    variant_name = (
-        target_config.variant_name if variant is None else variant
-    )
+    variant_name = target_config.variant_name if variant is None else variant
     kernel_name = target_config.resolve_kernel(kernel)
     out_dir = target_config.image_output_dir(kernel, variant=variant_name)
     image_path = out_dir / "base.ext4"

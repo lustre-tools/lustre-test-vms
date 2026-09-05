@@ -20,6 +20,7 @@ def _force_linux_host() -> Any:
     checks can run on macOS.  These tests drive the Linux code paths;
     without this pin they'd fail when the test runner is Darwin.
     """
+
     def routed_sudo_run(cmd, *, check=True, quiet=False):
         return qemu_run.run(cmd, check=check, capture_output=quiet)
 
@@ -528,7 +529,7 @@ class TestForceTcg:
     def test_cpu_model_is_concrete_when_forced(
         self, tmp_vmdir: Path, monkeypatch: Any
     ) -> None:
-        """"-cpu host" is invalid without a hardware accelerator.
+        """ "-cpu host" is invalid without a hardware accelerator.
 
         Under TCG the model must be a real one or QEMU refuses to start,
         so the arch-matches-host shortcut has to be skipped.

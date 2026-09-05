@@ -189,9 +189,7 @@ class TestCmdPrune:
         arch_dir = tmp_targets / "artifacts" / "rocky9" / "x86_64"
         # Kernel that survives:
         _make_kernel_dir(arch_dir, "5.14-rhel9.7-5.14.0-611.49.1.el9_7")
-        orphan = _make_image_dir(
-            arch_dir, "5.14-rhel9.5-5.14.0-503.40.1.el9_5"
-        )
+        orphan = _make_image_dir(arch_dir, "5.14-rhel9.5-5.14.0-503.40.1.el9_5")
 
         rc = _run_prune(tmp_targets, target="rocky9", apply=True)
         assert rc == EXIT_OK
@@ -283,9 +281,7 @@ class TestCmdPrune:
         """--force lifts the protected-group guard so even the only
         entry in the default-kernel group can be removed."""
         arch_dir = tmp_targets / "artifacts" / "rocky9" / "x86_64"
-        only = _make_kernel_dir(
-            arch_dir, "5.14-rhel9.7-5.14.0-611.49.1.el9_7"
-        )
+        only = _make_kernel_dir(arch_dir, "5.14-rhel9.7-5.14.0-611.49.1.el9_7")
 
         rc = _run_prune(
             tmp_targets, target="rocky9", apply=True, keep=0, force=True

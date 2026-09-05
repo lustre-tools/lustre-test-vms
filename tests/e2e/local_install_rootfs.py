@@ -64,22 +64,28 @@ print(f"== Host: {os.uname().sysname} {kver}, root={os.geteuid() == 0}")
 
 # ---------------------------------------------------------------- 0
 print("\n== 0. Preconditions (this is a real RHEL-family rootfs)")
-check("/lib is a symlink (the case that makes tar -C / dangerous)",
-      Path("/lib").is_symlink())
+check(
+    "/lib is a symlink (the case that makes tar -C / dangerous)",
+    Path("/lib").is_symlink(),
+)
 check("running as root", os.geteuid() == 0)
 
 # ---------------------------------------------------------------- 1
 print("\n== 1. Machine identity")
-Path("/etc/ltvm-image.json").write_text(json.dumps({
-    "schema": IMAGE_STAMP_SCHEMA,
-    "target": "rocky9",
-    "arch": os.uname().machine,
-    "variant": "base",
-    "kernel": "5.14-rhel9.7-1.el9",
-    "kernel_version": kver,
-    "os_family": "rhel",
-    "built": 1,
-}))
+Path("/etc/ltvm-image.json").write_text(
+    json.dumps(
+        {
+            "schema": IMAGE_STAMP_SCHEMA,
+            "target": "rocky9",
+            "arch": os.uname().machine,
+            "variant": "base",
+            "kernel": "5.14-rhel9.7-1.el9",
+            "kernel_version": kver,
+            "os_family": "rhel",
+            "built": 1,
+        }
+    )
+)
 img = read_image_stamp()
 check("stamp reads back", img is not None and img.target == "rocky9")
 try:
@@ -98,7 +104,9 @@ mod_dir.mkdir(parents=True)
 (staging / "usr" / "lib64").mkdir(parents=True)
 (staging / "etc").mkdir(parents=True)
 
-(staging / "usr" / "sbin" / "mount.lustre").write_text("#!/bin/sh\necho mount\n")
+(staging / "usr" / "sbin" / "mount.lustre").write_text(
+    "#!/bin/sh\necho mount\n"
+)
 os.chmod(staging / "usr" / "sbin" / "mount.lustre", 0o755)
 (staging / "usr" / "bin" / "lfs").write_text("#!/bin/sh\necho lfs\n")
 os.chmod(staging / "usr" / "bin" / "lfs", 0o755)
@@ -115,12 +123,20 @@ Path(f"/lib/modules/{kver}/extra").mkdir(parents=True, exist_ok=True)
 Path(f"/lib/modules/{kver}/extra/UNRELATED.ko").write_bytes(b"keep")
 
 files, dirs = staging_contents(staging)
-check("inventory found the module", f"lib/modules/{kver}/extra/lustre/lustre.ko" in files)
+check(
+    "inventory found the module",
+    f"lib/modules/{kver}/extra/lustre/lustre.ko" in files,
+)
 check("inventory found the symlink", "usr/sbin/mount.lustre_tgt" in files)
-check("inventory skipped the build marker",
-      not any(f.startswith(".ltvm-") for f in files))
-check("dirs are deepest-first",
-      [d.count("/") for d in dirs] == sorted([d.count("/") for d in dirs], reverse=True))
+check(
+    "inventory skipped the build marker",
+    not any(f.startswith(".ltvm-") for f in files),
+)
+check(
+    "dirs are deepest-first",
+    [d.count("/") for d in dirs]
+    == sorted([d.count("/") for d in dirs], reverse=True),
+)
 
 # ---------------------------------------------------------------- 3
 print("\n== 3. Install onto the real /")
@@ -129,36 +145,65 @@ run_depmod_ldconfig(kver)
 
 check("/lib is STILL a symlink after extraction", Path("/lib").is_symlink())
 check("mount.lustre installed", Path("/usr/sbin/mount.lustre").is_file())
-check("mount.lustre is executable",
-      os.access("/usr/sbin/mount.lustre", os.X_OK))
-check("mount.lustre actually runs",
-      subprocess.run(["/usr/sbin/mount.lustre"], capture_output=True,
-                     text=True).stdout.strip() == "mount")
+check(
+    "mount.lustre is executable", os.access("/usr/sbin/mount.lustre", os.X_OK)
+)
+check(
+    "mount.lustre actually runs",
+    subprocess.run(
+        ["/usr/sbin/mount.lustre"], capture_output=True, text=True
+    ).stdout.strip()
+    == "mount",
+)
 check("lfs installed", Path("/usr/bin/lfs").is_file())
-check("symlink preserved as a symlink",
-      Path("/usr/sbin/mount.lustre_tgt").is_symlink())
+check(
+    "symlink preserved as a symlink",
+    Path("/usr/sbin/mount.lustre_tgt").is_symlink(),
+)
 check("library installed", Path("/usr/lib64/liblustreapi.so").is_file())
 check("config installed", Path("/etc/ldev.conf").is_file())
-check("module landed through the /lib symlink",
-      Path(f"/usr/lib/modules/{kver}/extra/lustre/lustre.ko").is_file())
+check(
+    "module landed through the /lib symlink",
+    Path(f"/usr/lib/modules/{kver}/extra/lustre/lustre.ko").is_file(),
+)
 check("sentinel binary untouched", Path("/usr/sbin/UNRELATED-BINARY").is_file())
-check("sentinel module untouched",
-      Path(f"/lib/modules/{kver}/extra/UNRELATED.ko").is_file())
+check(
+    "sentinel module untouched",
+    Path(f"/lib/modules/{kver}/extra/UNRELATED.ko").is_file(),
+)
 
 write_manifest(
-    LocalImage("rocky9", os.uname().machine, "base", "5.14-rhel9.7-1.el9",
-               kver, "rhel", "stamp"),
-    staging, Path("/root/lustre-release"), kver, files, dirs,
+    LocalImage(
+        "rocky9",
+        os.uname().machine,
+        "base",
+        "5.14-rhel9.7-1.el9",
+        kver,
+        "rhel",
+        "stamp",
+    ),
+    staging,
+    Path("/root/lustre-release"),
+    kver,
+    files,
+    dirs,
 )
 m = read_manifest()
-check("manifest written and re-read", m is not None and len(m["files"]) == len(files))
-check("manifest at the documented path",
-      Path("/var/lib/ltvm/lustre-install.json").is_file())
+check(
+    "manifest written and re-read",
+    m is not None and len(m["files"]) == len(files),
+)
+check(
+    "manifest at the documented path",
+    Path("/var/lib/ltvm/lustre-install.json").is_file(),
+)
 
 # ---------------------------------------------------------------- 4
 print("\n== 4. Uninstall")
-check("no Lustre modules loaded (nothing real to unload)",
-      loaded_lustre_modules() == [])
+check(
+    "no Lustre modules loaded (nothing real to unload)",
+    loaded_lustre_modules() == [],
+)
 removed = remove_installed_files(m["files"])
 pruned = prune_empty_dirs(m["dirs"])
 run_depmod_ldconfig(m["kernel_version"])
@@ -169,20 +214,30 @@ check("mount.lustre gone", not Path("/usr/sbin/mount.lustre").exists())
 check("symlink gone", not Path("/usr/sbin/mount.lustre_tgt").is_symlink())
 check("library gone", not Path("/usr/lib64/liblustreapi.so").exists())
 check("config gone", not Path("/etc/ldev.conf").exists())
-check("module gone (removed through the /lib symlink)",
-      not Path(f"/usr/lib/modules/{kver}/extra/lustre/lustre.ko").exists())
-check("lustre module dir pruned",
-      not Path(f"/lib/modules/{kver}/extra/lustre").exists())
+check(
+    "module gone (removed through the /lib symlink)",
+    not Path(f"/usr/lib/modules/{kver}/extra/lustre/lustre.ko").exists(),
+)
+check(
+    "lustre module dir pruned",
+    not Path(f"/lib/modules/{kver}/extra/lustre").exists(),
+)
 
-check("SENTINEL binary survived uninstall",
-      Path("/usr/sbin/UNRELATED-BINARY").is_file())
-check("SENTINEL module survived uninstall",
-      Path(f"/lib/modules/{kver}/extra/UNRELATED.ko").is_file())
+check(
+    "SENTINEL binary survived uninstall",
+    Path("/usr/sbin/UNRELATED-BINARY").is_file(),
+)
+check(
+    "SENTINEL module survived uninstall",
+    Path(f"/lib/modules/{kver}/extra/UNRELATED.ko").is_file(),
+)
 check("shared dir /usr/sbin NOT pruned", Path("/usr/sbin").is_dir())
 check("shared dir /etc NOT pruned", Path("/etc").is_dir())
 check("/lib STILL a symlink after uninstall", Path("/lib").is_symlink())
-check("system still works (ls runs)",
-      subprocess.run(["ls", "/"], capture_output=True).returncode == 0)
+check(
+    "system still works (ls runs)",
+    subprocess.run(["ls", "/"], capture_output=True).returncode == 0,
+)
 
 # ---------------------------------------------------------------- 5
 print("\n== 5. CLI uninstall path, with no manifest left")
@@ -193,13 +248,26 @@ from ltvm_pkg.cli.make import (  # noqa: E402
 )
 from ltvm_pkg.priv import sudo_run  # noqa: E402
 
-sudo_run(["rm", "-f", "/var/lib/ltvm/lustre-install.json"], check=False, quiet=True)
-ns = argparse.Namespace(json=False, target=None, variant=None, kernel=None,
-                        arch=None, force=False, force_compat=False,
-                        lustre_tree=None, jobs=None, rebuild=False,
-                        no_unload=False)
-check("make-uninstall with nothing installed is a clean error",
-      cmd_make_uninstall(ns) != 0)
+sudo_run(
+    ["rm", "-f", "/var/lib/ltvm/lustre-install.json"], check=False, quiet=True
+)
+ns = argparse.Namespace(
+    json=False,
+    target=None,
+    variant=None,
+    kernel=None,
+    arch=None,
+    force=False,
+    force_compat=False,
+    lustre_tree=None,
+    jobs=None,
+    rebuild=False,
+    no_unload=False,
+)
+check(
+    "make-uninstall with nothing installed is a clean error",
+    cmd_make_uninstall(ns) != 0,
+)
 
 print("\n" + "=" * 60)
 if FAILS:

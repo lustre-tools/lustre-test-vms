@@ -101,8 +101,14 @@ class TestBuildTargetForms:
 
     def test_build_lustre_flag(self, tmp_path: Path) -> None:
         args = _parse(
-            ["build", "lustre", "--target", "rocky9",
-             "--lustre-tree", str(tmp_path)]
+            [
+                "build",
+                "lustre",
+                "--target",
+                "rocky9",
+                "--lustre-tree",
+                str(tmp_path),
+            ]
         )
         assert args.target == "rocky9"
 
@@ -225,9 +231,7 @@ class TestDeployLustreTargetForms:
         args = _parse(["deploy-lustre", "vm1"])
         assert args.target is None
 
-    def test_deploy_conflict(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
+    def test_deploy_conflict(self, capsys: pytest.CaptureFixture[str]) -> None:
         _parse_expect_conflict(
             ["deploy-lustre", "vm1", "rocky9", "--target", "rocky10"], capsys
         )
@@ -307,8 +311,14 @@ class TestClusterCreateTargetForms:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         rc, ns = self._run(
-            ["cluster", "create", "co9", "--target", "rocky9",
-             "mgs+mds:co9-mds:1"],
+            [
+                "cluster",
+                "create",
+                "co9",
+                "--target",
+                "rocky9",
+                "mgs+mds:co9-mds:1",
+            ],
             capsys,
         )
         assert rc == 0, capsys.readouterr()
@@ -332,8 +342,15 @@ class TestClusterCreateTargetForms:
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
         rc, ns = self._run(
-            ["cluster", "create", "co9", "rocky9", "--target", "rocky10",
-             "mgs+mds:co9-mds:1"],
+            [
+                "cluster",
+                "create",
+                "co9",
+                "rocky9",
+                "--target",
+                "rocky10",
+                "mgs+mds:co9-mds:1",
+            ],
             capsys,
         )
         assert rc != 0

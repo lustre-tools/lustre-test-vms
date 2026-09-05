@@ -83,7 +83,9 @@ def elf_build_id(path) -> str | None:
     try:
         out = subprocess.run(
             ["readelf", "-n", str(path)],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True,
+            text=True,
+            timeout=120,
         ).stdout
     except Exception:
         return None
@@ -91,6 +93,7 @@ def elf_build_id(path) -> str | None:
         if "Build ID" in line:
             return line.split(":")[-1].strip() or None
     return None
+
 
 if TYPE_CHECKING:
     from .target_config import TargetConfig
@@ -117,15 +120,15 @@ def _kernel_build_jobs() -> int:
             pass
     cores = os.cpu_count() or 4
     import sys as _sys
+
     if _sys.platform == "darwin":
         return min(cores, 4)
     return cores
 
+
 INNER_SCRIPT = Path(__file__).parent / "kernel-build-inner.sh"
 INNER_SCRIPT_DEB = Path(__file__).parent / "kernel-build-inner-deb.sh"
-INNER_SCRIPT_UPSTREAM = (
-    Path(__file__).parent / "kernel-build-inner-upstream.sh"
-)
+INNER_SCRIPT_UPSTREAM = Path(__file__).parent / "kernel-build-inner-upstream.sh"
 
 
 def _kernel_outputs_complete(kernel_out: Path) -> bool:
@@ -141,12 +144,13 @@ def _kernel_outputs_complete(kernel_out: Path) -> bool:
     if not (kernel_out / "build-tree" / ".config").exists():
         return False
     modules_dir = kernel_out / "modules"
-    return modules_dir.is_dir() and next(modules_dir.rglob("*.ko"), None) is not None
+    return (
+        modules_dir.is_dir()
+        and next(modules_dir.rglob("*.ko"), None) is not None
+    )
 
 
-def _run_kernel_podman(
-    container_cmd: list[str], kernel_out: Path
-) -> None:
+def _run_kernel_podman(container_cmd: list[str], kernel_out: Path) -> None:
     """Run a kernel-build podman container, tolerating cleanup EOF.
 
     When podman exits non-zero after the inner build succeeded (macOS
@@ -157,7 +161,9 @@ def _run_kernel_podman(
     r = run_podman_with_cleanup(container_cmd, check=True)
     if r.returncode == 0:
         return
-    if getattr(r, "cleanup_eof", False) and _kernel_outputs_complete(kernel_out):
+    if getattr(r, "cleanup_eof", False) and _kernel_outputs_complete(
+        kernel_out
+    ):
         log.warning(
             "Kernel build finished but podman cleanup exited %d with an "
             "EOF (macOS podman-machine socket drop).  Artifacts are on "
@@ -479,7 +485,9 @@ def download_srpm(srpm_name: str, cache_dir: str | Path, base_url: str) -> Path:
         log.info("Using cached SRPM: %s", cached)
         return cached
 
-    urls = [f"{base_url}/{srpm_name}"] + _srpm_fallback_urls(base_url, srpm_name)
+    urls = [f"{base_url}/{srpm_name}"] + _srpm_fallback_urls(
+        base_url, srpm_name
+    )
 
     # Download to a per-pid temp file in the same directory and rename on
     # success.  A previous interrupted curl could otherwise leave a
@@ -547,7 +555,9 @@ def _srpm_fallback_urls(base_url: str, srpm_name: str) -> list[str]:
     # e.g. vault/rocky/8.4/.../Packages/kernel-*.src.rpm resolves.
     parent, _, letter = rest.rpartition("/")
     if parent and len(letter) == 1:
-        urls.append(f"{host}/vault/rocky/{major}.{minor.group(2)}/{parent}/{srpm_name}")
+        urls.append(
+            f"{host}/vault/rocky/{major}.{minor.group(2)}/{parent}/{srpm_name}"
+        )
     return urls
 
 
@@ -600,7 +610,9 @@ class SrpmNotFoundError(RuntimeError):
         suggestion = self._suggestion()
         if suggestion:
             tree = (
-                str(self.lustre_tree) if self.lustre_tree else "/path/to/lustre-release"
+                str(self.lustre_tree)
+                if self.lustre_tree
+                else "/path/to/lustre-release"
             )
             lines += [
                 "",
@@ -734,7 +746,9 @@ def diagnose_srpm_not_found(
     we still want to produce the friendly error, so we return one with
     ``latest_available=None``.
     """
-    urls = [f"{base_url}/{srpm_name}"] + _srpm_fallback_urls(base_url, srpm_name)
+    urls = [f"{base_url}/{srpm_name}"] + _srpm_fallback_urls(
+        base_url, srpm_name
+    )
     statuses = [_url_returns_404(u) for u in urls]
     any_not_404 = any(s is False for s in statuses)
     if any_not_404:
@@ -858,9 +872,7 @@ def _ensure_container_image(target_config: TargetConfig) -> str:
         )
     variant_tag = target_config.container_tag  # variant-suffixed
 
-    log.info(
-        "Building variant container %s (overlay=%s)", variant_tag, overlay
-    )
+    log.info("Building variant container %s (overlay=%s)", variant_tag, overlay)
     # Build arg BASE_TAG lets the overlay Dockerfile say
     # `ARG BASE_TAG` + `FROM ${BASE_TAG}` so the parent image is wired
     # at build time instead of hardcoded.  Variant params are also
@@ -943,9 +955,7 @@ def build_kernel(
         dict with build metadata
     """
     if target_config.is_upstream:
-        return _build_kernel_upstream(
-            target_config, force=force, kernel=kernel
-        )
+        return _build_kernel_upstream(target_config, force=force, kernel=kernel)
 
     if target_config.kernel_deb_source:
         return _build_kernel_deb(target_config, force=force, kernel=kernel)
@@ -1052,9 +1062,7 @@ def _build_kernel_upstream(
         "kernel", kernel=spec, extra_hash=extra_hash
     ):
         log.info("Kernel is up to date (use force=True to rebuild)")
-        return kernel_status(
-            target_config, kernel=spec, extra_hash=extra_hash
-        )
+        return kernel_status(target_config, kernel=spec, extra_hash=extra_hash)
 
     # <spec>-<version>, matching the <short>-<full> convention the rest
     # of ltvm resolves against, so `latest` and `6.18` keep separate
@@ -1393,9 +1401,10 @@ def _build_kernel_srpm(
     # A rebuild that reproduced the same binary makes the archive a
     # duplicate of the new vmlinux; drop it rather than keep a few
     # hundred MB of the same bytes twice.
-    if archived_build_id and elf_build_id(
-        kernel_out / "vmlinux"
-    ) == archived_build_id:
+    if (
+        archived_build_id
+        and elf_build_id(kernel_out / "vmlinux") == archived_build_id
+    ):
         (kernel_out / f"vmlinux-{archived_build_id}").unlink(missing_ok=True)
 
     # extra_hash MUST match what was used in the is_stale check above,

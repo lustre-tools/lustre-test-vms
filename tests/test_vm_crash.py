@@ -103,9 +103,7 @@ class TestCrashNotRunning:
         tmp_path: Path,
     ) -> None:
         _seed_vm(tmp_vmdir, "stopped-trig")
-        args = _args(
-            "stopped-trig", outdir=str(tmp_path / "out"), trigger=True
-        )
+        args = _args("stopped-trig", outdir=str(tmp_path / "out"), trigger=True)
         with patch("ltvm_pkg.vm_commands.is_running", return_value=False):
             rc = vm_commands.cmd_crash_collect(args)
         assert rc != 0
@@ -134,7 +132,8 @@ class TestCrashVmcoreResolution:
         # ssh_rc: depends on which command is being sent.
         find_result = MagicMock(returncode=0, stdout=vmcore_path, stderr="")
         ls_result = MagicMock(
-            returncode=0, stdout=f"-rw------- 1 root root 1G Jan 1 01:00 {vmcore_path}",
+            returncode=0,
+            stdout=f"-rw------- 1 root root 1G Jan 1 01:00 {vmcore_path}",
             stderr="",
         )
 
@@ -147,10 +146,14 @@ class TestCrashVmcoreResolution:
 
         scp_result = MagicMock(returncode=0, stdout="", stderr="")
 
-        return kdir, vmlinux, {
-            "ssh": _ssh,
-            "scp": scp_result,
-        }
+        return (
+            kdir,
+            vmlinux,
+            {
+                "ssh": _ssh,
+                "scp": scp_result,
+            },
+        )
 
     def test_no_vmcore_returns_error(
         self,
@@ -163,9 +166,7 @@ class TestCrashVmcoreResolution:
         # Inject empty stdout so find returns nothing.
         find_empty = MagicMock(returncode=0, stdout="", stderr="")
         with (
-            patch(
-                "ltvm_pkg.vm_commands.is_running", return_value=True
-            ),
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
             patch("ltvm_pkg.vm_commands.run_ssh", return_value=find_empty),
         ):
             rc = vm_commands.cmd_crash_collect(
@@ -185,9 +186,7 @@ class TestCrashVmcoreResolution:
             returncode=255, stdout="", stderr="Connection closed"
         )
         with (
-            patch(
-                "ltvm_pkg.vm_commands.is_running", return_value=True
-            ),
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
             patch("ltvm_pkg.vm_commands.run_ssh", return_value=ssh_fail),
         ):
             rc = vm_commands.cmd_crash_collect(
@@ -207,9 +206,7 @@ class TestCrashVmcoreResolution:
     ) -> None:
         _seed_vm(tmp_vmdir, "ssh-timeout")
         with (
-            patch(
-                "ltvm_pkg.vm_commands.is_running", return_value=True
-            ),
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
             patch(
                 "ltvm_pkg.vm_commands.run_ssh",
                 side_effect=subprocess.TimeoutExpired("ssh", 10),
@@ -238,9 +235,7 @@ class TestCrashFullFlow:
     def _ssh_side_effect(self, vmcore_path: str):
         def _ssh(ip, cmd, **kw):
             if "find /var/crash" in cmd:
-                return MagicMock(
-                    returncode=0, stdout=vmcore_path, stderr=""
-                )
+                return MagicMock(returncode=0, stdout=vmcore_path, stderr="")
             if cmd.startswith("ls -lh"):
                 return MagicMock(
                     returncode=0,
@@ -353,9 +348,7 @@ class TestCrashFullFlow:
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         kdir, _ = self._setup(tmp_path)
-        _seed_vm(
-            tmp_vmdir, "scp-timeout", kernel=str(kdir / "vmlinuz")
-        )
+        _seed_vm(tmp_vmdir, "scp-timeout", kernel=str(kdir / "vmlinuz"))
         outdir = tmp_path / "out"
         args = _args("scp-timeout", outdir=str(outdir))
 
@@ -399,9 +392,7 @@ class TestCrashFullFlow:
         kdir.mkdir(parents=True)
         (kdir / "vmlinuz").write_bytes(b"bz")
         # no vmlinux file
-        _seed_vm(
-            tmp_vmdir, "no-vmlinux", kernel=str(kdir / "vmlinuz")
-        )
+        _seed_vm(tmp_vmdir, "no-vmlinux", kernel=str(kdir / "vmlinuz"))
         outdir = tmp_path / "out"
         args = _args("no-vmlinux", outdir=str(outdir))
         arts = MagicMock()
@@ -428,9 +419,7 @@ class TestCrashFullFlow:
         err = capsys.readouterr().err
         assert "no vmlinux found" in err
 
-    def test_no_os_id_raises(
-        self, tmp_vmdir: Path, tmp_path: Path
-    ) -> None:
+    def test_no_os_id_raises(self, tmp_vmdir: Path, tmp_path: Path) -> None:
         """An os_id-less .info file cannot reach vmlinux; we prefer a
         loud RuntimeError over a silent NotFound."""
         kdir = tmp_path / "kernels" / "5.14"
@@ -467,16 +456,12 @@ class TestCrashTriageScript:
     """--mod-dir triggers lustre_triage.py lookup with a well-defined
     search order: LTVM_TRIAGE_SCRIPT, Path.home(), SUDO_USER's home."""
 
-    def _setup_vm(
-        self, tmp_vmdir: Path, tmp_path: Path
-    ) -> tuple[Path, Path]:
+    def _setup_vm(self, tmp_vmdir: Path, tmp_path: Path) -> tuple[Path, Path]:
         kdir = tmp_path / "kernels" / "5.14"
         kdir.mkdir(parents=True)
         (kdir / "vmlinuz").write_bytes(b"bz")
         (kdir / "vmlinux").write_bytes(b"ELF")
-        _seed_vm(
-            tmp_vmdir, "triage-vm", kernel=str(kdir / "vmlinuz")
-        )
+        _seed_vm(tmp_vmdir, "triage-vm", kernel=str(kdir / "vmlinuz"))
         return kdir, kdir / "vmlinux"
 
     def _ssh_side_effect(self):
@@ -499,9 +484,7 @@ class TestCrashTriageScript:
         triage_script = tmp_path / "my-triage.py"
         triage_script.write_text("#!/usr/bin/env python3\n")
 
-        args = _args(
-            "triage-vm", outdir=str(outdir), mod_dir="/build/tree"
-        )
+        args = _args("triage-vm", outdir=str(outdir), mod_dir="/build/tree")
         arts = MagicMock()
         arts.kernel = kdir / "vmlinuz"
         scp_ok = MagicMock(returncode=0, stdout="", stderr="")
@@ -538,7 +521,9 @@ class TestCrashTriageScript:
         # One of the run() calls must be the triage invocation using the
         # env-var script
         triage_invocations = [
-            c for c in run_calls if str(triage_script) in " ".join(str(x) for x in c)
+            c
+            for c in run_calls
+            if str(triage_script) in " ".join(str(x) for x in c)
         ]
         assert triage_invocations
 
@@ -557,9 +542,7 @@ class TestCrashTriageScript:
         fake_home = tmp_path / "no-tools"
         fake_home.mkdir()
 
-        args = _args(
-            "triage-vm", outdir=str(outdir), mod_dir="/build/tree"
-        )
+        args = _args("triage-vm", outdir=str(outdir), mod_dir="/build/tree")
         arts = MagicMock()
         arts.kernel = kdir / "vmlinuz"
 
@@ -579,9 +562,7 @@ class TestCrashTriageScript:
                 return_value=arts,
             ),
             patch("ltvm_pkg.vm_commands.run", side_effect=_run),
-            patch(
-                "ltvm_pkg.vm_commands.Path.home", return_value=fake_home
-            ),
+            patch("ltvm_pkg.vm_commands.Path.home", return_value=fake_home),
             patch.dict(os.environ, {}, clear=True),
         ):
             rc = vm_commands.cmd_crash_collect(args)
@@ -599,9 +580,7 @@ class TestCrashTriageScript:
         triage_script = tmp_path / "t.py"
         triage_script.write_text("#!/usr/bin/env python3\n")
 
-        args = _args(
-            "triage-vm", outdir=str(outdir), mod_dir="/build/t"
-        )
+        args = _args("triage-vm", outdir=str(outdir), mod_dir="/build/t")
         arts = MagicMock()
         arts.kernel = kdir / "vmlinuz"
         scp_ok = MagicMock(returncode=0, stdout="", stderr="")
@@ -639,22 +618,20 @@ class TestCrashTriageScript:
             vm_commands.cmd_crash_collect(args)
 
         triage_calls = [
-            c for c in run_calls if str(triage_script) in " ".join(str(x) for x in c)
+            c
+            for c in run_calls
+            if str(triage_script) in " ".join(str(x) for x in c)
         ]
         assert triage_calls
         # First two elements should be ["sudo", "-u", "alice", "python3", ...]
         assert triage_calls[0][:4] == ["sudo", "-u", "alice", "python3"]
 
-    def test_trigger_sends_sysrq(
-        self, tmp_vmdir: Path, tmp_path: Path
-    ) -> None:
+    def test_trigger_sends_sysrq(self, tmp_vmdir: Path, tmp_path: Path) -> None:
         """--trigger fires 'echo c > /proc/sysrq-trigger' then waits
         for the VM to come back up before looking for the vmcore."""
         kdir, vmlinux = self._setup_vm(tmp_vmdir, tmp_path)
         outdir = tmp_path / "out"
-        args = _args(
-            "triage-vm", outdir=str(outdir), trigger=True, wait=3
-        )
+        args = _args("triage-vm", outdir=str(outdir), trigger=True, wait=3)
         arts = MagicMock()
         arts.kernel = kdir / "vmlinuz"
 
@@ -712,9 +689,7 @@ class TestCrashTriageScript:
         error), surface that rather than hanging in the wait loop."""
         kdir, _ = self._setup_vm(tmp_vmdir, tmp_path)
         outdir = tmp_path / "out"
-        args = _args(
-            "triage-vm", outdir=str(outdir), trigger=True, wait=3
-        )
+        args = _args("triage-vm", outdir=str(outdir), trigger=True, wait=3)
 
         ssh_fail = MagicMock(
             returncode=1, stdout="", stderr="permission denied"
@@ -736,9 +711,7 @@ class TestCrashTriageScript:
         """VM never comes back -> EXIT_TIMEOUT."""
         kdir, _ = self._setup_vm(tmp_vmdir, tmp_path)
         outdir = tmp_path / "out"
-        args = _args(
-            "triage-vm", outdir=str(outdir), trigger=True, wait=2
-        )
+        args = _args("triage-vm", outdir=str(outdir), trigger=True, wait=2)
 
         def _ssh(ip, cmd, **kw):
             if "sysrq-trigger" in cmd:
@@ -770,9 +743,7 @@ class TestCrashTriageScript:
         triage_script = tmp_path / "t.py"
         triage_script.write_text("#!/usr/bin/env python3\n")
 
-        args = _args(
-            "triage-vm", outdir=str(outdir), mod_dir="/build/t"
-        )
+        args = _args("triage-vm", outdir=str(outdir), mod_dir="/build/t")
         arts = MagicMock()
         arts.kernel = kdir / "vmlinuz"
         scp_ok = MagicMock(returncode=0, stdout="", stderr="")

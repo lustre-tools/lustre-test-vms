@@ -299,25 +299,39 @@ def launch_qemu(vm: VMInfo) -> None:
         # attach to it without root via TUNSETIFF; the ``ip`` calls
         # themselves still need sudo for CAP_NET_ADMIN.
         import getpass as _getpass
+
         _user = _getpass.getuser()
         for _tap in all_taps:
             sudo_run(["ip", "link", "del", _tap], check=False, quiet=True)
         sudo_run(
             ["ip", "neigh", "flush", vm.ip, "dev", BRIDGE],
-            check=False, quiet=True,
+            check=False,
+            quiet=True,
         )
         sudo_run(
-            ["ip", "tuntap", "add", "dev", vm.tap,
-             "mode", "tap", "user", _user],
-            check=True, quiet=True,
+            [
+                "ip",
+                "tuntap",
+                "add",
+                "dev",
+                vm.tap,
+                "mode",
+                "tap",
+                "user",
+                _user,
+            ],
+            check=True,
+            quiet=True,
         )
         sudo_run(
             ["ip", "link", "set", vm.tap, "master", BRIDGE],
-            check=True, quiet=True,
+            check=True,
+            quiet=True,
         )
         sudo_run(
             ["ip", "link", "set", vm.tap, "up"],
-            check=True, quiet=True,
+            check=True,
+            quiet=True,
         )
 
     # Extra NICs: create one TAP per declared nic.  They all join the
@@ -339,17 +353,29 @@ def launch_qemu(vm: VMInfo) -> None:
             if macos:
                 continue
             sudo_run(
-                ["ip", "tuntap", "add", "dev", _tap,
-                 "mode", "tap", "user", _user],
-                check=True, quiet=True,
+                [
+                    "ip",
+                    "tuntap",
+                    "add",
+                    "dev",
+                    _tap,
+                    "mode",
+                    "tap",
+                    "user",
+                    _user,
+                ],
+                check=True,
+                quiet=True,
             )
             sudo_run(
                 ["ip", "link", "set", _tap, "master", BRIDGE],
-                check=True, quiet=True,
+                check=True,
+                quiet=True,
             )
             sudo_run(
                 ["ip", "link", "set", _tap, "up"],
-                check=True, quiet=True,
+                check=True,
+                quiet=True,
             )
         elif _base_type == "passthrough":
             # No host TAP: the VF is attached directly to the guest
@@ -391,6 +417,7 @@ def launch_qemu(vm: VMInfo) -> None:
     # the baseline CPU model that satisfies v2 in full.
     host_arch = _platform.machine()
     import os as _os
+
     _force_tcg = _os.environ.get("LTVM_FORCE_TCG") == "1"
     if not _force_tcg and (
         (arch == "x86_64" and host_arch in ("x86_64", "amd64"))
@@ -437,8 +464,7 @@ def launch_qemu(vm: VMInfo) -> None:
         f"id=rootfs,file={vm.overlay_path},format=qcow2,if=none",
         "-netdev",
         (
-            f"stream,id=net0,addr.type=unix,addr.path={vmnet_socket},"
-            f"server=off"
+            f"stream,id=net0,addr.type=unix,addr.path={vmnet_socket},server=off"
             if macos
             else f"tap,id=net0,ifname={vm.tap},script=no,downscript=no"
         ),
@@ -484,8 +510,7 @@ def launch_qemu(vm: VMInfo) -> None:
                 )
             else:
                 _netdev_arg = (
-                    f"tap,id={_netdev_id},ifname={_tap},"
-                    f"script=no,downscript=no"
+                    f"tap,id={_netdev_id},ifname={_tap},script=no,downscript=no"
                 )
             qemu_args += [
                 "-netdev",
@@ -564,7 +589,8 @@ def launch_qemu(vm: VMInfo) -> None:
             for _tap in all_taps:
                 sudo_run(
                     ["ip", "link", "del", _tap],
-                    check=False, quiet=True,
+                    check=False,
+                    quiet=True,
                 )
         raise
 
@@ -625,5 +651,6 @@ def kill_qemu(vm: VMInfo) -> None:
     # re-creations of this VM that may get a different MAC.
     sudo_run(
         ["ip", "neigh", "flush", vm.ip, "dev", BRIDGE],
-        check=False, quiet=True,
+        check=False,
+        quiet=True,
     )

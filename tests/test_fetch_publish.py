@@ -175,9 +175,7 @@ class TestFindReleaseUrl:
             ),
         ]
         with patch("ltvm_pkg.cli._gh_api", return_value=releases):
-            url = _find_release_url(
-                "rocky9", arch="x86_64", variant="mofed"
-            )
+            url = _find_release_url("rocky9", arch="x86_64", variant="mofed")
         assert url.endswith("-mofed.json")
 
     def test_bootable_mode_uses_bootable_prefix(self) -> None:
@@ -192,9 +190,7 @@ class TestFindReleaseUrl:
             ),
         ]
         with patch("ltvm_pkg.cli._gh_api", return_value=releases):
-            url = _find_release_url(
-                "rocky9", arch="x86_64", mode="bootable"
-            )
+            url = _find_release_url("rocky9", arch="x86_64", mode="bootable")
         assert url.endswith(".qcow2.zst")
 
     def test_bootable_mode_rejects_ecosystem_tag(self) -> None:
@@ -226,9 +222,7 @@ class TestFindReleaseUrl:
             ),
         ]
         with patch("ltvm_pkg.cli._gh_api", return_value=releases):
-            url = _find_release_url(
-                "rocky9", filter_str="503", arch="x86_64"
-            )
+            url = _find_release_url("rocky9", filter_str="503", arch="x86_64")
         assert "503" in url
 
     def test_no_match_raises_with_helpful_hint(self) -> None:
@@ -324,9 +318,7 @@ class TestReleaseStatus:
         )
 
         with patch.object(cfg, "ARTIFACTS_DIR", out):
-            local, _ = _release_status(
-                "rocky9", "x86_64", [], variant="base"
-            )
+            local, _ = _release_status("rocky9", "x86_64", [], variant="base")
         assert local == "-"
 
     def test_local_variant_requires_matching_suffix(
@@ -342,9 +334,7 @@ class TestReleaseStatus:
         )
 
         with patch.object(cfg, "ARTIFACTS_DIR", out):
-            local, _ = _release_status(
-                "rocky9", "x86_64", [], variant="mofed"
-            )
+            local, _ = _release_status("rocky9", "x86_64", [], variant="mofed")
         assert local == "-"
 
     def test_remote_variant_filter_rejects_base_manifest(
@@ -357,7 +347,9 @@ class TestReleaseStatus:
             {
                 "tag_name": "rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre",
                 "assets": [
-                    {"name": "manifest-rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre.json"},
+                    {
+                        "name": "manifest-rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre.json"
+                    },
                 ],
             },
         ]
@@ -367,9 +359,7 @@ class TestReleaseStatus:
             )
         assert remote == "-"
 
-    def test_remote_kernel_signature_filter(
-        self, tmp_targets: Path
-    ) -> None:
+    def test_remote_kernel_signature_filter(self, tmp_targets: Path) -> None:
         """An el9_5 query must skip an el9_7 release."""
         import ltvm_pkg.target_config as cfg
 
@@ -377,7 +367,9 @@ class TestReleaseStatus:
             {
                 "tag_name": "rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre",
                 "assets": [
-                    {"name": "manifest-rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre.json"},
+                    {
+                        "name": "manifest-rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre.json"
+                    },
                 ],
             },
         ]
@@ -439,9 +431,7 @@ class TestGhReleaseUpload:
             "ltvm_pkg.cli.subprocess.run",
             side_effect=lambda *a, **k: next(run_outputs),
         ):
-            rc, err = _gh_release_upload(
-                "tag", [a], notes="n", use_json=True
-            )
+            rc, err = _gh_release_upload("tag", [a], notes="n", use_json=True)
         assert rc is None
         assert err is None
 
@@ -454,9 +444,7 @@ class TestGhReleaseUpload:
             "ltvm_pkg.cli.subprocess.run",
             return_value=self._proc(1, stderr="permission denied"),
         ):
-            rc, err = _gh_release_upload(
-                "tag", [a], notes="n", use_json=True
-            )
+            rc, err = _gh_release_upload("tag", [a], notes="n", use_json=True)
         assert rc == EXIT_ERROR
         assert err is not None
         assert "permission denied" in err
@@ -471,25 +459,19 @@ class TestGhReleaseUpload:
             "ltvm_pkg.cli.subprocess.run",
             side_effect=lambda *a, **k: next(run_outputs),
         ):
-            rc, err = _gh_release_upload(
-                "tag", [a], notes="n", use_json=True
-            )
+            rc, err = _gh_release_upload("tag", [a], notes="n", use_json=True)
         assert rc == EXIT_ERROR
         assert err is not None
         assert "asset.tar.zst" in err
 
-    def test_missing_gh_cli_returns_helpful_error(
-        self, tmp_path: Path
-    ) -> None:
+    def test_missing_gh_cli_returns_helpful_error(self, tmp_path: Path) -> None:
         a = tmp_path / "asset.tar.zst"
         a.write_bytes(b"x")
         with patch(
             "ltvm_pkg.cli.subprocess.run",
             side_effect=FileNotFoundError(),
         ):
-            rc, err = _gh_release_upload(
-                "tag", [a], notes="n", use_json=True
-            )
+            rc, err = _gh_release_upload("tag", [a], notes="n", use_json=True)
         assert rc == EXIT_ERROR
         assert err is not None
         assert "gh CLI not found" in err
@@ -524,9 +506,7 @@ class TestCmdPublishNoUpload:
 
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
-            patch.object(
-                cli_mod, "package_target", return_value=assets
-            ) as pt,
+            patch.object(cli_mod, "package_target", return_value=assets) as pt,
             patch.object(cli_mod, "_gh_release_upload") as upl,
         ):
             args = _ns(
@@ -566,9 +546,7 @@ class TestCmdPublishNoUpload:
 
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
-            patch.object(
-                cli_mod, "package_target", return_value=assets
-            ) as pt,
+            patch.object(cli_mod, "package_target", return_value=assets) as pt,
             patch.object(cli_mod, "_resolve_lustre_tree") as rl,
             patch.object(cli_mod, "snapshot_lustre") as snap,
         ):
@@ -625,9 +603,7 @@ class TestCmdPublishNoUpload:
         assets = {"manifest": tmp_path / "m.json"}
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
-            patch.object(
-                cli_mod, "package_target", return_value=assets
-            ) as pt,
+            patch.object(cli_mod, "package_target", return_value=assets) as pt,
         ):
             args = _ns(
                 target="rocky9",
@@ -821,7 +797,9 @@ class TestCmdFetch:
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
             patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
-            patch.object(cli_mod, "fetch_target", return_value=target_dir) as ft,
+            patch.object(
+                cli_mod, "fetch_target", return_value=target_dir
+            ) as ft,
             patch.object(cli_mod, "_gh_api") as ga,
         ):
             args = _ns(
@@ -1073,9 +1051,16 @@ class TestCmdFetch:
             patch.object(cli_mod, "fetch_target") as ft,
         ):
             args = _ns(
-                target="rocky9", url=url, filter=None, arch="x86_64",
-                kernel=None, variant="base", list=False,
-                replace=False, force=False, image=False,
+                target="rocky9",
+                url=url,
+                filter=None,
+                arch="x86_64",
+                kernel=None,
+                variant="base",
+                list=False,
+                replace=False,
+                force=False,
+                image=False,
             )
             rc = cmd_fetch(args)
 
@@ -1193,9 +1178,7 @@ class TestCmdFetch:
         def _stub(*, force: bool, use_json: bool) -> None:
             called.append(force)
 
-        monkeypatch.setattr(
-            update_check, "maybe_check_for_updates", _stub
-        )
+        monkeypatch.setattr(update_check, "maybe_check_for_updates", _stub)
 
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
@@ -1442,7 +1425,9 @@ class TestHostArch:
             ("ppc64le", "ppc64le"),
         ],
     )
-    def test_host_arch_normalisation(self, reported: str, expected: str) -> None:
+    def test_host_arch_normalisation(
+        self, reported: str, expected: str
+    ) -> None:
         from ltvm_pkg.cli.util import host_arch
 
         with patch("ltvm_pkg.cli.util.platform.machine", return_value=reported):
@@ -1495,9 +1480,7 @@ class TestCmdPublish:
         with (
             patch.object(cli_mod, "TargetConfig", return_value=tc),
             patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
-            patch.object(
-                cli_mod, "package_target", return_value=assets
-            ) as pt,
+            patch.object(cli_mod, "package_target", return_value=assets) as pt,
             patch.object(
                 cli_mod,
                 "_gh_release_upload",
@@ -1567,9 +1550,7 @@ class TestCmdPublish:
         tmp_path: Path,
     ) -> None:
         tc = _tc(tmp_targets)
-        manifest = tmp_path / (
-            "manifest-rocky9-x86_64-5.14.0-611.json"
-        )
+        manifest = tmp_path / ("manifest-rocky9-x86_64-5.14.0-611.json")
         manifest.write_text("{}")
         assets = {"manifest": manifest}
 

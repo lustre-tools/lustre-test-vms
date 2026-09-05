@@ -63,6 +63,7 @@ def _stderr_matches_cleanup_eof(stderr: str) -> bool:
         return False
     return any(m.search(stderr) for m in _CLEANUP_EOF_MARKERS)
 
+
 # Grace period between initial cleanup attempt and the nuclear
 # `podman rm -f` fallback.  Kept short because the container's PID 1
 # (bash waiting on make children) typically ignores SIGTERM -- there's
@@ -109,9 +110,7 @@ def run_podman_with_cleanup(
     :func:`tempfile.mkstemp` then immediately unlink the empty
     file before passing the path to podman.
     """
-    is_podman_run = (
-        len(cmd) >= 2 and cmd[0] == "podman" and cmd[1] == "run"
-    )
+    is_podman_run = len(cmd) >= 2 and cmd[0] == "podman" and cmd[1] == "run"
 
     cidfile_path: Path | None = None
     final_cmd = cmd
@@ -279,9 +278,7 @@ def run_podman_with_cleanup(
         raise SystemExit(128 + sig)
 
     tail_stderr = "".join(tee_buffer) if tee_buffer is not None else ""
-    cleanup_eof = (
-        returncode != 0 and _stderr_matches_cleanup_eof(tail_stderr)
-    )
+    cleanup_eof = returncode != 0 and _stderr_matches_cleanup_eof(tail_stderr)
 
     # cleanup_eof suppresses check=True's CalledProcessError -- callers
     # must inspect `result.cleanup_eof` and verify expected artifacts

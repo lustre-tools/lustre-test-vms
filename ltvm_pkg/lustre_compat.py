@@ -317,7 +317,9 @@ def dry_apply_patches(
                 if "FAILED" in line:
                     first_fail = line.strip()
                     break
-            reason = first_fail or detail.splitlines()[0] if detail else "rejected"
+            reason = (
+                first_fail or detail.splitlines()[0] if detail else "rejected"
+            )
             failures.append(f"{patch_path.name}: {reason}")
     return (len(failures) == 0, failures)
 
@@ -625,7 +627,12 @@ def validate_target(
         if match_stem is not None:
             bt = kernel_build_tree
             sysfs_c = bt / "fs" / "ext4" / "sysfs.c" if bt else None
-            if bt is not None and bt.is_dir() and sysfs_c is not None and sysfs_c.exists():
+            if (
+                bt is not None
+                and bt.is_dir()
+                and sysfs_c is not None
+                and sysfs_c.exists()
+            ):
                 patches = parse_ldiskfs_series_file(lustre_tree, match_stem)
                 all_clean, failures = dry_apply_patches(patches, bt)
                 if all_clean:
