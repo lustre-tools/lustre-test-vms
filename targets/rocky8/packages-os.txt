@@ -4,3 +4,12 @@
 # Rocky base release and repo config
 rocky-release
 epel-release
+
+# ltvm itself needs Python 3.10+, and the `make-*` commands run ltvm
+# *inside* this image (see "Running ltvm inside a VM it built").  The
+# distro python3 here is 3.6, below that floor, so without these
+# `ltvm make-install` cannot start on the very machines it is for.
+# pyyaml is the one hard dependency of the CLI; argcomplete is
+# optional and only affects tab completion.
+python3.11
+python3.11-pyyaml

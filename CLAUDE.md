@@ -211,6 +211,18 @@ The build still happens in the target's build container
 toolchain), so the node needs podman plus a
 `ltvm target fetch <target>` first.
 
+On an EL8/EL9 image the distro `python3` (3.6 / 3.9) is
+below ltvm's 3.10 floor, so run ltvm with the 3.11 the
+image now ships:
+
+```bash
+dnf install -y podman            # not in the image
+python3.11 /path/to/ltvm make-install --lustre-tree .
+```
+
+Images built before this was added need
+`dnf install -y python3.11 python3.11-pyyaml` too.
+
 **Two preconditions**, both enforced for all three
 commands: you must be on a machine ltvm built, and inside
 a Lustre source tree.  They unpack a tree onto `/`, and
