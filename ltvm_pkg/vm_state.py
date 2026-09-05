@@ -64,6 +64,14 @@ def qemu_machine_for_arch(arch: str = "x86_64") -> str:
     Uses the host's native accelerator only when the host arch matches
     the guest (accelerators can't run a different ISA): KVM on Linux,
     HVF on macOS.  Cross-arch VMs fall back to TCG emulation.
+
+    LTVM_FORCE_TCG=1 forces software emulation regardless of arch.
+    Needed for guest kernels whose translation granule the host
+    hypervisor cannot provide (Apple Silicon HVF has no 64 KiB granule,
+    so a CONFIG_ARM64_64K_PAGES guest dies in early MMU setup with no
+    console output at all).  It is not arch-specific: launch_qemu reads
+    the same variable to pick a concrete -cpu, and "-cpu host" is
+    invalid under TCG on x86_64 just as it is on aarch64.
     """
     import platform
 
@@ -72,9 +80,14 @@ def qemu_machine_for_arch(arch: str = "x86_64") -> str:
     host_is_x86 = host_arch in ("x86_64", "amd64")
     host_is_arm64 = host_arch in ("aarch64", "arm64")
     native_accel = "hvf" if platform.system() == "Darwin" else "kvm"
+    force_tcg = os.environ.get("LTVM_FORCE_TCG") == "1"
 
     if arch == "x86_64":
-        accel = f"accel={native_accel}" if host_is_x86 else "accel=tcg"
+        accel = (
+            "accel=tcg"
+            if force_tcg or not host_is_x86
+            else f"accel={native_accel}"
+        )
         # q35 matches the aarch64 'virt' path: PCIe root complex, full
         # device set, virtio-*-pci drivers.  Benchmarked against microvm
         # at ~+300 ms create-to-ssh (within create-path noise) with no
@@ -87,15 +100,11 @@ def qemu_machine_for_arch(arch: str = "x86_64") -> str:
         # still presents as /dev/vda to the guest.
         return f"q35,{accel}"
     if arch == "aarch64":
-        accel = f"accel={native_accel}" if host_is_arm64 else "accel=tcg"
-        # LTVM_FORCE_TCG=1 forces software emulation.  Needed for guest
-        # kernels whose translation granule the host hypervisor cannot
-        # provide (Apple Silicon HVF has no 64 KiB granule, so a
-        # CONFIG_ARM64_64K_PAGES guest dies in early MMU setup with no
-        # console output at all).
-        import os as _os
-        if _os.environ.get("LTVM_FORCE_TCG") == "1":
-            accel = "accel=tcg"
+        accel = (
+            "accel=tcg"
+            if force_tcg or not host_is_arm64
+            else f"accel={native_accel}"
+        )
         return f"virt,{accel},gic-version=max"
     return "virt,accel=tcg"
 
