@@ -820,20 +820,25 @@ def _print_gce_next_steps(
     print(f"  gcloud storage cp {asset} gs://YOUR_BUCKET/")
     print(f"  gcloud compute images create {image_name} \\")
     print(f"      --source-uri gs://YOUR_BUCKET/{asset.name}")
+    print()
+    print(
+        "  Hardened for the cloud: password auth is off and root's empty\n"
+        "  password is locked, so this image does NOT carry ltvm's "
+        "passwordless\n"
+        "  root over to GCE.  Key-based root SSH and the serial console "
+        "still work."
+    )
     if not have_ssh_key:
         print()
         print(
-            "  Note: this image ships no Google guest agent, so GCE will "
-            "not inject\n"
-            "  your SSH keys.  Re-export with --ssh-key ~/.ssh/id_ed25519.pub "
-            "to bake\n"
-            "  one in, or reach the instance over the serial console."
+            "  WARNING: no --ssh-key was given, and this image ships no "
+            "Google guest\n"
+            "  agent, so GCE cannot inject your keys either -- with "
+            "password auth\n"
+            "  off you will only reach it over the serial console.  "
+            "Re-export with\n"
+            "  --ssh-key ~/.ssh/id_ed25519.pub to bake one in."
         )
-    print(
-        "  Note: the image keeps ltvm's lab defaults -- root login with an "
-        "empty\n"
-        "  password.  Do not expose port 22 to 0.0.0.0/0."
-    )
 
 
 # ------------------------------------------------------------------

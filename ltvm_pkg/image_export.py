@@ -332,10 +332,91 @@ method=auto
 method=disabled
 """
 
+# sshd drop-in for the GCE guest.  The name sorts BEFORE the image's
+# own 99-ltvm.conf on purpose: sshd takes the FIRST value it obtains
+# for these keywords, so a lower-numbered file wins.
+_GCE_SSHD_HARDENING = """\
+# Written by `ltvm target export --format gce`.
+#
+# The base image ships ltvm's lab defaults -- root with an empty
+# password, PermitRootLogin yes, PermitEmptyPasswords yes (see
+# 99-ltvm.conf).  Those are fine on a private hypervisor and are an
+# instant root shell for anyone who can reach port 22 of a cloud
+# instance.  This file sorts first, and sshd keeps the first value it
+# obtains for a keyword, so these win over 99-ltvm.conf.
+#
+# Key-based root login still works: pass --ssh-key to `target export`.
+PermitEmptyPasswords no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+"""
+
 _NM_UNIT_CANDIDATES = (
     "usr/lib/systemd/system/NetworkManager.service",
     "lib/systemd/system/NetworkManager.service",
 )
+
+
+def _lock_root_password(dst_mnt: Path) -> bool:
+    """Lock root's password in the image's /etc/shadow.
+
+    ltvm images ship ``root::`` -- an empty password field, meaning
+    root logs in with no password at all.  Combined with the image's
+    ``PermitEmptyPasswords yes`` that is a credential-free root shell,
+    which is exactly what must not boot on a public address.
+
+    Locking replaces the empty field with ``!``, which no password
+    hashes to.  It does not disable the account: key-based SSH and the
+    serial-console autologin both still work, so a locked root is not
+    a lockout.
+
+    Returns True if the file was rewritten.  /etc/shadow's mode (0000
+    on RHEL) is preserved -- writing it 0644 would itself be a finding.
+    """
+    shadow = dst_mnt / "etc" / "shadow"
+    text = _sudo_read_text(shadow, missing_ok=True)
+    if not text:
+        log.warning("no /etc/shadow in the image; not locking root")
+        return False
+
+    out: list[str] = []
+    changed = False
+    for line in text.splitlines():
+        fields = line.split(":")
+        # An already-locked or hashed root ("!...", "*", a real hash)
+        # is left alone -- only the empty-password case is rewritten,
+        # so re-exporting an image twice is a no-op.
+        if len(fields) >= 2 and fields[0] == "root" and fields[1] == "":
+            fields[1] = "!"
+            changed = True
+            out.append(":".join(fields))
+        else:
+            out.append(line)
+    if not changed:
+        return False
+    _sudo_write_text(shadow, "\n".join(out) + "\n", mode=0o000)
+    return True
+
+
+def _harden_gce_ssh(dst_mnt: Path) -> None:
+    """Turn off password auth and lock root, for a cloud-bound image.
+
+    Called only for ``--format gce``.  The qcow2/raw exports keep the
+    lab defaults: those boot on someone's own hypervisor, where
+    passwordless root between nodes is the point.
+    """
+    sshd_dir = dst_mnt / "etc" / "ssh" / "sshd_config.d"
+    _ensure_dir(sshd_dir)
+    _sudo_write_text(
+        sshd_dir / "00-ltvm-gce-hardening.conf",
+        _GCE_SSHD_HARDENING,
+        mode=0o600,
+    )
+    locked = _lock_root_password(dst_mnt)
+    log.info(
+        "GCE hardening: password auth disabled%s",
+        ", root password locked" if locked else "",
+    )
 
 
 def _apply_gce_guest_config(dst_mnt: Path) -> None:
@@ -597,6 +678,7 @@ def export_image(
         _rewrite_fstab_root(dst_mnt, fs_uuid)
         if image_format == "gce":
             _apply_gce_guest_config(dst_mnt)
+            _harden_gce_ssh(dst_mnt)
         if ssh_key is not None:
             _inject_ssh_key(dst_mnt, ssh_key)
 

@@ -1041,3 +1041,123 @@ class TestHostToolsAreFormatSpecific:
             ):
                 with pytest.raises(RuntimeError, match="losetup"):
                     ie._check_host_tools(fmt)
+
+
+class TestGceSshHardening:
+    """The base image ships root with an empty password plus
+    PermitEmptyPasswords yes.  Fine on a private hypervisor; a
+    credential-free root shell the moment the disk boots on a public
+    address.  --format gce must neutralise both."""
+
+    def _mk_rootfs(self, tmp_path: Path, root_pw: str = "") -> Path:
+        etc = tmp_path / "etc"
+        (etc / "ssh" / "sshd_config.d").mkdir(parents=True)
+        # What ltvm actually bakes in, and what we must override.
+        (etc / "ssh" / "sshd_config.d" / "99-ltvm.conf").write_text(
+            "PermitRootLogin yes\nPermitEmptyPasswords yes\n"
+        )
+        (etc / "shadow").write_text(
+            f"root:{root_pw}:20186:0:99999:7:::\nbin:*:20186:0:99999:7:::\n"
+        )
+        return tmp_path
+
+    def test_drop_in_sorts_before_the_lab_defaults(
+        self, tmp_path: Path
+    ) -> None:
+        """sshd keeps the FIRST value it obtains, so the hardening file
+        only wins if it sorts before 99-ltvm.conf."""
+        import ltvm_pkg.image_export as ie
+
+        root = self._mk_rootfs(tmp_path)
+        with patch.object(ie, "sudo_run"):
+            ie._harden_gce_ssh(root)
+
+        names = sorted(
+            p.name for p in (root / "etc/ssh/sshd_config.d").iterdir()
+        )
+        assert names[0] == "00-ltvm-gce-hardening.conf", names
+        assert "99-ltvm.conf" in names  # we override, not delete
+
+    def test_disables_password_auth(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        root = self._mk_rootfs(tmp_path)
+        with patch.object(ie, "sudo_run"):
+            ie._harden_gce_ssh(root)
+
+        text = (
+            root / "etc/ssh/sshd_config.d/00-ltvm-gce-hardening.conf"
+        ).read_text()
+        assert "PermitEmptyPasswords no" in text
+        assert "PasswordAuthentication no" in text
+
+    def test_locks_empty_root_password(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        root = self._mk_rootfs(tmp_path, root_pw="")
+        with patch.object(ie, "sudo_run"):
+            assert ie._lock_root_password(root) is True
+
+        # The code leaves /etc/shadow 0000, so an unprivileged test
+        # cannot read it back without relaxing the mode first.
+        shadow = root / "etc/shadow"
+        shadow.chmod(0o600)
+        line = shadow.read_text().splitlines()[0]
+        assert line.split(":")[1] == "!", line
+
+    def test_shadow_mode_is_not_widened(self, tmp_path: Path) -> None:
+        """Writing /etc/shadow 0644 would itself be the finding."""
+        import ltvm_pkg.image_export as ie
+
+        root = self._mk_rootfs(tmp_path)
+        with patch.object(ie, "sudo_run"):
+            ie._lock_root_password(root)
+
+        assert (root / "etc/shadow").stat().st_mode & 0o777 == 0o000
+
+    def test_existing_hash_is_left_alone(self, tmp_path: Path) -> None:
+        """Re-exporting twice, or exporting an image someone already
+        gave a real password, must not clobber it."""
+        import ltvm_pkg.image_export as ie
+
+        root = self._mk_rootfs(tmp_path, root_pw="$6$salt$hash")
+        with patch.object(ie, "sudo_run"):
+            assert ie._lock_root_password(root) is False
+
+        line = (root / "etc/shadow").read_text().splitlines()[0]
+        assert line.split(":")[1] == "$6$salt$hash"
+
+    def test_other_users_untouched(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        root = self._mk_rootfs(tmp_path)
+        with patch.object(ie, "sudo_run"):
+            ie._lock_root_password(root)
+
+        shadow = root / "etc/shadow"
+        shadow.chmod(0o600)
+        assert "bin:*:20186" in shadow.read_text()
+
+    def test_missing_shadow_is_not_fatal(self, tmp_path: Path) -> None:
+        """A rootfs without /etc/shadow should warn, not explode --
+        the export is nearly done by this point."""
+        import ltvm_pkg.image_export as ie
+
+        (tmp_path / "etc").mkdir()
+        with patch.object(ie, "sudo_run"):
+            assert ie._lock_root_password(tmp_path) is False
+
+    def test_only_applied_to_gce_format(self) -> None:
+        """qcow2/raw boot on the user's own hypervisor, where
+        passwordless root between nodes is the whole point."""
+        import inspect
+
+        import ltvm_pkg.image_export as ie
+
+        src = inspect.getsource(ie.export_image)
+        harden = [ln for ln in src.splitlines() if "_harden_gce_ssh" in ln]
+        assert len(harden) == 1, harden
+        # It must sit under the `image_format == "gce"` branch.
+        idx = src.splitlines().index(harden[0])
+        preceding = "\n".join(src.splitlines()[max(0, idx - 4) : idx])
+        assert 'image_format == "gce"' in preceding, preceding
