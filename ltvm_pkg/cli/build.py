@@ -23,8 +23,6 @@ from pathlib import Path
 from typing import Any
 
 from ltvm_pkg.cli.util import (
-    EXIT_ERROR,
-    EXIT_OK,
     _artifact_label,
     _container_status,
     _error,
@@ -32,6 +30,9 @@ from ltvm_pkg.cli.util import (
     _load_target_args,
     _output,
     _print_target_header,
+    EXIT_ERROR,
+    EXIT_OK,
+    resolve_arch,
 )
 from ltvm_pkg.host_setup import (
     PodmanMachineError,
@@ -746,7 +747,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
     use_json = args.json
     target = args.target
     all_arches = bool(getattr(args, "all_arches", False))
-    arch_flag = getattr(args, "arch", None)
+    arch_flag = resolve_arch(args, target)
 
     # Validate target exists (via TargetConfig).  We don't need to
     # instantiate an arch-specific TargetConfig for --all-arches, but
@@ -756,7 +757,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
         return err
     assert tc is not None
 
-    if all_arches and arch_flag:
+    if all_arches and getattr(args, "arch", None):
         return _error(
             "--arch and --all-arches are mutually exclusive", use_json
         )

@@ -30,6 +30,7 @@ from ltvm_pkg.cli.util import (
     _load_target_args,
     _output,
     host_arch,
+    resolve_arch,
 )
 
 
@@ -507,7 +508,11 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     # Default arch to the native host arch so `ltvm target fetch rocky9`
     # picks x86_64 on an Intel host and aarch64 on an ARM host without
     # the user having to remember --arch.  Explicit --arch still wins.
-    arch = getattr(args, "arch", None) or _native_arch()
+    # Explicit --arch, else the target's declared arch when it states
+    # one (rocky9-64k is aarch64-only), else the host's.  Plain
+    # _native_arch() looked for an x86_64 release of an aarch64-only
+    # target, and disagreed with what `target clean` would remove.
+    arch = resolve_arch(args, target) or _native_arch()
     kernel = getattr(args, "kernel", None)
     variant = getattr(args, "variant", None) or "base"
     image_mode = bool(getattr(args, "image", False))
@@ -1193,12 +1198,12 @@ def cmd_delete(args: argparse.Namespace) -> int:
 
         target = args.target
         all_arches = bool(getattr(args, "all_arches", False))
-        arch_flag = getattr(args, "arch", None)
+        arch_flag = resolve_arch(args, target)
         tc, err = _load_target(target, use_json, arch=arch_flag)
         if err is not None:
             return err
         assert tc is not None
-        if all_arches and arch_flag:
+        if all_arches and getattr(args, "arch", None):
             return _error(
                 "--arch and --all-arches are mutually exclusive", use_json
             )

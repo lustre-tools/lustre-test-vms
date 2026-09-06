@@ -161,6 +161,37 @@ def _load_target(
         return None, code
 
 
+def resolve_arch(args: argparse.Namespace, target: str | None) -> str | None:
+    """Which arch a target-taking command should operate on.
+
+    Precedence: explicit --arch, then an arch *declared* by the target
+    in targets.yaml, then the host's.
+
+    The middle step matters because targets.yaml's `arch` key means two
+    different things.  For rocky9-64k ("arch: aarch64 -- must not
+    inherit the x86_64 default") it is a constraint; for rocky9, which
+    never states one and is published for both arches, the inherited
+    x86_64 is just a default and the host should win.  Commands that
+    substituted host_arch() unconditionally built rocky9-64k as x86_64,
+    while `target clean`/`delete` passed None and resolved the declared
+    arch -- so they cleaned a directory the builds never wrote to.
+
+    Returns None when the target's own default should stand, which is
+    what TargetConfig expects for "no override".
+    """
+    explicit = getattr(args, "arch", None)
+    if explicit:
+        return str(explicit)
+    if target:
+        try:
+            tc = _cli_attr("TargetConfig")(target)
+        except Exception:
+            return host_arch()
+        if tc.arch_is_declared:
+            return str(tc.arch)
+    return host_arch()
+
+
 def _load_target_args(
     args: argparse.Namespace, use_json: bool
 ) -> tuple[_TargetConfig | None, int | None]:
@@ -170,7 +201,18 @@ def _load_target_args(
     so they fold into the input hash.
     """
     variant = getattr(args, "variant", "base") or "base"
-    arch = getattr(args, "arch", None) or host_arch()
+    # Pass None when the user didn't say --arch, so the target's own
+    # declared arch wins.  Substituting host_arch() here made
+    # TargetConfig's documented "CLI override > target > defaults"
+    # chain collapse to "always CLI", because it treats any non-None
+    # value as an override -- so `ltvm build all rocky9-64k` on an
+    # x86_64 host built an x86_64 kernel into
+    # artifacts/rocky9-64k/x86_64/ and applied CONFIG_ARM64_64K_PAGES
+    # as a no-op, defeating the target's entire purpose.  It also made
+    # cli/build.py's cross-arch warning unreachable, since tc.arch had
+    # just been forced to host_arch().  targets.yaml's own default is
+    # x86_64, so undeclared targets are unaffected.
+    arch = resolve_arch(args, getattr(args, "target", None))
     tc, err = _load_target(args.target, use_json, arch=arch, variant=variant)
     if tc is None:
         return None, err

@@ -898,6 +898,12 @@ def _ensure_container_image(target_config: TargetConfig) -> str:
     ]
     for key, val in sorted(v.params.items()):
         v_cmd += ["--build-arg", f"VARIANT_{key.upper()}={val}"]
+    # The MOFED overlay Dockerfiles build their bundle URL from
+    # MOFED_ARCH, which nothing ever set -- so an aarch64 variant build
+    # passed --platform linux/arm64 and then downloaded the x86_64
+    # MLNX_OFED tarball.  mofed_distro is surfaced as a variant param;
+    # the arch is ltvm's own, so pass it explicitly.
+    v_cmd += ["--build-arg", f"MOFED_ARCH={target_config.arch}"]
     v_cmd += ["-f", str(overlay), str(TARGETS_DIR)]
     subprocess.run(v_cmd, check=True)
 

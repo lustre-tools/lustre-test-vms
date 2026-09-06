@@ -387,6 +387,13 @@ class TargetConfig:
         raw = targets[name]
         # Merge defaults under target fields
         self._data: dict[str, Any] = {**defaults, **raw}
+        # Whether targets.yaml states this target's arch explicitly.
+        # An explicit arch is a *constraint* (rocky9-64k is aarch64 and
+        # nothing else); the inherited default is merely the arch to
+        # prefer when the host doesn't suggest one, since targets like
+        # rocky9 are published for several.  Callers resolving "which
+        # arch did the user mean" need to tell those apart.
+        self.arch_is_declared: bool = "arch" in raw
 
         # Schema validation: catch type errors in targets.yaml early
         # so we don't get confusing downstream behavior (e.g. missing

@@ -216,6 +216,13 @@ def cmd_targets(args: argparse.Namespace) -> int:
     host_a = host_arch()
     _KNOWN_ARCHES = ("x86_64", "aarch64")
 
+    def _declared_arch(target_name: str) -> str:
+        """The target's own arch from targets.yaml, else the host's."""
+        try:
+            return str(_cli_attr("TargetConfig")(target_name).arch)
+        except Exception:
+            return host_a
+
     def _archs_for(target_name: str) -> list[str]:
         if explicit_arch:
             return [explicit_arch]
@@ -232,10 +239,13 @@ def cmd_targets(args: argparse.Namespace) -> int:
             for a in _KNOWN_ARCHES:
                 if tag.startswith(f"{target_name}-{a}-"):
                     archs.add(a)
-        # Nothing anywhere -- show the host arch so the target still
-        # lists one row (available action: build it here).
+        # Nothing anywhere -- show the target's declared arch so it
+        # still lists one row (available action: build it here).
+        # Falling back to the host arch instead rendered aarch64-only
+        # targets like rocky9-64k as "(x86_64)" on an x86_64 host,
+        # contradicting targets.yaml and the row's own build hint.
         if not archs:
-            archs.add(host_a)
+            archs.add(_declared_arch(target_name))
         return sorted(archs)
 
     TargetConfig = _cli_attr("TargetConfig")
