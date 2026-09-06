@@ -15,6 +15,8 @@ command in place of `podman run`, confirming:
 
 from __future__ import annotations
 
+import resource
+
 import os
 import signal
 import subprocess
@@ -80,7 +82,14 @@ class TestCidfileInjection:
         # between --cidfile and the original tail
         assert cmd[-3:] == ["--rm", "busybox", "true"]
         assert "--ulimit" in cmd
-        assert cmd[cmd.index("--ulimit") + 1] == "nofile=524288:524288"
+        # 64k, clamped to this process's own RLIMIT_NOFILE hard cap:
+        # crun cannot setrlimit above the limit it inherits, so asking
+        # for more fails the container with "OCI permission denied".
+        ulimit = cmd[cmd.index("--ulimit") + 1]
+        soft, _, hard = ulimit.removeprefix("nofile=").partition(":")
+        assert soft == hard
+        assert 0 < int(soft) <= 65536
+        assert int(soft) <= resource.getrlimit(resource.RLIMIT_NOFILE)[1]
 
     def test_non_run_subcommand_passthrough(self) -> None:
         captured: list[list[str]] = []

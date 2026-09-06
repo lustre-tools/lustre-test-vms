@@ -56,6 +56,35 @@ def _make_config(tmp_targets: Path, arch: str | None = None) -> TargetConfig:
         return cfg.TargetConfig("rocky9", arch=arch)
 
 
+
+
+def _make_kernel_outputs(tc, kernel: str | None = None) -> Path:
+    """Lay down the files a successful kernel build leaves behind.
+
+    is_stale() checks that an artifact's outputs actually exist, not
+    just that its meta.json hash matches -- so a test that writes meta
+    without outputs is describing a *failed* build.  Use this whenever
+    a test means "a good kernel build is cached here".
+    """
+    out = tc.kernel_output_dir(kernel)
+    (out / "build-tree").mkdir(parents=True, exist_ok=True)
+    (out / "modules" / "lib" / "modules").mkdir(parents=True, exist_ok=True)
+    (out / "vmlinux").write_bytes(b"\x7fELF")
+    (out / "vmlinuz").write_bytes(b"kernel")
+    (out / "build-tree" / ".config").write_text("CONFIG_X=y\n")
+    (out / "modules" / "lib" / "modules" / "dummy.ko").write_bytes(b"ko")
+    return out
+
+
+def _make_image_outputs(tc, kernel: str | None = None, variant=None) -> Path:
+    """Lay down the file a successful image build leaves behind."""
+    out = tc.image_output_dir(kernel, variant=variant)
+    out.mkdir(parents=True, exist_ok=True)
+    img = out / "base.ext4"
+    img.write_bytes(b"ext4")
+    return img
+
+
 @pytest.fixture(autouse=True)
 def _neutralize_podman_preflight() -> object:
     """Suppress the macOS podman-machine preflight for unit tests.

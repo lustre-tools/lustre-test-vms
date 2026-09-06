@@ -9,7 +9,13 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from tests.conftest import _ROCKY9_YAML, _make_config, _write_targets_yaml
+from tests.conftest import (
+    _ROCKY9_YAML,
+    _make_config,
+    _make_image_outputs,
+    _make_kernel_outputs,
+    _write_targets_yaml,
+)
 
 
 class TestTargetConfigProperties:
@@ -381,6 +387,7 @@ class TestStaleness:
     def test_image_staleness_per_kernel(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
         tc.write_meta("image", kernel="5.14-rhel9.7")
+        _make_image_outputs(tc, kernel="5.14-rhel9.7")
         assert tc.is_stale("image", kernel="5.14-rhel9.7") is False
         # Other kernel's image still stale (no meta written for it).
         assert tc.is_stale("image", kernel="5.14-rhel9.5") is True
@@ -395,6 +402,7 @@ class TestStaleness:
         tc = _make_config(tmp_targets)
         assert tc.is_stale("kernel") is True
         tc.write_meta("kernel")
+        _make_kernel_outputs(tc)
         assert tc.is_stale("kernel") is False
 
     def test_kernel_staleness_with_explicit_name(
@@ -402,6 +410,7 @@ class TestStaleness:
     ) -> None:
         tc = _make_config(tmp_targets)
         tc.write_meta("kernel", kernel="custom-kernel")
+        _make_kernel_outputs(tc, kernel="custom-kernel")
         assert tc.is_stale("kernel", kernel="custom-kernel") is False
         assert tc.is_stale("kernel", kernel="other-kernel") is True
 

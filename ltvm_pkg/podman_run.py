@@ -72,6 +72,30 @@ def _stderr_matches_cleanup_eof(stderr: str) -> bool:
 _GRACE_SECONDS = 0.5
 
 
+# Kernel kbuild's worst observed fd usage is ~4k; 64k is a generous
+# ceiling that stays under the rootless RLIMIT_NOFILE hard cap.
+_NOFILE_WANT = 65536
+
+
+def _nofile_limit() -> str:
+    """Return the "soft:hard" --ulimit nofile value to pass to podman.
+
+    Clamped to this process's own hard limit: crun cannot setrlimit
+    above the limit it inherits, and asking for more fails the whole
+    container with "OCI permission denied".
+    """
+    want = _NOFILE_WANT
+    try:
+        import resource
+
+        hard = resource.getrlimit(resource.RLIMIT_NOFILE)[1]
+        if hard != resource.RLIM_INFINITY:
+            want = min(want, hard)
+    except (ImportError, OSError, ValueError):
+        pass
+    return f"{want}:{want}"
+
+
 def run_podman_with_cleanup(
     cmd: list[str],
     *,
@@ -132,8 +156,12 @@ def run_podman_with_cleanup(
             # beyond that fails with "OCI permission denied" (crun
             # can't setrlimit above the container's inherited hard
             # limit).  64k is ~16x the worst observed kbuild usage and
-            # comfortably below the rootless cap on macOS machines.
-            injected += ["--ulimit", "nofile=524288:524288"]
+            # comfortably below the rootless cap on macOS machines --
+            # but the code asked for 524288, which is exactly the hard
+            # cap systemd commonly sets, leaving no margin, and more
+            # than it on hosts that set less.  Ask for 64k, and never
+            # for more than this process can actually pass on.
+            injected += ["--ulimit", f"nofile={_nofile_limit()}"]
         if injected:
             final_cmd = [cmd[0], cmd[1], *injected, *cmd[2:]]
 

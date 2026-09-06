@@ -25,7 +25,7 @@ from ltvm_pkg.kernel_build import (
     parse_lustre_target,
     resolve_lustre_files,
 )
-from tests.conftest import _make_config
+from tests.conftest import _make_config, _make_kernel_outputs
 
 _ROCKY9_SRPM_URL = (
     "https://dl.rockylinux.org/pub/rocky/9/BaseOS/source/tree/Packages/k"
@@ -201,13 +201,52 @@ class TestDownloadSrpm:
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir(parents=True)
         cached = cache_dir / srpm
-        cached.touch()
+        cached.write_bytes(b"\xed\xab\xee\xdb rpm payload")
 
         with patch("ltvm_pkg.kernel_build.subprocess.run") as mock_run:
             result = download_srpm(srpm, cache_dir, _ROCKY9_SRPM_URL)
 
         assert result == cached
         mock_run.assert_not_called()
+
+    def test_zero_length_cache_is_rediscarded_and_refetched(
+        self, tmp_path: Path
+    ) -> None:
+        """A truncated cached SRPM must not be reused.
+
+        A 0-byte kernel-*.src.rpm (disk full, killed download) was
+        returned forever and failed opaquely inside the container at
+        `rpm2cpio | cpio`, surfacing as the unrelated-looking
+        "No linux source tarball in SRPM".
+        """
+        srpm = "kernel-5.14.0-503.26.1.el9_7.src.rpm"
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir(parents=True)
+        cached = cache_dir / srpm
+        cached.touch()
+        assert cached.stat().st_size == 0
+
+        def fake_run(cmd, **kw):
+            # Simulate curl writing the payload to its -o target (the
+            # real code downloads to a tempfile and renames).
+            out = Path(cmd[cmd.index("-o") + 1])
+            out.write_bytes(b"\xed\xab\xee\xdb rpm payload")
+
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return R()
+
+        with patch(
+            "ltvm_pkg.kernel_build.subprocess.run", side_effect=fake_run
+        ) as mock_run:
+            result = download_srpm(srpm, cache_dir, _ROCKY9_SRPM_URL)
+
+        assert mock_run.called, "zero-length cache must trigger a re-fetch"
+        assert result == cached
+        assert cached.stat().st_size > 0
 
     @staticmethod
     def _curl_mock(content: bytes = b"fake srpm") -> MagicMock:
@@ -693,6 +732,7 @@ class TestKernelStatus:
             "srpm": "kernel-5.14.0-503.26.1.el9_7.src.rpm",
         }
         (kernel_dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+        _make_kernel_outputs(cfg)
         result = kernel_status(cfg, extra_hash=live_extra)
         assert result["built"] is True
         assert result["stale"] is False

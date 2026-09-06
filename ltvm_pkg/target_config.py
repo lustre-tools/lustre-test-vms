@@ -1064,6 +1064,24 @@ class TargetConfig:
             # build overwrites it cleanly rather than crashing every
             # subsequent status/build command on the parse error.
             return True
+        if not self.outputs_complete(artifact, kernel=kernel, variant=v):
+            # meta.json says this hash was built, but the artifact it
+            # describes isn't on disk.  A failed rebuild leaves exactly
+            # this state: archive_outgoing_vmlinux() renames vmlinux
+            # away and the inner script rm -rf's modules/ before the
+            # step that dies, while meta.json (whose inputs did not
+            # change) stays put.  Hash-only staleness then answered
+            # "up to date" forever, and the image build silently
+            # produced a rootfs with no kernel modules.  An interrupted
+            # `target fetch` lands here too: tar can write meta.json
+            # before the payload.
+            log.info(
+                "%s: %s meta is current but its outputs are missing -- "
+                "rebuilding",
+                self.name,
+                artifact,
+            )
+            return True
         return bool(
             meta.get("input_hash")
             != self.input_hash(
@@ -1071,12 +1089,47 @@ class TargetConfig:
             )
         )
 
+    def outputs_complete(
+        self,
+        artifact: str,
+        kernel: str | None = None,
+        variant: str | None = None,
+    ) -> bool:
+        """Are the files *artifact*'s meta.json claims to describe present?
+
+        A meta.json is written at the end of a successful build, but
+        nothing removes it when a *later* rebuild of the same inputs
+        fails partway -- so the hash alone cannot tell "built" from
+        "was built once, then destroyed".  Container images live in
+        podman's store rather than the filesystem, so they are not
+        checked here.
+        """
+        v = self.variant_name if variant is None else variant
+        if artifact == "kernel":
+            out = self.kernel_output_dir(kernel)
+            if not (out / "vmlinux").exists():
+                return False
+            if not (out / "vmlinuz").exists():
+                return False
+            if not (out / "build-tree" / ".config").exists():
+                return False
+            mods = out / "modules"
+            if not mods.is_dir():
+                return False
+            return any(mods.rglob("*.ko")) or any(mods.rglob("*.ko.xz"))
+        if artifact == "image":
+            return (
+                self.image_output_dir(kernel, variant=v) / "base.ext4"
+            ).exists()
+        return True
+
     def write_meta(
         self,
         artifact: str,
         kernel: str | None = None,
         extra_hash: bytes = b"",
         variant: str | None = None,
+        hash_kernel: str | None = None,
         **extra: object,
     ) -> None:
         """Write build metadata after a successful build.
@@ -1085,6 +1138,16 @@ class TargetConfig:
         ``input_hash`` matches the one ``is_stale`` will compute on the
         next run.  ``extra`` keyword args are written into meta.json
         verbatim (kernel_version, build_date, etc.).
+
+        ``hash_kernel`` names the kernel key to hash, when that differs
+        from the one naming the output directory.  The kernel builder
+        writes meta into the *full* directory name
+        (5.14-rhel9.7-5.14.0-611.42.1.el9_7) but is_stale() is called
+        with the declared short name.  input_hash() normalises the two
+        via _short_kernel_name(), which can only do so for kernels
+        declared in targets.yaml -- for anything else the two hashes
+        differed and the kernel rebuilt from scratch on every single
+        invocation, showing permanently stale in `build status`.
         """
         v = self.variant_name if variant is None else variant
         if artifact == "kernel":
@@ -1099,7 +1162,10 @@ class TargetConfig:
         meta = {
             "target": self.name,
             "input_hash": self.input_hash(
-                artifact, kernel=kernel, extra=extra_hash, variant=v
+                artifact,
+                kernel=hash_kernel if hash_kernel is not None else kernel,
+                extra=extra_hash,
+                variant=v,
             ),
             **extra,
         }

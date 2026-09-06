@@ -80,14 +80,35 @@ def _kver_from_build_tree(build_tree: Path) -> str:
     return kver_file.read_text().strip()
 
 
-def _input_hash(kver: str, mofed_version: str) -> str:
+def _input_hash(
+    kver: str, mofed_version: str, kernel_hash: str = ""
+) -> str:
     h = hashlib.sha256()
     h.update(kver.encode())
     h.update(b"\0")
     h.update(mofed_version.encode())
     h.update(b"\0")
+    # kver is the EXTRAVERSION-derived release string, which does not
+    # change when a Lustre kernel patch or a kernels.config option
+    # does -- but Module.symvers does.  Without the kernel's own
+    # input_hash here, editing a patch rebuilt the kernel, left this
+    # cache "fresh", and image_build force-installed kmods built
+    # against the previous Module.symvers: mlx5_core/ib_core then fail
+    # to load in the VM with symbol-version disagreement, taking
+    # ko2iblnd with them.
+    h.update(kernel_hash.encode())
+    h.update(b"\0")
     h.update(INNER_SCRIPT.read_bytes())
     return h.hexdigest()
+
+
+def _kernel_input_hash(tc: TargetConfig, kernel: str | None) -> str:
+    """The kernel artifact's recorded input_hash, or "" if unbuilt."""
+    meta = load_meta_safe(tc.meta_path("kernel", kernel))
+    if meta is None:
+        return ""
+    h = meta.get("input_hash")
+    return h if isinstance(h, str) else ""
 
 
 def is_stale(tc: TargetConfig, kernel: str | None = None) -> bool:
@@ -100,8 +121,15 @@ def is_stale(tc: TargetConfig, kernel: str | None = None) -> bool:
         kver = _kver_from_build_tree(build_tree)
     except FileNotFoundError:
         return True
-    expected = _input_hash(kver, _mofed_version(tc))
-    return meta.get("input_hash") != expected
+    expected = _input_hash(
+        kver, _mofed_version(tc), _kernel_input_hash(tc, kernel)
+    )
+    if meta.get("input_hash") != expected:
+        return True
+    # A failed build wipes the RPMs but leaves the matching meta.json,
+    # so the hash alone would report "up to date" over an empty
+    # directory and hand the caller no RPMs while exiting 0.
+    return not any(out_dir.glob("*.rpm"))
 
 
 def build_mofed_kmods(
@@ -142,7 +170,9 @@ def build_mofed_kmods(
 
     kver = _kver_from_build_tree(build_tree)
     mofed_version = _mofed_version(tc)
-    expected_hash = _input_hash(kver, mofed_version)
+    expected_hash = _input_hash(
+        kver, mofed_version, _kernel_input_hash(tc, kernel)
+    )
 
     out_dir = mofed_kmod_dir(tc, kernel)
     if not force and not is_stale(tc, kernel):

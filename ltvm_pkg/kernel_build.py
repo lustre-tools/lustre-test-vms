@@ -481,9 +481,17 @@ def download_srpm(srpm_name: str, cache_dir: str | Path, base_url: str) -> Path:
     cache_dir.mkdir(parents=True, exist_ok=True)
     cached = cache_dir / srpm_name
 
-    if cached.exists():
+    if cached.exists() and cached.stat().st_size > 0:
         log.info("Using cached SRPM: %s", cached)
         return cached
+    if cached.exists():
+        # Zero-length: a download interrupted by a full disk or a
+        # killed process.  Reused forever, it failed opaquely inside
+        # the container at `rpm2cpio | cpio` (whose stderr is
+        # discarded) and surfaced as "No linux source tarball in
+        # SRPM".  upstream_kernel.download_tarball already guards this.
+        log.warning("Discarding zero-length cached SRPM: %s", cached)
+        cached.unlink()
 
     urls = [f"{base_url}/{srpm_name}"] + _srpm_fallback_urls(
         base_url, srpm_name
@@ -1021,8 +1029,16 @@ def _finalize_kernel_build(
         "built_at": datetime.now(timezone.utc).isoformat(),
         **extra_meta,
     }
+    # Hash against the same kernel key is_stale() uses (the declared
+    # short name), while the meta file itself lands in the full-name
+    # output dir.  Without hash_kernel these two disagree for any
+    # kernel not declared in targets.yaml.
     target_config.write_meta(
-        "kernel", kernel=full_name, extra_hash=extra_hash, **meta
+        "kernel",
+        kernel=full_name,
+        hash_kernel=lustre_target,
+        extra_hash=extra_hash,
+        **meta,
     )
     log.info("Kernel build complete")
     return meta
@@ -1287,6 +1303,21 @@ def _build_kernel_srpm(
     log.info("Patches to apply: %d", len(lustre_patches))
 
     extra_hash = lustre_inputs_hash(lustre_tree, lustre_target, lustre_files)
+
+    # Fold in the SRPM actually resolved for this build.  When the
+    # version declared in <target>.target.in has been retired from
+    # Rocky's mirrors, _resolve_available_srpm() silently substitutes
+    # the latest published .elN_M -- which changes lnxmaj/lnxrel, the
+    # output directory name and the kernel that gets built, but
+    # reached neither hash input.  So after upstream retired the
+    # fallback in turn, the next run resolved a *newer* SRPM, read the
+    # older directory's meta, found the hash unchanged and reported
+    # "Kernel is up to date" -- never building the kernel it had just
+    # told the user it was falling back to.  _build_kernel_upstream
+    # already folds its resolved version in for the same reason.
+    srpm_key = str(target_info.get("srpm", ""))
+    if srpm_key:
+        extra_hash += b"srpm:" + srpm_key.encode()
 
     # Staleness check (now folds in the resolved Lustre inputs)
     if not force and not target_config.is_stale(

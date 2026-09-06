@@ -114,6 +114,31 @@ def _podman_platform(target_config: TargetConfig) -> list[str]:
     return ["--platform", podman_platform_for(target_config.arch)]
 
 
+def _dockerfile_referenced_target_dirs(dockerfile: Path) -> set[str]:
+    """Top-level targets/ subdirs a Dockerfile COPYs from.
+
+    Used to assemble a cross-build context: a target's image.Dockerfile
+    may legitimately read a sibling target's package list rather than
+    duplicating it.
+    """
+    dirs: set[str] = set()
+    try:
+        text = dockerfile.read_text()
+    except OSError:
+        return dirs
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.upper().startswith("COPY "):
+            continue
+        for tok in stripped.split()[1:]:
+            if tok.startswith("--") or tok.startswith("/"):
+                continue
+            head = tok.split("/", 1)
+            if len(head) == 2 and head[0] not in ("", ".", ".."):
+                dirs.add(head[0])
+    return dirs
+
+
 def _prebuild_tools_native(
     target_config: TargetConfig,
     output_dir: Path,
@@ -651,12 +676,35 @@ def build_image(
         # Podman doesn't follow symlinks outside the context, so we
         # hard-copy the target dirs into the build context.
         build_context = out_dir
-        for name in ("common", target_config.name):
-            dest = build_context / name
+        # Copy this target's dir, common/, and any *sibling* target dir
+        # its Dockerfile COPYs from.  rocky9-64k's image.Dockerfile
+        # reads rocky9/packages-os.txt and mainline's reads rocky10/'s
+        # -- and since both targets are cross-built on an ordinary
+        # host, every build of them died at
+        # "COPY rocky9/packages-os.txt: no such file or directory".
+        needed = {"common", target_config.name}
+        needed |= _dockerfile_referenced_target_dirs(effective_dockerfile)
+        for name in sorted(needed):
             src = TARGETS_DIR / name
+            if not src.is_dir():
+                continue
+            dest = build_context / name
             if dest.exists():
                 shutil.rmtree(dest)
             shutil.copytree(src, dest)
+        # out_dir also holds the previous base.ext4 (often 1-3 GB) and
+        # _prebuilt/, all of which podman would otherwise tar up and
+        # ship to the daemon before running the first instruction.
+        (build_context / ".containerignore").write_text(
+            "base.ext4\n"
+            "*.ext4\n"
+            "meta.json\n"
+            "bootable-*\n"
+            "disk.raw\n"
+            "*.tar.gz\n"
+            "*.tar.zst\n"
+            "_inject/\n"
+        )
     else:
         build_context = TARGETS_DIR
 
@@ -739,6 +787,25 @@ def build_image(
         # injecting kernel modules because those live deterministically
         # next to the kernel build output, not in a per-user tree.
         has_modules = (modules_dir / "lib" / "modules").is_dir()
+
+        # has_modules gates the whole second-stage inject block below:
+        # the Lustre payload, the /etc/ltvm-image.json identity stamp
+        # and the baked kdump kernel all ride along with it.  So when
+        # the kernel dir has no modules/ (a failed or half-cleaned
+        # kernel build) the build used to *succeed*, quietly emitting a
+        # rootfs with no kernel modules, no stamp and no Lustre -- and
+        # then write meta.json claiming with_lustre=<path> and a
+        # lustre_version read from the staging tree rather than the
+        # image.  The pre-check above validates the Lustre side; this
+        # is the kernel side of the same contract.
+        if not has_modules:
+            raise FileNotFoundError(
+                f"No kernel modules at {modules_dir / 'lib' / 'modules'} -- "
+                f"the kernel build for {target_config.name} "
+                f"(kernel={kernel_name}) is missing or incomplete.\n"
+                f"  run: ltvm build kernel {target_config.name} "
+                f"--kernel {kernel_name} --force"
+            )
 
         if has_modules:
             # Build a context dir with the files to inject
@@ -906,7 +973,12 @@ def build_image(
 
     # ── Step 3: Collect metadata ──
     size_mb = image_path.stat().st_size / (1024 * 1024)
-    pkg_manifest = _get_package_manifest(tag, target_config.os_family)
+    # Query the tag that was actually exported.  Using the pre-inject
+    # `tag` omitted everything the final stage installs -- notably the
+    # MOFED kmod RPMs -- so meta.json's package list under-reported
+    # what shipped in the image.  final_tag == tag when no second
+    # stage ran, and it is only rmi'd on the failure path above.
+    pkg_manifest = _get_package_manifest(final_tag, target_config.os_family)
 
     lustre_version: str | None = None
     if lustre_staging is not None:
