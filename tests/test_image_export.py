@@ -351,6 +351,23 @@ class TestDoctorFlagsMissingExportTools:
         assert warnings == []
 
 
+def _which_until_installed(missing: str, state: dict):
+    """shutil.which stub where the mocked install makes `missing` appear.
+
+    check_prerequisites re-checks after installing, so a stub that
+    reports a tool missing forever describes a failed install and
+    correctly raises.  Pair with a _pkg_install mock that sets
+    state["installed"].
+    """
+
+    def which(name: str) -> str | None:
+        if name == missing and not state.get("installed"):
+            return None
+        return "/u/bin/" + name
+
+    return which
+
+
 class TestHostSetupDeps:
     """check_prerequisites now declares parted + grub as deps."""
 
@@ -368,13 +385,16 @@ class TestHostSetupDeps:
         # When everything is installed, _pkg_install is only called for
         # podman/pyyaml.  What we care about: the dict *would* list parted.
         # So rerun with parted missing and assert it shows up as a pkg.
-        def which(name: str) -> str | None:
-            return None if name == "parted" else "/u/bin/" + name
-
+        state: dict = {}
         with (
-            patch.object(host_setup.shutil, "which", side_effect=which),
+            patch.object(
+                host_setup.shutil,
+                "which",
+                side_effect=_which_until_installed("parted", state),
+            ),
             patch.object(host_setup, "_pkg_install") as install,
         ):
+            install.side_effect = lambda *a, **k: state.update(installed=True)
             host_setup.check_prerequisites(host)
         pkgs = [a for call in install.call_args_list for a in call.args]
         assert "parted" in pkgs
@@ -385,13 +405,16 @@ class TestHostSetupDeps:
         host = MagicMock()
         host.pkg_mgr = "apt"
 
-        def which(name: str) -> str | None:
-            return None if name == "grub-install" else "/u/bin/" + name
-
+        state: dict = {}
         with (
-            patch.object(host_setup.shutil, "which", side_effect=which),
+            patch.object(
+                host_setup.shutil,
+                "which",
+                side_effect=_which_until_installed("grub-install", state),
+            ),
             patch.object(host_setup, "_pkg_install") as install,
         ):
+            install.side_effect = lambda *a, **k: state.update(installed=True)
             host_setup.check_prerequisites(host)
         pkgs = [a for call in install.call_args_list for a in call.args]
         assert "grub-pc-bin" in pkgs
@@ -402,13 +425,16 @@ class TestHostSetupDeps:
         host = MagicMock()
         host.pkg_mgr = "dnf"
 
-        def which(name: str) -> str | None:
-            return None if name == "grub2-install" else "/u/bin/" + name
-
+        state: dict = {}
         with (
-            patch.object(host_setup.shutil, "which", side_effect=which),
+            patch.object(
+                host_setup.shutil,
+                "which",
+                side_effect=_which_until_installed("grub2-install", state),
+            ),
             patch.object(host_setup, "_pkg_install") as install,
         ):
+            install.side_effect = lambda *a, **k: state.update(installed=True)
             host_setup.check_prerequisites(host)
         pkgs = [a for call in install.call_args_list for a in call.args]
         assert "grub2-pc" in pkgs

@@ -133,8 +133,12 @@ def test_prompt_yes_triggers_update(_config_dir: Path) -> None:
         patch.object(uc, "_is_newer", return_value=True),
         patch.object(uc, "_prompt_choice", return_value="y"),
         patch.object(uc, "_apply_update") as mock_apply,
+        pytest.raises(SystemExit) as exc,
     ):
         uc.maybe_check_for_updates()
+    # A successful self-update must stop the process rather than run
+    # the user's command with old code against the new tree.
+    assert exc.value.code == 0
     mock_apply.assert_called_once()
 
 
@@ -148,8 +152,10 @@ def test_prompt_auto_flips_config(_config_dir: Path) -> None:
         patch.object(uc, "_is_newer", return_value=True),
         patch.object(uc, "_prompt_choice", return_value="a"),
         patch.object(uc, "_apply_update") as mock_apply,
+        pytest.raises(SystemExit) as exc,
     ):
         uc.maybe_check_for_updates()
+    assert exc.value.code == 0
     mock_apply.assert_called_once()
     cfg = uc._load_config()
     assert cfg["update_check"]["mode"] == "auto"
@@ -271,7 +277,9 @@ def test_auto_mode_no_prompt(_config_dir: Path) -> None:
         patch.object(uc, "_is_newer", return_value=True),
         patch.object(uc, "_prompt_choice") as mock_prompt,
         patch.object(uc, "_apply_update") as mock_apply,
+        pytest.raises(SystemExit) as exc,
     ):
         uc.maybe_check_for_updates()
+    assert exc.value.code == 0
     mock_prompt.assert_not_called()
     mock_apply.assert_called_once()

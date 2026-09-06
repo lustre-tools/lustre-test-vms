@@ -5,6 +5,7 @@ from __future__ import annotations
 import platform
 import subprocess
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -250,18 +251,36 @@ class TestCheckPrerequisites:
                 check_prerequisites(host)
         mock_install.assert_not_called()
 
-    def test_missing_cmds_calls_install(self) -> None:
-        """Missing cmds trigger _pkg_install with the right packages."""
-        host = self._make_host("dnf")
+    @staticmethod
+    def _which_installed_after(missing: set[str], state: dict) -> Any:
+        """shutil.which stub where a successful install makes cmds appear.
+
+        check_prerequisites now re-checks after installing, so a stub
+        that reports a command missing forever describes a *failed*
+        install (which correctly raises).  Flip `state["installed"]`
+        from the _pkg_install mock to model the success path.
+        """
 
         def _which(cmd: str) -> str | None:
-            # curl and tar are missing; everything else present
-            if cmd in ("curl", "tar"):
+            if cmd in missing and not state.get("installed"):
                 return None
             return f"/usr/bin/{cmd}"
 
-        with patch("shutil.which", side_effect=_which):
+        return _which
+
+    def test_missing_cmds_calls_install(self) -> None:
+        """Missing cmds trigger _pkg_install with the right packages."""
+        host = self._make_host("dnf")
+        state: dict = {}
+
+        with patch(
+            "shutil.which",
+            side_effect=self._which_installed_after({"curl", "tar"}, state),
+        ):
             with patch("ltvm_pkg.host_setup._pkg_install") as mock_install:
+                mock_install.side_effect = lambda *a, **k: state.update(
+                    installed=True
+                )
                 check_prerequisites(host)
 
         # Should be called once with the two missing packages
@@ -275,13 +294,16 @@ class TestCheckPrerequisites:
         """dnf host uses 'iproute' for the 'ip' command."""
         host = self._make_host("dnf")
 
-        def _which(cmd: str) -> str | None:
-            if cmd == "ip":
-                return None
-            return f"/usr/bin/{cmd}"
+        state: dict = {}
 
-        with patch("shutil.which", side_effect=_which):
+        with patch(
+            "shutil.which",
+            side_effect=self._which_installed_after({"ip"}, state),
+        ):
             with patch("ltvm_pkg.host_setup._pkg_install") as mock_install:
+                mock_install.side_effect = lambda *a, **k: state.update(
+                    installed=True
+                )
                 check_prerequisites(host)
 
         args = mock_install.call_args[0]
@@ -292,13 +314,16 @@ class TestCheckPrerequisites:
         """apt host uses 'iproute2' for the 'ip' command."""
         host = self._make_host("apt")
 
-        def _which(cmd: str) -> str | None:
-            if cmd == "ip":
-                return None
-            return f"/usr/bin/{cmd}"
+        state: dict = {}
 
-        with patch("shutil.which", side_effect=_which):
+        with patch(
+            "shutil.which",
+            side_effect=self._which_installed_after({"ip"}, state),
+        ):
             with patch("ltvm_pkg.host_setup._pkg_install") as mock_install:
+                mock_install.side_effect = lambda *a, **k: state.update(
+                    installed=True
+                )
                 check_prerequisites(host)
 
         args = mock_install.call_args[0]

@@ -776,6 +776,15 @@ def package_target(
             f"--use-compress-program=zstd -{ZSTD_LEVEL} -T{ZSTD_THREADS} --long={ZSTD_LONG}",
             "--exclude",
             f"{kernel_rel}/lustre-artifacts",
+            # MOFED kmods are variant content living under
+            # kernels/<kver>/mofed-kmods/.  The container, image and
+            # lustre assets all filter their variant subdirs to stay
+            # under GitHub's 2 GiB cap; this one did not, so publishing
+            # the *base* release after building the mofed-24 variant
+            # shipped the kmod RPMs to every base fetcher, which has no
+            # MOFED userspace to use them with.
+            "--exclude",
+            f"{kernel_rel}/mofed-kmods",
             "-cf",
             str(kern_asset),
             "-C",

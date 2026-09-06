@@ -32,11 +32,24 @@ for target in rocky9 rocky10; do
         -C /tmp/qemu-out/install/opt/qemu bin share
 done
 
+# Publish a sha256 next to each tarball.  `ltvm install` fetches
+# <asset>.sha256 and refuses to unpack a tarball whose digest does not
+# match -- it extracts into /opt as root, so this is the only thing
+# standing between a corrupted or substituted asset and the host.
+for suffix in el9 el10; do
+    ( cd /tmp && sha256sum "qemu-9.2.2-${suffix}.tar.gz" \
+        > "qemu-9.2.2-${suffix}.tar.gz.sha256" )
+done
+
 gh release upload qemu-9.2.2 /tmp/qemu-9.2.2-el9.tar.gz --clobber
+gh release upload qemu-9.2.2 /tmp/qemu-9.2.2-el9.tar.gz.sha256 --clobber
 gh release upload qemu-9.2.2 /tmp/qemu-9.2.2-el10.tar.gz --clobber
+gh release upload qemu-9.2.2 /tmp/qemu-9.2.2-el10.tar.gz.sha256 --clobber
 ```
 
 Notes:
+- The `.sha256` companion is required for new uploads.  Assets
+  published before it existed still install, with a warning.
 - Rocky 8 needs `dnf install python38` (system python too old)
 - Ubuntu uses system QEMU package (has microvm)
 - Bump `QEMU_VERSION` in `ltvm_pkg/host_setup.py` when updating

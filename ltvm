@@ -784,9 +784,14 @@ def build_parser() -> argparse.ArgumentParser:
     tfp.set_defaults(func=cmd_fetch)
 
     # export (bootable-disk packaging for non-ltvm users)
+    # variant_arg: `target publish --image --variant X` tells the user
+    # to run `ltvm target export <t> --variant X --format qcow2`, which
+    # argparse then rejected as an unrecognized argument -- there was
+    # no way to satisfy the error message, and no way to produce a
+    # bootable image for any non-base variant.
     tep = target_sub.add_parser(
         "export",
-        parents=[common, kernel_arg],
+        parents=[common, kernel_arg, variant_arg],
         help="Export base.ext4 + kernel as a bootable qcow2/raw disk, "
         "or a Google Compute Engine image (--format gce)",
     )

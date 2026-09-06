@@ -11,6 +11,7 @@ import contextlib
 import fcntl
 import json
 import logging
+import hashlib
 import os
 import platform
 import re
@@ -290,6 +291,25 @@ def check_prerequisites(host: HostInfo) -> None:
     if missing:
         log.info("Installing missing prerequisites: %s", " ".join(missing))
         _pkg_install(host, *missing)
+        # Re-check.  _pkg_install only warns on failure, and nothing
+        # verified the outcome -- so on a host with an unreachable
+        # mirror `ltvm install` warned once about e.g. "zstd parted
+        # grub2-pc" and then printed "Install complete." and exited 0.
+        # The user found out much later, when `target fetch` died in
+        # _check_zstd() or `target export` in _which_or_die().  Report
+        # it now, while the mirror is still the obvious suspect.
+        still_missing = [
+            cmd for cmd, pkg in needed.items() if pkg in missing
+            and not shutil.which(cmd)
+        ]
+        if still_missing:
+            raise RuntimeError(
+                "required tool(s) still missing after install: "
+                + ", ".join(sorted(still_missing))
+                + "\n  The package manager reported a failure above "
+                "(unreachable mirror? no such package on this distro?).\n"
+                "  Install them by hand and re-run `ltvm install`."
+            )
 
     if not shutil.which("podman"):
         log.info("Installing podman (needed for container/image builds)...")
@@ -507,13 +527,31 @@ def _fetch_prebuilt_qemu(host: HostInfo) -> bool:
                 f"required build deps may be too old."
             )
 
+        # Verify the download before unpacking it as root.  Every other
+        # artifact ltvm fetches is checked against a sha256 in its
+        # manifest (release_package.fetch_target); this one was fetched
+        # over curl and extracted straight into /opt as uid 0 with no
+        # integrity check at all, and the post-extraction checks are
+        # existence-only -- a truncated or substituted tarball that
+        # still contains the binary and two firmware files passes them.
+        _verify_qemu_asset(url, tmpdir / asset, asset)
+
         # Tarball is structured as a /opt/qemu overlay: bin/qemu-system-*,
         # bin/qemu-img, share/qemu/<firmware>.  Extract directly into
         # QEMU_PREFIX so firmware lands at the path QEMU was configured to
         # look for it (--prefix=/opt/qemu => looks at /opt/qemu/share/qemu/).
         QEMU_PREFIX.mkdir(parents=True, exist_ok=True)
         _run(
-            ["tar", "xf", str(tmpdir / asset), "-C", str(QEMU_PREFIX)],
+            [
+                "tar",
+                "xf",
+                str(tmpdir / asset),
+                "-C",
+                str(QEMU_PREFIX),
+                # We are uid 0 here: without this, tar restores the
+                # uid/gid recorded in the archive.
+                "--no-same-owner",
+            ],
             check=True,
         )
 
@@ -2198,6 +2236,137 @@ def _ltvm_launcher_needs_write(link: Path, repo_ltvm: Path) -> bool:
         return True
 
 
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _verify_qemu_asset(url: str, local: Path, asset: str) -> None:
+    """Check a downloaded QEMU tarball against its published sha256.
+
+    Publishers upload ``<asset>.sha256`` next to the tarball (see
+    docs/RELEASING.md).  When it is present the digest must match --
+    we are about to extract this archive into /opt as root.  When it
+    is absent (assets published before the companion file existed) say
+    so loudly rather than failing: refusing outright would strand
+    every host whose EL release predates it.
+    """
+    sha_url = url + ".sha256"
+    sha_file = local.with_suffix(local.suffix + ".sha256")
+    r = _run(
+        ["curl", "-fsSL", sha_url, "-o", str(sha_file)],
+        check=False,
+        quiet=True,
+    )
+    if r.returncode != 0 or not sha_file.is_file():
+        log.warning(
+            "no published sha256 for %s -- extracting an unverified "
+            "archive into %s as root.  Ask a maintainer to upload "
+            "%s.sha256 alongside the asset.",
+            asset,
+            QEMU_PREFIX,
+            asset,
+        )
+        return
+
+    expected = sha_file.read_text().split()[0].strip().lower()
+    actual = _sha256_file(local)
+    if actual != expected:
+        raise RuntimeError(
+            f"Checksum mismatch for pre-built QEMU asset {asset}:\n"
+            f"  expected {expected}\n"
+            f"  actual   {actual}\n"
+            f"Refusing to extract it into {QEMU_PREFIX}.  Re-run to "
+            f"retry the download; if it persists, the published asset "
+            f"may have been corrupted or replaced."
+        )
+    log.info("Verified %s against published sha256", asset)
+
+
+def _current_secure_path() -> list[str]:
+    """The secure_path sudo is configured with right now, as a list.
+
+    Under sudo, $PATH *is* secure_path, so asking sudo to print it is
+    the most reliable read that doesn't parse /etc/sudoers.  Falls back
+    to the conventional set when sudo can't be consulted.
+    """
+    try:
+        r = subprocess.run(
+            ["sudo", "-n", "printenv", "PATH"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return [p for p in r.stdout.strip().split(":") if p]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return ["/sbin", "/bin", "/usr/sbin", "/usr/bin"]
+
+
+def _install_sudoers_fragment(path: Path) -> None:
+    """Make `sudo ltvm` work without clobbering the distro's secure_path.
+
+    Some distros (Rocky 9, RHEL) ship a secure_path that excludes
+    /usr/local/bin, so `sudo ltvm` fails with "command not found".  The
+    fix used to be a hardcoded, unscoped
+    ``Defaults secure_path="/sbin:/bin:/usr/sbin:/usr/bin:
+    /usr/local/sbin:/usr/local/bin"``.  sudoers.d is included at the
+    end of /etc/sudoers and the last Defaults wins, so that replaced
+    secure_path for *every user and every command*, silently dropping
+    whatever the distro had put there -- on Ubuntu that includes
+    /snap/bin, so `sudo snap install ...` started reporting
+    "snap: command not found" after `ltvm install`.
+
+    Derive the value from the secure_path in force, add only what is
+    missing, and skip the directive entirely when nothing is missing.
+    Validate with visudo before installing: a parse error in
+    /etc/sudoers.d disables sudo altogether.
+    """
+    wanted = ["/usr/local/sbin", "/usr/local/bin"]
+    current = _current_secure_path()
+    missing = [d for d in wanted if d not in current]
+
+    lines = ['Defaults env_keep += "LTVM_OWNER_ID"']
+    if missing:
+        merged = ":".join(current + missing)
+        lines.insert(0, f'Defaults secure_path="{merged}"')
+    body = "\n".join(lines) + "\n"
+
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        tmp.write_text(body)
+        tmp.chmod(0o440)
+        check = subprocess.run(
+            ["visudo", "-cf", str(tmp)], capture_output=True, text=True
+        )
+        if check.returncode != 0:
+            log.warning(
+                "refusing to install %s: visudo rejected it: %s",
+                path,
+                (check.stderr or check.stdout or "").strip(),
+            )
+            return
+        tmp.replace(path)
+        path.chmod(0o440)
+    except OSError as e:
+        log.warning("could not install sudoers fragment %s: %s", path, e)
+        return
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    if missing:
+        log.info("sudo secure_path extended with %s via %s", ", ".join(missing), path)
+    else:
+        log.info("sudo secure_path already sufficient; %s sets env_keep only", path)
+
+
 def _install_ltvm_launcher(link: Path, repo_ltvm: Path) -> bool:
     """Install a shell wrapper at ``link`` that exec()s the repo's ltvm
     under the Python currently executing this code.
@@ -2369,14 +2538,7 @@ def run_setup(
         # Drop in a sudoers fragment for both settings.
         sudoers_d = Path("/etc/sudoers.d")
         if sudoers_d.is_dir():
-            sudoers_drop = sudoers_d / "ltvm"
-            sudoers_drop.write_text(
-                'Defaults secure_path="/sbin:/bin:/usr/sbin:/usr/bin:'
-                '/usr/local/sbin:/usr/local/bin"\n'
-                'Defaults env_keep += "LTVM_OWNER_ID"\n'
-            )
-            sudoers_drop.chmod(0o440)
-            log.info("sudo secure_path extended via %s", sudoers_drop)
+            _install_sudoers_fragment(sudoers_d / "ltvm")
 
     # Install bash tab completion via argcomplete.
     # We bake the output of `register-python-argcomplete ltvm` straight

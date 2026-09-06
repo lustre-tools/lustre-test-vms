@@ -1000,10 +1000,21 @@ def _finalize_kernel_build(
     if not vmlinuz.exists():
         raise RuntimeError("Build failed: vmlinuz not found in output")
 
-    krelease = "unknown"
     kr_file = kernel_out / "build-tree" / "include/config/kernel.release"
-    if kr_file.exists():
-        krelease = kr_file.read_text().strip()
+    if not kr_file.exists():
+        # Do not fall back to a placeholder.  meta_schema._require only
+        # tests truthiness, so "unknown" sailed through
+        # require_kernel_meta and became the kernel_version that names
+        # every release asset: kernel-rocky9-x86_64-unknown.tar.zst and
+        # a release tag to match -- a published release named for a
+        # kernel version that does not exist.
+        raise RuntimeError(
+            f"Build failed: no kernel.release at {kr_file} -- "
+            f"the kernel build did not complete"
+        )
+    krelease = kr_file.read_text().strip()
+    if not krelease:
+        raise RuntimeError(f"Build failed: {kr_file} is empty")
 
     kernel_build_id = elf_build_id(vmlinux)
     vmlinux_size = vmlinux.stat().st_size

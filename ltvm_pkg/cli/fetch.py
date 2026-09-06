@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -32,6 +33,8 @@ from ltvm_pkg.cli.util import (
     host_arch,
     resolve_arch,
 )
+
+log = logging.getLogger("ltvm")
 
 
 def _cli_attr(name: str) -> Any:
@@ -546,10 +549,20 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                     hint=f"Available: {', '.join(declared)}",
                 )
             kernel_signature = _kernel_release_signature(kernel)
-            if kernel_signature is None and not use_json:
+            if kernel_signature is None:
+                # Never suppress this under --json.  mainline's moving
+                # aliases (latest / stable / longterm) match neither
+                # the rhelX.Y nor the MAJOR.MINOR pattern, so
+                # `target fetch mainline --kernel latest --json`
+                # fetched whichever release GitHub happened to list
+                # first -- plausibly the `stable` one -- and said
+                # nothing at all.  JSON output goes to stdout, so a
+                # stderr warning cannot corrupt it.
                 print(
-                    f"warning: could not derive release signature from "
-                    f"--kernel {kernel!r}; falling back to first match.",
+                    f"warning: could not derive a release signature from "
+                    f"--kernel {kernel!r}; falling back to the first "
+                    f"published release for {target}, which may not be "
+                    f"the kernel you asked for.",
                     file=sys.stderr,
                 )
 
@@ -739,9 +752,25 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         # release on top of (or alongside) the existing one mixes two
         # releases' files and leaves the output dir in a state that's
         # hard to reason about -- so refuse by default.  --replace opts
-        # into a clean overwrite; --force bypasses the guard for
-        # scripts that have already decided.
-        if not replace and not force:
+        # into a clean overwrite.
+        #
+        # --force alone must NOT bypass this: it skips the refusal but
+        # not the cleanup, because _replace_scope only runs under
+        # `if replace`.  The result was the exact mixed state the
+        # refusal exists to prevent -- stale kernels/<old>/,
+        # images/<old>/ and a half-overwritten container/ -- and
+        # --force's own help only claims to mean "with --replace,
+        # re-fetch even when the tag already matches".  Treat --force
+        # on a divergent tag as implying --replace.
+        if force and not replace:
+            log.warning(
+                "--force on a divergent release (%s -> %s): "
+                "replacing the local copy rather than extracting over it",
+                existing_tag,
+                release_tag,
+            )
+            replace = True
+        if not replace:
             remote_date = _lookup_release_date(release_tag)
             local_date = _tag_file_date(tag_file)
             local_desc = existing_tag + (

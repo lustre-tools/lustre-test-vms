@@ -76,8 +76,27 @@ def _load_config() -> dict[str, Any]:
 
 
 def _save_config(cfg: dict[str, Any]) -> None:
+    """Persist the config, keeping it owned by the human.
+
+    maybe_check_for_updates() runs on every interactive invocation,
+    including the ones that need root (`sudo ltvm cluster create`).  On
+    a distro that preserves HOME under sudo, the first such call wrote
+    the user's config.json as root; every later unprivileged ltvm could
+    still read it but _bump_last_check raised PermissionError, which
+    ltvm's blanket `except Exception` swallowed.  last_check_iso then
+    never advanced, so _due_for_check was always true -- a git
+    ls-remote on every single command, and an update prompt with it.
+    """
     _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    _CONFIG_FILE.write_text(json.dumps(cfg, indent=2) + "\n")
+    try:
+        _CONFIG_FILE.write_text(json.dumps(cfg, indent=2) + "\n")
+    except PermissionError:
+        log.debug("cannot write %s (owned by another user?)", _CONFIG_FILE)
+        return
+    from .priv import chown_to_invoking_user
+
+    chown_to_invoking_user(_CONFIG_DIR)
+    chown_to_invoking_user(_CONFIG_FILE)
 
 
 def _bump_last_check(cfg: dict[str, Any]) -> None:
@@ -281,6 +300,22 @@ def _apply_update() -> bool:
     return True
 
 
+def _exit_after_update() -> None:
+    """Stop after a successful self-update instead of continuing.
+
+    _apply_update() does `git pull --ff-only` + `ltvm install` and then
+    returned, so main() went on to run the user's command with the
+    already-imported *old* ltvm_pkg modules against the freshly-pulled
+    tree.  Anything read from disk after the pull -- targets.yaml,
+    SCHEMA_VERSION, host-config/ templates, kernel-build-inner*.sh --
+    is then the new file interpreted by old code: a new targets.yaml
+    key, for instance, fails validation against the old in-memory
+    _KNOWN_TARGET_KEYS immediately after a "successful" update.  The
+    message already says "Re-run your command"; make that true.
+    """
+    raise SystemExit(0)
+
+
 def _prompt_choice(local: str, remote: str) -> str:
     """Ask the user which of y/a/n/x they want; default is n."""
     try:
@@ -337,18 +372,21 @@ def maybe_check_for_updates(
             f"ltvm: auto-updating ({local} -> {remote})...",
             file=sys.stderr,
         )
-        _apply_update()
+        if _apply_update():
+            _exit_after_update()
         return
 
     # mode == "prompt"
     choice = _prompt_choice(local, remote)
     _bump_last_check(cfg)  # always: we DID check, regardless of answer
     if choice == "y":
-        _apply_update()
+        if _apply_update():
+            _exit_after_update()
     elif choice == "a":
         cfg["update_check"]["mode"] = "auto"
         _save_config(cfg)
-        _apply_update()
+        if _apply_update():
+            _exit_after_update()
     elif choice == "x":
         cfg["update_check"]["mode"] = "never"
         _save_config(cfg)
