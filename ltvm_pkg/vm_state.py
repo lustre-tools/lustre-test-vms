@@ -796,7 +796,9 @@ class ClusterInfo:
                     ", ".join(extra),
                 )
             try:
-                out.append(ClusterNode(**{k: v for k, v in n.items() if k in known}))
+                out.append(
+                    ClusterNode(**{k: v for k, v in n.items() if k in known})
+                )
             except TypeError as e:
                 raise RuntimeError(
                     f"corrupt cluster state for {self.name!r}: {e}"

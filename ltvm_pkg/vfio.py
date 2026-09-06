@@ -172,7 +172,9 @@ def bind_to_vfio(bdf: str) -> str | None:
     #    that as a successful bind either way.
     try:
         if used_override:
-            _sysfs_write(SYSFS_ROOT / "bus" / "pci" / "drivers_probe", f"{bdf}\n")
+            _sysfs_write(
+                SYSFS_ROOT / "bus" / "pci" / "drivers_probe", f"{bdf}\n"
+            )
         else:
             _sysfs_write(vfio_dir / "bind", f"{bdf}\n")
     except VfioError as exc:

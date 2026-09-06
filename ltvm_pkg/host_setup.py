@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import logging
-import hashlib
 import os
 import platform
 import re
@@ -299,8 +299,9 @@ def check_prerequisites(host: HostInfo) -> None:
         # _check_zstd() or `target export` in _which_or_die().  Report
         # it now, while the mirror is still the obvious suspect.
         still_missing = [
-            cmd for cmd, pkg in needed.items() if pkg in missing
-            and not shutil.which(cmd)
+            cmd
+            for cmd, pkg in needed.items()
+            if pkg in missing and not shutil.which(cmd)
         ]
         if still_missing:
             raise RuntimeError(
@@ -2362,9 +2363,13 @@ def _install_sudoers_fragment(path: Path) -> None:
             pass
 
     if missing:
-        log.info("sudo secure_path extended with %s via %s", ", ".join(missing), path)
+        log.info(
+            "sudo secure_path extended with %s via %s", ", ".join(missing), path
+        )
     else:
-        log.info("sudo secure_path already sufficient; %s sets env_keep only", path)
+        log.info(
+            "sudo secure_path already sufficient; %s sets env_keep only", path
+        )
 
 
 def _install_ltvm_launcher(link: Path, repo_ltvm: Path) -> bool:

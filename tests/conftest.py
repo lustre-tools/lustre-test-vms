@@ -56,8 +56,6 @@ def _make_config(tmp_targets: Path, arch: str | None = None) -> TargetConfig:
         return cfg.TargetConfig("rocky9", arch=arch)
 
 
-
-
 def _make_kernel_outputs(tc, kernel: str | None = None) -> Path:
     """Lay down the files a successful kernel build leaves behind.
 

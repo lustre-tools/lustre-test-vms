@@ -886,7 +886,8 @@ def cmd_cluster_ssh(args: argparse.Namespace) -> None:
     # node-name match so an explicit name is never shadowed by a role.
     exact = [n for n in nodes if n.name == target]
     by_role = [n for n in nodes if target in n.roles]
-    matched = (exact or by_role or [None])[0]
+    candidates = exact or by_role
+    matched = candidates[0] if candidates else None
     if matched is None:
         die(
             f"no node matching '{target}' in cluster '{args.name}'",

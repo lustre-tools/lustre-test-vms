@@ -26,7 +26,9 @@ def _mofed_tc(tmp_targets: Path):
 
 def _seed_kernel(tc, kernel: str | None, input_hash: str) -> Path:
     out = tc.kernel_output_dir(kernel)
-    (out / "build-tree" / "include" / "config").mkdir(parents=True, exist_ok=True)
+    (out / "build-tree" / "include" / "config").mkdir(
+        parents=True, exist_ok=True
+    )
     (out / "build-tree" / "include" / "config" / "kernel.release").write_text(
         "5.14.0-611.47.1.el9_7_lustre\n"
     )

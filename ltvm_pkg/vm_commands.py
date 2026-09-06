@@ -1292,17 +1292,21 @@ def cmd_list(args: argparse.Namespace) -> None:
             # Race: .info file disappeared between all_names() and load().
             # Skip this entry rather than crashing.
             continue
-        except ValueError as e:
+        except ValueError as exc:
             # Corrupt int field.  VMInfo.load fails loud by design, but
             # `ltvm list` is how a user *finds out* something is wrong;
             # aborting the whole listing on one damaged file hides every
             # healthy VM behind a traceback.  Report the casualty in
-            # place instead.
+            # place instead.  (Named `exc`, not `e`: the render loop
+            # below binds `e`, and Python deletes an except-name at
+            # block exit.)
             print(
-                f"warning: {name}: unreadable VM state ({e})",
+                f"warning: {name}: unreadable VM state ({exc})",
                 file=sys.stderr,
             )
-            entries.append({"name": name, "status": "corrupt", "error": str(e)})
+            entries.append(
+                {"name": name, "status": "corrupt", "error": str(exc)}
+            )
             continue
         status = "running" if is_running(vm) else "stopped"
 
@@ -2350,9 +2354,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print("---")
     if args.fix:
         if fix_failures:
-            print(
-                f"{issues} issue(s) found, {fix_failures} could not be fixed"
-            )
+            print(f"{issues} issue(s) found, {fix_failures} could not be fixed")
             return EXIT_ERROR
         print(f"{issues} issue(s) found and fixed")
         return EXIT_OK

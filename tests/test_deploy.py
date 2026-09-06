@@ -610,9 +610,9 @@ def _mark_staging_fresh(
     meta["configure_sha256"] = cfg_hash
     meta_file.write_text(json.dumps(meta))
 
-    (build_path / f".ltvm-configure-{_stamp_suffix(target, tc.arch)}").write_text(
-        cfg_hash + "\n"
-    )
+    (
+        build_path / f".ltvm-configure-{_stamp_suffix(target, tc.arch)}"
+    ).write_text(cfg_hash + "\n")
     # Writing into the tree root bumps its mtime, and the fast path's
     # `find -newer` compares against the staging stamp -- so re-touch
     # the stamp last or the setup makes itself look stale.

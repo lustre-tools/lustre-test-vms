@@ -39,14 +39,18 @@ class TestSudoersFragment:
         assert "/snap/bin" in body
         assert "/usr/local/bin" in body
 
-    def test_omits_directive_when_nothing_missing(
-        self, tmp_path: Path
-    ) -> None:
+    def test_omits_directive_when_nothing_missing(self, tmp_path: Path) -> None:
         """No reason to set secure_path at all when it already works."""
         body = self._install(
             tmp_path,
-            ["/sbin", "/bin", "/usr/sbin", "/usr/bin",
-             "/usr/local/sbin", "/usr/local/bin"],
+            [
+                "/sbin",
+                "/bin",
+                "/usr/sbin",
+                "/usr/bin",
+                "/usr/local/sbin",
+                "/usr/local/bin",
+            ],
         )
         assert "secure_path" not in body
         assert "LTVM_OWNER_ID" in body

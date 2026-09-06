@@ -15,9 +15,8 @@ command in place of `podman run`, confirming:
 
 from __future__ import annotations
 
-import resource
-
 import os
+import resource
 import signal
 import subprocess
 import threading

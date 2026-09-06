@@ -75,8 +75,9 @@ class TestFixtureArchOverrideStillWorks:
         data["targets"]["rocky9"]["arch"] = "aarch64"
         yaml_path.write_text(yaml.dump(data, default_flow_style=False))
 
-        import ltvm_pkg.target_config as cfg
         from unittest.mock import patch
+
+        import ltvm_pkg.target_config as cfg
 
         with (
             patch.object(cfg, "TARGETS_DIR", tmp_targets / "targets"),

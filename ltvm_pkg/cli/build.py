@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any
 
 from ltvm_pkg.cli.util import (
+    EXIT_ERROR,
+    EXIT_OK,
     _artifact_label,
     _container_status,
     _error,
@@ -30,8 +32,6 @@ from ltvm_pkg.cli.util import (
     _load_target_args,
     _output,
     _print_target_header,
-    EXIT_ERROR,
-    EXIT_OK,
     resolve_arch,
 )
 from ltvm_pkg.host_setup import (

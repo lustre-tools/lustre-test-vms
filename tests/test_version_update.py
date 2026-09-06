@@ -545,9 +545,7 @@ class TestVersionRefreshAfterUpdate:
             # Prime both caches the way package import does.
             _sys.modules.pop("ltvm_pkg._build_info", None)
             importlib.import_module("ltvm_pkg._build_info")
-            assert ltvm_pkg._compute_version(refresh=True).endswith(
-                ".aaaaaaa"
-            )
+            assert ltvm_pkg._compute_version(refresh=True).endswith(".aaaaaaa")
 
             # cmd_update rewrites the file with the post-pull hash.
             # Same length as the previous content, written within the
@@ -559,9 +557,7 @@ class TestVersionRefreshAfterUpdate:
             # The already-imported module still holds the old hash...
             assert ltvm_pkg._compute_version().endswith(".aaaaaaa")
             # ...and refresh reports what is actually on disk.
-            assert ltvm_pkg._compute_version(refresh=True).endswith(
-                ".bbbbbbb"
-            )
+            assert ltvm_pkg._compute_version(refresh=True).endswith(".bbbbbbb")
         finally:
             if original is not None:
                 build_info.write_text(original)

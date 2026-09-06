@@ -514,9 +514,7 @@ def _ldiskfs_series_matches(
         # No distro context (older callers / upstream targets): keep
         # the historical prefix-only behavior.
         return candidates[0]
-    same_distro = [
-        s for s in candidates if any(t in s for t in distro_tokens)
-    ]
+    same_distro = [s for s in candidates if any(t in s for t in distro_tokens)]
     if not same_distro:
         return None
     return same_distro[-1]

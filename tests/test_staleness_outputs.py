@@ -55,9 +55,7 @@ class TestKernelOutputsGateStaleness:
         (out / "build-tree" / ".config").unlink()
         assert tc.is_stale("kernel") is True
 
-    def test_outputs_complete_reports_directly(
-        self, tmp_targets: Path
-    ) -> None:
+    def test_outputs_complete_reports_directly(self, tmp_targets: Path) -> None:
         tc = _make_config(tmp_targets)
         assert tc.outputs_complete("kernel") is False
         _make_kernel_outputs(tc)
@@ -115,9 +113,9 @@ class TestWriteMetaHashKernel:
         undeclared_short = "6.17"
         # Without hash_kernel the two hashes differ for a kernel that
         # targets.yaml does not declare -- that divergence is the bug.
-        assert tc.input_hash(
-            "kernel", kernel=undeclared_full
-        ) != tc.input_hash("kernel", kernel=undeclared_short)
+        assert tc.input_hash("kernel", kernel=undeclared_full) != tc.input_hash(
+            "kernel", kernel=undeclared_short
+        )
         # With it, the persisted hash matches what is_stale computes.
         tc.write_meta(
             "kernel",

@@ -596,7 +596,9 @@ def _unregister_ssh_name_locked(name: str) -> None:
         try:
             reload_dns()
         except RuntimeError as e:
-            log.warning("could not reload dnsmasq after removing %s: %s", name, e)
+            log.warning(
+                "could not reload dnsmasq after removing %s: %s", name, e
+            )
 
     # ~/.ssh/config -- remove block.  Same root-owns-the-file footgun
     # as register, so we chown back to the real user after writing.

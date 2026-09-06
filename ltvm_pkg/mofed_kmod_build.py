@@ -80,9 +80,7 @@ def _kver_from_build_tree(build_tree: Path) -> str:
     return kver_file.read_text().strip()
 
 
-def _input_hash(
-    kver: str, mofed_version: str, kernel_hash: str = ""
-) -> str:
+def _input_hash(kver: str, mofed_version: str, kernel_hash: str = "") -> str:
     h = hashlib.sha256()
     h.update(kver.encode())
     h.update(b"\0")

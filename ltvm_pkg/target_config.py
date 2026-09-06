@@ -1136,7 +1136,6 @@ class TargetConfig:
         kernel: str | None = None,
         extra_hash: bytes = b"",
         variant: str | None = None,
-        hash_kernel: str | None = None,
         **extra: object,
     ) -> None:
         """Write build metadata after a successful build.
@@ -1146,16 +1145,21 @@ class TargetConfig:
         next run.  ``extra`` keyword args are written into meta.json
         verbatim (kernel_version, build_date, etc.).
 
-        ``hash_kernel`` names the kernel key to hash, when that differs
-        from the one naming the output directory.  The kernel builder
-        writes meta into the *full* directory name
+        ``extra["hash_kernel"]`` names the kernel key to hash, when
+        that differs from the one naming the output directory.  The
+        kernel builder writes meta into the *full* directory name
         (5.14-rhel9.7-5.14.0-611.42.1.el9_7) but is_stale() is called
         with the declared short name.  input_hash() normalises the two
         via _short_kernel_name(), which can only do so for kernels
         declared in targets.yaml -- for anything else the two hashes
         differed and the kernel rebuilt from scratch on every single
-        invocation, showing permanently stale in `build status`.
+        invocation, showing permanently stale in `build status`.  It is
+        consumed here, not written into meta.json.
         """
+        hash_kernel_raw = extra.pop("hash_kernel", None)
+        hash_kernel = (
+            hash_kernel_raw if isinstance(hash_kernel_raw, str) else None
+        )
         v = self.variant_name if variant is None else variant
         if artifact == "kernel":
             out_dir = self._kernel_meta_file(kernel).parent

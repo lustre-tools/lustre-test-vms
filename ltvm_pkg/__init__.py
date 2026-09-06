@@ -18,7 +18,6 @@ from __future__ import annotations
 import importlib
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 BASE_VERSION = "0.20"
