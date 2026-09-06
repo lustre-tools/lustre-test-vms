@@ -255,9 +255,10 @@ tree), so it removes exactly what ltvm put there.  It
 unloads Lustre modules first and refuses if they won't
 unload; `--no-unload` and `--force` override.
 
-Verified end-to-end by three scripts under `tests/e2e/`
-(none named `test_*.py` -- they write to `/`, so run them
-only in a throwaway machine):
+Verified end-to-end by the three scripts under `tests/e2e/`
+(deliberately not named `test_*.py`, and excluded from pytest
+collection -- they write to `/`, so run them only in a
+throwaway machine):
 [local_install_rootfs.py](tests/e2e/local_install_rootfs.py)
 (any Linux rootfs),
 [make_install_vm.py](tests/e2e/make_install_vm.py) (a real

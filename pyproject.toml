@@ -41,6 +41,10 @@ pycodestyle.max-line-length = 100
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# tests/e2e/ holds root-filesystem scripts, not pytest tests: they
+# write to / and are run by hand inside a throwaway machine.  The
+# pytest e2e suite is tests/test_e2e/, which skips itself when not
+# root or when no image is built.
 addopts = "--cov=ltvm_pkg --cov-report=term-missing --ignore=tests/e2e"
 markers = [
     "e2e: end-to-end tests that require a real VM environment (KVM, ltvm, built images)",
