@@ -78,6 +78,19 @@ with `ltvm target list --all-kernels`.
 | rocky9 | x86_64 | server (ldiskfs) + client | 5.14-rhel9.7 | rhel9.7, 9.8 |
 | rocky10 | aarch64, x86_64 | server (ldiskfs) + client | 6.12-rhel10.0 | rhel10.0, 10.1 |
 | ubuntu2404 | x86_64 | client only | 6.8-ubuntu2404 | 6.8-ubuntu2404 |
+| rocky9-64k | aarch64 | server (ldiskfs) + client | 5.14-rhel9.7 | no -- build locally |
+| mainline* | x86_64 | server (ldiskfs) + client | see below | no -- build locally |
+
+`rocky9-64k` is rocky9 with `CONFIG_ARM64_64K_PAGES`, for testing
+Lustre against a 64K page size.  It is aarch64-only: on an x86_64 host
+it cross-builds, and `ltvm target list` hides it behind
+`--all-arches` along with every other non-native target.
+
+`mainline` (experimental) builds Lustre against vanilla kernel.org
+kernels rather than a distro SRPM.  Its `--kernel` takes a release
+series (`6.18`), an exact release (`7.2.3`), or one of the moving
+aliases `latest` / `stable` / `longterm`.  See
+[ltvm_pkg/upstream_kernel.py](ltvm_pkg/upstream_kernel.py).
 
 ## ltvm commands
 

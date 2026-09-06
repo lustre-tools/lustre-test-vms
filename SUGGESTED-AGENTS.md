@@ -214,7 +214,7 @@ large is fine.
 # Build
 ltvm install                    One-time host setup (sudo)
 ltvm update                     git fast-forward ltvm itself
-ltvm build all <target>         Container + kernel + image (+ --kernel)
+ltvm build all <target>         Container + kernel + Lustre + image
 ltvm build container <target>   Rebuild the build container
 ltvm build kernel <target>      Kernel (+ --kernel, --lustre-tree)
 ltvm build image <target>       Per-kernel VM image (+ --kernel)

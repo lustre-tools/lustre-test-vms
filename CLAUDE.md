@@ -66,7 +66,7 @@ ltvm build kernel rocky9 --lustre-tree ~/lustre-release
 ltvm build image rocky9                          # default kernel
 ltvm build image rocky9 --kernel 5.14-rhel9.5    # specific kernel
 ltvm build all rocky9 --lustre-tree ~/lustre-release  # stale only
-ltvm build all rocky9 --force                    # everything
+ltvm build all rocky9 --lustre-tree ~/lustre-release --force  # everything
 ltvm build mofed-kmods rocky9 --variant mofed-24 # MOFED kmods per variant
 ```
 
@@ -272,9 +272,17 @@ lustre`, then unloading it again), and
 ```bash
 sudo ltvm cluster create co2 mgs+mds:co2-mds:1 oss:co2-oss:3
 ltvm cluster deploy co2 --mount
-ltvm cluster exec co2 oss 'lctl dl'
+ltvm cluster exec co2 oss 'lctl dl'    # runs on EVERY oss node
+ltvm cluster exec co2 co2-oss2 'lctl dl'   # or one node by name
+ltvm cluster ssh co2 mds               # interactive; one node
+ltvm cluster status co2
+ltvm cluster list
 sudo ltvm cluster destroy co2
 ```
+
+`cluster exec <role>` fans out across every node holding the role and
+exits non-zero if any node did; `cluster ssh <role>` opens a session on
+the first, since it execs a single interactive ssh.
 
 ## Target Configuration
 

@@ -108,7 +108,7 @@ but kexec_load fails silently on the microvm machine type.
 
 ```bash
 ltvm build status
-sudo ltvm list
+ltvm list
 ltvm doctor
 ```
 
@@ -116,7 +116,7 @@ ltvm doctor
 
 ```bash
 LTVM_OWNER_ID=system-test:phase-1 ltvm create co1-default
-sudo ltvm list --json   # verify: owner_id=system-test:phase-1, vcpus=2, mem=2048, mdt_disks=1, ost_disks=2, disk=500MiB
+ltvm list --json   # verify: owner_id=system-test:phase-1, vcpus=2, mem=2048, mdt_disks=1, ost_disks=2, disk=500MiB
 # 1.2: ensure on running VM
 ltvm create co1-default   # should print "already running", exit 0
 # 1.6: root fs size
@@ -143,7 +143,7 @@ ltvm destroy co1-t1 co1-t3 co1-t4 co1-t5
 
 ```bash
 ltvm create co1-single
-sudo ltvm deploy-lustre co1-single --lustre-tree ~/lustre-release --mount
+ltvm deploy-lustre co1-single --lustre-tree ~/lustre-release --mount
 ssh co1-single 'lctl dl'
 ssh co1-single 'lctl get_param osd-*.*.mntdev'
 ssh co1-single 'lfs df /mnt/lustre'
@@ -157,22 +157,22 @@ ssh co1-single 'ls /proc/fs/lustre/'
 ```bash
 # 4.1. Fresh deploy on new VM
 ltvm create co1-deploy
-sudo ltvm deploy-lustre co1-deploy --lustre-tree ~/lustre-release --mount
+ltvm deploy-lustre co1-deploy --lustre-tree ~/lustre-release --mount
 ssh co1-deploy 'lctl dl'
 ssh co1-deploy 'lfs df /mnt/lustre'
 
 # 4.2. Idempotency: re-deploy to same VM
-sudo ltvm deploy-lustre co1-deploy --lustre-tree ~/lustre-release --mount
+ltvm deploy-lustre co1-deploy --lustre-tree ~/lustre-release --mount
 ssh co1-deploy 'lctl dl'
 
 # 4.3. 4-OST VM
 ltvm create co1-4ost --ost-disks 4
-sudo ltvm deploy-lustre co1-4ost --lustre-tree ~/lustre-release --mount
+ltvm deploy-lustre co1-4ost --lustre-tree ~/lustre-release --mount
 ssh co1-4ost 'lfs df /mnt/lustre'
 
 # 4.4. Deploy without --mount, then mount manually
 ltvm create co1-nomount
-sudo ltvm deploy-lustre co1-nomount --lustre-tree ~/lustre-release
+ltvm deploy-lustre co1-nomount --lustre-tree ~/lustre-release
 ssh co1-nomount 'lctl dl | grep -c UP'
 ssh co1-nomount 'bash lustre/tests/llmount.sh'
 ssh co1-nomount 'lctl dl'
@@ -193,9 +193,9 @@ ssh co1-single 'cat /proc/fs/lustre/llite/*/stats | grep -v " 0 samples"'
 ### Phase 6: Crash / kdump
 
 ```bash
-sudo ltvm vm nmi co1-single
+ltvm vm nmi co1-single
 # Wait ~30s for reboot
-sudo ltvm vm crash-collect co1-single --mod-dir ~/lustre-release
+ltvm vm crash-collect co1-single --mod-dir ~/lustre-release
 # Verify kdump re-armed
 ssh co1-single 'systemctl is-active kdump'
 ```
@@ -217,8 +217,8 @@ Client VM mounts a Lustre filesystem served by a rocky9 server VM.
 ```bash
 # Server: rocky9 (already tested in phase 3)
 ltvm create co1-server
-sudo ltvm deploy-lustre co1-server --lustre-tree ~/lustre-release --mount
-SERVER_IP=$(sudo ltvm list --json | python3 -c \
+ltvm deploy-lustre co1-server --lustre-tree ~/lustre-release --mount
+SERVER_IP=$(ltvm list --json | python3 -c \
     "import sys,json; [print(v['ip']) for v in json.load(sys.stdin)['vms'] \
     if v['name']=='co1-server']")
 
@@ -240,12 +240,12 @@ ltvm destroy co1-server co1-client
 ### Phase 9: Snapshot / Restore
 
 ```bash
-sudo ltvm vm snapshot co1-single before-test
+ltvm vm snapshot co1-single before-test
 ssh co1-single 'sudo bash lustre/tests/llmountcleanup.sh && sudo lustre_rmmod'
-sudo ltvm vm restore co1-single before-test
+ltvm vm restore co1-single before-test
 ssh co1-single 'lctl dl'
 # Error path
-sudo ltvm vm restore co1-single no-such-tag   # expect non-zero exit
+ltvm vm restore co1-single no-such-tag   # expect non-zero exit
 ```
 
 ### Phase 10: Correctness
@@ -269,7 +269,7 @@ ssh co1-4ost \
 ### Phase 11: CLI Error Paths
 
 ```bash
-sudo ltvm vm nmi co1-stopped                   # expect non-zero + clear error
+ltvm vm nmi co1-stopped                   # expect non-zero + clear error
 ltvm destroy co1-nonexistent           # expect exit 0
 ```
 

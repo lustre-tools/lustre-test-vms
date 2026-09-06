@@ -25,19 +25,35 @@ RXE runs RDMA verbs over the regular Ethernet NIC.
 
 ## Steps
 
-### 1. Create two VMs
+### 1. Create two VMs with a SoftRoCE NIC
+
+`--nic softroce` adds an extra NIC (eth1) and brings `rdma_rxe` up on
+it at boot, via `targets/common/setup-nic-softroce.sh`.  That is the
+supported path and it does steps 3 and 4 below for you:
 
 ```bash
 ltvm create co<N>-rdma-a --vcpus 2 --mem 2048 --target rocky9 \
-    --mdt-disks 0 --ost-disks 0
+    --mdt-disks 0 --ost-disks 0 --nic softroce
 ltvm create co<N>-rdma-b --vcpus 2 --mem 2048 --target rocky9 \
-    --mdt-disks 0 --ost-disks 0
-sudo ltvm list
+    --mdt-disks 0 --ost-disks 0 --nic softroce
+ltvm list
+```
+
+Note the RXE link lands on the **extra** NIC (eth1, MTU 4200), not on
+the management NIC eth0 -- keeping RDMA traffic off the interface ssh
+and /etc/hosts rely on.  Check it came up:
+
+```bash
+ssh co<N>-rdma-a 'rdma link'
 ```
 
 No MDT/OST disks needed unless you also intend to run Lustre on them.
-Confirm L2 connectivity with a ping between the two assigned IPs before
-going further.
+Confirm L2 connectivity with a ping between the two VMs' eth1
+addresses before going further.
+
+The manual procedure in steps 3-4 remains documented below for VMs
+created without `--nic softroce`, and for anyone who wants to see what
+the boot-time script does.
 
 ### 2. Verbs tooling is preinstalled
 
@@ -53,17 +69,21 @@ enable RDMA.
 
 ### 3. Load `rdma_rxe` and create the RXE link (both VMs)
 
+Skip this if you passed `--nic softroce` -- it has already happened.
+For a VM without it, bind RXE to the extra NIC if there is one; only
+fall back to eth0 (the management NIC) when the VM has no other:
+
 ```bash
 ssh co<N>-rdma-a 'modprobe rdma_rxe && \
-    rdma link add rxe0 type rxe netdev eth0 && rdma link'
+    rdma link add rxe0 type rxe netdev eth1 && rdma link'
 ssh co<N>-rdma-b 'modprobe rdma_rxe && \
-    rdma link add rxe0 type rxe netdev eth0 && rdma link'
+    rdma link add rxe0 type rxe netdev eth1 && rdma link'
 ```
 
 Expected:
 
 ```
-link rxe0/1 state ACTIVE physical_state LINK_UP netdev eth0
+link rxe0/1 state ACTIVE physical_state LINK_UP netdev eth1
 ```
 
 Verify userspace can see it:
