@@ -1007,6 +1007,13 @@ fi""")
             "arch": arch,
             "module_symvers_sha256": symvers_hash,
             "lustre_modules_sha256": lustre_hash,
+            # What this staging was configured with.  cmd_deploy's
+            # fast path compares these before deciding it can skip the
+            # build; without them its only input was source-file
+            # mtimes, so a rebuilt kernel or changed configure flags
+            # silently shipped the previous build's modules.
+            "configure_sha256": cfg_hash,
+            "enable_server": enable_server,
         },
         indent=2,
     )

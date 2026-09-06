@@ -190,6 +190,53 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 use_json,
             )
 
+    def _staging_matches_kernel_and_flags(staging: Path) -> bool:
+        """Was this staging built against the kernel and flags in play now?
+
+        Source-file mtimes -- the only thing this fast path used to
+        consider -- cannot see either.  Rebuilding the kernel from an
+        edited patch series or a changed kernels.config leaves the
+        kernel directory name and kernel.release identical while
+        Module.symvers changes, so `ltvm deploy-lustre` said "Staging
+        up to date" and shipped modules linked against the previous
+        ABI: the VM then fails `modprobe lustre` with "disagrees about
+        version of symbol", or loads modules whose config.h HAVE_*
+        macros were probed against the old kernel.  Changing
+        configure_args in targets.yaml was equally invisible.
+
+        build_lustre records both signals in .ltvm-staging-meta.json;
+        this is the consumer that was missing.  Unknown/absent fields
+        mean staging predates them -- rebuild rather than guess.
+        """
+        meta = _cli_attr("read_staging_meta")(staging)
+        if not isinstance(meta, dict):
+            return False
+
+        build_tree = tc.kernel_output_dir(kernel=deploy_kernel) / "build-tree"
+        recorded_symvers = meta.get("module_symvers_sha256")
+        if not isinstance(recorded_symvers, str) or not recorded_symvers:
+            return False
+        current_symvers = _cli_attr("_hash_file")(build_tree / "Module.symvers")
+        if current_symvers != recorded_symvers:
+            if not use_json:
+                print("  Kernel ABI changed since staging was built")
+            return False
+
+        recorded_cfg = meta.get("configure_sha256")
+        if not isinstance(recorded_cfg, str) or not recorded_cfg:
+            return False
+        cfg_stamp = (
+            build_path
+            / f".ltvm-configure-{_cli_attr('_stamp_suffix')(target, tc.arch)}"
+        )
+        if not cfg_stamp.is_file():
+            return False
+        if cfg_stamp.read_text().strip() != recorded_cfg:
+            if not use_json:
+                print("  Configure flags changed since staging was built")
+            return False
+        return True
+
     def _staging_is_fresh(staging: Path, src: Path) -> bool:
         """Check if the staging dir is newer than all source files.
 
@@ -210,6 +257,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             # Pre-stamp builds (or a build that crashed before writing
             # the stamp): treat as stale so we rebuild rather than
             # silently skip.
+            return False
+        if not _staging_matches_kernel_and_flags(staging):
             return False
         # Staging is outside the source tree so the find exclusions are
         # simpler -- just skip build artifacts and VCS dirs.
@@ -356,6 +405,15 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             # "no staging with modules" after a full build.
             if vm_variant and vm_variant != "base":
                 build_cmd += ["--variant", vm_variant]
+            # Forward --force-compat.  The parent has already run the
+            # compat gate with force=True and passed, but the child
+            # `ltvm build lustre` re-runs the same gate with
+            # force=False and SystemExit(1)s -- so the flag the help
+            # text promises applies to "deploy-lustre ... when it
+            # rebuilds from source" could never actually override a
+            # refusal.  cmd_cluster_deploy already forwards it.
+            if args.force_compat:
+                build_cmd += ["--force-compat"]
             sudo_user = os.environ.get("SUDO_USER")
             if sudo_user:
                 build_cmd = ["sudo", "-u", sudo_user] + build_cmd

@@ -527,7 +527,13 @@ def install_staging_into_root(staging: Path, root: Path = Path("/")) -> None:
 
     log.info("Installing %s into %s", staging, root)
     src = subprocess.Popen(
-        ["tar", "cf", "-", "-C", str(staging), "."],
+        # Exclude ltvm's own build bookkeeping.  staging_contents()
+        # deliberately skips .ltvm-* entries when building the
+        # uninstall manifest, so anything shipped here that it filters
+        # lands on / permanently: make-uninstall reads that manifest
+        # and would never remove /.ltvm-staging-stamp or
+        # /.ltvm-staging-meta.json.
+        ["tar", "cf", "-", "-C", str(staging), "--exclude=./.ltvm-*", "."],
         stdout=subprocess.PIPE,
     )
     assert src.stdout is not None

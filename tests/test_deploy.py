@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
+import tempfile
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -444,15 +447,16 @@ class TestCmdDeployPerKernelStaging:
         staging.mkdir(parents=True)
         (staging / "lustre.ko").write_text("")
         (staging / ".ltvm-staging-stamp").write_text("5.14.0-foo\n")
+        _mark_staging_fresh(staging, build_path, _stub_tc())
 
         vm = _make_vm(name="co1-eh9", ip="192.168.100.60")
         vm.os_id = "rocky9"
         vm.save()
 
-        tc = MagicMock()
-        tc.os_family = "rhel"
-        tc.arch = "x86_64"
-        tc.resolve_kernel.side_effect = lambda k: k or "5.14-rhel9.7"
+        # Full stub: cmd_deploy's freshness check reads the kernel
+        # build-tree's Module.symvers, so kernel_output_dir must be a
+        # real path rather than an auto-created MagicMock attribute.
+        tc = _stub_tc()
 
         captured: dict = {}
 
@@ -568,14 +572,67 @@ def _deploy_args(
     )
 
 
+def _mark_staging_fresh(
+    staging: Path,
+    build_path: Path,
+    tc: Any,
+    *,
+    kernel: str = "5.14-rhel9.7",
+    target: str = "rocky9",
+) -> None:
+    """Make a staging dir pass cmd_deploy's fast-path freshness check.
+
+    The check now verifies that the staging was built against the
+    kernel ABI and configure flags currently in play, not just that no
+    source file is newer than the stamp -- so a test that wants "this
+    staging is up to date" has to record those too.  Creates the
+    kernel build-tree's Module.symvers and the tree's configure stamp
+    to match what .ltvm-staging-meta.json claims.
+    """
+    from ltvm_pkg.lustre_build import _hash_file, _stamp_suffix
+
+    build_tree = Path(tc.kernel_output_dir(kernel=kernel)) / "build-tree"
+    build_tree.mkdir(parents=True, exist_ok=True)
+    symvers = build_tree / "Module.symvers"
+    if not symvers.exists():
+        symvers.write_text("dummy symvers\n")
+    cfg_hash = "deadbeef" * 8
+
+    meta_file = staging / ".ltvm-staging-meta.json"
+    meta = {}
+    if meta_file.is_file():
+        try:
+            meta = json.loads(meta_file.read_text())
+        except ValueError:
+            meta = {}
+    meta.setdefault("kernel_version", "5.14.0-fake")
+    meta["module_symvers_sha256"] = _hash_file(symvers)
+    meta["configure_sha256"] = cfg_hash
+    meta_file.write_text(json.dumps(meta))
+
+    (build_path / f".ltvm-configure-{_stamp_suffix(target, tc.arch)}").write_text(
+        cfg_hash + "\n"
+    )
+    # Writing into the tree root bumps its mtime, and the fast path's
+    # `find -newer` compares against the staging stamp -- so re-touch
+    # the stamp last or the setup makes itself look stale.
+    (staging / ".ltvm-staging-stamp").touch()
+
+
+# cmd_deploy's freshness check reads the kernel build-tree's
+# Module.symvers, so the stub's kernel_output_dir has to be a path
+# tests can actually write to -- "/fake/kernels/..." cannot be created.
+_STUB_KERNELS_ROOT = Path(tempfile.mkdtemp(prefix="ltvm-test-kernels-"))
+
+
 def _stub_tc() -> MagicMock:
     """Standard TargetConfig stub used by cmd_deploy tests."""
     tc = MagicMock()
     tc.os_family = "rhel"
     tc.arch = "x86_64"
     tc.resolve_kernel.side_effect = lambda k: k or "5.14-rhel9.7"
-    tc.kernel_output_dir.side_effect = lambda kernel=None: Path(
-        f"/fake/kernels/{kernel or '5.14-rhel9.7'}"
+    tc.kernel_output_dir.side_effect = lambda kernel=None: (
+        _STUB_KERNELS_ROOT / f"{kernel or '5.14-rhel9.7'}"
     )
     return tc
 
@@ -697,6 +754,7 @@ class TestCmdDeployErrorPaths:
         staging.mkdir(parents=True)
         (staging / "lustre.ko").write_text("")
         (staging / ".ltvm-staging-stamp").write_text("")
+        _mark_staging_fresh(staging, build_path, _stub_tc())
 
         vm = _make_vm(name="co1-rterr", ip="10.0.0.15")
         vm.os_id = "rocky9"
@@ -735,6 +793,7 @@ class TestCmdDeployUserspaceOnly:
         staging.mkdir(parents=True)
         (staging / "lustre.ko").write_text("")
         (staging / ".ltvm-staging-stamp").write_text("")
+        _mark_staging_fresh(staging, build_path, _stub_tc())
 
         vm = _make_vm(name="co1-uspace-ok", ip="10.0.0.16")
         vm.os_id = "rocky9"
@@ -928,6 +987,7 @@ class TestCmdDeployVariantPropagation:
         staging.mkdir(parents=True)
         (staging / "ko2iblnd.ko").write_text("")
         (staging / ".ltvm-staging-stamp").write_text("")
+        _mark_staging_fresh(staging, build_path, _stub_tc())
 
         vm = _make_vm(name="co1-mofed", ip="10.0.0.20")
         vm.os_id = "rocky9"
@@ -987,6 +1047,9 @@ class TestCmdDeployKernelMismatch:
         staging.mkdir(parents=True)
         (staging / "lustre.ko").write_text("")
         (staging / ".ltvm-staging-stamp").write_text("")
+        _mark_staging_fresh(
+            staging, build_path, _stub_tc(), kernel="5.14-rhel9.5"
+        )
 
         vm = _make_vm(name="co1-altkern", ip="10.0.0.21")
         vm.os_id = "rocky9"
@@ -1180,6 +1243,7 @@ class TestCmdDeployMountAndKver:
         staging.mkdir(parents=True)
         (staging / "lustre.ko").write_text("")
         (staging / ".ltvm-staging-stamp").write_text("")
+        _mark_staging_fresh(staging, build_path, _stub_tc())
 
         vm = _make_vm(name="co1-mount", ip="10.0.0.25")
         vm.os_id = "rocky9"
@@ -1216,6 +1280,7 @@ class TestCmdDeployMountAndKver:
         staging.mkdir(parents=True)
         (staging / "lustre.ko").write_text("")
         (staging / ".ltvm-staging-stamp").write_text("")
+        _mark_staging_fresh(staging, build_path, _stub_tc())
 
         vm = _make_vm(name="co1-mount-fail", ip="10.0.0.26")
         vm.os_id = "rocky9"
@@ -1254,6 +1319,9 @@ class TestCmdDeployMountAndKver:
         (staging / ".ltvm-staging-meta.json").write_text(
             '{"kernel_version": "5.14.0-from-staging"}'
         )
+        # After the meta write: _mark_staging_fresh merges the
+        # freshness fields into whatever meta is already there.
+        _mark_staging_fresh(staging, build_path, _stub_tc())
 
         vm = _make_vm(name="co1-kver", ip="10.0.0.27")
         vm.os_id = "rocky9"
@@ -1299,6 +1367,7 @@ class TestCmdDeployMountAndKver:
         staging.mkdir(parents=True)
         (staging / "lustre.ko").write_text("")
         (staging / ".ltvm-staging-stamp").write_text("")
+        _mark_staging_fresh(staging, build_path, _stub_tc())
 
         vm = _make_vm(name="co1-perm", ip="10.0.0.28")
         vm.os_id = "rocky9"

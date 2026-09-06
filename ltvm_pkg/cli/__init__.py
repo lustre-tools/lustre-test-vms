@@ -61,6 +61,8 @@ from ltvm_pkg.kernel_build import (
     kernel_status,
 )
 from ltvm_pkg.lustre_build import (
+    _hash_file,
+    _stamp_suffix,
     build_lustre,
     read_staging_meta,
     staging_path,
@@ -240,6 +242,8 @@ __all__ = [
     "lustre_mount_vm",
     "os",
     "package_target",
+    "_hash_file",
+    "_stamp_suffix",
     "read_staging_meta",
     "shlex",
     "snapshot_lustre",

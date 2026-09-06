@@ -1725,6 +1725,33 @@ class TestNoRootRequiredForReadCommands:
         tc.os_family = "rhel"
         tc.arch = "x86_64"
         tc.resolve_kernel.side_effect = lambda k: k or "5.14-rhel9.7"
+        # cmd_deploy's fast path checks the staging was built against
+        # the kernel ABI and configure flags now in play, so give it a
+        # real build-tree to read rather than a MagicMock attribute.
+        from ltvm_pkg.lustre_build import _hash_file, _stamp_suffix
+
+        build_tree = tmp_path / "kernels" / "5.14-rhel9.7" / "build-tree"
+        build_tree.mkdir(parents=True)
+        symvers = build_tree / "Module.symvers"
+        symvers.write_text("dummy symvers\n")
+        tc.kernel_output_dir.side_effect = lambda kernel=None: build_tree.parent
+        cfg_hash = "abc123" * 8
+        (staging / ".ltvm-staging-meta.json").write_text(
+            json.dumps(
+                {
+                    "kernel_version": "5.14.0-fake",
+                    "module_symvers_sha256": _hash_file(symvers),
+                    "configure_sha256": cfg_hash,
+                }
+            )
+        )
+        (
+            build_path / f".ltvm-configure-{_stamp_suffix('rocky9', 'x86_64')}"
+        ).write_text(cfg_hash + "\n")
+        # Writing into the tree root bumps its mtime; the fast path
+        # compares source files against the staging stamp, so make the
+        # stamp the newest thing.
+        (staging / ".ltvm-staging-stamp").touch()
 
         with (
             patch("ltvm_pkg.vm_state.SOCKETS", sockets_dir),

@@ -53,10 +53,13 @@ def deploy_to_vm(
     # UserKnownHostsFile=/dev/null isn't silently dropped here (as it was
     # before), keeping this call site consistent with the rest.
     exclude_modules = "--exclude=./lib/modules" if userspace_only else ""
+    # Never ship ltvm's own build bookkeeping into the VM's /.
+    exclude_bookkeeping = "--exclude=./.ltvm-*"
     ssh_opt_str = " ".join(shlex.quote(o) for o in SSH_OPTS)
     tar_cmd = (
         f"set -o pipefail; "
-        f"tar cf - -C {shlex.quote(str(staging))} {exclude_modules} . "
+        f"tar cf - -C {shlex.quote(str(staging))} "
+        f"{exclude_modules} {exclude_bookkeeping} . "
         f"| sshpass -p {shlex.quote(ROOT_PASSWORD)} ssh {ssh_opt_str} "
         f"root@{shlex.quote(vm.ip)} "
         f"'tar xf - -C / --keep-directory-symlink --no-same-owner'"

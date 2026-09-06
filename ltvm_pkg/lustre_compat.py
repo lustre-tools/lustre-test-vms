@@ -12,7 +12,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from .kernel_build import _shell_var
 from .lustre_tree import kp_targets, ldiskfs_patches, ldiskfs_series
@@ -459,26 +459,67 @@ def vanilla_ldiskfs_series(version: str) -> str | None:
     return chosen
 
 
+def _distro_tokens(tc: Any) -> set[str]:
+    """Distro markers that may appear in an ldiskfs series filename.
+
+    Series are named ``ldiskfs-<kver>-<distro>``: ldiskfs-5.14-rhel9.7,
+    ldiskfs-6.8.0-90-ubuntu24, ldiskfs-5.14.21-sles15sp4,
+    ldiskfs-5.10.0-oe2203.  The distro half is what distinguishes two
+    series that share a kernel major.minor.
+    """
+    try:
+        family = str(tc.os_family)
+        name = str(tc.os_name)
+        version = str(tc.os_version)
+    except Exception:
+        return set()
+    major = version.split(".", 1)[0]
+    tokens = {f"{name}{major}"}
+    if family == "rhel":
+        tokens |= {f"rhel{major}", f"el{major}"}
+    elif family == "debian":
+        tokens.add(f"{name}{major}")
+    return {t for t in tokens if t}
+
+
 def _ldiskfs_series_matches(
-    series_stems: set[str], kver_majmin: str | None
+    series_stems: set[str],
+    kver_majmin: str | None,
+    distro_tokens: set[str] | None = None,
 ) -> str | None:
-    """Heuristic: does any ldiskfs series filename appear to target the
-    given kernel major.minor?
+    """Heuristic: does any ldiskfs series filename target this kernel?
 
     Series filenames look like ``ldiskfs-<kver>-<distro>`` (e.g.
     ``ldiskfs-6.8.0-90-ubuntu24``, ``ldiskfs-5.14.0-427.13.1.el9``).
-    We accept a target if any stem starts with ``ldiskfs-<major>.<minor>``.
-    This errs on the side of accepting -- a future agent can tighten it
-    by also checking the distro suffix (ubuntu<os_major>, el<os_major>,
-    etc.) if false positives show up.
+    A stem must start with ``ldiskfs-<major>.<minor>`` *and* carry a
+    marker for the target's distro.
+
+    The distro half is not optional cosmetics.  RHEL 9 and SLES 15 SP4
+    both ship 5.14 kernels, so on prefix alone
+    ``ldiskfs-5.14.21-sles15sp4`` sorted ahead of every rhel9 series
+    and vouched for a RHEL 9.0 kernel -- and when no kernel build-tree
+    was available to dry-apply the patches, validate_target returned
+    "ok" on the strength of that.  Among several same-distro
+    candidates prefer an exact os_version match, then the highest,
+    rather than whichever sorts first (which picked
+    ldiskfs-6.8.0-100-ubuntu24 for a -45 kernel).
     """
     if kver_majmin is None:
         return None
     prefix = f"ldiskfs-{kver_majmin}."
-    for stem in sorted(series_stems):
-        if stem.startswith(prefix):
-            return stem
-    return None
+    candidates = [s for s in sorted(series_stems) if s.startswith(prefix)]
+    if not candidates:
+        return None
+    if not distro_tokens:
+        # No distro context (older callers / upstream targets): keep
+        # the historical prefix-only behavior.
+        return candidates[0]
+    same_distro = [
+        s for s in candidates if any(t in s for t in distro_tokens)
+    ]
+    if not same_distro:
+        return None
+    return same_distro[-1]
 
 
 # A kernel name for an upstream target is either a bare spec
@@ -623,7 +664,9 @@ def validate_target(
                     ),
                 )
         else:
-            match_stem = _ldiskfs_series_matches(stems, kver_mm)
+            match_stem = _ldiskfs_series_matches(
+                stems, kver_mm, _distro_tokens(tc)
+            )
         if match_stem is not None:
             bt = kernel_build_tree
             sysfs_c = bt / "fs" / "ext4" / "sysfs.c" if bt else None

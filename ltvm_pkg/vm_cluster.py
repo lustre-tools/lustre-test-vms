@@ -331,6 +331,27 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
 
     node_specs = [parse_node_spec(s) for s in args.nodes]
 
+    # Refuse a spec that names the same node twice.  Nothing checked,
+    # so `cluster create co2 mgs+mds:co2-a:1 oss:co2-a:3` launched two
+    # concurrent `ltvm create co2-a` subprocesses racing on one .info,
+    # overlay and TAP -- or the loser adopted the winner and reported
+    # success.  The saved ClusterInfo then carried the same host twice
+    # with contradictory disk roles, and generate_local_sh assigned it
+    # MDSDEV and OSTDEV letters from two different disk_offset
+    # computations, pointing at overlapping devices.
+    seen_names: set[str] = set()
+    dupes: set[str] = set()
+    for n in node_specs:
+        if n.name in seen_names:
+            dupes.add(n.name)
+        seen_names.add(n.name)
+    if dupes:
+        die(
+            f"node name(s) listed more than once: "
+            f"{', '.join(sorted(dupes))}\n"
+            f"Each node in a cluster needs its own name."
+        )
+
     # Refuse to build a cluster on top of VMs that already exist.
     # `ltvm create` is idempotent -- _handle_existing_vm starts a
     # stopped VM and exits 0 -- so without this check the cluster
@@ -566,7 +587,22 @@ def _parallel_cluster_op(
     with ThreadPoolExecutor(max_workers=len(nodes)) as executor:
         futures = {executor.submit(submit, node): node for node in nodes}
         for future in as_completed(futures):
-            name, rc, output = future.result()
+            node = futures[future]
+            try:
+                name, rc, output = future.result()
+            except Exception as e:
+                # _deploy_one_node can raise past its own except
+                # RuntimeError -- VMInfo.load raises VMNotFound, which
+                # is not a RuntimeError -- and an unguarded result()
+                # aborted the whole fan-out with a Python traceback:
+                # no per-node report, no "deploy failed for: ...",
+                # update_deploy never recorded, local.sh never
+                # distributed.  cmd_cluster_create already wraps its
+                # result() for exactly this reason.
+                name = getattr(node, "name", str(node))
+                print(f"\n--- {name}: {failure_verb} ---\n{e}")
+                failed.append(name)
+                continue
             if rc != 0:
                 print(f"\n--- {name}: {failure_verb} (rc={rc}) ---\n{output}")
                 failed.append(name)
@@ -845,10 +881,12 @@ def cmd_cluster_ssh(args: argparse.Namespace) -> None:
     target = args.target
     nodes = cluster.get_nodes()
 
-    matched = next(
-        (n for n in nodes if n.name == target or target in n.roles),
-        None,
-    )
+    # ssh opens one interactive session, so a role selects its first
+    # node (unlike `cluster exec`, which fans out).  Prefer an exact
+    # node-name match so an explicit name is never shadowed by a role.
+    exact = [n for n in nodes if n.name == target]
+    by_role = [n for n in nodes if target in n.roles]
+    matched = (exact or by_role or [None])[0]
     if matched is None:
         die(
             f"no node matching '{target}' in cluster '{args.name}'",
@@ -873,11 +911,14 @@ def cmd_cluster_exec(args: argparse.Namespace) -> None:
     target = args.target
     nodes = cluster.get_nodes()
 
-    matched = next(
-        (n for n in nodes if n.name == target or target in n.roles),
-        None,
-    )
-    if matched is None:
+    # A role names every node holding it.  Running on only the first
+    # match reported one OSS out of three and exited 0, which reads as
+    # "the whole role is healthy" -- and the docs describe this exact
+    # command as "run a command on all OSS nodes".  An exact node name
+    # still selects exactly that node.
+    exact = [n for n in nodes if n.name == target]
+    matches = exact or [n for n in nodes if target in n.roles]
+    if not matches:
         die(
             f"no node matching '{target}' in cluster '{args.name}'",
         )
@@ -898,13 +939,29 @@ def cmd_cluster_exec(args: argparse.Namespace) -> None:
         command = args.command[0]
     else:
         command = shlex.join(args.command)
-    vm = VMInfo.load(matched.name)
-    try:
-        r = run_ssh(vm.ip, command, timeout=args.timeout)
+    multi = len(matches) > 1
+    worst = 0
+    for node in matches:
+        vm = VMInfo.load(node.name)
+        if multi:
+            print(f"--- {node.name} ---")
+        try:
+            r = run_ssh(vm.ip, command, timeout=args.timeout)
+        except subprocess.TimeoutExpired:
+            if not multi:
+                die(f"timeout after {args.timeout}s", EXIT_TIMEOUT)
+            print(
+                f"{node.name}: timeout after {args.timeout}s",
+                file=sys.stderr,
+            )
+            worst = EXIT_TIMEOUT
+            continue
         if r.stdout:
             print(r.stdout, end="")
         if r.stderr:
             print(r.stderr, end="", file=sys.stderr)
-        sys.exit(r.returncode)
-    except subprocess.TimeoutExpired:
-        die(f"timeout after {args.timeout}s", EXIT_TIMEOUT)
+        # Exit non-zero if any node did; a role-wide command that
+        # failed somewhere must not look like a clean run.
+        if r.returncode != 0 and worst == 0:
+            worst = r.returncode
+    sys.exit(worst)
