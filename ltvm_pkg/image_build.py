@@ -1008,11 +1008,13 @@ def build_image(
             ko = next(lustre_staging.rglob(cand), None)
             if ko is None:
                 continue
-            v = (read_modinfo_field(ko, "version") or "").strip()
+            # Not `v`: that name is bound to a Variant earlier in this
+            # function, and mypy scopes a name to one type per function.
+            modver = (read_modinfo_field(ko, "version") or "").strip()
             # Guard against the legacy "in-kernel" stub even if a future
             # refactor lets it leak back in under a preferred name.
-            if v and "in-kernel" not in v:
-                lustre_version = v
+            if modver and "in-kernel" not in modver:
+                lustre_version = modver
                 break
 
     # Schema: see ltvm_pkg.meta_schema.ImageMeta.

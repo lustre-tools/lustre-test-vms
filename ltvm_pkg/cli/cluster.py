@@ -21,7 +21,7 @@ from ltvm_pkg.cli.util import (
 from ltvm_pkg.vm_state import ClusterNotFound
 
 
-def _require_root(*a: Any, **kw: Any) -> Any:
+def _require_root(*a: Any, **kw: Any) -> int | None:
     """Thunk to ltvm_pkg.cli._require_root so tests patching it on
     the package attribute still gate cluster subcommands."""
     import ltvm_pkg.cli as _cli

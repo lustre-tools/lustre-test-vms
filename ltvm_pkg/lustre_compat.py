@@ -862,7 +862,11 @@ def validate_target(
             ),
         )
 
-    return ValidationResult(
+    # mypy proves this unreachable: LustreMode has exactly three
+    # members and the three branches above each return.  Keep it
+    # anyway -- it is the guard that catches a fourth mode added
+    # without a branch here, and tests reach it by passing a mock.
+    return ValidationResult(  # type: ignore[unreachable]
         status="error",
         mode=mode,
         kernel_version=kver,

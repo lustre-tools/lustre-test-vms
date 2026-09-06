@@ -100,7 +100,7 @@ def _producer_metadata() -> dict[str, str]:
     # Try an in-tree build-info module first (populated at install time
     # by `sudo ./ltvm install`), then fall back to a git describe.
     try:
-        from . import _build_info  # type: ignore[attr-defined]
+        from . import _build_info
 
         v = getattr(_build_info, "VERSION", None)
         if v:

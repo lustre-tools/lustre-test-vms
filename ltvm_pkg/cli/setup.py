@@ -24,7 +24,7 @@ from ltvm_pkg.cli.util import (
 )
 
 
-def _require_root(*a: Any, **kw: Any) -> Any:
+def _require_root(*a: Any, **kw: Any) -> int | None:
     """Thunk to ltvm_pkg.cli._require_root so tests patching it at the
     package level still gate create/destroy/doctor/update."""
     import ltvm_pkg.cli as _cli

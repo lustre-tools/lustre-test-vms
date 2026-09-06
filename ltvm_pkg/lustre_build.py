@@ -25,6 +25,7 @@ import shlex
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TypedDict
 
@@ -59,7 +60,7 @@ def _show_configure_log(lustre_tree: Path, tail_lines: int = 50) -> None:
 
 
 @contextlib.contextmanager
-def _tree_build_lock(lustre_tree: Path):
+def _tree_build_lock(lustre_tree: Path) -> Iterator[None]:
     """Serialize concurrent builds on a shared Lustre source tree.
 
     Two pipelines (e.g. `ltvm build all rocky9` and `ltvm build all

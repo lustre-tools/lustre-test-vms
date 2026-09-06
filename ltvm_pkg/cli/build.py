@@ -983,7 +983,12 @@ def cmd_status(args: argparse.Namespace) -> int:
             print("No targets configured.")
         return EXIT_OK
 
-    all_status = {}
+    # Values are either {"error": str} or the full per-target status
+    # block (container/kernel dicts plus an images list), so the value
+    # type has to be Any -- without the annotation mypy infers
+    # dict[str, str] from the first assignment (the error branch) and
+    # rejects every real row.
+    all_status: dict[str, dict[str, Any]] = {}
     TargetConfig = _cli_attr("TargetConfig")
     # Honor --arch, and otherwise default to the host arch the way every
     # build/publish/validate path does via _load_target_args.  Falling

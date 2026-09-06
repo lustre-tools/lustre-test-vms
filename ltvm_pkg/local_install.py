@@ -30,7 +30,7 @@ import subprocess
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from ltvm_pkg.priv import sudo_run
 
@@ -621,7 +621,7 @@ def read_manifest(path: Path | None = None) -> dict | None:
             f"Install manifest {path} has schema {raw.get('schema')!r}, "
             f"expected {MANIFEST_SCHEMA!r}"
         )
-    return raw
+    return cast("dict[Any, Any]", raw)
 
 
 # ----------------------------------------------------------------------

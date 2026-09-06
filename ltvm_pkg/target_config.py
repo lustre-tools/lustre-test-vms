@@ -1043,8 +1043,11 @@ class TargetConfig:
         # variants; see image_build for module injection).
         v_name = self.variant_name if variant is None else variant
         if v_name != DEFAULT_VARIANT and artifact in ("container", "image"):
-            v = self.variant(v_name)
-            h.update(v.hash_bytes(artifact))
+            # Not `v`: the kernel_config_overrides loop above binds that
+            # name to a str, and mypy scopes a name to one type per
+            # function.
+            variant_obj = self.variant(v_name)
+            h.update(variant_obj.hash_bytes(artifact))
 
         return h.hexdigest()[:16]
 

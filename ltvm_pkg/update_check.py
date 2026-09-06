@@ -25,6 +25,7 @@ skipped -- we never want to block a script on an interactive prompt.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -57,18 +58,23 @@ _DEFAULT_CONFIG: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 
 
+def _default_config() -> dict[str, Any]:
+    """A fresh deep copy of the default config."""
+    return copy.deepcopy(_DEFAULT_CONFIG)
+
+
 def _load_config() -> dict[str, Any]:
     if not _CONFIG_FILE.is_file():
-        return json.loads(json.dumps(_DEFAULT_CONFIG))  # deep copy
+        return _default_config()
     try:
         data = json.loads(_CONFIG_FILE.read_text())
     except (OSError, json.JSONDecodeError):
         log.warning(
             "ltvm config at %s is unreadable; using defaults", _CONFIG_FILE
         )
-        return json.loads(json.dumps(_DEFAULT_CONFIG))
+        return _default_config()
     # Merge defaults so a partial config still works.
-    out = json.loads(json.dumps(_DEFAULT_CONFIG))
+    out = _default_config()
     uc = data.get("update_check")
     if isinstance(uc, dict):
         out["update_check"].update(uc)
@@ -144,7 +150,7 @@ def _local_hash() -> str | None:
     baked file is missing.
     """
     try:
-        from . import _build_info  # type: ignore[attr-defined]
+        from . import _build_info
 
         h = getattr(_build_info, "BUILD_HASH", None)
         if isinstance(h, str) and h:

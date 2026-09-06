@@ -488,7 +488,9 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
     # Optionally mount Lustre
     if args.mount:
-        rc = _cli_attr("lustre_mount_vm")(args.vm, os_family)
+        # _cli_attr resolves at call time (so tests can patch), which
+        # means it is typed Any; the callee returns an exit code.
+        rc = int(_cli_attr("lustre_mount_vm")(args.vm, os_family))
         if rc != EXIT_OK:
             return rc
         if not use_json:

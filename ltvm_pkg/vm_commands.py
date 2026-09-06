@@ -1541,7 +1541,7 @@ def cmd_nmi(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _elf_build_id(path) -> str | None:
+def _elf_build_id(path: Path) -> str | None:
     """GNU build ID of an ELF file, or None if unreadable."""
     try:
         out = subprocess.run(
@@ -1558,7 +1558,7 @@ def _elf_build_id(path) -> str | None:
     return None
 
 
-def _vm_kernel_build_id(vm) -> str | None:
+def _vm_kernel_build_id(vm: VMInfo) -> str | None:
     """GNU build ID of the kernel running in `vm`.
 
     /sys/kernel/notes carries the same ELF notes the vmlinux does, so

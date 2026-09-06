@@ -529,8 +529,10 @@ def cmd_targets(args: argparse.Namespace) -> int:
             # a variant with nothing local or remote is theory, not
             # state (matches build status, which only rows variants
             # that are actually built).
-            for e in kept:
-                e["variants"] = [v for v in e["variants"] if _row_present(v)]
+            for krow in kept:
+                krow["variants"] = [
+                    v for v in krow["variants"] if _row_present(v)
+                ]
 
     # Never interleave arches: render one section per arch, each with
     # its own heading when more than one arch is shown.
@@ -548,8 +550,10 @@ def cmd_targets(args: argparse.Namespace) -> int:
             print()
         first = False
         if "error" in blk:
-            e = blk["error"]
-            print(f"{e['name']}: {e.get('error', '')}")
+            # Not `e`: the `except ValueError as e` earlier in this
+            # function deletes that name at block exit.
+            errblk = blk["error"]
+            print(f"{errblk['name']}: {errblk.get('error', '')}")
             continue
         if sectioned and blk["key"][1] != prev_arch:
             prev_arch = blk["key"][1]

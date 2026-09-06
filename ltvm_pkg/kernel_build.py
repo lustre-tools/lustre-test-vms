@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from .cross_compile import host_podman_platform
 from .lustre_tree import kp_configs, kp_patches, kp_series, kp_targets
@@ -73,7 +73,7 @@ def archive_outgoing_vmlinux(kernel_out: Path, keep: int = 1) -> str | None:
     return build_id
 
 
-def elf_build_id(path) -> str | None:
+def elf_build_id(path: Path) -> str | None:
     """GNU build ID of an ELF file, or None if it cannot be read.
 
     Used to tell two builds of the same kernel VERSION apart: a
@@ -988,7 +988,7 @@ def _finalize_kernel_build(
     full_name: str,
     lustre_target: str,
     patches_applied: int,
-    extra_meta: dict[str, object],
+    extra_meta: dict[str, Any],
     extra_hash: bytes = b"",
 ) -> dict[str, object]:
     """Shared tail of the kernel build: verify outputs, read kernel.release,
@@ -1025,7 +1025,7 @@ def _finalize_kernel_build(
 
     # Schema: see ltvm_pkg.meta_schema.KernelMeta.
     # target/input_hash are written by TargetConfig.write_meta.
-    meta: dict[str, object] = {
+    meta: dict[str, Any] = {
         "kernel_version": krelease,
         "lustre_target": lustre_target,
         # The directory this build landed in.  Callers that chain off a

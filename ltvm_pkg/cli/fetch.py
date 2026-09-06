@@ -797,18 +797,10 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                 ),
             )
 
-    if dry_run:
-        _dry_run_report(
-            url,
-            target=target,
-            arch=arch,
-            variant=variant,
-            mode="ecosystem",
-            use_json=use_json,
-            existing_tag=existing_tag,
-            release_tag=release_tag,
-        )
-        return EXIT_OK
+    # (No second --dry-run check here: the one above returns before any
+    # of the idempotency branches, precisely so --dry-run always
+    # reports the resolved URL.  A duplicate block used to sit here and
+    # was dead code -- mypy flagged it as unreachable.)
 
     # --replace: clear this kernel's artifacts so a partial or
     # mismatched prior fetch doesn't leave stale files behind the new

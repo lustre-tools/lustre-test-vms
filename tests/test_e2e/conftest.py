@@ -27,9 +27,8 @@ import shutil
 import string
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Callable
 
 import pytest
 

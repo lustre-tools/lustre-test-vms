@@ -18,7 +18,11 @@ argparse setup and dispatch only.
 # would not defer it -- 3.10 is a hard floor.
 import sys
 
-if sys.version_info < (3, 10):
+# noqa: UP036 -- ruff sees requires-python >=3.10 and calls this
+# block dead, but it exists precisely to run on the interpreters
+# below that floor and print the hint above instead of a
+# SyntaxError.  Deleting it defeats its whole purpose.
+if sys.version_info < (3, 10):  # noqa: UP036
     sys.stderr.write(
         "error: ltvm requires Python 3.10+; this is Python %d.%d.%d\n"  # noqa: UP031
         "hint (macOS):       brew install python@3.13  (or use pyenv)\n"
@@ -50,7 +54,7 @@ _VENV_PY = _REPO_ROOT / ".venv" / "bin" / "python"
 _BOOT_FLOOR = (3, 10)
 
 
-def _venv_meets_floor(venv_py, floor):
+def _venv_meets_floor(venv_py: Path, floor: "tuple[int, ...]") -> bool:
     """Return True if the venv's pyvenv.cfg reports a Python that meets
     ``floor``.  False when the cfg explicitly reports an older version
     (so we refuse to ``os.execv`` into a stale venv that would just
