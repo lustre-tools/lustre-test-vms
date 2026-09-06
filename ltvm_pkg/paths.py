@@ -148,5 +148,19 @@ def find_ltvm_root() -> Path:
         return Path(env)
     ltvm_link = Path("/usr/local/bin/ltvm")
     if ltvm_link.is_symlink():
-        return ltvm_link.resolve().parent
+        # Only trust the symlink if it still points somewhere real.
+        # is_symlink() is true for a dangling link and Path.resolve()
+        # is non-strict, so a link into a deleted checkout returned a
+        # nonexistent directory and every command then failed to find
+        # targets.yaml -- even when run from a perfectly good tree.
+        # (Current installs write a wrapper script rather than a
+        # symlink, so this branch only fires for legacy installs.)
+        target = ltvm_link.resolve()
+        if target.exists() and (target.parent / "targets").is_dir():
+            return target.parent
+        log.warning(
+            "ignoring %s: it points at %s, which is not an ltvm checkout",
+            ltvm_link,
+            target,
+        )
     return Path(__file__).resolve().parent.parent

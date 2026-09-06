@@ -187,16 +187,20 @@ def _git(
     )
 
 
-def _current_version() -> str:
+def _current_version(refresh: bool = False) -> str:
     """Return the version string, recomputing fresh from disk.
 
     ``ltvm_pkg.__version__`` is captured at import time, so after a
     successful update we recompute via ``_compute_version`` to pick up
-    the new git hash without forcing a reload.
+    the new git hash.  Pass ``refresh=True`` once the update has
+    rewritten ``_build_info.py``: ltvm_pkg imported that module at
+    startup, so without dropping the cached copy the "new" version is
+    the old one and `ltvm update` reports "Already up to date" after a
+    real fast-forward.
     """
     from ltvm_pkg import _compute_version
 
-    return _compute_version()
+    return _compute_version(refresh=refresh)
 
 
 def cmd_update(args: argparse.Namespace) -> int:
@@ -297,7 +301,7 @@ def cmd_update(args: argparse.Namespace) -> int:
         # git rev-parse path.
         pass
 
-    new_version = _cli._current_version()
+    new_version = _cli._current_version(refresh=True)
 
     result = {
         "old_version": old_version,

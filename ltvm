@@ -979,9 +979,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TYPE[:ARG]",
         help=(
             "Add an extra NIC beyond the mgmt NIC (eth0).  Repeat for "
-            "multiple.  Types: 'tcp' (plain virtio-net).  'softroce' "
-            "and 'passthrough:<BDF>' are reserved for follow-up features "
-            "(tracked in lustre_test_vms_v2-r55 and -5a0)."
+            "multiple.  Types: 'tcp' (plain virtio-net), 'softroce' "
+            "(virtio-net with rdma_rxe brought up on it at boot, for "
+            "o2iblnd without RDMA hardware), and 'passthrough:<BDF>' "
+            "(bind a PCI device to vfio-pci and hand it to the guest; "
+            "needs a host IOMMU)."
         ),
     )
     _vm_create_args.add_argument(

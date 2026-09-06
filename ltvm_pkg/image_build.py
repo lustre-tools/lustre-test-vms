@@ -176,20 +176,26 @@ def _prebuild_tools_native(
     if r.returncode != 0:
         log.info("Building native container %s for cross-compile...", build_tag)
         build_dockerfile = target_config.target_dir / "container.Dockerfile"
-        subprocess.run(
-            [
-                "podman",
-                "build",
-                "-t",
-                build_tag,
+        cmd = [
+            "podman",
+            "build",
+            "-t",
+            build_tag,
+            "--build-arg",
+            f"BASE_IMAGE={target_config.container_image}",
+        ]
+        # Match kernel_build._ensure_container_image's build args.
+        # Omitting KERNEL_DEB_SOURCE left ubuntu2404's Dockerfile on
+        # its hardcoded default (linux-source-6.8.0) rather than the
+        # value targets.yaml configures, so this fallback container
+        # built against a different kernel source than the real one.
+        if target_config.kernel_deb_source:
+            cmd += [
                 "--build-arg",
-                f"BASE_IMAGE={target_config.container_image}",
-                "-f",
-                str(build_dockerfile),
-                str(TARGETS_DIR),
-            ],
-            check=True,
-        )
+                f"KERNEL_DEB_SOURCE={target_config.kernel_deb_source}",
+            ]
+        cmd += ["-f", str(build_dockerfile), str(TARGETS_DIR)]
+        subprocess.run(cmd, check=True)
 
     log.info(
         "Pre-building tools natively for %s (cross-compile in %s)...",

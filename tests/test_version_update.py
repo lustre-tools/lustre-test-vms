@@ -298,7 +298,7 @@ class TestCmdUpdate:
             patch.object(
                 ltvm_cli,
                 "_current_version",
-                side_effect=lambda: next(versions),
+                side_effect=lambda **kw: next(versions),
             ),
             patch.object(ltvm_cli, "_git", side_effect=fake_git),
         ):
@@ -345,7 +345,7 @@ class TestCmdUpdate:
             patch.object(
                 ltvm_cli,
                 "_current_version",
-                side_effect=lambda: next(versions),
+                side_effect=lambda **kw: next(versions),
             ),
             patch.object(ltvm_cli, "_git", side_effect=fake_git),
         ):
@@ -514,3 +514,57 @@ class TestCmdUpdate:
             rc = cmd_update(_make_args(check=True))
         assert rc == EXIT_ERROR
         assert "git fetch failed" in capsys.readouterr().err
+
+
+class TestVersionRefreshAfterUpdate:
+    """`ltvm update` must report the version it just pulled.
+
+    ltvm_pkg imports _build_info at startup to compute __version__, so
+    _compute_version() returned the cached module's BUILD_HASH -- and
+    cmd_update calls it right after rewriting _build_info.py with the
+    post-pull hash.  The result was "Already up to date at <old>"
+    after a real fast-forward, and --json reporting changed=false with
+    a stale new_version.  Every existing test patched
+    _current_version with a side_effect list, so none could see it.
+    """
+
+    def test_refresh_picks_up_rewritten_build_info(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        import importlib
+        import sys as _sys
+
+        import ltvm_pkg
+
+        pkg_dir = Path(ltvm_pkg.__file__).parent
+        build_info = pkg_dir / "_build_info.py"
+        original = build_info.read_text() if build_info.exists() else None
+
+        try:
+            build_info.write_text('BUILD_HASH = "aaaaaaa"\n')
+            # Prime both caches the way package import does.
+            _sys.modules.pop("ltvm_pkg._build_info", None)
+            importlib.import_module("ltvm_pkg._build_info")
+            assert ltvm_pkg._compute_version(refresh=True).endswith(
+                ".aaaaaaa"
+            )
+
+            # cmd_update rewrites the file with the post-pull hash.
+            # Same length as the previous content, written within the
+            # same second -- so a .pyc revalidated on (mtime, size) is
+            # still considered current, which is why re-importing is
+            # not enough and the refresh path reads the file.
+            build_info.write_text('BUILD_HASH = "bbbbbbb"\n')
+
+            # The already-imported module still holds the old hash...
+            assert ltvm_pkg._compute_version().endswith(".aaaaaaa")
+            # ...and refresh reports what is actually on disk.
+            assert ltvm_pkg._compute_version(refresh=True).endswith(
+                ".bbbbbbb"
+            )
+        finally:
+            if original is not None:
+                build_info.write_text(original)
+            elif build_info.exists():
+                build_info.unlink()
+            _sys.modules.pop("ltvm_pkg._build_info", None)

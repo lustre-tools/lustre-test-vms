@@ -16,7 +16,9 @@ The base version is bumped by hand; the hash moves on every commit.
 from __future__ import annotations
 
 import importlib
+import re
 import subprocess
+import sys
 from pathlib import Path
 
 BASE_VERSION = "0.20"
@@ -45,15 +47,45 @@ def _git_short_hash() -> str | None:
     return out or None
 
 
-def _compute_version() -> str:
+def _read_baked_hash() -> str | None:
+    """Parse BUILD_HASH straight out of _build_info.py.
+
+    Used only on the post-update refresh path, where the module cache
+    and the bytecode cache both hold the pre-update value.
+    """
+    path = Path(__file__).with_name("_build_info.py")
+    try:
+        text = path.read_text()
+    except OSError:
+        return None
+    m = re.search(r'^BUILD_HASH\s*=\s*["\']([^"\']+)["\']', text, re.M)
+    return m.group(1) if m else None
+
+
+def _compute_version(refresh: bool = False) -> str:
     # Prefer the hash baked by the post-commit hook so importing this
     # package stays cheap.  The module is gitignored and may not exist
     # (fresh clone, hook not installed); use importlib so mypy doesn't
     # try to type-check a path that's missing on disk at install time.
     build_hash: str | None = None
     try:
-        bi = importlib.import_module("ltvm_pkg._build_info")
-        build_hash = getattr(bi, "BUILD_HASH", None)
+        if refresh:
+            # Read the file rather than importing it.  ltvm_pkg
+            # imports _build_info at startup to compute __version__,
+            # so import_module() hands back the already-loaded module
+            # -- and cmd_update calls this right after rewriting
+            # _build_info.py with the post-pull hash, so `ltvm update`
+            # reported "Already up to date at <old>" after a real
+            # fast-forward and --json reported changed=false.
+            # Re-importing is not enough either: the file is one short
+            # line, so pre- and post-update versions have identical
+            # sizes, and a .pyc is revalidated on (mtime, size) -- two
+            # writes within the same second keep serving the old hash
+            # out of __pycache__.
+            build_hash = _read_baked_hash()
+        else:
+            bi = importlib.import_module("ltvm_pkg._build_info")
+            build_hash = getattr(bi, "BUILD_HASH", None)
     except ImportError:
         pass
     if build_hash:
