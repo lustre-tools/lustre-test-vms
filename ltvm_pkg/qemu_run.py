@@ -609,6 +609,52 @@ def launch_qemu(vm: VMInfo) -> None:
     vm.update_last_boot(int(time.time()))
 
 
+def _pid_alive(pid: int) -> bool:
+    """Is *pid* still around?
+
+    EPERM means the process exists but belongs to another uid -- the
+    normal case for an unprivileged `ltvm stop` against a QEMU started
+    by `sudo ltvm create`.  Treating it as "gone" (which a bare
+    `except OSError: break` does) made kill_qemu report a clean
+    shutdown while QEMU kept running, then mark the VM stopped and
+    delete its TAP, leaving an unreachable orphan that `ltvm destroy`
+    would not kill and whose overlay it would unlink underneath.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _signal_qemu(vm: VMInfo, sig: int) -> None:
+    """Signal a VM's QEMU, escalating to sudo when it isn't ours.
+
+    A VM created with `sudo ltvm create` runs QEMU as root, but stop
+    and destroy are documented as unprivileged commands, so the direct
+    os.kill() gets EPERM.  Fall back to `sudo kill` rather than
+    silently doing nothing.
+    """
+    try:
+        os.kill(vm.pid, sig)
+        return
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        pass
+    except OSError:
+        return
+    sudo_run(
+        ["kill", f"-{int(sig)}", str(vm.pid)],
+        check=False,
+        quiet=True,
+    )
+
+
 def kill_qemu(vm: VMInfo) -> None:
     """Kill the QEMU process and tear down the TAP device.
 
@@ -619,27 +665,18 @@ def kill_qemu(vm: VMInfo) -> None:
     take it down.  is_running() does the /proc/<pid>/comm check.
     """
     if vm.pid > 0 and is_running(vm):
-        try:
-            os.kill(vm.pid, signal.SIGTERM)
-        except OSError:
-            pass
+        _signal_qemu(vm, signal.SIGTERM)
+        # Wait up to 5s for clean shutdown (qcow2 flush)
+        for _ in range(50):
+            if not _pid_alive(vm.pid):
+                break
+            time.sleep(0.1)
         else:
-            # Wait up to 5s for clean shutdown (qcow2 flush)
-            for _ in range(50):
-                try:
-                    os.kill(vm.pid, 0)
-                except OSError:
-                    break
-                time.sleep(0.1)
-            else:
-                # Still alive after 5s, force kill.  Re-check is_running
-                # so we don't SIGKILL a PID that QEMU released to another
-                # process during the 5-second wait.
-                if is_running(vm):
-                    try:
-                        os.kill(vm.pid, signal.SIGKILL)
-                    except OSError:
-                        pass
+            # Still alive after 5s, force kill.  Re-check is_running
+            # so we don't SIGKILL a PID that QEMU released to another
+            # process during the 5-second wait.
+            if is_running(vm):
+                _signal_qemu(vm, signal.SIGKILL)
     try:
         vm.update_pid(0)
     except VMNotFound:

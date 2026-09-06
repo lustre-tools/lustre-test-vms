@@ -139,30 +139,52 @@ def bind_to_vfio(bdf: str) -> str | None:
     if device.startswith("0x"):
         device = device[2:]
 
-    # 1. Register the vendor:device with vfio-pci so it will accept
-    #    the bind.  new_id may already know about this pair (e.g.
-    #    from a previous bind); that write returns EEXIST, which
-    #    we swallow.
-    try:
-        _sysfs_write(vfio_dir / "new_id", f"{vendor} {device}\n")
-    except VfioError as exc:
-        # EEXIST is fine: vfio-pci already has this ID registered.
-        if "File exists" not in str(exc) and "EEXIST" not in str(exc):
-            raise
+    # 1. Claim *this* device for vfio-pci via driver_override.
+    #    new_id registers the vendor:device pair driver-wide and for
+    #    the lifetime of the module, so any later device of the same
+    #    model -- notably VFs created by a subsequent
+    #    `echo N > sriov_numvfs` -- binds to vfio-pci instead of its
+    #    real driver and silently never appears as a netdev.
+    #    driver_override is per-device and undone on destroy.
+    override = dev_dir / "driver_override"
+    used_override = False
+    if override.exists():
+        _sysfs_write(override, "vfio-pci\n")
+        used_override = True
+    else:
+        # Pre-3.16 kernels have no driver_override; fall back to
+        # new_id, which is what this code always did.
+        try:
+            _sysfs_write(vfio_dir / "new_id", f"{vendor} {device}\n")
+        except VfioError as exc:
+            # EEXIST is fine: vfio-pci already has this ID registered.
+            if "File exists" not in str(exc) and "EEXIST" not in str(exc):
+                raise
 
     # 2. Unbind from the current driver (if any).
     if from_driver is not None:
         old_unbind = _pci_driver_dir(from_driver) / "unbind"
         _sysfs_write(old_unbind, f"{bdf}\n")
 
-    # 3. Bind to vfio-pci.  new_id normally auto-binds matching
-    #    devices, so the explicit bind may EEXIST; treat that as a
-    #    successful bind.
+    # 3. Bind to vfio-pci.  With driver_override set, a probe request
+    #    is the documented way to bind; new_id normally auto-binds
+    #    matching devices, so the explicit bind may EEXIST.  Treat
+    #    that as a successful bind either way.
     try:
-        _sysfs_write(vfio_dir / "bind", f"{bdf}\n")
+        if used_override:
+            _sysfs_write(SYSFS_ROOT / "bus" / "pci" / "drivers_probe", f"{bdf}\n")
+        else:
+            _sysfs_write(vfio_dir / "bind", f"{bdf}\n")
     except VfioError as exc:
         if "File exists" not in str(exc) and "EEXIST" not in str(exc):
             raise
+    if current_driver(bdf) != "vfio-pci":
+        # drivers_probe is best-effort; fall back to an explicit bind.
+        try:
+            _sysfs_write(vfio_dir / "bind", f"{bdf}\n")
+        except VfioError as exc:
+            if "File exists" not in str(exc) and "EEXIST" not in str(exc):
+                raise
 
     return from_driver
 
@@ -184,6 +206,17 @@ def rebind(bdf: str, driver: str) -> None:
             f"target driver {driver!r} not present under "
             f"{target_dir} (module not loaded?)"
         )
+
+    # Drop any vfio-pci driver_override first, otherwise the device
+    # is pinned to vfio-pci and the bind below either fails or is
+    # undone by the next re-probe.
+    override = dev_dir / "driver_override"
+    if override.exists():
+        try:
+            if override.read_text().strip() in ("vfio-pci", ""):
+                _sysfs_write(override, "\n")
+        except OSError:
+            pass
 
     cur = current_driver(bdf)
     if cur == driver:

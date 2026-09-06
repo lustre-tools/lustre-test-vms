@@ -421,6 +421,69 @@ def _validate_vm_name_for_lookup(name: str) -> None:
         die(f"invalid VM name {name!r}")
 
 
+# create flags that describe VM hardware: settable only at create
+# time, because the overlay, data disks and QEMU cmdline are all
+# built from them.
+_RESOURCE_FLAGS = {
+    "vcpus": "--vcpus",
+    "mem": "--mem",
+    "mdt_disks": "--mdt-disks",
+    "ost_disks": "--ost-disks",
+    "disk_size": "--disk-size",
+}
+
+
+def _explicit_flags(argv: list[str] | None = None) -> set[str]:
+    """Which --flags the user actually typed.
+
+    argparse defaults are indistinguishable from a typed value in the
+    namespace, and _handle_existing_vm needs the difference to tell
+    "user asked for 8G" from "user said nothing and the default is
+    4096".  Reading argv is contained and testable.
+    """
+    argv = sys.argv if argv is None else argv
+    seen = set()
+    for dest, flag in _RESOURCE_FLAGS.items():
+        if any(a == flag or a.startswith(flag + "=") for a in argv):
+            seen.add(dest)
+    return seen
+
+
+def _warn_ignored_resource_flags(
+    vm: VMInfo, args: argparse.Namespace, argv: list[str] | None = None
+) -> None:
+    """Warn when an idempotent create silently drops hardware flags.
+
+    `ltvm create co1-single --mem 8192 --ost-disks 6` against an
+    existing stopped VM just restarted it with the stored 4096/3 and
+    printed "started", with no hint that the flags did nothing.
+    """
+    ignored = []
+    for dest in sorted(_explicit_flags(argv)):
+        requested = getattr(args, dest, None)
+        if requested is None:
+            continue
+        current = getattr(vm, dest, None)
+        if current is not None and str(current) != str(requested):
+            ignored.append(
+                f"{_RESOURCE_FLAGS[dest]}: requested {requested}, "
+                f"VM has {current}"
+            )
+    if not ignored:
+        return
+    print(
+        f"warning: {vm.name} already exists; these flags were ignored:",
+        file=sys.stderr,
+    )
+    for line in ignored:
+        print(f"  {line}", file=sys.stderr)
+    print(
+        f"  hardware is fixed at create time -- "
+        f"`ltvm destroy {vm.name}` first to change it",
+        file=sys.stderr,
+    )
+
+
 def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
     """If a VMInfo already exists for *name*, handle the idempotent
     restart/no-op paths and return True.  Returns False when no
@@ -430,6 +493,7 @@ def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
     if not info_path.exists():
         return False
     vm = VMInfo.load(name)
+    _warn_ignored_resource_flags(vm, args)
     if is_running(vm):
         wait_for_ssh(vm.ip, SSH_TIMEOUT)
         register_ssh_name(vm.name, vm.ip)
@@ -679,13 +743,44 @@ def _validate_create_bounds(
                 "intel_iommu=on (or amd_iommu=on) on the host kernel cmdline "
                 "and ensure /sys/kernel/iommu_groups/ is non-empty."
             )
+        seen: set[str] = set()
         for bdf in passthrough_bdfs:
             if not (Path("/sys/bus/pci/devices") / bdf).is_dir():
                 die(
                     f"passthrough device {bdf!r} not found in /sys/bus/pci/devices"
                 )
+            if bdf in seen:
+                die(f"passthrough device {bdf} listed twice for this VM")
+            seen.add(bdf)
+        _check_passthrough_conflicts(passthrough_bdfs)
 
     return extra_nic_types, passthrough_bdfs
+
+
+def _check_passthrough_conflicts(bdfs: list[str]) -> None:
+    """Refuse a BDF already claimed by another VM.
+
+    vfio.py's own docstring says "refusing two VMs claiming the same
+    BDF" is the caller's job, and nothing did it.  bind_to_vfio()
+    returns None for a device already on vfio-pci, so the second VM
+    recorded an empty from-driver and cmd_destroy skipped it: destroy
+    the *first* VM and the device is rebound to its host driver while
+    the second VM's QEMU still holds it; destroy the second and the
+    device stays on vfio-pci forever.
+    """
+    for other in VMInfo.all_names():
+        try:
+            vm = VMInfo.load(other)
+        except (VMNotFound, ValueError):
+            continue
+        clash = sorted(set(bdfs) & set(vm.passthrough_drivers))
+        if clash:
+            die(
+                f"passthrough device(s) {', '.join(clash)} already "
+                f"assigned to VM {other!r}.\n"
+                f"  A PCI device can be passed to one VM at a time -- "
+                f"`ltvm destroy {other}` first, or pick another device."
+            )
 
 
 def _checked(cmd: list[str]) -> None:
@@ -1303,7 +1398,12 @@ def cmd_console_log(args: argparse.Namespace) -> None:
     if not vm.log_path.exists():
         die(f"no log for VM '{args.name}'")
     lines = vm.log_path.read_text().splitlines()
-    for line in lines[-args.lines :]:
+    # lines[-0:] is lines[0:] -- the whole file -- so --lines 0 dumped
+    # a long-lived VM's entire serial log instead of nothing.
+    if args.lines < 0:
+        die(f"--lines must be >= 0, got {args.lines}")
+    tail = lines[-args.lines :] if args.lines > 0 else []
+    for line in tail:
         print(line)
 
 
@@ -1405,7 +1505,7 @@ def cmd_nmi(args: argparse.Namespace) -> int:
     # by mem_parity_error() which only panics when panic_on_unrecovered_nmi=1.
     # Set all three NMI-panic knobs to cover every kernel version.
     try:
-        run_ssh(
+        r = run_ssh(
             vm.ip,
             "sysctl -w kernel.panic_on_unrecovered_nmi=1 "
             "kernel.panic_on_io_nmi=1 kernel.unknown_nmi_panic=1",
@@ -1414,6 +1514,18 @@ def cmd_nmi(args: argparse.Namespace) -> int:
     except Exception as e:
         return _handler_error(
             args, f"failed to set NMI panic sysctls on '{args.name}': {e}"
+        )
+    # Without these knobs the injected NMI arrives as an ISA SERR the
+    # guest logs and ignores, so a discarded rc here meant ltvm
+    # promised "expect panic + kdump reboot" and exited 0 while the
+    # user waited for a vmcore that was never coming.  The non-x86
+    # branch above already checks its rc.
+    if r.returncode != 0:
+        return _handler_error(
+            args,
+            f"failed to set NMI panic sysctls on '{args.name}' "
+            f"(rc={r.returncode}): "
+            f"{(r.stderr or '').strip() or '(no stderr)'}",
         )
     try:
         _qmp_nmi(vm.socket_path)
@@ -1949,8 +2061,41 @@ def _check_artifacts_disk_usage() -> tuple[list[str], str | None]:
     return warnings, info
 
 
+def _doctor_unlink(*paths: Path) -> tuple[bool, str]:
+    """Remove orphan files, escalating to sudo when we don't own them.
+
+    OVERLAYS and SOCKETS live inside root-owned VM_DIR, so a plain
+    unlink() from an unprivileged `ltvm doctor --fix` raises
+    PermissionError -- which nothing here caught, so the traceback
+    aborted every remaining check (orphan disks, sockets, clusters,
+    TAPs, hosts entries, disk usage).  _destroy_vm_artifacts already
+    documents this hazard and falls back to `sudo rm -f`; doctor did
+    not.  Returns (ok, error).
+    """
+    retry: list[Path] = []
+    for f in paths:
+        try:
+            f.unlink(missing_ok=True)
+        except PermissionError:
+            retry.append(f)
+        except OSError as e:
+            return False, str(e)
+    if retry:
+        r = sudo_run(
+            ["rm", "-f", *(str(f) for f in retry)],
+            check=False,
+            quiet=True,
+        )
+        if r.returncode != 0:
+            return False, (r.stderr or "").strip() or "sudo rm failed"
+    return True, ""
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     issues = 0
+    # Counts repairs that were attempted and did not work, so --fix
+    # can't claim "found and fixed" for something still broken.
+    fix_failures = 0
 
     # Socket + overlay dir perms: non-root `ltvm list`/`deploy`/`llmount`
     # need read access, so these are owned root:root but should be 0755.
@@ -2001,10 +2146,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"orphan overlay: {oname} ({size}M)")
             issues += 1
             if args.fix:
-                overlay.unlink(missing_ok=True)
-                for disk in OVERLAYS.glob(f"{oname}-disk*.img"):
-                    disk.unlink(missing_ok=True)
-                print("  fixed: removed")
+                ok, err = _doctor_unlink(
+                    overlay, *OVERLAYS.glob(f"{oname}-disk*.img")
+                )
+                if ok:
+                    print("  fixed: removed")
+                else:
+                    print(f"  FAILED to remove: {err}")
+                    fix_failures += 1
 
     # Orphan data disks (overlay was removed but disks weren't, e.g.
     # crash between cmd_create's overlay create and disk truncate, or
@@ -2022,8 +2171,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"orphan disk: {disk.name} ({size}M)")
         issues += 1
         if args.fix:
-            disk.unlink(missing_ok=True)
-            print("  fixed: removed")
+            ok, err = _doctor_unlink(disk)
+            if ok:
+                print("  fixed: removed")
+            else:
+                print(f"  FAILED to remove: {err}")
+                fix_failures += 1
 
     # Orphan socket-side files (.pid, .log, .qmp, .info.lock) whose
     # matching .info file is gone.  These accumulate when cmd_destroy
@@ -2034,8 +2187,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 print(f"orphan {ext}: {f.name}")
                 issues += 1
                 if args.fix:
-                    f.unlink(missing_ok=True)
-                    print("  fixed: removed")
+                    ok, err = _doctor_unlink(f)
+                    if ok:
+                        print("  fixed: removed")
+                    else:
+                        print(f"  FAILED to remove: {err}")
+                        fix_failures += 1
     for f in sorted(SOCKETS.glob(".*.info.lock")):
         # Strip leading "." and trailing ".info.lock"
         bare = f.name[1 : -len(".info.lock")]
@@ -2043,8 +2200,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"orphan info lock: {f.name}")
             issues += 1
             if args.fix:
-                f.unlink(missing_ok=True)
-                print("  fixed: removed")
+                ok, err = _doctor_unlink(f)
+                if ok:
+                    print("  fixed: removed")
+                else:
+                    print(f"  FAILED to remove: {err}")
+                    fix_failures += 1
 
     # Cluster files referencing dead nodes.  A user can `ltvm destroy
     # node` individually after a `cluster create`, leaving the .cluster
@@ -2054,7 +2215,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for cname in ClusterInfo.all_names():
         try:
             cluster = ClusterInfo.load(cname)
-        except ClusterNotFound:
+        except (ClusterNotFound, RuntimeError) as e:
+            if not isinstance(e, ClusterNotFound):
+                print(f"corrupt cluster state: {cname}: {e}")
+                issues += 1
             continue
         missing_nodes = [
             n
@@ -2066,8 +2230,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"orphan cluster: {cname} (all nodes destroyed)")
             issues += 1
             if args.fix:
-                cluster.path.unlink(missing_ok=True)
-                print("  fixed: removed")
+                ok, err = _doctor_unlink(cluster.path)
+                if ok:
+                    print("  fixed: removed")
+                else:
+                    print(f"  FAILED to remove: {err}")
+                    fix_failures += 1
         elif missing_nodes:
             names = ", ".join(n.name for n in missing_nodes)
             print(f"degraded cluster: {cname} (missing nodes: {names})")
@@ -2126,8 +2294,23 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 print(f"orphan TAP: {tap}")
                 issues += 1
                 if args.fix:
-                    run(["ip", "link", "del", tap])
-                    print("  fixed: removed")
+                    # `ip link del` needs root, and doctor runs as the
+                    # user: without sudo this failed with "Operation
+                    # not permitted", capture_output swallowed the
+                    # message, and doctor still printed "fixed" and
+                    # counted the issue resolved.  Every other ip-link
+                    # call in the tree uses sudo_run.
+                    dr = sudo_run(
+                        ["ip", "link", "del", tap],
+                        check=False,
+                        quiet=True,
+                    )
+                    if dr.returncode == 0:
+                        print("  fixed: removed")
+                    else:
+                        err = (dr.stderr or "").strip()
+                        print(f"  FAILED to remove: {err or 'unknown error'}")
+                        fix_failures += 1
 
     for line in _check_export_tools():
         print(line)
@@ -2166,6 +2349,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         return EXIT_OK
     print("---")
     if args.fix:
+        if fix_failures:
+            print(
+                f"{issues} issue(s) found, {fix_failures} could not be fixed"
+            )
+            return EXIT_ERROR
         print(f"{issues} issue(s) found and fixed")
         return EXIT_OK
     print(f"{issues} issue(s) found")
