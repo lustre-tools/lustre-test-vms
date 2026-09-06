@@ -118,6 +118,15 @@ targets:
         srpm_version: 6.12.0-55.41.1.el10_0
       config:
         CONFIG_XEN_PVH: y
+        # Soft-RoCE, for RDMA testing without RDMA hardware.  RHEL
+        # deprecated rxe in 9 and ships it disabled in 10, so every
+        # stock rocky10 kernel has "# CONFIG_RDMA_RXE is not set" --
+        # unlike rocky8/rocky9, which carry it as =m.  Without this,
+        # `rdma link add ... type rxe` has no driver to bind and the
+        # softroce path ltvm otherwise relies on is silently
+        # unavailable on this target.  The driver is upstream in 6.12;
+        # Red Hat disabled it by policy, not because it is broken.
+        CONFIG_RDMA_RXE: m
       default: 6.12-rhel10.0
     lustre:
       mode: server_ldiskfs
