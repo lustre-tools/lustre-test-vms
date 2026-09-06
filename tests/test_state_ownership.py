@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -102,13 +103,15 @@ class TestInvokingUser:
 
 class TestAtomicWriteOwnership:
     def test_sudo_fallback_installs_as_invoking_user(
-        self, tmp_path: Path
+        self, tmp_path: Path, monkeypatch: Any
     ) -> None:
         """When the destination dir isn't user-writable, the install
         must name an owner -- otherwise every .info/.cluster file ends
         up root-owned and the next unprivileged ltvm can't rewrite it."""
-        dest = tmp_path / "root-owned" / "co1.info"
-        dest.parent.mkdir()
+        vm_dir = tmp_path / "qemu-vms"
+        dest = vm_dir / "sockets" / "co1.info"
+        dest.parent.mkdir(parents=True)
+        monkeypatch.setenv("LTVM_VM_DIR", str(vm_dir))
         calls: list[list[str]] = []
 
         def fake_sudo(cmd, **kw):

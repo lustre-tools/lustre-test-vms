@@ -37,9 +37,19 @@ def _run(
     log.debug("run: %s", " ".join(str(c) for c in cmd))
     r = subprocess.run(cmd, capture_output=quiet, text=True)
     if check and r.returncode != 0:
+        # Include the captured stderr: with quiet=True the child's
+        # output goes nowhere else, so without this an atomic_write
+        # sudo-fallback failure reports only an argv and an rc, and
+        # the actual reason (ENOSPC, read-only fs, sudo policy) is
+        # lost entirely.
+        detail = ""
+        if quiet:
+            err = (r.stderr or r.stdout or "").strip()
+            if err:
+                detail = f": {err}"
         raise RuntimeError(
             f"Command failed (rc={r.returncode}): "
-            f"{' '.join(str(c) for c in cmd)}"
+            f"{' '.join(str(c) for c in cmd)}{detail}"
         )
     return r
 
@@ -102,6 +112,40 @@ def invoking_user() -> tuple[str, str] | None:
         return None
 
 
+def _ltvm_owned(path: Path) -> bool:
+    """Is *path* a file ltvm creates and must hand back to the human?
+
+    ltvm writes two very different kinds of file through
+    ``atomic_write()``: its own state (``/opt/qemu-vms/sockets/*.info``,
+    lock files, overlays) which a later *unprivileged* ltvm has to
+    rewrite, and pre-existing system files (``/etc/hosts``) which it
+    only edits a line of.  Only the first kind may be chowned to the
+    invoking user.
+
+    Handing ``/etc/hosts`` to the invoking user -- which is what this
+    function exists to prevent -- means any user who can run a single
+    ``ltvm create`` owns it from then on and can rewrite it at will
+    with no privilege at all.
+    """
+    vm_dir = Path(os.environ.get("LTVM_VM_DIR", "/opt/qemu-vms"))
+    roots = [vm_dir]
+    owner = invoking_user()
+    if owner is not None:
+        import pwd
+
+        try:
+            roots.append(Path(pwd.getpwnam(owner[0]).pw_dir))
+        except KeyError:
+            pass
+    for root in roots:
+        try:
+            path.resolve().relative_to(root.resolve())
+            return True
+        except (ValueError, OSError):
+            continue
+    return False
+
+
 def chown_to_invoking_user(path: Path) -> None:
     """Give *path* back to the human when we hold it as root.
 
@@ -144,14 +188,34 @@ def atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
         except PermissionError:
             sudo_run(["mkdir", "-p", str(parent)], quiet=True)
 
+    owns = _ltvm_owned(path)
+    prev_owner: tuple[int, int] | None = None
+    if not owns:
+        try:
+            st = path.stat()
+            prev_owner = (st.st_uid, st.st_gid)
+        except OSError:
+            prev_owner = None
+
     if os.access(str(parent), os.W_OK):
         fd, tmp = tempfile.mkstemp(dir=str(parent), prefix=f".{path.name}.")
         try:
             with os.fdopen(fd, "w") as f:
                 f.write(text)
             os.chmod(tmp, mode)
+            # Preserve the destination's existing ownership for files
+            # ltvm doesn't own (see _ltvm_owned): the tempfile we are
+            # about to rename over it was created by us, so without
+            # this a root-run ltvm would turn /etc/hosts root-owned
+            # into whatever we happen to be.
+            if not owns and prev_owner is not None:
+                try:
+                    os.chown(tmp, prev_owner[0], prev_owner[1])
+                except OSError:
+                    pass
             os.rename(tmp, str(path))
-            chown_to_invoking_user(path)
+            if owns:
+                chown_to_invoking_user(path)
         except BaseException:
             try:
                 os.unlink(tmp)
@@ -165,8 +229,17 @@ def atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
     try:
         with os.fdopen(fd, "w") as f:
             f.write(text)
-        owner = invoking_user()
+        owner = invoking_user() if owns else None
         own_args = ["-o", owner[0], "-g", owner[1]] if owner is not None else []
+        if not owns and prev_owner is not None:
+            # Keep the system file's existing owner rather than letting
+            # `install` default it to whoever sudo runs as.
+            own_args = [
+                "-o",
+                str(prev_owner[0]),
+                "-g",
+                str(prev_owner[1]),
+            ]
         sudo_run(
             [
                 "install",

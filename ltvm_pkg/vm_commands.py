@@ -24,6 +24,7 @@ from .vm_net import (
     HOSTS_FILE,
     _real_user_ssh_dir,
     alloc_ip,
+    check_tap_collision,
     mac_for_name,
     provision_vm_ssh,
     register_ssh_name,
@@ -389,6 +390,35 @@ def _validate_vm_name(name: str) -> None:
             f"invalid VM name {name!r}: only ASCII letters, digits, "
             f"'.', '_', '-' are allowed (must start with alnum)"
         )
+
+
+_VM_NAME_UNSAFE = set("*?[]!/\\")
+
+
+def _validate_vm_name_for_lookup(name: str) -> None:
+    """Reject names that are unsafe to interpolate into a path or glob.
+
+    Deliberately weaker than ``_validate_vm_name``: commands that act
+    on an *existing* VM must stay able to address one created before
+    the create-time charset rules existed.  What they must not do is
+    treat the name as a pattern -- ``_destroy_vm_artifacts`` feeds it
+    straight into ``OVERLAYS.glob(f"{name}-disk*.img")``, so
+    ``ltvm destroy 'co1-*'`` (a plausible stab at a bulk destroy)
+    would unlink the data disks of every co1-* VM on the host while
+    leaving their .info files and QEMU processes running.  ``..`` and
+    a path separator would likewise escape the VM directory into a
+    ``sudo rm -f``.
+    """
+    if not name:
+        die("VM name is empty")
+    bad = sorted(_VM_NAME_UNSAFE & set(name))
+    if bad:
+        die(
+            f"invalid VM name {name!r}: {''.join(bad)!r} not allowed "
+            f"(names are not patterns -- pass each VM name in full)"
+        )
+    if name == ".." or name.startswith("../") or name in (".", ""):
+        die(f"invalid VM name {name!r}")
 
 
 def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
@@ -896,6 +926,10 @@ def cmd_create(args: argparse.Namespace) -> None:
 
     extra_nic_types, passthrough_bdfs = _validate_create_bounds(args)
 
+    # Refuse now rather than letting two VMs fight over one host TAP
+    # once they are both running (see check_tap_collision).
+    check_tap_collision(name, len(extra_nic_types))
+
     tap = tap_for_name(name)
     mac = mac_for_name(name)
 
@@ -942,6 +976,7 @@ def cmd_create(args: argparse.Namespace) -> None:
 
 def cmd_start(args: argparse.Namespace) -> None:
     for name in args.names:
+        _validate_vm_name_for_lookup(name)
         vm = VMInfo.load(name)
         # Short-circuit when already running: launch_qemu also detects
         # this and prints "already running" to stderr, but the
@@ -964,6 +999,7 @@ def cmd_start(args: argparse.Namespace) -> None:
 
 def cmd_stop(args: argparse.Namespace) -> None:
     for name in args.names:
+        _validate_vm_name_for_lookup(name)
         try:
             vm = VMInfo.load(name)
         except VMNotFound:
@@ -988,6 +1024,9 @@ def _destroy_vm_artifacts(name: str) -> None:
     only root has write+exec on them, so unlink fails with EACCES
     for the user.  Fall back to ``sudo rm -f`` on PermissionError.
     """
+    # Belt-and-braces: this function globs and sudo-rm's, so never
+    # let a pattern reach it even if a future caller forgets.
+    _validate_vm_name_for_lookup(name)
     overlay = OVERLAYS / f"{name}.qcow2"
     targets = [overlay] + list(OVERLAYS.glob(f"{name}-disk*.img"))
     for ext in ("qmp", "pid", "info", "log"):
@@ -1010,6 +1049,7 @@ def _destroy_vm_artifacts(name: str) -> None:
 
 def cmd_destroy(args: argparse.Namespace) -> None:
     for name in args.names:
+        _validate_vm_name_for_lookup(name)
         existed = (SOCKETS / f"{name}.info").exists()
         passthrough_rebinds: dict[str, str] = {}
         try:
@@ -1157,6 +1197,18 @@ def cmd_list(args: argparse.Namespace) -> None:
             # Race: .info file disappeared between all_names() and load().
             # Skip this entry rather than crashing.
             continue
+        except ValueError as e:
+            # Corrupt int field.  VMInfo.load fails loud by design, but
+            # `ltvm list` is how a user *finds out* something is wrong;
+            # aborting the whole listing on one damaged file hides every
+            # healthy VM behind a traceback.  Report the casualty in
+            # place instead.
+            print(
+                f"warning: {name}: unreadable VM state ({e})",
+                file=sys.stderr,
+            )
+            entries.append({"name": name, "status": "corrupt", "error": str(e)})
+            continue
         status = "running" if is_running(vm) else "stopped"
 
         if status == "running":
@@ -1216,6 +1268,12 @@ def cmd_list(args: argparse.Namespace) -> None:
             print("(no VMs)")
             return
         for e in entries:
+            if e["status"] == "corrupt":
+                print(
+                    f"{e['name']:<20} {'-':<18} {'corrupt':<8} "
+                    f"(unreadable state: {e['error']})"
+                )
+                continue
             disks = ""
             if e["mdt_disks"] + e["ost_disks"] > 0:
                 disks = f"mdt={e['mdt_disks']} ost={e['ost_disks']}"

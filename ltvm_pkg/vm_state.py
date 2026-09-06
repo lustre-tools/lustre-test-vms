@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import fcntl
 import json
+import logging
 import os
 import re
 import sys
@@ -31,6 +33,8 @@ def _atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
 # standard install layout from `ltvm setup`.
 
 VM_DIR = Path(os.environ.get("LTVM_VM_DIR", "/opt/qemu-vms"))
+
+log = logging.getLogger(__name__)
 QEMU_PREFIX = Path(os.environ.get("LTVM_QEMU_PREFIX", "/opt/qemu"))
 # x86_64 qemu binary path -- non-x86_64 callers use qemu_binary_for_arch().
 QEMU_IMG = str(QEMU_PREFIX / "bin" / "qemu-img")
@@ -747,8 +751,17 @@ class ClusterInfo:
                 f"corrupt cluster state at {path}: {e}\n"
                 f"  remove the file and recreate the cluster with `ltvm cluster create`"
             )
+        if not isinstance(data, dict) or "nodes" not in data:
+            # Same contract as the JSON case above: a truncated or
+            # hand-edited .cluster file must produce an actionable
+            # error, not a bare KeyError from deep inside a listing.
+            raise RuntimeError(
+                f"corrupt cluster state at {path}: missing 'nodes'\n"
+                f"  remove the file and recreate the cluster with "
+                f"`ltvm cluster create`"
+            )
         return ClusterInfo(
-            name=data["name"],
+            name=data.get("name", name),
             nodes=data["nodes"],
             owner_id=data.get("owner_id"),
         )
@@ -758,7 +771,37 @@ class ClusterInfo:
         return [f.stem for f in sorted(SOCKETS.glob("*.cluster"))]
 
     def get_nodes(self) -> list[ClusterNode]:
-        return [ClusterNode(**n) for n in self.nodes]
+        """Parse the stored node dicts into ClusterNode objects.
+
+        Unknown keys are dropped rather than raising TypeError: a
+        .cluster file written by a *newer* ltvm that added a node
+        field would otherwise make every older ltvm's `cluster list`
+        traceback -- and cmd_cluster_list calls this outside its
+        try/except, so one such file aborts the whole listing.
+        """
+        known = {f.name for f in dataclasses.fields(ClusterNode)}
+        out: list[ClusterNode] = []
+        for n in self.nodes:
+            if not isinstance(n, dict):
+                raise RuntimeError(
+                    f"corrupt cluster state for {self.name!r}: "
+                    f"node entry is {type(n).__name__}, expected object"
+                )
+            extra = sorted(set(n) - known)
+            if extra:
+                log.warning(
+                    "cluster %s: ignoring unknown node field(s) %s "
+                    "(written by a newer ltvm?)",
+                    self.name,
+                    ", ".join(extra),
+                )
+            try:
+                out.append(ClusterNode(**{k: v for k, v in n.items() if k in known}))
+            except TypeError as e:
+                raise RuntimeError(
+                    f"corrupt cluster state for {self.name!r}: {e}"
+                )
+        return out
 
     def mgs_node(self) -> ClusterNode:
         for n in self.get_nodes():

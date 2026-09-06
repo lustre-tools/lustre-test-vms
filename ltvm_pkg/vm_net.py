@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import logging
 import os
 import signal
 import subprocess
@@ -11,11 +12,22 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import IO
 
 from .priv import atomic_write as _priv_atomic_write
 from .priv import sudo_run
 from .qemu_run import die, run
-from .vm_state import MARKER, ROOT_PASSWORD, SUBNET, VM_DIR, VMInfo, VMNotFound
+from .vm_state import (
+    GATEWAY,
+    MARKER,
+    ROOT_PASSWORD,
+    SUBNET,
+    VM_DIR,
+    VMInfo,
+    VMNotFound,
+)
+
+log = logging.getLogger(__name__)
 
 _IP_LOCK_PATH = VM_DIR / ".ip-alloc.lock"
 _HOSTS_LOCK_PATH = VM_DIR / ".hosts.lock"
@@ -81,11 +93,34 @@ def sshpass_scp_argv(
     ]
 
 
+def _open_lock_file(path: Path) -> IO[str]:
+    """Open (creating if needed) a lock file usable by either uid.
+
+    /opt/qemu-vms is root-owned 0755, so the first `sudo ltvm create`
+    leaves these lock files root:root 0644 and a plain open(path, "w")
+    from an unprivileged `ltvm create`/`destroy` -- which are *not*
+    root-gated -- dies with PermissionError before doing anything.
+    Create through priv.atomic_write (which knows how to escalate) at
+    0666 so either uid can lock later, and fall back to a read-only
+    descriptor for locks already on disk owned by root: flock() needs
+    an open fd, not write access.  Mirrors VMInfo._open_lock_file.
+    """
+    if not path.exists():
+        try:
+            _priv_atomic_write(path, "", mode=0o666)
+        except (OSError, RuntimeError):
+            pass
+    try:
+        return open(path, "a")
+    except PermissionError:
+        return open(path)
+
+
 @contextmanager
 def _ip_alloc_lock() -> Iterator[None]:
     """Exclusive file lock serialising IP allocation across concurrent creates."""
     _IP_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(_IP_LOCK_PATH, "w") as fh:
+    with _open_lock_file(_IP_LOCK_PATH) as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
             yield
@@ -102,7 +137,7 @@ def _hosts_lock() -> Iterator[None]:
     read-modify-write on /etc/hosts silently drops entries.
     """
     _HOSTS_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(_HOSTS_LOCK_PATH, "w") as fh:
+    with _open_lock_file(_HOSTS_LOCK_PATH) as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         try:
             yield
@@ -181,6 +216,52 @@ def extra_tap_for_name(name: str, idx: int) -> str:
     return f"tap-{h[: 11 - len(suffix)]}{suffix}"
 
 
+def taps_for_vm(name: str, extra_nics: int) -> set[str]:
+    """Every TAP ifname a VM with *extra_nics* extra NICs will own."""
+    taps = {tap_for_name(name)}
+    for idx in range(1, extra_nics + 1):
+        taps.add(extra_tap_for_name(name, idx))
+    return taps
+
+
+def check_tap_collision(name: str, extra_nics: int) -> None:
+    """Refuse a VM whose TAP names would collide with an existing VM's.
+
+    ``extra_tap_for_name(n, i)`` is ``tap_for_name(n) + "-<i>"``, which
+    is character-for-character ``tap_for_name(f"{n}-{i}")``.  So
+    "co2-mds" with two extra NICs and a VM literally named "co2-mds-2"
+    both claim ``tap-co2-mds-2`` -- and the project's own co<N>-<role>
+    convention makes numbered suffixes ordinary.  Nothing detected
+    this: whoever started second ran ``ip link del`` on the other's
+    live TAP, then recreated it, and the two QEMUs fought over one
+    device (the loser's TUNSETIFF fails EBUSY).  kill_qemu and
+    cmd_doctor's orphan sweep deleted the wrong VM's TAP for the same
+    reason.
+
+    Checked at create time so the readable ``tap-<name>-<idx>`` scheme
+    (which cmd_doctor prefix-matches to find a VM's TAPs) can stay.
+    """
+    mine = taps_for_vm(name, extra_nics)
+    for other in VMInfo.all_names():
+        if other == name:
+            continue
+        try:
+            vm = VMInfo.load(other)
+        except (VMNotFound, ValueError):
+            continue
+        theirs = taps_for_vm(other, len(vm.nics))
+        clash = mine & theirs
+        if clash:
+            die(
+                f"VM name {name!r} would collide with existing VM "
+                f"{other!r} on TAP device(s) {', '.join(sorted(clash))}.\n"
+                f"  Both map to the same host interface name, so "
+                f"starting one would tear down the other's network.\n"
+                f"  Pick a different name (avoid a '-<digit>' suffix "
+                f"that matches another VM's extra-NIC index)."
+            )
+
+
 def mac_for_name(name: str) -> str:
     h = hashlib.md5(name.encode()).hexdigest()
     return f"AA:FC:00:{h[0:2]}:{h[2:4]}:{h[4:6]}"
@@ -215,10 +296,45 @@ def _used_ips(exclude_name: str) -> set[str]:
             vm = VMInfo.load(n)
         except VMNotFound:
             continue
+        except ValueError as e:
+            # VMInfo.load deliberately fails loud on a corrupt int
+            # field (see TestVMInfoLoadCorruption) -- but that must
+            # stay scoped to the damaged VM.  This walk feeds every
+            # `ltvm create`, so letting it out would mean one
+            # truncated .info file makes IP allocation, and therefore
+            # VM creation, impossible host-wide.  Skip the casualty
+            # and keep its address out of the free pool by warning.
+            log.warning(
+                "skipping corrupt VM state for %r during IP scan: %s", n, e
+            )
+            continue
         if vm.ip:
             used.add(vm.ip)
         used.update(ip for ip in vm.nic_ips if ip)
     return used
+
+
+def _validate_explicit_ip(ip: str) -> None:
+    """Reject a --ip that isn't a host address on the VM subnet.
+
+    Unvalidated, the value goes straight onto QEMU's kernel cmdline as
+    ``fc_ip=<value>`` and into /etc/hosts as ``<value>\t<name>``, so
+    ``ltvm create foo --ip banana`` produced a VM that never got an
+    address and an /etc/hosts line that resolved a name to garbage.
+    """
+    import ipaddress
+
+    try:
+        addr = ipaddress.IPv4Address(ip)
+    except ipaddress.AddressValueError:
+        die(f"--ip {ip!r} is not a valid IPv4 address")
+    net = ipaddress.IPv4Network(f"{SUBNET}.0/24")
+    if addr not in net:
+        die(f"--ip {ip} is outside the VM subnet {net}")
+    if ip == GATEWAY:
+        die(f"--ip {ip} is the bridge gateway address")
+    if addr == net.network_address or addr == net.broadcast_address:
+        die(f"--ip {ip} is a network/broadcast address")
 
 
 @contextmanager
@@ -248,6 +364,7 @@ def alloc_ip(
         used = _used_ips(name)
         ips: list[str] = []
         if explicit_ip:
+            _validate_explicit_ip(explicit_ip)
             if explicit_ip in used:
                 die(f"IP {explicit_ip} already used by another VM")
             ips.append(explicit_ip)
@@ -384,6 +501,13 @@ def _register_ssh_name_locked(name: str, ip: str) -> None:
         for ln in hosts_text.splitlines(keepends=True)
         if not ln.rstrip("\n").endswith(marker_line)
     ]
+    # A hand-edited /etc/hosts often has no trailing newline on its
+    # last line; keepends preserves that, so appending would splice
+    # our entry onto it ("10.0.0.1 foo192.168.100.42\tco1 # ...") and
+    # break both names at once -- and leave a marker that is no longer
+    # at end-of-line, so unregister could never remove it again.
+    if filtered and not filtered[-1].endswith("\n"):
+        filtered[-1] += "\n"
     _atomic_write(hosts, "".join(filtered) + new_entry)
     reload_dns()
 
@@ -462,7 +586,17 @@ def _unregister_ssh_name_locked(name: str) -> None:
             if not line.rstrip("\r\n").endswith(marker)
         ]
         _atomic_write(hosts, "".join(lines))
-        reload_dns()
+        # Teardown must not stop here.  reload_dns() raises when
+        # dnsmasq isn't running (e.g. host rebooted without it coming
+        # back), and cmd_destroy calls us from a `finally` *after* the
+        # disks and .info are already gone -- so a raise here strands
+        # the ~/.ssh/config block and known_hosts entries forever and
+        # reports a destroy that mostly succeeded as a traceback.  A
+        # stale DNS cache is the least of the caller's problems.
+        try:
+            reload_dns()
+        except RuntimeError as e:
+            log.warning("could not reload dnsmasq after removing %s: %s", name, e)
 
     # ~/.ssh/config -- remove block.  Same root-owns-the-file footgun
     # as register, so we chown back to the real user after writing.

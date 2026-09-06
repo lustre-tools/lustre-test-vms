@@ -922,9 +922,14 @@ class TestKillQemu:
 
 
 class TestLaunchQemuSocketPerms:
-    """launch_qemu chmods the QMP socket to 0o666 after the pidfile appears."""
+    """launch_qemu hands the QMP socket to the invoking user at 0o600.
 
-    def test_socket_chmoded_to_0o666_after_launch(
+    It must NOT be world-accessible: QMP exposes human-monitor-command
+    and `migrate exec:`, both of which run a shell as the QEMU process
+    owner (root for a VM created under sudo), and SOCKETS is 0755.
+    """
+
+    def test_socket_chmoded_to_0o600_after_launch(
         self, tmp_vmdir: Path
     ) -> None:
         vm = _make_vm(tmp_vmdir)
@@ -954,9 +959,12 @@ class TestLaunchQemuSocketPerms:
         socket_str = str(vm.socket_path)
         chmod_for_socket = [(p, m) for p, m in chmod_calls if p == socket_str]
         assert chmod_for_socket, (
-            f"expected os.chmod({socket_str!r}, 0o666); got {chmod_calls}"
+            f"expected os.chmod({socket_str!r}, 0o600); got {chmod_calls}"
         )
-        assert chmod_for_socket[0][1] == 0o666
+        assert chmod_for_socket[0][1] == 0o600
+        assert chmod_for_socket[0][1] & 0o077 == 0, (
+            "QMP socket must not be group/world accessible"
+        )
 
 
 class TestIsRunningPidIdentity:

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from .host_setup import is_macos, socket_vmnet_socket_path
-from .priv import sudo_run
+from .priv import invoking_user, sudo_run
 from .vm_state import (
     BRIDGE,
     EXIT_ERROR,
@@ -569,11 +569,22 @@ def launch_qemu(vm: VMInfo) -> None:
                 f"QEMU likely failed to start"
             )
         pid = int(vm.pid_path.read_text().strip())
-        # QMP socket is created by QEMU (running as root) as 0600.  Any
-        # user who can read the VM state files should be able to send NMI
-        # and other QMP commands without sudo.
+        # QMP socket is created by QEMU (running as root) as 0600.  The
+        # invoking human should be able to send NMI and other QMP
+        # commands without sudo, so hand them the socket -- but keep it
+        # 0600.  QMP exposes human-monitor-command and `migrate exec:`,
+        # both of which spawn a shell as the QEMU process owner (root
+        # for a VM created under sudo), so a world-writable socket in
+        # the 0755 SOCKETS dir is local code execution as that owner.
+        owner = invoking_user()
         try:
-            os.chmod(vm.socket_path, 0o666)
+            if owner is not None:
+                sudo_run(
+                    ["chown", f"{owner[0]}:{owner[1]}", str(vm.socket_path)],
+                    check=False,
+                    quiet=True,
+                )
+            os.chmod(vm.socket_path, 0o600)
         except OSError:
             pass
     except BaseException:

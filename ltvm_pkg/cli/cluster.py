@@ -18,6 +18,7 @@ from ltvm_pkg.cli.util import (
     _error,
     _qemu_ns,
 )
+from ltvm_pkg.vm_state import ClusterNotFound
 
 
 def _require_root(*a: Any, **kw: Any) -> Any:
@@ -61,6 +62,13 @@ def cmd_cluster(args: argparse.Namespace) -> int:
             return EXIT_OK
         except SystemExit as e:
             return int(e.code) if e.code is not None else EXIT_ERROR
+        except (ClusterNotFound, RuntimeError) as e:
+            # Every action but `list` calls ClusterInfo.load(), which
+            # raises ClusterNotFound for a mistyped name and RuntimeError
+            # for a corrupt .cluster file.  Without this, `ltvm cluster
+            # status co99-nope` answers a typo with a Python traceback.
+            # Mirrors _vm_call's VMNotFound handling in cli/vm.py.
+            return _error(str(e), use_json)
 
     if action == "create":
         err = _require_root(use_json)
