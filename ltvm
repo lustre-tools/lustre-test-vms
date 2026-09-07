@@ -1262,6 +1262,33 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Deploy only userspace (tools, tests) -- skip kernel modules and depmod",
     )
+    sp.add_argument(
+        "--ram-osts",
+        dest="ram_osts",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Back N OSTs with brd ram devices instead of virtio disks, "
+        "for benchmarks that want the OST's backing store out of the "
+        "measurement.  Overrides the OSTDEV mapping from --ost-disks.",
+    )
+    sp.add_argument(
+        "--ram-ost-size",
+        dest="ram_ost_size",
+        type=int,
+        default=32,
+        metavar="GB",
+        help="Size of each ram device in GiB (default: 32).  brd allocates "
+        "on write, so this is a ceiling rather than a reservation -- but "
+        "the memory is real and is not reclaimed until the device is "
+        "removed.",
+    )
+    sp.add_argument(
+        "--ram-mdt",
+        dest="ram_mdt",
+        action="store_true",
+        help="Put the MDT on a ram device too (default: leave it alone)",
+    )
     _dep_tflag = sp.add_argument(
         "--target",
         dest=_TARGET_FLAG_DEST,

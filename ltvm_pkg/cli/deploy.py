@@ -436,6 +436,9 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             staging,
             os_family=os_family,
             userspace_only=userspace_only,
+            ram_osts=getattr(args, "ram_osts", 0) or 0,
+            ram_ost_size_gb=getattr(args, "ram_ost_size", 32),
+            ram_mdt=getattr(args, "ram_mdt", False),
         )
     except RuntimeError as e:
         return _error(str(e), use_json)

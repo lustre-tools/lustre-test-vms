@@ -1577,3 +1577,143 @@ class TestVerifyDeployedModules:
             ssh.return_value = MagicMock(returncode=255, stdout="")
             verify_deployed_modules(self._vm(), staging)
         assert "could not verify" in capsys.readouterr().err
+
+
+# ── configure_ram_osts ───────────────────────────────────
+
+
+class TestConfigureRamOsts:
+    """Ram-backed OSTs take the OST's backing store out of a benchmark."""
+
+    def _capture_script(
+        self,
+        count: int,
+        size_gb: int = 32,
+        ram_mdt: bool = False,
+        os_family: str = "rhel",
+    ) -> str:
+        captured: dict = {}
+
+        def fake_run_ssh(ip, script, timeout=30):
+            captured["script"] = script
+            return _ok()
+
+        with patch("ltvm_pkg.deploy.run_ssh", side_effect=fake_run_ssh):
+            deploy.configure_ram_osts(
+                "10.0.0.1",
+                count,
+                size_gb,
+                ram_mdt=ram_mdt,
+                os_family=os_family,
+            )
+        return captured["script"]
+
+    def test_osts_map_to_ram_devices_from_zero(self) -> None:
+        script = self._capture_script(count=4)
+        for n, dev in enumerate(("ram0", "ram1", "ram2", "ram3"), start=1):
+            assert f"OSTDEV{n}=/dev/{dev}" in script
+        assert "OSTCOUNT=4" in script
+
+    def test_mdt_untouched_by_default(self) -> None:
+        """Without --ram-mdt the MDT keeps whatever it had; emitting an
+        MDSDEV here would silently override the virtio mapping."""
+        script = self._capture_script(count=4)
+        assert "MDSDEV" not in script
+        assert "MDSCOUNT" not in script
+
+    def test_ram_mdt_takes_the_device_after_the_osts(self) -> None:
+        script = self._capture_script(count=4, ram_mdt=True)
+        assert "MDSDEV1=/dev/ram4" in script  # 0-3 are the OSTs
+        assert "rd_nr=$want_nr" in script
+
+    def test_size_is_converted_to_kib_for_brd(self) -> None:
+        """brd's rd_size is KiB; OSTSIZE is KB for the test framework."""
+        script = self._capture_script(count=2, size_gb=32)
+        assert "want_kb=33554432" in script  # 32 GiB in KiB
+        assert "OSTSIZE=33554432" in script
+
+    def test_stale_signatures_are_wiped(self) -> None:
+        """A ram device reloaded with a new geometry can still carry an
+        ldiskfs superblock, which mkfs.lustre then refuses."""
+        script = self._capture_script(count=2)
+        assert "wipefs -a /dev/ram$i" in script
+
+    def test_brd_only_reloaded_when_geometry_differs(self) -> None:
+        """An unconditional rmmod would fail on a mounted filesystem for
+        no reason."""
+        script = self._capture_script(count=2)
+        assert "have_nr" in script and "have_kb" in script
+        assert "-lt" in script  # count compare
+        assert "-ne" in script  # size compare
+
+    def test_in_use_brd_gives_an_actionable_message(self) -> None:
+        script = self._capture_script(count=2)
+        assert "unmount Lustre first" in script
+
+    def test_block_is_appended_not_replacing_the_virtio_one(self) -> None:
+        """cfg/local.sh is sourced, so later wins.  Appending keeps both
+        blocks visible, which matters when working out why an OST is not
+        where it was expected."""
+        script = self._capture_script(count=2)
+        assert ">> " in script  # append
+        # Only our own block is removed first, never ltvm's virtio block.
+        assert "RAM OST configuration" in script
+        assert "VM disk configuration" not in script
+
+    def test_failure_is_raised_with_output(self) -> None:
+        with patch(
+            "ltvm_pkg.deploy.run_ssh",
+            return_value=_fail(stderr="brd is in use; unmount Lustre first"),
+        ):
+            with pytest.raises(RuntimeError, match="unmount Lustre first"):
+                deploy.configure_ram_osts("10.0.0.1", 4, 32)
+
+
+class TestDeployRamOstWiring:
+    """deploy_to_vm must apply ram OSTs after the virtio block."""
+
+    def test_not_called_when_zero(self, staging: Path) -> None:
+        vm = _make_vm(mdt_disks=1, ost_disks=2)
+        with (
+            patch("ltvm_pkg.deploy.subprocess.run", return_value=_ok()),
+            patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()),
+            patch("ltvm_pkg.deploy.configure_test_disks"),
+            patch("ltvm_pkg.deploy.configure_ram_osts") as mock_ram,
+        ):
+            deploy.deploy_to_vm(vm, staging)
+            mock_ram.assert_not_called()
+
+    def test_forwarded_when_requested(self, staging: Path) -> None:
+        vm = _make_vm(mdt_disks=1, ost_disks=0)
+        with (
+            patch("ltvm_pkg.deploy.subprocess.run", return_value=_ok()),
+            patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()),
+            patch("ltvm_pkg.deploy.configure_test_disks"),
+            patch("ltvm_pkg.deploy.configure_ram_osts") as mock_ram,
+        ):
+            deploy.deploy_to_vm(
+                vm, staging, ram_osts=8, ram_ost_size_gb=16, ram_mdt=True
+            )
+            mock_ram.assert_called_once_with(
+                vm.ip, 8, 16, ram_mdt=True, os_family="rhel"
+            )
+
+    def test_ram_runs_after_virtio(self, staging: Path) -> None:
+        """Order is load-bearing: the ram block must be appended after
+        the virtio one or `source cfg/local.sh` takes the wrong devices."""
+        calls: list[str] = []
+        vm = _make_vm(mdt_disks=1, ost_disks=2)
+        with (
+            patch("ltvm_pkg.deploy.subprocess.run", return_value=_ok()),
+            patch("ltvm_pkg.deploy.run_ssh", return_value=_ok()),
+            patch(
+                "ltvm_pkg.deploy.configure_test_disks",
+                side_effect=lambda *a, **k: calls.append("virtio"),
+            ),
+            patch(
+                "ltvm_pkg.deploy.configure_ram_osts",
+                side_effect=lambda *a, **k: calls.append("ram"),
+            ),
+        ):
+            deploy.deploy_to_vm(vm, staging, ram_osts=4)
+        assert calls == ["virtio", "ram"], calls
