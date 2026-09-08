@@ -386,15 +386,15 @@ def _kernel_changed(
     target: str = DEFAULT_TARGET,
     arch: str = "x86_64",
 ) -> bool:
-    """Return True iff the Lustre tree was previously built against a
-    different kernel than the one we're about to use.
+    """Return True iff any `.ltvm-kernel-*` stamp in the tree names a
+    kernel other than the one we're about to build against.
 
-    Checks every `.ltvm-kernel-*` stamp under the tree, not just this
-    target's.  Autoconf state (config.cache, kconftest.dir, .deps) is
-    shared across all targets because the Lustre source is shared; a
-    stamp for ANY other target whose kver differs means distclean is
-    required to avoid picking up the wrong feature probes on a fresh
-    build of a new target.
+    Legacy, and deliberately pessimistic: it cannot distinguish "this
+    tree currently holds another target's autoconf state" from "this
+    tree also built another target at some point in the past", so a
+    tree that has ever served two targets answers True forever.  Kept
+    only as the one-shot fallback for a tree carrying no claim stamp
+    yet -- see _tree_claim_changed.
     """
     cur = _kernel_release(build_tree)
     stamps = list(lustre_tree.glob(".ltvm-kernel-*"))
@@ -407,6 +407,50 @@ def _kernel_changed(
         except OSError:
             continue
     return False
+
+
+# One tree-wide stamp naming whoever the tree's shared autoconf state
+# (config.h, config.cache, .deps, staged ldiskfs sources) currently
+# belongs to.  Written inside the container immediately after the
+# cleanup that establishes the claim, so it can never vouch for a
+# distclean that didn't run.
+CLAIM_STAMP = ".ltvm-last-build"
+
+
+def _tree_claim(target: str, arch: str, variant: str, kver: str) -> str:
+    """The identity a build claims the shared source tree for."""
+    return f"{target} {arch} {variant} {kver}"
+
+
+def _tree_claim_changed(
+    lustre_tree: Path,
+    build_tree: Path,
+    target: str = DEFAULT_TARGET,
+    arch: str = "x86_64",
+    variant: str = "base",
+) -> bool:
+    """Return True iff the tree's shared autoconf state was last
+    written by a build other than the one we're about to run -- which
+    is what makes `make distclean` necessary.
+
+    Autoconf state is per-tree, not per-target, because the Lustre
+    source is shared.  So what matters is who wrote it LAST, not which
+    targets the tree has ever built: a tree that alternates rocky9 and
+    rocky10 needs a distclean on every switch, and a tree that builds
+    rocky9 twice in a row needs none the second time.
+    """
+    want = _tree_claim(target, arch, variant, _kernel_release(build_tree))
+    claim = lustre_tree / CLAIM_STAMP
+    if claim.is_file():
+        try:
+            return claim.read_text().strip() != want
+        except OSError:
+            return True
+    # No claim stamp: either a fresh tree (nothing to distclean) or a
+    # tree last built by an ltvm predating the stamp.  Fall back to the
+    # legacy sweep, which distcleans at most once -- the claim that
+    # build writes answers for every run after it.
+    return _kernel_changed(lustre_tree, build_tree)
 
 
 def _invalidate_stale_ldiskfs(lustre_tree: Path) -> None:
@@ -480,11 +524,12 @@ def _build_in_container(
     # reconfigure" -- but config.h in the (shared) Lustre source tree
     # may have been written by a different target's build against a
     # different kernel, so its autoconf-driven HAVE_* macros are wrong
-    # for us.  _kernel_changed sweeps every target's stamp, so use it
-    # as the canonical cross-target safety net.
-    if not force and _kernel_changed(
-        lustre_tree, build_tree, target=target, arch=arch
+    # for us.  The claim stamp says who wrote that state last, which is
+    # exactly the question, so use it as the cross-target safety net.
+    if not force and _tree_claim_changed(
+        lustre_tree, build_tree, target=target, arch=arch, variant=variant
     ):
+        print("  Tree last built for another target/kernel, distcleaning")
         force = True
 
     need_reconf = _needs_reconfigure(
@@ -706,6 +751,14 @@ def _build_in_container(
             "find . -maxdepth 3 -name '*.d' -type d"
             " -not -path '*/.git/*' -exec rmdir {} + 2>/dev/null || true"
         )
+
+    # Claim the tree for this build, in the container and before make,
+    # so the stamp only ever appears on the far side of the cleanup it
+    # vouches for.  Writing it on the host success path instead would
+    # mean every failed build distcleans the next one -- exactly the
+    # edit-compile-fix loop where a full rebuild hurts most.
+    claim = _tree_claim(target, arch, variant, kver)
+    script_parts.append(f"printf '%s\\n' {shlex.quote(claim)} > {CLAIM_STAMP}")
 
     # Run autogen.sh + configure only when needed.
     #

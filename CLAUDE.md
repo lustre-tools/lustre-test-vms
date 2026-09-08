@@ -352,6 +352,17 @@ Builds inside the target's build container against the
 target's kernel build tree.  Output goes to the Lustre
 tree's `.ltvm-staging/<target>/<arch>/<kernel>[/<variant>]/`.
 
+Incremental by default: repeating the command rebuilds
+only what changed.  `make distclean` runs for `--force`,
+or when `.ltvm-last-build` -- a claim stamp naming the
+`<target> <arch> <variant> <kver>` the tree's shared
+autoconf state (config.h, config.cache, `.deps`, staged
+ldiskfs sources) currently belongs to -- names anything
+other than the build about to run.  So switching targets
+in one source tree distcleans on each switch, and staying
+on one target never does.  autogen + configure re-run on
+a narrower condition still (`_needs_reconfigure`).
+
 ## Release Manifest Schema
 
 Each published release carries `"schema": "ltvm-release/<N>"`

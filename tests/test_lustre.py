@@ -7,10 +7,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ltvm_pkg.lustre_build import (
+    CLAIM_STAMP,
     _container_exists,
     _kernel_release,
     _needs_reconfigure,
     _show_configure_log,
+    _tree_claim,
     build_lustre,
     lustre_status,
     read_staging_meta,
@@ -465,6 +467,129 @@ class TestKernelChangeDistclean:
         assert captured_scripts, "podman run was not called"
         script = captured_scripts[0]
         assert "distclean" in script
+
+
+class TestTreeClaim:
+    """The claim stamp records which build owns the tree's shared
+    autoconf state, so a repeat build of the SAME target/kernel skips
+    distclean even in a tree that has served other targets."""
+
+    TARGET = "rocky9"
+    KVER = "5.14.0-611.el9_lustre"
+
+    def _tree(self, tmp_path: Path):
+        lustre = tmp_path / "lustre"
+        kernel = tmp_path / "kernel"
+        lustre.mkdir()
+        kernel.mkdir()
+        (lustre / "lustre" / "kernel_patches").mkdir(parents=True)
+        (lustre / "configure").write_text("#!/bin/sh\n")
+        (lustre / "config.status").write_text("# status\n")
+        (lustre / "Makefile").write_text("# stub\n")
+        release_dir = kernel / "include" / "config"
+        release_dir.mkdir(parents=True)
+        (release_dir / "kernel.release").write_text(self.KVER + "\n")
+        (kernel / "Module.symvers").write_text("")
+        t = self.TARGET
+        (lustre / f".ltvm-kernel-{t}-x86_64").write_text(self.KVER + "\n")
+        (lustre / f".ltvm-server-{t}-x86_64").write_text("True\n")
+        return lustre, kernel
+
+    def _claim(self, lustre: Path, text: str) -> None:
+        (lustre / CLAIM_STAMP).write_text(text + "\n")
+
+    def _run(self, lustre: Path, kernel: Path) -> str:
+        captured: list[str] = []
+
+        def mock_run(cmd, *args, **kwargs):
+            if "podman" in cmd[0]:
+                captured.append(cmd[-1])
+            r = MagicMock()
+            r.returncode = 0
+            return r
+
+        with (
+            patch("ltvm_pkg.lustre_build.subprocess.run", side_effect=mock_run),
+            patch(
+                "ltvm_pkg.lustre_build.run_podman_with_cleanup",
+                side_effect=mock_run,
+            ),
+            patch("ltvm_pkg.lustre_build._container_exists", return_value=True),
+            patch("ltvm_pkg.target_config.TargetConfig") as mock_tc,
+        ):
+            mock_tc.return_value.resolve_kernel.return_value = "5.14-rhel9.7"
+            try:
+                build_lustre(
+                    lustre,
+                    kernel,
+                    container_tag="ltvm-build-rocky9",
+                    target=self.TARGET,
+                    force=False,
+                )
+            except Exception:
+                pass
+        assert captured, "podman run was not called"
+        return captured[0]
+
+    def test_matching_claim_skips_distclean(self, tmp_path: Path) -> None:
+        lustre, kernel = self._tree(tmp_path)
+        self._claim(
+            lustre, _tree_claim(self.TARGET, "x86_64", "base", self.KVER)
+        )
+        assert "distclean" not in self._run(lustre, kernel)
+
+    def test_other_target_claim_forces_distclean(self, tmp_path: Path) -> None:
+        lustre, kernel = self._tree(tmp_path)
+        self._claim(
+            lustre,
+            _tree_claim("rocky10", "x86_64", "base", "6.12.0-el10_lustre"),
+        )
+        assert "distclean" in self._run(lustre, kernel)
+
+    def test_stale_sibling_stamp_does_not_force_distclean(
+        self, tmp_path: Path
+    ) -> None:
+        """The regression: another target's leftover `.ltvm-kernel-*`
+        stamp used to distclean every build of THIS target forever."""
+        lustre, kernel = self._tree(tmp_path)
+        (lustre / ".ltvm-kernel-rocky10-x86_64").write_text(
+            "6.12.0-el10_lustre\n"
+        )
+        self._claim(
+            lustre, _tree_claim(self.TARGET, "x86_64", "base", self.KVER)
+        )
+        assert "distclean" not in self._run(lustre, kernel)
+
+    def test_no_claim_falls_back_to_sibling_sweep(self, tmp_path: Path) -> None:
+        """A tree from an ltvm predating the stamp distcleans once."""
+        lustre, kernel = self._tree(tmp_path)
+        (lustre / ".ltvm-kernel-rocky10-x86_64").write_text(
+            "6.12.0-el10_lustre\n"
+        )
+        assert "distclean" in self._run(lustre, kernel)
+
+    def test_script_writes_claim(self, tmp_path: Path) -> None:
+        lustre, kernel = self._tree(tmp_path)
+        self._claim(
+            lustre, _tree_claim(self.TARGET, "x86_64", "base", self.KVER)
+        )
+        script = self._run(lustre, kernel)
+        expected = _tree_claim(self.TARGET, "x86_64", "base", self.KVER)
+        assert f"> {CLAIM_STAMP}" in script
+        assert expected in script
+
+    def test_claim_written_before_make(self, tmp_path: Path) -> None:
+        """Ordering matters: the claim must land after the cleanup and
+        before the build, so a failed `make` leaves it standing."""
+        lustre, kernel = self._tree(tmp_path)
+        self._claim(
+            lustre,
+            _tree_claim("rocky10", "x86_64", "base", "6.12.0-el10_lustre"),
+        )
+        script = self._run(lustre, kernel)
+        claim_at = script.index(f"> {CLAIM_STAMP}")
+        assert claim_at < script.index("\nmake ")
+        assert claim_at > script.index("distclean")
 
 
 class TestIncrementalRebuildGuard:
