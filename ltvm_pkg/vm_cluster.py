@@ -723,12 +723,25 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     import time as _time
 
     _now = int(_time.time())
+    unrecorded: list[str] = []
     for node in nodes:
         try:
             vm = VMInfo.load(node.name)
             vm.update_deploy(_now, build, vm.kver)
         except VMNotFound:
             pass
+        except PermissionError:
+            # Same as single-node deploy: cluster deploy is unprivileged
+            # and update_deploy never prompts, so a root-owned sockets/
+            # without cached sudo costs only the bookkeeping.
+            unrecorded.append(node.name)
+    if unrecorded:
+        print(
+            f"  Warning: deploy metadata not recorded for "
+            f"{', '.join(unrecorded)} (sockets dir is root-owned and "
+            f"sudo needs a password); the deploy itself succeeded.",
+            file=sys.stderr,
+        )
 
     # Overwrite single-node local.sh with the cluster topology config.
     local_sh = generate_local_sh(cluster, os_family=os_family)

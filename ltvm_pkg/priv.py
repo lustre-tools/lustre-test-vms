@@ -12,12 +12,19 @@ password prompt.  ``atomic_write()`` writes a file atomically,
 falling back to a ``sudo install`` when the destination dir
 isn't user-writable (e.g. ``/etc/hosts`` or ``/opt/qemu-vms/``).
 
+Commands documented as never needing root (deploy-lustre, cluster
+deploy) pass ``noninteractive=True``: sudo is then used only with
+``-n`` -- a cached timestamp or NOPASSWD rule -- and a write that
+would need a password raises ``PermissionError`` for the caller to
+warn about instead of stalling an unattended run at a prompt.
+
 These helpers are deliberately dependency-free (stdlib only) so
 any module can import them without risking a circular import.
 """
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import subprocess
@@ -59,11 +66,29 @@ def sudo_run(
     *,
     check: bool = True,
     quiet: bool = False,
+    noninteractive: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a command under sudo (no-op prefix if already root)."""
+    """Run a command under sudo (no-op prefix if already root).
+
+    ``noninteractive`` adds ``-n``: use a credential that is already
+    there (cached timestamp, NOPASSWD) and fail rather than prompt.
+    """
     if os.geteuid() == 0:
         return _run(cmd, check=check, quiet=quiet)
+    if noninteractive:
+        return _run(["sudo", "-n", *cmd], check=check, quiet=quiet)
     return _run(["sudo", *cmd], check=check, quiet=quiet)
+
+
+def sudo_ready() -> bool:
+    """Can we sudo right now without being asked for a password?
+
+    True when already root, or when ``sudo -n true`` succeeds -- an
+    unexpired timestamp or a NOPASSWD rule.
+    """
+    if os.geteuid() == 0:
+        return True
+    return _run(["sudo", "-n", "true"], check=False, quiet=True).returncode == 0
 
 
 def sudo_prime(reason: str) -> None:
@@ -76,9 +101,7 @@ def sudo_prime(reason: str) -> None:
     fail in non-tty contexts (subshells, hooks, CI), aborting even
     though every later ``sudo`` would have worked.
     """
-    if os.geteuid() == 0:
-        return
-    if _run(["sudo", "-n", "true"], check=False, quiet=True).returncode == 0:
+    if sudo_ready():
         return
     log.info("%s -- prompting for sudo credentials now.", reason)
     _run(["sudo", "-v"])
@@ -167,9 +190,19 @@ def chown_to_invoking_user(path: Path) -> None:
         pass
 
 
-def atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
+def atomic_write(
+    path: Path,
+    text: str,
+    mode: int = 0o644,
+    *,
+    noninteractive: bool = False,
+) -> None:
     """Write *text* to *path* atomically, falling back to sudo when
     the destination dir isn't user-writable.
+
+    With ``noninteractive`` the fallback runs ``sudo -n`` only, and
+    raises ``PermissionError`` up front when that would need a
+    password -- for callers that must never block on a prompt.
 
     User-writable case: tempfile + rename in the same directory --
     a true atomic swap on the destination filesystem.
@@ -186,7 +219,13 @@ def atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
         try:
             parent.mkdir(parents=True, exist_ok=True)
         except PermissionError:
-            sudo_run(["mkdir", "-p", str(parent)], quiet=True)
+            if noninteractive and not sudo_ready():
+                raise
+            sudo_run(
+                ["mkdir", "-p", str(parent)],
+                quiet=True,
+                noninteractive=noninteractive,
+            )
 
     owns = _ltvm_owned(path)
     prev_owner: tuple[int, int] | None = None
@@ -224,6 +263,13 @@ def atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
             raise
         return
 
+    if noninteractive and not sudo_ready():
+        raise PermissionError(
+            errno.EACCES,
+            f"{parent} is not writable and sudo would need a password",
+            str(path),
+        )
+
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir="/tmp")
     dest_tmp = parent / f".{path.name}.{os.getpid()}.tmp"
     try:
@@ -250,10 +296,20 @@ def atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
                 str(dest_tmp),
             ],
             quiet=True,
+            noninteractive=noninteractive,
         )
-        sudo_run(["mv", "-f", str(dest_tmp), str(path)], quiet=True)
+        sudo_run(
+            ["mv", "-f", str(dest_tmp), str(path)],
+            quiet=True,
+            noninteractive=noninteractive,
+        )
     finally:
-        sudo_run(["rm", "-f", str(dest_tmp)], check=False, quiet=True)
+        sudo_run(
+            ["rm", "-f", str(dest_tmp)],
+            check=False,
+            quiet=True,
+            noninteractive=noninteractive,
+        )
         try:
             os.unlink(tmp)
         except OSError:

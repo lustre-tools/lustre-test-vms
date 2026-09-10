@@ -16,16 +16,24 @@ from pathlib import Path
 from typing import IO
 
 
-def _atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
+def _atomic_write(
+    path: Path,
+    text: str,
+    mode: int = 0o644,
+    *,
+    noninteractive: bool = False,
+) -> None:
     """Write ``text`` to ``path`` atomically.
 
     Delegates to ``priv.atomic_write`` so .info / subnet / etc.
     writes into the root-owned ``VM_DIR`` work transparently when
     ltvm runs as the invoking user (sudo-fallback inside the helper).
+    ``noninteractive`` restricts that fallback to ``sudo -n``; see
+    ``VMInfo.update_deploy``.
     """
     from .priv import atomic_write as _priv_atomic_write
 
-    _priv_atomic_write(path, text, mode=mode)
+    _priv_atomic_write(path, text, mode=mode, noninteractive=noninteractive)
 
 
 # ── constants ────────────────────────────────────────────
@@ -512,7 +520,7 @@ class VMInfo:
     def _lock_path(self) -> Path:
         return SOCKETS / f".{self.name}.info.lock"
 
-    def _open_lock_file(self) -> IO[str]:
+    def _open_lock_file(self, *, noninteractive: bool = False) -> IO[str]:
         """Open the per-VM lock file, creating it if needed.
 
         SOCKETS is root-owned and not user-writable, so a plain
@@ -526,14 +534,14 @@ class VMInfo:
         """
         path = self._lock_path
         if not path.exists():
-            _atomic_write(path, "", mode=0o666)
+            _atomic_write(path, "", mode=0o666, noninteractive=noninteractive)
         try:
             return open(path, "a")
         except PermissionError:
             return open(path)
 
     @contextmanager
-    def _info_lock(self) -> Iterator[None]:
+    def _info_lock(self, *, noninteractive: bool = False) -> Iterator[None]:
         """Per-VM exclusive lock for read-modify-write of the .info file.
 
         Two processes can call e.g. update_pid() and update_deploy() concurrently
@@ -545,14 +553,16 @@ class VMInfo:
             SOCKETS.mkdir(parents=True, exist_ok=True)
         except PermissionError:
             pass  # _atomic_write escalates to create it if it must
-        with self._open_lock_file() as fh:
+        with self._open_lock_file(noninteractive=noninteractive) as fh:
             fcntl.flock(fh, fcntl.LOCK_EX)
             try:
                 yield
             finally:
                 fcntl.flock(fh, fcntl.LOCK_UN)
 
-    def _update_fields(self, fields: dict) -> None:
+    def _update_fields(
+        self, fields: dict, *, noninteractive: bool = False
+    ) -> None:
         """Update multiple fields in the info file atomically (single write).
 
         Held under a per-VM flock so concurrent updaters can't lose writes.
@@ -560,8 +570,12 @@ class VMInfo:
         destroy or partially rolled-back create) -- the previous silent
         no-op left in-memory VMInfo state diverged from disk with no
         signal to the caller.
+
+        ``noninteractive``: the lock and the write may use ``sudo -n``
+        but never prompt; a write that would need a password raises
+        PermissionError instead.
         """
-        with self._info_lock():
+        with self._info_lock(noninteractive=noninteractive):
             if not self.info_path.exists():
                 raise VMNotFound(self.name)
             text = self.info_path.read_text()
@@ -577,7 +591,7 @@ class VMInfo:
                     )
                 else:
                     text = text.rstrip("\n") + f"\n{replacement}\n"
-            _atomic_write(self.info_path, text)
+            _atomic_write(self.info_path, text, noninteractive=noninteractive)
 
     def _update_field(self, key: str, value: str | int) -> None:
         """Update a single field in the info file (add if missing)."""
@@ -592,11 +606,22 @@ class VMInfo:
         self._update_field("LAST_BOOT", epoch)
 
     def update_deploy(self, epoch: int, build_path: str, kver: str) -> None:
+        """Record a deploy.  Never prompts for a password.
+
+        deploy-lustre and cluster deploy are unprivileged commands, and
+        this bookkeeping is the only reason they write into SOCKETS at
+        all.  SOCKETS is root-owned on a standard install, so the write
+        can only land through sudo: do that when sudo needs no password
+        (cached timestamp, NOPASSWD) and raise PermissionError
+        otherwise, for the caller to warn about and go on.  Prompting
+        here stalled every unattended deploy driven by an agent.
+        """
         self.last_deploy = epoch
         self.build_path = build_path
         self.kver = kver
         self._update_fields(
-            {"LAST_DEPLOY": epoch, "BUILD_PATH": build_path, "KVER": kver}
+            {"LAST_DEPLOY": epoch, "BUILD_PATH": build_path, "KVER": kver},
+            noninteractive=True,
         )
 
     @staticmethod

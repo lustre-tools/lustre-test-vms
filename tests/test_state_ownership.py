@@ -157,3 +157,271 @@ class TestAtomicWriteOwnership:
 
         install = next(c for c in calls if c[0] == "install")
         assert "-o" not in install
+
+
+# --------------------------------------------------------------------------
+# Unprivileged commands must never block on a sudo password prompt.
+# --------------------------------------------------------------------------
+
+
+class _Ok:
+    returncode = 0
+
+
+def _perform(cmd: list[str]) -> None:
+    """Carry out what an atomic_write sudo fallback asked for, without
+    privilege: the test dir is really writable, only os.access lies."""
+    import shutil
+
+    op = [str(c) for c in cmd]
+    if op[0] == "install":
+        shutil.copy(op[-2], op[-1])
+    elif op[0] == "mv":
+        os.replace(op[-2], op[-1])
+    elif op[0] == "rm":
+        for p in op[2:]:
+            Path(p).unlink(missing_ok=True)
+    elif op[0] == "mkdir":
+        Path(op[-1]).mkdir(parents=True, exist_ok=True)
+
+
+def _recording_sudo(calls: list[tuple[list[str], dict[str, Any]]]):
+    def fake_sudo(cmd, **kw):
+        calls.append(([str(c) for c in cmd], kw))
+        _perform(cmd)
+        return _Ok()
+
+    return fake_sudo
+
+
+class TestAtomicWriteNoninteractive:
+    def test_raises_permissionerror_when_sudo_needs_password(
+        self, tmp_path: Path
+    ) -> None:
+        """No credential cached: fail before touching sudo at all, so
+        the caller can warn -- never a prompt."""
+        dest = tmp_path / "root-owned" / "co1.info"
+        dest.parent.mkdir()
+        with (
+            patch.object(os, "access", return_value=False),
+            patch.object(priv, "sudo_ready", return_value=False),
+            patch.object(priv, "sudo_run") as sr,
+        ):
+            with pytest.raises(PermissionError):
+                priv.atomic_write(dest, "K=v\n", noninteractive=True)
+        sr.assert_not_called()
+        assert not dest.exists()
+
+    def test_uses_sudo_n_when_credentials_are_cached(
+        self, tmp_path: Path
+    ) -> None:
+        dest = tmp_path / "root-owned" / "co1.info"
+        dest.parent.mkdir()
+        calls: list[tuple[list[str], dict[str, Any]]] = []
+        with (
+            patch.object(os, "access", return_value=False),
+            patch.object(priv, "sudo_ready", return_value=True),
+            patch.object(priv, "sudo_run", side_effect=_recording_sudo(calls)),
+        ):
+            priv.atomic_write(dest, "K=v\n", noninteractive=True)
+        assert dest.read_text() == "K=v\n"
+        assert calls
+        assert all(kw.get("noninteractive") for _, kw in calls)
+
+    def test_default_stays_interactive(self, tmp_path: Path) -> None:
+        """create/start/stop prime sudo and may prompt; the default
+        fallback is unchanged and never consults sudo_ready."""
+        dest = tmp_path / "root-owned" / "co1.info"
+        dest.parent.mkdir()
+        calls: list[tuple[list[str], dict[str, Any]]] = []
+        with (
+            patch.object(os, "access", return_value=False),
+            patch.object(priv, "sudo_ready") as ready,
+            patch.object(priv, "sudo_run", side_effect=_recording_sudo(calls)),
+        ):
+            priv.atomic_write(dest, "K=v\n")
+        ready.assert_not_called()
+        assert calls
+        assert not any(kw.get("noninteractive") for _, kw in calls)
+
+    def test_sudo_run_noninteractive_adds_dash_n(self) -> None:
+        with (
+            patch.object(os, "geteuid", return_value=1000),
+            patch.object(priv, "_run") as run,
+        ):
+            priv.sudo_run(["true"], noninteractive=True)
+        run.assert_called_once_with(
+            ["sudo", "-n", "true"], check=True, quiet=False
+        )
+
+
+class TestDeployNeverPrompts:
+    """`ltvm deploy-lustre` and `cluster deploy` run unprivileged.  Their
+    only write into the root-owned sockets dir is the LAST_DEPLOY /
+    BUILD_PATH / KVER bookkeeping, and that must never turn into a
+    password prompt: an agent driving deploy+test unattended hangs on
+    it.  3c476c7 routed the lock file through atomic_write's sudo
+    fallback and did exactly that."""
+
+    def test_update_deploy_raises_instead_of_prompting(
+        self, sockets: Path
+    ) -> None:
+        vm = VMInfo(name="co1-dep", ip="10.0.0.9", os_id="rocky9")
+        vm.save()
+        with (
+            patch.object(os, "access", return_value=False),
+            patch.object(priv, "sudo_ready", return_value=False),
+            patch.object(priv, "sudo_run") as sr,
+        ):
+            with pytest.raises(PermissionError):
+                vm.update_deploy(1, "/src", "5.14")
+        sr.assert_not_called()
+        assert VMInfo.load("co1-dep").last_deploy == 0
+
+    def test_update_deploy_records_through_sudo_n(self, sockets: Path) -> None:
+        """A cached timestamp or NOPASSWD rule is used silently."""
+        vm = VMInfo(name="co1-dep", ip="10.0.0.9", os_id="rocky9")
+        vm.save()
+        calls: list[tuple[list[str], dict[str, Any]]] = []
+        with (
+            patch.object(os, "access", return_value=False),
+            patch.object(priv, "sudo_ready", return_value=True),
+            patch.object(priv, "sudo_run", side_effect=_recording_sudo(calls)),
+        ):
+            vm.update_deploy(7, "/src", "5.14-x")
+        loaded = VMInfo.load("co1-dep")
+        assert (loaded.last_deploy, loaded.build_path, loaded.kver) == (
+            7,
+            "/src",
+            "5.14-x",
+        )
+        assert calls
+        assert all(kw.get("noninteractive") for _, kw in calls)
+
+    def test_update_deploy_needs_no_sudo_in_writable_dir(
+        self, sockets: Path
+    ) -> None:
+        vm = VMInfo(name="co1-dep", ip="10.0.0.9", os_id="rocky9")
+        vm.save()
+        with (
+            patch.object(priv, "sudo_ready") as ready,
+            patch.object(priv, "sudo_run") as sr,
+        ):
+            vm.update_deploy(3, "/src", "5.14")
+        ready.assert_not_called()
+        sr.assert_not_called()
+        assert VMInfo.load("co1-dep").last_deploy == 3
+
+    def test_root_owned_lock_from_old_sudo_create(self, sockets: Path) -> None:
+        """The scenario 3c476c7 fixed: a 0644 root-owned lock left by
+        `sudo ltvm cluster create` in a root-owned sockets dir.  That
+        used to traceback on open(lock, "w").  Now the lock is taken
+        read-only and the .info write is what decides: PermissionError
+        for the caller to warn about when sudo would need a password,
+        or recorded through `sudo -n` when a credential is cached."""
+        vm = VMInfo(name="co1-old", ip="10.0.0.9", os_id="rocky9")
+        vm.save()
+        lock = sockets / ".co1-old.info.lock"
+        lock.write_text("")
+        lock.chmod(0o444)
+        real_open = open
+
+        def no_write_open(path, mode="r", *a, **kw):
+            if str(path) == str(lock) and ("a" in mode or "w" in mode):
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_open(path, mode, *a, **kw)
+
+        with (
+            patch("builtins.open", side_effect=no_write_open),
+            patch.object(os, "access", return_value=False),
+            patch.object(priv, "sudo_ready", return_value=False),
+            patch.object(priv, "sudo_run") as sr,
+        ):
+            with pytest.raises(PermissionError) as ei:
+                vm.update_deploy(1, "/src", "5.14")
+        sr.assert_not_called()
+        # It got past the lock; the .info write is what refused.
+        assert str(ei.value.filename).endswith("co1-old.info")
+
+        calls: list[tuple[list[str], dict[str, Any]]] = []
+        with (
+            patch("builtins.open", side_effect=no_write_open),
+            patch.object(os, "access", return_value=False),
+            patch.object(priv, "sudo_ready", return_value=True),
+            patch.object(priv, "sudo_run", side_effect=_recording_sudo(calls)),
+        ):
+            vm.update_deploy(9, "/src", "5.14")
+        assert VMInfo.load("co1-old").last_deploy == 9
+        assert calls
+        assert all(kw.get("noninteractive") for _, kw in calls)
+
+    def test_update_pid_keeps_interactive_fallback(self, sockets: Path) -> None:
+        """start/stop prime sudo up front; their writes may still go
+        through a plain `sudo`."""
+        vm = VMInfo(name="co1-pid", ip="10.0.0.9", os_id="rocky9")
+        vm.save()
+        calls: list[tuple[list[str], dict[str, Any]]] = []
+        with (
+            patch.object(os, "access", return_value=False),
+            patch.object(priv, "sudo_ready") as ready,
+            patch.object(priv, "sudo_run", side_effect=_recording_sudo(calls)),
+        ):
+            vm.update_pid(5)
+        ready.assert_not_called()
+        assert calls
+        assert not any(kw.get("noninteractive") for _, kw in calls)
+        assert VMInfo.load("co1-pid").pid == 5
+
+
+class TestClusterDeployNeverPrompts:
+    def test_permissionerror_on_bookkeeping_is_a_warning(
+        self, sockets: Path, tmp_path: Path, capsys: Any
+    ) -> None:
+        """The deploy itself succeeded on every node; an unrecordable
+        LAST_DEPLOY must not abort the command (or prompt)."""
+        import argparse
+
+        from ltvm_pkg import vm_cluster
+        from ltvm_pkg.vm_state import ClusterInfo
+
+        for n in ("co3-mds", "co3-oss1"):
+            VMInfo(name=n, ip="10.0.0.5", os_id="rocky9", arch="x86_64").save()
+        cluster = ClusterInfo(
+            name="co3",
+            nodes=[
+                {"name": "co3-mds", "roles": ["mgs", "mds"]},
+                {"name": "co3-oss1", "roles": ["oss"]},
+            ],
+        )
+        args = argparse.Namespace(
+            name="co3", lustre_source=str(tmp_path), mount=False
+        )
+
+        class _TC:
+            os_family = "rhel"
+
+        with (
+            patch.object(ClusterInfo, "load", return_value=cluster),
+            patch.object(vm_cluster, "_validate_lustre_source"),
+            patch("ltvm_pkg.target_config.TargetConfig", return_value=_TC()),
+            patch.object(vm_cluster.subprocess, "run", return_value=_Ok()),
+            patch.object(
+                vm_cluster,
+                "_deploy_one_node",
+                side_effect=lambda name, *a, **k: (name, 0, ""),
+            ),
+            patch.object(vm_cluster, "generate_local_sh", return_value=""),
+            patch.object(
+                vm_cluster,
+                "_write_cluster_local_sh",
+                side_effect=lambda name, *a, **k: (name, 0, ""),
+            ),
+            patch.object(
+                VMInfo, "update_deploy", side_effect=PermissionError("nope")
+            ),
+        ):
+            vm_cluster.cmd_cluster_deploy(args)
+
+        err = capsys.readouterr().err
+        assert "not recorded" in err
+        assert "co3-mds" in err and "co3-oss1" in err

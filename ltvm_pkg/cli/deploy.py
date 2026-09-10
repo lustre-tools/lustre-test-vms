@@ -468,14 +468,16 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     try:
         vm.update_deploy(int(_time.time()), str(build_path), kver)
     except PermissionError:
-        # Non-root deploy can't take the lock file in a root-owned
-        # sockets/ -- the actual module copy already happened, only
-        # the "last deployed at" timestamp fails to persist.
+        # sockets/ is root-owned and sudo would need a password.  The
+        # modules are already on the VM; only LAST_DEPLOY/BUILD_PATH/
+        # KVER in the .info go unrecorded.  deploy-lustre must never
+        # prompt -- an unattended deploy+test loop would hang on it.
         if not use_json:
             print(
-                "  Warning: couldn't update deploy timestamp "
-                "(missing write perm on sockets dir); "
-                "run `sudo ltvm doctor --fix` or rerun as root",
+                "  Warning: deploy metadata not recorded (sockets dir "
+                "is root-owned and sudo needs a password); the deploy "
+                "itself succeeded.  Run `sudo -v` first to have it "
+                "recorded.",
                 file=sys.stderr,
             )
     except VMNotFound:
