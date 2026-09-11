@@ -24,6 +24,19 @@ append `SUGGESTED-AGENTS.md` to their workspace CLAUDE.md:
 cat SUGGESTED-AGENTS.md >> ~/lustre-release/CLAUDE.md
 ```
 
+## Agent Skills
+
+`skills/ltvm/` is the skill that teaches an agent to use this
+tool: VM and cluster lifecycle, deploying a Lustre tree, the root rules,
+crash collection. `ltvm install` links it into `~/.claude/skills` (and
+`~/.codex/skills` when Codex is installed) for the invoking user -- under
+sudo that is `$SUDO_USER`, not root. `ltvm skills` does only the linking
+and `ltvm skills --uninstall` removes it.
+
+Links, not copies: `git pull` or `ltvm update` updates the skill with the
+ltvm it describes. It covers *using* ltvm; target configuration, artifact
+internals and release mechanics stay in this file.
+
 ## Repository Layout
 
 - `targets/` -- `targets.yaml` (source of truth), shared

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,8 @@ from ltvm_pkg.cli.util import (
     _error,
     _output,
 )
+
+log = logging.getLogger("ltvm.setup")
 
 
 def _require_root(*a: Any, **kw: Any) -> int | None:
@@ -140,6 +143,55 @@ def cmd_setup(args: argparse.Namespace) -> int:
     except Exception as e:
         return _error(f"Setup failed: {e}", use_json)
 
+    # Agent skills are a convenience, not part of the host setup: a
+    # failure here must not fail an install that otherwise worked.
+    if steps is None or "install" in active_steps(steps):
+        try:
+            _link_skills(use_json)
+        except Exception as e:  # noqa: BLE001
+            log.warning("skills not linked: %s", e)
+
+    return EXIT_OK
+
+
+def active_steps(steps: list[str] | None) -> list[str]:
+    """The steps a setup run covers; None means all of them."""
+    return steps if steps is not None else ["qemu", "network", "install", "ssh"]
+
+
+def _link_skills(use_json: bool) -> None:
+    from ltvm_pkg import skills
+
+    result = skills.install_skills(_ltvm_repo_root())
+    if use_json:
+        return
+    for line in skills.describe(result):
+        print(line)
+
+
+# ------------------------------------------------------------------
+# Subcommand: skills
+# ------------------------------------------------------------------
+
+
+def cmd_skills(args: argparse.Namespace) -> int:
+    """Link (or unlink) this checkout's agent skills."""
+    from ltvm_pkg import skills
+
+    use_json = args.json
+    try:
+        if getattr(args, "uninstall", False):
+            result = skills.uninstall_skills(_ltvm_repo_root())
+        else:
+            result = skills.install_skills(_ltvm_repo_root())
+    except Exception as e:  # noqa: BLE001
+        return _error(f"Skills: {e}", use_json)
+
+    if use_json:
+        _output(result, True)
+        return EXIT_OK
+    lines = skills.describe(result)
+    _output(lines or ["Nothing to do."], False)
     return EXIT_OK
 
 

@@ -118,6 +118,7 @@ from ltvm_pkg.cli.setup import (  # noqa: E402
     cmd_destroy,
     cmd_doctor,
     cmd_setup,
+    cmd_skills,
     cmd_update,
 )
 from ltvm_pkg.cli.targets import (  # noqa: E402
@@ -221,6 +222,7 @@ __all__ = [
     "cmd_publish",
     "cmd_restore",
     "cmd_setup",
+    "cmd_skills",
     "cmd_snapshot",
     "cmd_status",
     "cmd_target_export",

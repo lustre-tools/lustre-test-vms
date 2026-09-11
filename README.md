@@ -175,6 +175,22 @@ ltvm list --json                    # each VM has owner_id (or null for legacy)
 and `cluster create`. See [VM ownership metadata](docs/VM_OWNERSHIP.md) for the
 precedence, persistence, cluster propagation, and JSON contracts.
 
+## Agent skills
+
+`ltvm install` links this repo's agent skill (`skills/ltvm/`) into
+`~/.claude/skills`, and into `~/.codex/skills` when Codex is installed, so
+Claude Code and Codex know how to drive ltvm. Under `sudo` the links are
+made for the invoking user, not root.
+
+```bash
+ltvm skills              # link them (also done by `ltvm install`)
+ltvm skills --uninstall  # remove the links this checkout made
+```
+
+They are symlinks into the checkout, so `git pull` or `ltvm update` keeps
+them current. A skill directory of the same name that you wrote yourself
+is never replaced.
+
 ## More
 
 See [CLAUDE.md](CLAUDE.md) for the full developer reference, and

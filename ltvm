@@ -178,6 +178,7 @@ from ltvm_pkg.cli import (  # noqa: E402
     cmd_publish,
     cmd_restore,
     cmd_setup,
+    cmd_skills,
     cmd_snapshot,
     cmd_status,
     cmd_target_export,
@@ -420,6 +421,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Update even if the working tree has local changes",
     )
     sp.set_defaults(func=cmd_update)
+
+    # -- skills (agent skills for this checkout) --
+    sp = sub.add_parser(
+        "skills",
+        parents=[common],
+        help="Link this checkout's agent skills into ~/.claude/skills "
+        "(and ~/.codex/skills if Codex is installed)",
+    )
+    sp.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Remove the links this checkout installed",
+    )
+    sp.set_defaults(func=cmd_skills)
 
     # -- build (all | container | kernel | image | lustre | shell | status) --
     build_parser = sub.add_parser(
