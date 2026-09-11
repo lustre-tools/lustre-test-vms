@@ -1,9 +1,10 @@
 """ltvm usage telemetry -- an anonymous weekly check-in.
 
-Sends a random install ID and the ltvm version to
+Sends a random install ID, the ltvm version, a description of the
+host, and counts of which commands and targets were used to
 https://ltvm.mulberrytree.cc once a week, so the people maintaining
-ltvm can tell whether anyone is using it.  Opt-out, with a notice on
-first run.
+ltvm can tell whether anyone is using it and which parts they use.
+Opt-out, with a notice on first run.
 
 **Notice and send are gated separately**, which is the whole reason
 this is not modelled on update_check's single TTY gate:
@@ -20,11 +21,18 @@ opting out is one command.
 
 What is sent is a closed list, built in _payload() and printed
 verbatim by `ltvm telemetry show`.  Hostnames, usernames, paths, VM
-names, Lustre tree identity and IP addresses are not on it and must
-not be added -- the rule of thumb is that a week of the server's
-table should be safe to paste into a public ticket.  (The server
-records a *hash* of the source IP so distinct networks can be
+names, Lustre tree identity, git branches and IP addresses are not on
+it and must not be added -- the rule of thumb is that a week of the
+server's table should be safe to paste into a public ticket.  (The
+server records a *hash* of the source IP so distinct networks can be
 counted; the address itself is never stored.)
+
+Two specific things that stay off it.  Failure *reasons*: commands
+carry an ok/fail count and nothing more, because a reason is a string
+built at an error site and error sites are where paths live.  And
+names from outside the shipped target and variant lists, which are
+replaced with "other" -- a target someone added themselves identifies
+their site far better than an install ID does.
 
 Nothing here may ever fail a user's command.  Every entry point
 swallows its own exceptions, and the ltvm hook wraps the lot again.
@@ -53,7 +61,14 @@ log = logging.getLogger("ltvm.telemetry")
 ENDPOINT = os.environ.get(
     "LTVM_TELEMETRY_URL", "https://ltvm.mulberrytree.cc/v1/checkin"
 )
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+# Every counter key is drawn from a closed set already (our own command
+# function names, the shipped target list, a fixed option list), so this
+# is a backstop against a bug rather than against a user.
+MAX_COUNTER_KEYS = 64
+# Variants ship with the targets; anything else is somebody's local
+# experiment and its name is not ours to send.
+KNOWN_VARIANTS = frozenset({"base", "mofed"})
 SEND_INTERVAL = timedelta(days=7)
 # Long enough that a stalled network never delays the child past the
 # point of being noticed; short enough to cross an ocean.
@@ -68,15 +83,12 @@ _STATE_DIR = (
     / "ltvm"
 )
 _STATE_FILE = _STATE_DIR / "telemetry.json"
+_COUNTERS_FILE = _STATE_DIR / "counters.json"
 _SITE_CONFIG = Path(os.environ.get("LTVM_SITE_CONFIG", "/etc/ltvm.conf"))
 
 NOTICE = """\
-ltvm sends an anonymous weekly check-in -- a random install ID and the
-ltvm version -- so we can see how many people use it.  No hostnames,
-paths, or IP addresses are sent.
-
-  ltvm telemetry show     print exactly what would be sent
-  ltvm telemetry off      turn it off
+ltvm sends an anonymous weekly usage check-in.  It is on by default.
+  ltvm telemetry show   what it sends      ltvm telemetry off   stop it
 """
 
 
@@ -142,31 +154,40 @@ def _load_state() -> dict[str, Any]:
     return out
 
 
-def _save_state(state: dict[str, Any]) -> None:
-    """Persist send state atomically, and never raise.
+def _write_json_state(path: Path, data: dict[str, Any]) -> None:
+    """Write one state file atomically, and never raise.
 
-    Written by root invocations too (`sudo ltvm cluster create`), so it
-    carries the same chown as the other two state files against the
-    root-owned-file trap update_check._save_config documents.
+    Both state files are written by root invocations too (`sudo ltvm
+    cluster create`), so both carry the chown against the
+    root-owned-file trap update_check._save_config documents.  The
+    counters file gets written after *every* command, which is what
+    makes that trap a certainty here rather than a possibility.
+
+    tempfile + replace because two ltvm processes can be running at
+    once and a half-written file would read back as corrupt.
     """
     try:
         _STATE_DIR.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(_STATE_DIR), prefix=".telemetry.")
+        fd, tmp = tempfile.mkstemp(dir=str(_STATE_DIR), prefix=f".{path.name}.")
         try:
             with os.fdopen(fd, "w") as fh:
-                fh.write(json.dumps(state, indent=2) + "\n")
-            os.replace(tmp, _STATE_FILE)
+                fh.write(json.dumps(data, indent=2) + "\n")
+            os.replace(tmp, path)
         except BaseException:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
             raise
     except OSError as e:
-        log.debug("cannot write %s: %s", _STATE_FILE, e)
+        log.debug("cannot write %s: %s", path, e)
         return
     from .priv import chown_to_invoking_user
 
     chown_to_invoking_user(_STATE_DIR)
-    chown_to_invoking_user(_STATE_FILE)
+    chown_to_invoking_user(path)
+
+
+def _save_state(state: dict[str, Any]) -> None:
+    _write_json_state(_STATE_FILE, state)
 
 
 def _site_disabled() -> bool:
@@ -246,6 +267,257 @@ def _due_for_send(state: dict[str, Any], uid: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Host facts (sampled at send time)
+# ---------------------------------------------------------------------------
+
+
+def _bucket(value: int | None, edges: tuple[int, ...]) -> str | None:
+    """Put a count in a bucket rather than reporting it exactly.
+
+    With a population this small, an exact core count next to a country
+    and a version starts to identify a machine.  The questions these
+    answer -- "is 4 cores common enough to matter", "can the default VM
+    size go up" -- are bucket-shaped anyway.
+    """
+    if value is None or value < 0:
+        return None
+    lo = 0
+    for edge in edges:
+        if value < edge:
+            return f"{lo}-{edge - 1}" if lo else f"<{edge}"
+        lo = edge
+    return f"{lo}+"
+
+
+def _host_os() -> tuple[str | None, str | None]:
+    """(id, version) for the host OS."""
+    import platform
+
+    if platform.system() == "Darwin":
+        return "macos", (platform.mac_ver()[0] or None)
+    fields = {}
+    try:
+        for line in Path("/etc/os-release").read_text().splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                fields[k] = v.strip().strip('"')
+    except OSError:
+        return None, None
+    return fields.get("ID"), fields.get("VERSION_ID")
+
+
+def _ram_gb() -> int | None:
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) // (1024 * 1024)
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        return int(out.stdout.strip()) // (1024**3)
+    except (subprocess.SubprocessError, OSError, ValueError):
+        return None
+
+
+def _qemu_version() -> str | None:
+    import platform
+    import shutil
+
+    arch = "aarch64" if platform.machine() in ("aarch64", "arm64") else "x86_64"
+    binary = shutil.which(f"qemu-system-{arch}")
+    if not binary:
+        return None
+    try:
+        out = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True, timeout=5
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    # "QEMU emulator version 8.2.2 (...)" -- take the bare version.
+    for word in out.stdout.split():
+        if word[:1].isdigit():
+            return word[:MAX_STR_LEN]
+    return None
+
+
+def _container_runtime() -> str | None:
+    import shutil
+
+    for name in ("podman", "docker"):
+        if shutil.which(name):
+            return name
+    return None
+
+
+def _host_info() -> dict[str, Any]:
+    """What the machine is -- sampled now, not accumulated.
+
+    Answers the questions that decide what ltvm has to keep working:
+    whether anyone is on macOS or aarch64, how much of the population
+    is WSL (which changes networking, clocks and filesystem behaviour
+    enough to be a different product), and whether the Python floor
+    can move.
+    """
+    import platform
+
+    os_id, os_version = _host_os()
+    try:
+        from .host_setup import is_wsl2
+
+        wsl = bool(is_wsl2())
+    except Exception:  # noqa: BLE001
+        wsl = False
+    machine = platform.machine()
+    return {
+        "os": os_id,
+        "os_version": os_version,
+        "arch": "aarch64" if machine in ("aarch64", "arm64") else machine,
+        "wsl": wsl,
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "qemu": _qemu_version(),
+        "runtime": _container_runtime(),
+        "cpus": _bucket(os.cpu_count(), (4, 8, 16, 32, 64)),
+        "ram_gb": _bucket(_ram_gb(), (8, 16, 32, 64, 128)),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Counters (accumulated between sends)
+# ---------------------------------------------------------------------------
+
+MAX_STR_LEN = 64
+_TARGETS_CACHE: frozenset[str] | None = None
+
+
+def _known_targets() -> frozenset[str]:
+    """The targets this checkout ships, as an allowlist.
+
+    A target someone added themselves is named something we have no
+    business transmitting -- `acme-internal` identifies a site far
+    better than an install ID does.  Unknown names become "other".
+    """
+    global _TARGETS_CACHE
+    if _TARGETS_CACHE is None:
+        try:
+            root = Path(__file__).resolve().parent.parent / "targets"
+            _TARGETS_CACHE = frozenset(
+                d.name
+                for d in root.iterdir()
+                if d.is_dir() and d.name != "common"
+            )
+        except OSError:
+            _TARGETS_CACHE = frozenset()
+    return _TARGETS_CACHE
+
+
+def _empty_counters() -> dict[str, Any]:
+    return {
+        "since": _now_iso(),
+        "targets": {},
+        "commands": {},
+        "options": {},
+    }
+
+
+def _load_counters() -> dict[str, Any]:
+    out = _empty_counters()
+    try:
+        data = json.loads(_COUNTERS_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return out
+    if not isinstance(data, dict):
+        return out
+    for key in ("targets", "commands", "options"):
+        if isinstance(data.get(key), dict):
+            out[key] = data[key]
+    if isinstance(data.get("since"), str):
+        out["since"] = data["since"]
+    return out
+
+
+def _save_counters(counters: dict[str, Any]) -> None:
+    _write_json_state(_COUNTERS_FILE, counters)
+
+
+def _command_label(args: Any) -> str | None:
+    """A stable name for the command that just ran.
+
+    Taken from the handler's own function name rather than reassembled
+    from argparse dests: every subparser sets `func`, the names are
+    ours rather than the user's, and `cmd_build_lustre` already
+    distinguishes itself from `cmd_build_kernel` without us
+    maintaining a mapping.
+    """
+    fn = getattr(args, "func", None)
+    name = getattr(fn, "__name__", "")
+    if not isinstance(name, str) or not name.startswith("cmd_"):
+        return None
+    label = name[4:]
+    if not label:
+        return None
+    # Most handlers are named for their full command path already
+    # (cmd_build_lustre), but a few shared ones are not: `build status`
+    # is cmd_status, which on a dashboard reads as nothing in
+    # particular.  Prefix the group when the name does not carry it.
+    group = str(getattr(args, "command", "") or "").replace("-", "_")
+    if group and not label.startswith(group):
+        label = f"{group}.{label}"
+    return label[:MAX_STR_LEN]
+
+
+def _bump(table: dict[str, Any], key: str, amount: int = 1) -> None:
+    if key not in table and len(table) >= MAX_COUNTER_KEYS:
+        return
+    table[key] = int(table.get(key, 0)) + amount
+
+
+def record(args: Any, rc: int) -> None:
+    """Note one finished command.  Called once, from ltvm's main().
+
+    Counts are usage plus a bare ok/fail split.  The *reason* a command
+    failed is deliberately not collected: a reason is a string built at
+    an error site, which is where paths and tree names live.  A rate
+    tells us where to look; people can file bugs for the rest.
+
+    A single instrumentation point: all of this is already on `args`
+    and `rc` by the time the command returns, so nothing has to be
+    threaded through the rest of the codebase.
+    """
+    if not is_enabled():
+        return
+    counters = _load_counters()
+
+    label = _command_label(args)
+    if label:
+        commands = counters["commands"]
+        if label in commands or len(commands) < MAX_COUNTER_KEYS:
+            entry = commands.setdefault(label, {"ok": 0, "fail": 0})
+            if isinstance(entry, dict):
+                key = "ok" if rc == 0 else "fail"
+                entry[key] = int(entry.get(key, 0)) + 1
+
+    target = getattr(args, "target", None)
+    if isinstance(target, str) and target:
+        known = target if target in _known_targets() else "other"
+        _bump(counters["targets"], known)
+
+    if getattr(args, "zfs", False):
+        _bump(counters["options"], "zfs")
+    variant = getattr(args, "variant", None)
+    if isinstance(variant, str) and variant and variant != "base":
+        name = variant if variant in KNOWN_VARIANTS else "other"
+        _bump(counters["options"], f"variant:{name}")
+
+    _save_counters(counters)
+
+
+# ---------------------------------------------------------------------------
 # Payload
 # ---------------------------------------------------------------------------
 
@@ -258,11 +530,17 @@ def _payload() -> dict[str, Any]:
     """
     from . import __version__
 
+    counters = _load_counters()
     return {
         "schema": SCHEMA_VERSION,
         "install_id": install_id(),
         "sent_at": _now_iso(),
         "ltvm_version": __version__,
+        "host": _host_info(),
+        "since": counters["since"],
+        "targets": counters["targets"],
+        "commands": counters["commands"],
+        "options": counters["options"],
     }
 
 
@@ -297,6 +575,11 @@ def send_now() -> bool:
     ok = _post(_payload())
     state["last_send_iso"] = _now_iso()
     _save_state(state)
+    if ok:
+        # Only on success: a failed send keeps the counters, so the
+        # next one carries two weeks rather than losing one.  `since`
+        # says which, so the server is never guessing at the span.
+        _save_counters(_empty_counters())
     return ok
 
 
@@ -305,24 +588,25 @@ def send_now() -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _maybe_show_notice(cfg: dict[str, Any], state: dict[str, Any]) -> bool:
-    """Print the first-run notice.  True if this run printed it.
+def _maybe_show_notice(cfg: dict[str, Any]) -> None:
+    """Print the first-run notice, once.
 
     Printed regardless of whether anyone is watching: stderr survives
-    redirection into a log, and a machine that only ever runs ltvm
-    from CI has still been told.
+    redirection into a log, and a machine that only ever runs ltvm from
+    CI has still been told.
+
+    It does not gate the send.  This is opt-out: the first check-in
+    goes out on the first run, alongside the notice.  Holding it back
+    for a week would be the behaviour of an opt-in scheme, and would
+    lose every install that gets used for a few days and dropped --
+    which is exactly the population "how many people use this" is
+    asking about.
     """
     if cfg.get("notice_shown"):
-        return False
+        return
     print(NOTICE, file=sys.stderr)
     cfg["notice_shown"] = True
     _save_config(cfg)
-    # Start the clock now, so the first real check-in is a week out.
-    # That is the window in which `ltvm telemetry off` still means
-    # nothing was ever sent.
-    state["last_send_iso"] = _now_iso()
-    _save_state(state)
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -361,12 +645,17 @@ def maybe_send() -> None:
         return
     cfg = _load_config()
     state = _load_state()
-    if _maybe_show_notice(cfg, state):
-        # Told them this run; first send is a week from now.
-        return
+    _maybe_show_notice(cfg)
     uid = cfg.get("install_id") or install_id()
     if not _due_for_send(state, uid):
         return
+    # Mark the attempt here rather than leaving it to the child.  The
+    # child is what actually POSTs, and it records the attempt too --
+    # but it takes a moment to start, and until it does the clock has
+    # not moved.  A script running ltvm in a loop would spawn a sender
+    # per invocation in that window.
+    state["last_send_iso"] = _now_iso()
+    _save_state(state)
     _spawn_detached_send()
 
 

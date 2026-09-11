@@ -185,6 +185,22 @@ def test_payload_is_a_closed_list(_home: Path) -> None:
         "install_id",
         "sent_at",
         "ltvm_version",
+        "host",
+        "since",
+        "targets",
+        "commands",
+        "options",
+    }
+    assert set(t._payload()["host"]) == {
+        "os",
+        "os_version",
+        "arch",
+        "wsl",
+        "python",
+        "qemu",
+        "runtime",
+        "cpus",
+        "ram_gb",
     }
 
 
@@ -223,21 +239,20 @@ def test_stamp_moves_even_when_the_send_fails(_home: Path) -> None:
     assert t._load_state()["last_send_iso"] is not None
 
 
-def test_first_run_notices_but_does_not_send(
+def test_first_run_notices_and_sends(
     _home: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The notice is the consent point, so nothing leaves before it.
+    """Opt-out: the notice does not hold the first check-in back.
 
-    Seeding the clock here is what gives someone a week in which
-    `ltvm telemetry off` means nothing was ever sent.
+    Delaying it a week would be opt-in behaviour, and would lose every
+    install used for a few days and dropped.
     """
     import ltvm_pkg.telemetry as t
 
     with patch.object(t, "_spawn_detached_send") as mock_spawn:
         t.maybe_send()
-    mock_spawn.assert_not_called()
-    assert "anonymous weekly check-in" in capsys.readouterr().err
-    assert t._load_state()["last_send_iso"] is not None
+    mock_spawn.assert_called_once()
+    assert "on by default" in capsys.readouterr().err
 
 
 def test_notice_prints_once_only(
@@ -254,10 +269,14 @@ def test_notice_prints_once_only(
 
 
 def test_sends_once_due(_home: Path) -> None:
+    """And exactly once: the parent marks the attempt before spawning,
+    so a loop of ltvm invocations does not spawn a sender each time."""
     import ltvm_pkg.telemetry as t
 
     with patch.object(t, "_spawn_detached_send") as mock_spawn:
-        t.maybe_send()  # notice run
+        t.maybe_send()  # first run: notice + send
+        t.maybe_send()  # too soon, nothing
+        assert mock_spawn.call_count == 1
         t._save_state(
             {
                 "last_send_iso": (
@@ -266,7 +285,7 @@ def test_sends_once_due(_home: Path) -> None:
             }
         )
         t.maybe_send()
-    mock_spawn.assert_called_once()
+    assert mock_spawn.call_count == 2
 
 
 def test_disabled_never_spawns(_home: Path) -> None:
@@ -291,3 +310,163 @@ def test_never_raises_when_the_config_dir_is_unwritable(
     monkeypatch.setattr(Path, "mkdir", _boom)
     t._save_config({"enabled": True})
     t._save_state({"last_send_iso": None})
+
+
+# ---------------------------------------------------------------------------
+# Counters
+# ---------------------------------------------------------------------------
+
+
+class _Args:
+    """Stand-in for the argparse namespace main() hands to record()."""
+
+    def __init__(self, func_name: str = "cmd_list", **kw: object) -> None:
+        def handler() -> None:
+            pass
+
+        handler.__name__ = func_name
+        self.func = handler
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def test_command_label_comes_from_the_handler(_home: Path) -> None:
+    import ltvm_pkg.telemetry as t
+
+    # A handler already named for its command path is used as-is.
+    assert (
+        t._command_label(_Args("cmd_build_lustre", command="build"))
+        == "build_lustre"
+    )
+    # A shared handler gets its group prefixed, so `build status` does
+    # not land on the dashboard as a bare "status".
+    assert (
+        t._command_label(_Args("cmd_status", command="build")) == "build.status"
+    )
+    # Anything not one of our handlers is not counted at all.
+    assert t._command_label(_Args("something_else")) is None
+
+
+def test_record_counts_commands_and_targets(_home: Path) -> None:
+    import ltvm_pkg.telemetry as t
+
+    t.record(_Args("cmd_deploy_lustre", target="rocky9"), 0)
+    t.record(_Args("cmd_deploy_lustre", target="rocky9"), 1)
+    t.record(_Args("cmd_build_lustre", target="rocky10"), 0)
+    counters = t._load_counters()
+    assert counters["commands"] == {
+        "deploy_lustre": {"ok": 1, "fail": 1},
+        "build_lustre": {"ok": 1, "fail": 0},
+    }
+    assert counters["targets"] == {"rocky9": 2, "rocky10": 1}
+
+
+def test_unknown_target_name_is_not_transmitted(_home: Path) -> None:
+    """A target someone added themselves names their site, not ours."""
+    import ltvm_pkg.telemetry as t
+
+    t.record(_Args("cmd_build_lustre", target="acme-internal-fs"), 0)
+    counters = t._load_counters()
+    assert counters["targets"] == {"other": 1}
+    assert "acme" not in json.dumps(counters)
+
+
+def test_unknown_variant_is_not_transmitted(_home: Path) -> None:
+    import ltvm_pkg.telemetry as t
+
+    t.record(_Args("cmd_build_lustre", variant="customer-x"), 0)
+    counters = t._load_counters()
+    assert counters["options"] == {"variant:other": 1}
+    assert "customer" not in json.dumps(counters)
+
+
+def test_record_counts_options(_home: Path) -> None:
+    import ltvm_pkg.telemetry as t
+
+    t.record(_Args("cmd_build_lustre", zfs=True, variant="mofed"), 0)
+    counters = t._load_counters()
+    assert counters["options"] == {"zfs": 1, "variant:mofed": 1}
+
+
+def test_counter_keys_are_bounded(_home: Path) -> None:
+    import ltvm_pkg.telemetry as t
+
+    for i in range(t.MAX_COUNTER_KEYS + 20):
+        t._bump(t._load_counters()["targets"], f"k{i}")
+    table: dict[str, object] = {}
+    for i in range(t.MAX_COUNTER_KEYS + 20):
+        t._bump(table, f"k{i}")
+    assert len(table) == t.MAX_COUNTER_KEYS
+
+
+def test_failures_are_counted_but_not_explained(_home: Path) -> None:
+    """A rate says where to look.  A reason would carry a path."""
+    import ltvm_pkg.telemetry as t
+
+    t.record(_Args("cmd_deploy_lustre", target="rocky9"), 1)
+    blob = json.dumps(t._load_counters())
+    assert '"fail": 1' in blob
+    for leaky in ("Traceback", "/home/", "Error", "errno"):
+        assert leaky not in blob
+
+
+def test_record_is_a_noop_when_disabled(_home: Path) -> None:
+    import ltvm_pkg.telemetry as t
+
+    t.set_enabled(False)
+    t.record(_Args("cmd_list", target="rocky9"), 0)
+    assert t._load_counters()["commands"] == {}
+
+
+def test_counters_flush_only_on_a_successful_send(_home: Path) -> None:
+    """A failed send keeps the week rather than losing it."""
+    import ltvm_pkg.telemetry as t
+
+    t.record(_Args("cmd_deploy_lustre", target="rocky9"), 0)
+
+    with patch.object(t, "_post", return_value=False):
+        t.send_now()
+    assert t._load_counters()["commands"] == {
+        "deploy_lustre": {"ok": 1, "fail": 0}
+    }
+
+    with patch.object(t, "_post", return_value=True):
+        t.send_now()
+    assert t._load_counters()["commands"] == {}
+
+
+def test_payload_carries_the_counters(_home: Path) -> None:
+    import ltvm_pkg.telemetry as t
+
+    t.record(_Args("cmd_deploy_lustre", target="rocky9", zfs=True), 0)
+    payload = t._payload()
+    assert payload["commands"] == {"deploy_lustre": {"ok": 1, "fail": 0}}
+    assert payload["targets"] == {"rocky9": 1}
+    assert payload["options"] == {"zfs": 1}
+    assert payload["since"]
+
+
+# ---------------------------------------------------------------------------
+# Host facts
+# ---------------------------------------------------------------------------
+
+
+def test_buckets_never_report_an_exact_value(_home: Path) -> None:
+    import ltvm_pkg.telemetry as t
+
+    assert t._bucket(2, (4, 8, 16)) == "<4"
+    assert t._bucket(12, (4, 8, 16)) == "8-15"
+    assert t._bucket(64, (4, 8, 16)) == "16+"
+    assert t._bucket(None, (4, 8)) is None
+
+
+def test_host_info_leaks_nothing_identifying(_home: Path) -> None:
+    import getpass
+    import socket
+
+    import ltvm_pkg.telemetry as t
+
+    blob = json.dumps(t._host_info())
+    for secret in (socket.gethostname(), getpass.getuser(), str(Path.home())):
+        if secret:
+            assert secret not in blob

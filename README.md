@@ -195,10 +195,24 @@ is never replaced.
 ## Telemetry
 
 ltvm sends an anonymous check-in once a week so we can tell whether
-anyone is using it. It is a random install ID and the ltvm version --
-no hostnames, paths, VM or tree names, and no IP addresses. The server
-records a *hash* of the source address so distinct networks can be
-counted; the address itself is never stored.
+anyone is using it, and which parts. It carries:
+
+| | |
+|---|---|
+| a random install ID | minted once, not derived from anything about the host |
+| the ltvm version | so we know when an old code path can go |
+| host facts | OS + version, arch, WSL or not, Python, QEMU, podman/docker, and CPU and RAM as *buckets* rather than exact numbers |
+| usage counts | which commands ran, against which targets, with which options, and how many of each succeeded or failed |
+
+No hostnames, usernames, paths, VM or cluster names, Lustre tree
+identity, git branches, environment variables, command lines, or IP
+addresses. No error messages and no failure *reasons* -- only counts,
+because a reason is a string built where the paths live. Target and
+variant names outside the shipped set arrive as `other`, so a target
+you added yourself does not name your site.
+
+The server records a *hash* of the source address so distinct networks
+can be counted; the address itself is never stored.
 
 ```bash
 ltvm telemetry show      # the exact payload a check-in would send

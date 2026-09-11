@@ -1763,15 +1763,16 @@ def main() -> int:
 
     result: int = args.func(args)
 
-    # Anonymous weekly check-in.  Skipped for `install` (the install is
-    # still in flight) and for `telemetry` itself (the detached sender
+    # Note what ran, then send if a week is up.  Skipped for `install`
+    # (still in flight) and for `telemetry` itself (the detached sender
     # runs `ltvm telemetry send`, which would otherwise spawn another).
     # Runs after the command so it can never delay it, and swallows
     # everything: telemetry must not be able to fail a build.
     if args.command not in ("install", "telemetry"):
         try:
-            from ltvm_pkg.telemetry import maybe_send
+            from ltvm_pkg.telemetry import maybe_send, record
 
+            record(args, result)
             maybe_send()
         except Exception as e:  # noqa: BLE001
             logging.getLogger("ltvm.telemetry").debug(

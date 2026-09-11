@@ -113,7 +113,9 @@ not something that failed -- do not try to fix it, and do not run
 once per install.
 
 If they ask what is collected, `ltvm telemetry show` prints the literal
-payload: a random install ID, the ltvm version, and a timestamp.
+payload: a random install ID, the ltvm version, a description of the
+host (OS, arch, WSL, bucketed CPU/RAM), and counts of which commands
+and targets were used. No paths, names or error text.
 
 ## Root
 
