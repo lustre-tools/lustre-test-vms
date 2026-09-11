@@ -22,11 +22,9 @@ def _home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("LTVM_SITE_CONFIG", str(tmp_path / "absent.conf"))
     monkeypatch.delenv("LTVM_TELEMETRY", raising=False)
-    import importlib
-
-    import ltvm_pkg.telemetry as t
-
-    importlib.reload(t)
+    # No module reload needed: telemetry resolves its paths per call, so
+    # the env above is enough.  A reload would also quietly undo any
+    # patching conftest has done.
     return tmp_path
 
 
@@ -61,7 +59,7 @@ def test_user_opt_out(_home: Path) -> None:
 def test_site_config_disables(_home: Path) -> None:
     import ltvm_pkg.telemetry as t
 
-    t._SITE_CONFIG.write_text("[telemetry]\nenabled = false\n")
+    t._site_config().write_text("[telemetry]\nenabled = false\n")
     assert t.is_enabled() is False
 
 
@@ -69,7 +67,7 @@ def test_site_opt_out_beats_the_user(_home: Path) -> None:
     """A site opt-out a user could silently undo would not be one."""
     import ltvm_pkg.telemetry as t
 
-    t._SITE_CONFIG.write_text("[telemetry]\nenabled = false\n")
+    t._site_config().write_text("[telemetry]\nenabled = false\n")
     t.set_enabled(True)
     assert t.is_enabled() is False
     assert "site-wide" in (t.status()["disabled_by"] or "")
@@ -79,7 +77,7 @@ def test_unreadable_site_config_is_ignored(_home: Path) -> None:
     """A broken /etc/ltvm.conf must not be a broken ltvm."""
     import ltvm_pkg.telemetry as t
 
-    t._SITE_CONFIG.write_text("this is not ini [[[\n")
+    t._site_config().write_text("this is not ini [[[\n")
     assert t.is_enabled() is True
 
 
@@ -109,10 +107,10 @@ def test_config_write_preserves_update_check(_home: Path) -> None:
     """
     import ltvm_pkg.telemetry as t
 
-    t._CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    t._CONFIG_FILE.write_text(json.dumps({"update_check": {"mode": "never"}}))
+    t._config_dir().mkdir(parents=True, exist_ok=True)
+    t._config_file().write_text(json.dumps({"update_check": {"mode": "never"}}))
     t.install_id()
-    data = json.loads(t._CONFIG_FILE.read_text())
+    data = json.loads(t._config_file().read_text())
     assert data["update_check"]["mode"] == "never"
     assert data["telemetry"]["install_id"]
 
@@ -252,7 +250,7 @@ def test_first_run_notices_and_sends(
     with patch.object(t, "_spawn_detached_send") as mock_spawn:
         t.maybe_send()
     mock_spawn.assert_called_once()
-    assert "on by default" in capsys.readouterr().err
+    assert "anonymous usage telemetry" in capsys.readouterr().err
 
 
 def test_notice_prints_once_only(
@@ -470,3 +468,24 @@ def test_host_info_leaks_nothing_identifying(_home: Path) -> None:
     for secret in (socket.gethostname(), getpass.getuser(), str(Path.home())):
         if secret:
             assert secret not in blob
+
+
+def test_legacy_counter_shape_is_repaired(_home: Path) -> None:
+    """A counters file from another ltvm version must not wedge a key.
+
+    An earlier build counted commands as a bare integer.  Declining to
+    touch an entry of the wrong shape meant that command never being
+    counted again -- silently, and for as long as the file lived.
+    """
+    import ltvm_pkg.telemetry as t
+
+    t._save_counters(
+        {
+            "since": t._now_iso(),
+            "targets": {},
+            "commands": {"list": 86},
+            "options": {},
+        }
+    )
+    t.record(_Args("cmd_list"), 0)
+    assert t._load_counters()["commands"]["list"] == {"ok": 1, "fail": 0}

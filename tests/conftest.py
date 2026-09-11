@@ -84,6 +84,44 @@ def _make_image_outputs(tc, kernel: str | None = None, variant=None) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_user_state(
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> object:
+    """Keep the suite out of the developer's real config and state.
+
+    ltvm's main() records telemetry counters and runs the update check,
+    and the CLI tests drive main() directly -- so without this they
+    accumulate into ~/.local/state/ltvm.  That is not merely untidy:
+    those counters get *sent*, so a test run arrives at the server as
+    somebody's usage.  It happened, and the giveaway was `build_lustre`
+    failing 21 times on a machine where nobody had run it.
+
+    LTVM_TELEMETRY rather than patching record(): it disables telemetry
+    through its own front door, so the tests exercise the real disabled
+    path, and it works regardless of the module-level paths having been
+    resolved at import time by an earlier test.
+
+    The update check has no such switch and would otherwise `git
+    ls-remote` once per test, so it is patched out.  Both have their
+    own tests, which set up their own isolation.
+    """
+    root = tmp_path_factory.mktemp("xdg")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(root / "config"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(root / "state"))
+    monkeypatch.setenv("LTVM_TELEMETRY", "0")
+    monkeypatch.setenv("LTVM_SITE_CONFIG", str(root / "no-such-ltvm.conf"))
+    # The update check has no kill switch and would otherwise `git
+    # ls-remote` once per test, so it is patched out.  Telemetry needs
+    # no patch: the env above disables it through its own front door,
+    # so the tests exercise the real disabled path.
+    with patch(
+        "ltvm_pkg.update_check.maybe_check_for_updates", return_value=None
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_podman_preflight() -> object:
     """Suppress the macOS podman-machine preflight for unit tests.
 

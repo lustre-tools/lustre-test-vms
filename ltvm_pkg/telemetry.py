@@ -74,20 +74,43 @@ SEND_INTERVAL = timedelta(days=7)
 # point of being noticed; short enough to cross an ocean.
 SEND_TIMEOUT = 5
 
-_CONFIG_DIR = (
-    Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "ltvm"
-)
-_CONFIG_FILE = _CONFIG_DIR / "config.json"
-_STATE_DIR = (
-    Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
-    / "ltvm"
-)
-_STATE_FILE = _STATE_DIR / "telemetry.json"
-_COUNTERS_FILE = _STATE_DIR / "counters.json"
-_SITE_CONFIG = Path(os.environ.get("LTVM_SITE_CONFIG", "/etc/ltvm.conf"))
+# Resolved per call rather than at import.  As module constants these
+# were fixed by whatever the environment happened to be when the module
+# was first imported, which made them untestable without reloading the
+# module -- and a reload silently undoes any patching a test has done.
+# That is not a theoretical tidiness point: it let the test suite write
+# and very nearly send the developer's real counters as usage data.
+
+
+def _config_dir() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
+    return Path(base) / "ltvm"
+
+
+def _config_file() -> Path:
+    return _config_dir() / "config.json"
+
+
+def _state_dir() -> Path:
+    base = os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
+    return Path(base) / "ltvm"
+
+
+def _state_file() -> Path:
+    return _state_dir() / "telemetry.json"
+
+
+def _counters_file() -> Path:
+    return _state_dir() / "counters.json"
+
+
+def _site_config() -> Path:
+    return Path(os.environ.get("LTVM_SITE_CONFIG") or "/etc/ltvm.conf")
+
 
 NOTICE = """\
-ltvm sends an anonymous weekly usage check-in.  It is on by default.
+ltvm sends anonymous usage telemetry once per week, so developers can
+know what usage is and where to focus improvements.
   ltvm telemetry show   what it sends      ltvm telemetry off   stop it
 """
 
@@ -109,7 +132,7 @@ def _load_config() -> dict[str, Any]:
         "notice_shown": False,
     }
     try:
-        data = json.loads(_CONFIG_FILE.read_text())
+        data = json.loads(_config_file().read_text())
     except (OSError, json.JSONDecodeError):
         return out
     block = data.get("telemetry") if isinstance(data, dict) else None
@@ -127,26 +150,26 @@ def _save_config(block: dict[str, Any]) -> None:
     """
     data: dict[str, Any] = {}
     with contextlib.suppress(OSError, json.JSONDecodeError):
-        loaded = json.loads(_CONFIG_FILE.read_text())
+        loaded = json.loads(_config_file().read_text())
         if isinstance(loaded, dict):
             data = loaded
     data["telemetry"] = block
     try:
-        _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        _CONFIG_FILE.write_text(json.dumps(data, indent=2) + "\n")
+        _config_dir().mkdir(parents=True, exist_ok=True)
+        _config_file().write_text(json.dumps(data, indent=2) + "\n")
     except OSError as e:
-        log.debug("cannot write %s: %s", _CONFIG_FILE, e)
+        log.debug("cannot write %s: %s", _config_file(), e)
         return
     from .priv import chown_to_invoking_user
 
-    chown_to_invoking_user(_CONFIG_DIR)
-    chown_to_invoking_user(_CONFIG_FILE)
+    chown_to_invoking_user(_config_dir())
+    chown_to_invoking_user(_config_file())
 
 
 def _load_state() -> dict[str, Any]:
     out: dict[str, Any] = {"last_send_iso": None}
     try:
-        data = json.loads(_STATE_FILE.read_text())
+        data = json.loads(_state_file().read_text())
     except (OSError, json.JSONDecodeError):
         return out
     if isinstance(data, dict):
@@ -167,8 +190,10 @@ def _write_json_state(path: Path, data: dict[str, Any]) -> None:
     once and a half-written file would read back as corrupt.
     """
     try:
-        _STATE_DIR.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(_STATE_DIR), prefix=f".{path.name}.")
+        _state_dir().mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(
+            dir=str(_state_dir()), prefix=f".{path.name}."
+        )
         try:
             with os.fdopen(fd, "w") as fh:
                 fh.write(json.dumps(data, indent=2) + "\n")
@@ -182,12 +207,12 @@ def _write_json_state(path: Path, data: dict[str, Any]) -> None:
         return
     from .priv import chown_to_invoking_user
 
-    chown_to_invoking_user(_STATE_DIR)
+    chown_to_invoking_user(_state_dir())
     chown_to_invoking_user(path)
 
 
 def _save_state(state: dict[str, Any]) -> None:
-    _write_json_state(_STATE_FILE, state)
+    _write_json_state(_state_file(), state)
 
 
 def _site_disabled() -> bool:
@@ -197,14 +222,15 @@ def _site_disabled() -> bool:
     opt a shared lab out in one place, and an opt-out a user could
     silently undo would not be one.
     """
-    if not _SITE_CONFIG.is_file():
+    site = _site_config()
+    if not site.is_file():
         return False
     parser = configparser.ConfigParser()
     try:
-        parser.read(_SITE_CONFIG)
+        parser.read(site)
         return not parser.getboolean("telemetry", "enabled", fallback=True)
     except (configparser.Error, ValueError, OSError) as e:
-        log.debug("ignoring unreadable %s: %s", _SITE_CONFIG, e)
+        log.debug("ignoring unreadable %s: %s", site, e)
         return False
 
 
@@ -428,7 +454,7 @@ def _empty_counters() -> dict[str, Any]:
 def _load_counters() -> dict[str, Any]:
     out = _empty_counters()
     try:
-        data = json.loads(_COUNTERS_FILE.read_text())
+        data = json.loads(_counters_file().read_text())
     except (OSError, json.JSONDecodeError):
         return out
     if not isinstance(data, dict):
@@ -442,7 +468,7 @@ def _load_counters() -> dict[str, Any]:
 
 
 def _save_counters(counters: dict[str, Any]) -> None:
-    _write_json_state(_COUNTERS_FILE, counters)
+    _write_json_state(_counters_file(), counters)
 
 
 def _command_label(args: Any) -> str | None:
@@ -497,10 +523,16 @@ def record(args: Any, rc: int) -> None:
     if label:
         commands = counters["commands"]
         if label in commands or len(commands) < MAX_COUNTER_KEYS:
-            entry = commands.setdefault(label, {"ok": 0, "fail": 0})
-            if isinstance(entry, dict):
-                key = "ok" if rc == 0 else "fail"
-                entry[key] = int(entry.get(key, 0)) + 1
+            entry = commands.get(label)
+            if not isinstance(entry, dict):
+                # Repair rather than skip.  A counters file written by
+                # another ltvm version can hold a different shape here,
+                # and silently declining to count it would mean this
+                # command never being counted again.
+                entry = {"ok": 0, "fail": 0}
+                commands[label] = entry
+            key = "ok" if rc == 0 else "fail"
+            entry[key] = int(entry.get(key, 0)) + 1
 
     target = getattr(args, "target", None)
     if isinstance(target, str) and target:
@@ -667,9 +699,9 @@ def status() -> dict[str, Any]:
     if os.environ.get("LTVM_TELEMETRY", "").strip() in ("0", "no", "false"):
         reason = "LTVM_TELEMETRY in the environment"
     elif _site_disabled():
-        reason = f"{_SITE_CONFIG} (site-wide)"
+        reason = f"{_site_config()} (site-wide)"
     elif not cfg.get("enabled", True):
-        reason = str(_CONFIG_FILE)
+        reason = str(_config_file())
     return {
         "enabled": is_enabled(),
         "disabled_by": reason,
