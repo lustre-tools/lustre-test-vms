@@ -192,6 +192,38 @@ They are symlinks into the checkout, so `git pull` or `ltvm update` keeps
 them current. A skill directory of the same name that you wrote yourself
 is never replaced.
 
+## Telemetry
+
+ltvm sends an anonymous check-in once a week so we can tell whether
+anyone is using it. It is a random install ID and the ltvm version --
+no hostnames, paths, VM or tree names, and no IP addresses. The server
+records a *hash* of the source address so distinct networks can be
+counted; the address itself is never stored.
+
+```bash
+ltvm telemetry show      # the exact payload a check-in would send
+ltvm telemetry status    # on/off, install ID, when it last sent
+ltvm telemetry off       # opt out
+```
+
+`ltvm telemetry show` prints the literal JSON, so what leaves your
+machine is something you can check rather than something we assert.
+
+Three ways to turn it off, in precedence order:
+
+| | scope |
+|---|---|
+| `LTVM_TELEMETRY=0` in the environment | one command or one CI job |
+| `/etc/ltvm.conf` with `[telemetry]` / `enabled = false` | every user on the host |
+| `ltvm telemetry off` | you |
+
+The site-wide file can only ever disable, and a user cannot override
+it -- an opt-out someone could silently undo would not be one.
+
+Nothing is sent on the first run: ltvm prints the notice, starts the
+clock, and the first check-in is a week later. That week is the window
+in which opting out means nothing was ever sent.
+
 ## More
 
 See [CLAUDE.md](CLAUDE.md) for the full developer reference. Agents get

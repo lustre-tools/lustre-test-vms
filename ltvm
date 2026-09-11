@@ -185,6 +185,7 @@ from ltvm_pkg.cli import (  # noqa: E402
     cmd_target_export,
     cmd_target_show,
     cmd_targets,
+    cmd_telemetry,
     cmd_update,
     cmd_validate,
     cmd_vm_start,
@@ -456,6 +457,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Remove the links this checkout installed",
     )
     sp.set_defaults(func=cmd_skills)
+
+    # -- telemetry (anonymous weekly check-in) --
+    tel = sub.add_parser(
+        "telemetry",
+        parents=[common],
+        help="Show or change the anonymous weekly usage check-in",
+    )
+    tel_sub = tel.add_subparsers(dest="telemetry_action")
+    tel_sub.add_parser(
+        "status",
+        parents=[common],
+        help="Whether it is on, and when it last sent",
+    )
+    tel_sub.add_parser(
+        "show",
+        parents=[common],
+        help="Print the exact payload a check-in would send",
+    )
+    tel_sub.add_parser("on", parents=[common], help="Enable telemetry")
+    tel_sub.add_parser("off", parents=[common], help="Disable telemetry")
+    tsp = tel_sub.add_parser(
+        "send", parents=[common], help="Send a check-in now"
+    )
+    tsp.add_argument("--quiet", action="store_true", help=argparse.SUPPRESS)
+    tel.set_defaults(func=cmd_telemetry)
 
     # -- build (all | container | kernel | image | lustre | shell | status) --
     build_parser = sub.add_parser(
@@ -1736,6 +1762,22 @@ def main() -> int:
             )
 
     result: int = args.func(args)
+
+    # Anonymous weekly check-in.  Skipped for `install` (the install is
+    # still in flight) and for `telemetry` itself (the detached sender
+    # runs `ltvm telemetry send`, which would otherwise spawn another).
+    # Runs after the command so it can never delay it, and swallows
+    # everything: telemetry must not be able to fail a build.
+    if args.command not in ("install", "telemetry"):
+        try:
+            from ltvm_pkg.telemetry import maybe_send
+
+            maybe_send()
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger("ltvm.telemetry").debug(
+                "telemetry skipped: %s", e
+            )
+
     return result
 
 

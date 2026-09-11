@@ -104,6 +104,17 @@ The notice repeats at most once a day while an update is pending, so
 seeing it once in a session is the expected behaviour -- not a signal
 that a previous update attempt failed.
 
+## Telemetry notice
+
+On its first run ltvm prints a short notice to stderr saying it sends
+an anonymous weekly check-in. That is expected output, not an error and
+not something that failed -- do not try to fix it, and do not run
+`ltvm telemetry off` on the user's behalf unless they ask. It prints
+once per install.
+
+If they ask what is collected, `ltvm telemetry show` prints the literal
+payload: a random install ID, the ltvm version, and a timestamp.
+
 ## Root
 
 - `update`, `cluster create` and `cluster destroy` require root.
