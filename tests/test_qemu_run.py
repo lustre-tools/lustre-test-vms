@@ -165,6 +165,20 @@ class _LaunchHarness:
         self.qemu_args: list[str] | None = None
         self.run_calls: list[list[str]] = []
 
+    @property
+    def qemu_argv(self) -> list[str] | None:
+        """The QEMU command with any sudo prefix removed.
+
+        launch_qemu elevates the launch when it is not already root --
+        QEMU writes its pidfile and QMP socket into a root-owned
+        directory -- so the captured argv starts with sudo for an
+        unprivileged run.
+        """
+        if self.qemu_args is None:
+            return None
+        args = self.qemu_args
+        return args[1:] if args and args[0] == "sudo" else args
+
     def run(self, cmd, **kwargs):
         """Stand-in for qemu_run.run used by launch_qemu."""
         if isinstance(cmd, list):
@@ -220,7 +234,7 @@ class TestLaunchQemuCommand:
         _run_launch(vm, h)
         args = h.qemu_args
         assert args is not None
-        assert args[0].endswith("qemu-system-x86_64")
+        assert h.qemu_argv[0].endswith("qemu-system-x86_64")
         assert "-machine" in args
         machine = args[args.index("-machine") + 1]
         assert machine.startswith("q35")
@@ -238,7 +252,7 @@ class TestLaunchQemuCommand:
         _run_launch(vm, h)
         args = h.qemu_args
         assert args is not None
-        assert args[0].endswith("qemu-system-aarch64")
+        assert h.qemu_argv[0].endswith("qemu-system-aarch64")
         machine = args[args.index("-machine") + 1]
         assert machine.startswith("virt")
         joined = " ".join(args)
@@ -1010,3 +1024,31 @@ class TestIsRunningPidIdentity:
     def test_non_qemu_pid_reuse_still_rejected(self) -> None:
         with self._patch_proc("bash\n", b"bash\x00-c\x00sleep\x00"):
             assert qemu_run.is_running(self._vm("co1-single")) is False
+
+
+class TestLaunchElevation:
+    """QEMU is launched as root; ltvm itself need not be.
+
+    It writes its pidfile and QMP socket into /opt/qemu-vms/sockets,
+    which is root-owned 0755 and which `doctor` asserts that mode on, so
+    the launch elevates rather than the whole command.
+    """
+
+    def test_unprivileged_launch_goes_through_sudo(
+        self, tmp_vmdir: Path
+    ) -> None:
+        vm = _make_vm(tmp_vmdir)
+        h = _LaunchHarness()
+        with patch("ltvm_pkg.qemu_run.os.geteuid", return_value=1000):
+            _run_launch(vm, h)
+        assert h.qemu_args is not None
+        assert h.qemu_args[0] == "sudo"
+        assert h.qemu_argv[0].endswith("qemu-system-x86_64")
+
+    def test_root_launches_qemu_directly(self, tmp_vmdir: Path) -> None:
+        vm = _make_vm(tmp_vmdir)
+        h = _LaunchHarness()
+        with patch("ltvm_pkg.qemu_run.os.geteuid", return_value=0):
+            _run_launch(vm, h)
+        assert h.qemu_args is not None
+        assert h.qemu_args[0] != "sudo"

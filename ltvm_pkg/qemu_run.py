@@ -225,6 +225,35 @@ def _cmdline_names_vm(argv: list[str], name: str, *, strict: bool) -> bool:
     return not strict
 
 
+def _as_root(cmd: list[str]) -> list[str]:
+    """Prefix sudo unless we already are root."""
+    if os.geteuid() == 0:
+        return cmd
+    return ["sudo", *cmd]
+
+
+def _prepare_log(vm: Any) -> None:
+    """Make the QEMU log writable by whoever is running ltvm.
+
+    SOCKETS is root-owned 0755 on purpose -- `doctor` asserts that mode
+    -- so an unprivileged process cannot create a file in it, though it
+    can write one it already owns.  Create the log as root once and hand
+    it over, the same bargain the .info files get.  Without this,
+    `ltvm create` and `ltvm start` fail for a non-root user with a
+    PermissionError naming the log, which reads like a bug in the
+    logging rather than a privilege boundary.
+    """
+    if os.access(vm.log_path, os.W_OK):
+        return
+    sudo_run(["touch", str(vm.log_path)], quiet=True)
+    owner = invoking_user()
+    if owner:
+        sudo_run(
+            ["chown", f"{owner[0]}:{owner[1]}", str(vm.log_path)], quiet=True
+        )
+    sudo_run(["chmod", "644", str(vm.log_path)], quiet=True)
+
+
 def launch_qemu(vm: VMInfo) -> None:
     """Launch QEMU for an existing VM. Recreates TAP device."""
     if is_running(vm):
@@ -549,8 +578,13 @@ def launch_qemu(vm: VMInfo) -> None:
         ]
 
     try:
+        _prepare_log(vm)
         with open(vm.log_path, "a") as log:
-            r = subprocess.run(qemu_args, stdout=log, stderr=log)
+            # QEMU runs as root: it creates its pidfile and QMP socket in
+            # the root-owned SOCKETS dir, and attaches the TAP.  The log
+            # is opened here, unprivileged, and inherited as fd 1/2 --
+            # sudo preserves those.
+            r = subprocess.run(_as_root(qemu_args), stdout=log, stderr=log)
         if r.returncode != 0:
             die(
                 f"QEMU failed to start for '{vm.name}' "
@@ -568,6 +602,18 @@ def launch_qemu(vm: VMInfo) -> None:
                 f"QEMU pidfile not written within 2s: {vm.pid_path}; "
                 f"QEMU likely failed to start"
             )
+        # QEMU wrote its pidfile as root, 0600, in a directory the
+        # invoking user cannot write.  Hand it over before reading it,
+        # the same bargain the QMP socket gets below -- a pid is not a
+        # secret, and without this an unprivileged ltvm cannot read the
+        # pid of the VM it just started.
+        owner = invoking_user()
+        if owner is not None:
+            sudo_run(
+                ["chown", f"{owner[0]}:{owner[1]}", str(vm.pid_path)],
+                check=False,
+                quiet=True,
+            )
         pid = int(vm.pid_path.read_text().strip())
         # QMP socket is created by QEMU (running as root) as 0600.  The
         # invoking human should be able to send NMI and other QMP
@@ -576,7 +622,6 @@ def launch_qemu(vm: VMInfo) -> None:
         # both of which spawn a shell as the QEMU process owner (root
         # for a VM created under sudo), so a world-writable socket in
         # the 0755 SOCKETS dir is local code execution as that owner.
-        owner = invoking_user()
         try:
             if owner is not None:
                 sudo_run(

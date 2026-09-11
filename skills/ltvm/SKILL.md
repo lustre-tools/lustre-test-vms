@@ -24,7 +24,7 @@ ltvm build status               # what is stale
 ```
 
 `ltvm target fetch` is the fast path, and a fetched image already has
-Lustre baked in -- `sudo ltvm create` then `ltvm llmount` gives a mounted
+Lustre baked in -- `ltvm create` then `ltvm llmount` gives a mounted
 filesystem with no build at all. Build locally only when a target has no
 release, or when the kernel or image genuinely needs to change:
 `ltvm build all rocky9 --lustre-tree <tree>` rebuilds only what is stale,
@@ -39,7 +39,7 @@ booting the wrong modules. A Lustre build lands in the tree's
 ## A single VM, from nothing to a mounted filesystem
 
 ```bash
-sudo ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
+ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
 ltvm deploy-lustre co1-single --lustre-tree <tree> --mount
 ssh co1-single 'lctl dl'
 ```
@@ -119,13 +119,12 @@ and targets were used. No paths, names or error text.
 
 ## Root
 
-- **Needs root:** `create`, `start`, `update`, `cluster create`,
-  `cluster destroy`. Launching QEMU writes its log into the root-owned
-  `/opt/qemu-vms/sockets/`, so an unprivileged `create` or `start` dies
-  with `PermissionError` on `<vm>.log` rather than anything about
-  privileges.
-- **Does not:** `stop`, `destroy` (running or stopped), `doctor` -- the
-  VM state files belong to the invoking user.
+- **Needs root:** `update`, `cluster create`, `cluster destroy`.
+- **Does not:** the single-VM lifecycle -- `create`, `start`, `stop`,
+  `destroy`, `doctor`. They run as the invoking user and elevate only
+  the operations that need it, prompting once for sudo. QEMU is launched
+  under sudo because it writes into a root-owned directory; the files it
+  leaves behind are handed back to the user.
 - **Nor does anything else** -- `list`, `build *`, `target *`,
   `deploy-lustre`, `llmount`, `vm *`, `cluster deploy/exec/status/ssh`.
 

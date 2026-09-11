@@ -315,9 +315,9 @@ ltvm destroy co1-single
 
 **Owner/session metadata:** New VMs persist an advisory opaque `owner_id`.
 Agent controllers should export `LTVM_OWNER_ID=<durable-session-id>` before
-running normal create commands -- and since `create` needs sudo, use
-`sudo -E`, or sudo drops the variable and the VM silently gets the
-`pid:` fallback instead. `--owner ID` / `--owner-id ID` override the
+running normal create commands.  (If you do run create under sudo
+anyway, use `sudo -E`: plain sudo drops the variable and the VM silently
+takes the `pid:` fallback.) `--owner ID` / `--owner-id ID` override the
 environment; otherwise LTVM uses `pid:<invoking-ltvm-pid>`. Cluster create
 resolves once and applies the same owner to every member. Discover it through
 `ltvm list --json`; legacy VMs report `owner_id: null`. See
@@ -325,19 +325,22 @@ resolves once and applies the same owner to every member. Discover it through
 
 **Naming:** always include the checkout number: `co<N>-<role>`.
 
-**Root:** `create` and `start` need root, because launching QEMU opens
-its log under `/opt/qemu-vms/sockets/`, which is root-owned 0755 (and
-`doctor` asserts that mode).  Unprivileged, they die with
-`PermissionError: .../<vm>.log`.  `update`, `cluster create` and
-`cluster destroy` need root too.
+**Root:** only `update`, `cluster create` and `cluster destroy` need the
+whole command under root.
 
-`stop`, `destroy` (running or stopped) and `doctor` do not: the `.info`
-state files are chowned back to the invoking user, so anything that only
-reads or rewrites VM state works unprivileged.  Nor do `build *`,
-`target *`, `deploy-lustre`, `llmount`, `list`, `vm *`, or the remaining
-`cluster` actions.
+Single-VM lifecycle -- `create`, `start`, `stop`, `destroy`, `doctor` --
+runs as the invoking user and elevates the individual operations that
+need it.  QEMU itself is launched under sudo, because it writes its
+pidfile and QMP socket into the root-owned `/opt/qemu-vms/sockets`
+(0755, and `doctor` asserts that mode); the log is created there as root
+once and handed to the user, and the pidfile and QMP socket are handed
+over after launch.  Everything the user then touches is theirs: `.info`
+and `.log` 0644, `.pid` and `.qmp` 0600.
 
-Verified 2026-09-11 by running each one both ways.
+`build *`, `target *`, `deploy-lustre`, `llmount`, `list`, `vm *` and
+the remaining `cluster` actions need nothing.
+
+Verified 2026-09-11 by running the whole lifecycle as a non-root user.
 
 ### Running ltvm inside a VM it built
 
@@ -546,11 +549,11 @@ Watch for:
 
 - **Subprocess command building.** Never interpolate into
   shell strings (`bash -c f"...{x}"`).  Use argument lists.
-- **Root-required operations.** `create` and `start` currently need the
-  whole command under sudo -- the QEMU launch writes its log into a
-  root-owned directory.  Elevating just that write would let them run
-  unprivileged like `stop` and `destroy` do; until then, do not document
-  them as unprivileged.  Cluster create/destroy still require root. Read/observe (console-log,
+- **Root-required operations.** Single-VM lifecycle commands elevate the
+  individual host operations that need it -- the QEMU launch itself, and
+  the handover of the files QEMU creates as root -- so do not require
+  users to invoke the whole command through sudo.  Cluster
+  create/destroy still require root. Read/observe (console-log,
   deploy-lustre, llmount, crash-collect, cluster
   deploy/exec/status, list) don't.  Build commands don't.
 - **`--force-compat`** silences compat *refusals* but not
