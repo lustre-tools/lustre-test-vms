@@ -65,6 +65,20 @@ host kernel is not the VM kernel; `ltvm build lustre <target>
 --lustre-tree <tree>` builds inside the target's build container, which is
 what `deploy-lustre` invokes.
 
+ltvm's build path detects two staleness traps that a host build still
+walks into, and both look like something else:
+
+- `modpost: "ldiskfs_<sym>" [osd_ldiskfs.ko] undefined!` is stale ldiskfs
+  staging. The tree's `sources` stamp depends on the series file but not
+  on the individual patches under `ldiskfs/kernel_patches/`, so an edited
+  patch never restages the generated `ldiskfs/*.c`. Fix it with
+  `rm -f <tree>/ldiskfs/sources` and rebuild -- it is not a
+  kernel/target mismatch, so do not bump the target or re-fetch
+  artifacts over it.
+- `configure: error: newly created file is older than distributed
+  files!` is the host clock stepping backwards mid-build. Retry; any
+  residual `make: Clock skew detected` warnings are harmless.
+
 VMs are disposable. Destroying and recreating takes about 15-20 seconds
 and is usually faster than unpicking a broken mount -- use
 `ltvm llmount <vm> --cleanup` only when the logs or crash dumps on that VM
