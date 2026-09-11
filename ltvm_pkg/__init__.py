@@ -20,7 +20,7 @@ import re
 import subprocess
 from pathlib import Path
 
-BASE_VERSION = "0.20"
+BASE_VERSION = "0.5"
 
 
 def _git_short_hash() -> str | None:
