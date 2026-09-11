@@ -1,0 +1,51 @@
+#!/bin/bash
+# Bump the patch version in pyproject.toml when the staged commit touches
+# ltvm itself.  Docs-, test- and hook-only commits do not move it.
+#
+# Called by .githooks/pre-commit once the lint checks pass, so a commit
+# that fails lint is not left with a bumped version staged.  Runs on its
+# own too, which is what the tests do.
+
+set -euo pipefail
+
+root=$(git rev-parse --show-toplevel) || exit 0
+pyproject="$root/pyproject.toml"
+[[ -f "$pyproject" ]] || exit 0
+
+# A version edited by hand wins: never bump on top of a deliberate minor
+# or major bump that is part of this very commit.
+if git diff --cached -- "$pyproject" | grep -q '^[+-]version = '; then
+	exit 0
+fi
+
+# Only ltvm itself carries a version.  A commit that touches docs, tests
+# or the hooks leaves it alone.
+if ! git diff --cached --name-only |
+	grep -qE '^(ltvm$|ltvm_pkg/|targets/)'; then
+	exit 0
+fi
+
+current=$(sed -n 's/^version = "\(.*\)"/\1/p' "$pyproject" | head -1)
+IFS='.' read -r major minor patch <<< "$current"
+if ! [[ "$patch" =~ ^[0-9]+$ ]]; then
+	echo "bump-version: cannot read a patch number from '$current'" >&2
+	exit 1
+fi
+
+# BASE_VERSION is what `ltvm --version` reports, with the commit hash
+# appended.  Bumping pyproject while that drifts would leave two
+# versions disagreeing and nobody noticing.
+base=$(sed -n 's/^BASE_VERSION = "\(.*\)"/\1/p' \
+	"$root/ltvm_pkg/__init__.py" | head -1)
+if [[ -n "$base" && "$base" != "$major.$minor" ]]; then
+	echo "bump-version: BASE_VERSION ($base) and pyproject" \
+		"($major.$minor) disagree -- fix one of them" >&2
+	exit 1
+fi
+
+new="$major.$minor.$((patch + 1))"
+sed "0,/^version = \"$current\"/s//version = \"$new\"/" \
+	"$pyproject" > "$pyproject.tmp"
+mv "$pyproject.tmp" "$pyproject"
+git add "$pyproject"
+printf '\033[1;34m[version-bump]\033[0m %s -> %s\n' "$current" "$new" >&2

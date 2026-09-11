@@ -1,4 +1,4 @@
-.PHONY: lint fix format typecheck test test-fast test-e2e test-sh coverage check install uninstall
+.PHONY: lint fix format typecheck test test-fast test-e2e test-sh coverage check hooks install uninstall
 
 # Lint only (report errors, don't fix)
 lint:
@@ -48,6 +48,12 @@ coverage:
 
 # CI-friendly check (non-zero exit on any issue)
 check: lint typecheck test test-sh
+
+# Point git at the tracked hooks: ruff/mypy + patch-version bump on
+# commit, build-hash bake afterwards.  Per clone, once.
+hooks:
+	git config core.hooksPath .githooks
+	@echo "git hooks: .githooks (pre-commit, post-commit)"
 
 # Install ltvm and host dependencies (QEMU, bridge, SSH, scripts)
 install:

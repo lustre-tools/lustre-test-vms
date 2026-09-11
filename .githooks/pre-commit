@@ -18,4 +18,6 @@ uv run ruff format --check .
 echo "pre-commit: mypy..."
 uv run mypy ltvm
 
+"$(dirname "$0")/bump-version"
+
 echo "pre-commit: all checks passed"

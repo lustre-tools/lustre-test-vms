@@ -24,6 +24,26 @@ append `SUGGESTED-AGENTS.md` to their workspace CLAUDE.md:
 cat SUGGESTED-AGENTS.md >> ~/lustre-release/CLAUDE.md
 ```
 
+## Versioning and git hooks
+
+`pyproject.toml` carries the full version; `BASE_VERSION` in
+`ltvm_pkg/__init__.py` carries its major.minor, and `ltvm --version`
+reports that plus the short commit hash.
+
+The tracked hooks in `.githooks/` keep both honest, and are enabled per
+clone:
+
+```bash
+make hooks        # git config core.hooksPath .githooks
+```
+
+`pre-commit` runs ruff and mypy, then `.githooks/bump-version` bumps the
+patch version when the staged commit touches `ltvm`, `ltvm_pkg/` or
+`targets/` -- docs-, test- and hook-only commits do not move it, and a
+version edited by hand in the same commit is left alone. It refuses the
+commit when `BASE_VERSION` and `pyproject.toml` disagree. `post-commit`
+bakes the new hash into `ltvm_pkg/_build_info.py`.
+
 ## Agent Skills
 
 `skills/ltvm/` is the skill that teaches an agent to use this
