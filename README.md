@@ -185,6 +185,7 @@ made for the invoking user, not root.
 ```bash
 ltvm skills              # link them (also done by `ltvm install`)
 ltvm skills --uninstall  # remove the links this checkout made
+ltvm doctor              # reports missing links; `--fix` makes them
 ```
 
 They are symlinks into the checkout, so `git pull` or `ltvm update` keeps

@@ -2095,6 +2095,58 @@ def _doctor_unlink(*paths: Path) -> tuple[bool, str]:
     return True, ""
 
 
+def _check_skill_links(
+    fix: bool,
+    repo_root: Path | None = None,
+    home: Path | None = None,
+) -> tuple[list[str], list[str], int]:
+    """Report the agent-skill links, and with *fix* make the missing ones.
+
+    `ltvm install` links them, so the hosts that need this check are the
+    ones installed before the skills existed, or from a different
+    checkout.  Returns (issue lines, repair notes, unfixable count).
+    """
+    from ltvm_pkg import skills
+
+    root = repo_root or skills.default_repo_root()
+    status = skills.link_status(root, home=home)
+    issues: list[str] = []
+    notes: list[str] = []
+    failures = 0
+
+    for where, names in sorted(status["blocked"].items()):
+        issues.append(
+            f"skills shadowed by a real directory: {' '.join(names)} in {where}"
+        )
+        if fix:
+            # Whoever wrote that directory meant to; replacing it is
+            # not a repair.
+            notes.append("  NOT fixed: move it aside, then run `ltvm skills`")
+            failures += 1
+
+    if not status["missing"]:
+        return issues, notes, failures
+
+    for where, names in sorted(status["missing"].items()):
+        issues.append(f"skills not linked: {' '.join(names)} -> {where}")
+    if not fix:
+        return issues, notes, failures
+
+    try:
+        skills.install_skills(root, home=home)
+    except OSError as e:
+        notes.append(f"  FAILED to link: {e}")
+        return issues, notes, failures + len(status["missing"])
+
+    still = skills.link_status(root, home=home)["missing"]
+    for where, names in sorted(still.items()):
+        notes.append(f"  FAILED to link: {' '.join(names)} -> {where}")
+    failures += len(still)
+    if not still:
+        notes.append("  fixed: linked")
+    return issues, notes, failures
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     issues = 0
     # Counts repairs that were attempted and did not work, so --fix
@@ -2319,6 +2371,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for line in _check_export_tools():
         print(line)
         issues += 1
+
+    skill_issues, skill_notes, skill_failures = _check_skill_links(args.fix)
+    for line in skill_issues:
+        print(line)
+        issues += 1
+    for line in skill_notes:
+        print(line)
+    fix_failures += skill_failures
 
     # Disk-usage probe.  Always prints the info line so the user has a
     # capacity reference; counts as an issue only when free space is

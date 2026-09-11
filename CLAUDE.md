@@ -52,7 +52,11 @@ tool: VM and cluster lifecycle, deploying a Lustre tree, the root rules,
 crash collection. `ltvm install` links it into `~/.claude/skills` (and
 `~/.codex/skills` when Codex is installed) for the invoking user -- under
 sudo that is `$SUDO_USER`, not root. `ltvm skills` does only the linking
-and `ltvm skills --uninstall` removes it.
+and `ltvm skills --uninstall` removes it. `ltvm doctor` reports links
+that are missing and makes them with `--fix`, which is what catches a
+host installed before the skills existed. A skill directory that is not
+a symlink is someone else's: doctor names it and `--fix` leaves it
+alone.
 
 Links, not copies: `git pull` or `ltvm update` updates the skill with the
 ltvm it describes. It covers *using* ltvm; target configuration, artifact

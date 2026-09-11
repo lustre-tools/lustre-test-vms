@@ -62,6 +62,10 @@ def doctor_env(tmp_vmdir: Path, tmp_path: Path) -> Iterator[dict]:
         ),
         patch("ltvm_pkg.vm_commands.run", return_value=ip_out) as mock_run,
         patch("ltvm_pkg.vm_commands._check_export_tools", return_value=[]),
+        patch(
+            "ltvm_pkg.vm_commands._check_skill_links",
+            return_value=([], [], 0),
+        ),
         patch("ltvm_pkg.vm_commands.is_running", return_value=False),
     ):
         # cmd_doctor reads vm_commands.HOSTS_FILE (re-exported from
@@ -498,3 +502,71 @@ class TestDoctorDiskUsage:
             warnings, info = _check_artifacts_disk_usage()
         assert info is not None and "free" in info
         assert warnings and "low free disk" in warnings[0]
+
+
+# ── agent skills ──────────────────────────────────────────
+
+
+class TestDoctorSkillLinks:
+    """`ltvm install` links the skills; doctor says when they are not.
+
+    The check is stubbed out in `doctor_env` so the rest of the suite
+    does not depend on whether the developer running it has ever run
+    `ltvm skills`, so it is exercised directly here.
+    """
+
+    @pytest.fixture
+    def checkout(self, tmp_path: Path) -> Path:
+        skill = tmp_path / "repo" / "skills" / "ltvm"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: ltvm\n---\n")
+        return tmp_path / "repo"
+
+    def test_unlinked_skills_are_reported(
+        self, checkout: Path, tmp_path: Path
+    ) -> None:
+        home = tmp_path / "home"
+        issues, notes, failures = vm_commands._check_skill_links(
+            False, repo_root=checkout, home=home
+        )
+        assert any("skills not linked" in i for i in issues)
+        assert failures == 0
+        assert not notes
+
+    def test_fix_links_them(self, checkout: Path, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        issues, notes, failures = vm_commands._check_skill_links(
+            True, repo_root=checkout, home=home
+        )
+        assert issues  # it was an issue before it was fixed
+        assert "  fixed: linked" in notes
+        assert failures == 0
+        assert (home / ".claude" / "skills" / "ltvm").is_symlink()
+
+    def test_linked_skills_are_not_an_issue(
+        self, checkout: Path, tmp_path: Path
+    ) -> None:
+        home = tmp_path / "home"
+        vm_commands._check_skill_links(True, repo_root=checkout, home=home)
+        issues, notes, failures = vm_commands._check_skill_links(
+            False, repo_root=checkout, home=home
+        )
+        assert issues == []
+        assert notes == []
+        assert failures == 0
+
+    def test_a_hand_written_skill_is_reported_but_never_replaced(
+        self, checkout: Path, tmp_path: Path
+    ) -> None:
+        home = tmp_path / "home"
+        mine = home / ".claude" / "skills" / "ltvm"
+        mine.mkdir(parents=True)
+        (mine / "SKILL.md").write_text("mine\n")
+
+        issues, notes, failures = vm_commands._check_skill_links(
+            True, repo_root=checkout, home=home
+        )
+
+        assert any("shadowed by a real directory" in i for i in issues)
+        assert failures == 1  # --fix must not claim to have fixed it
+        assert (mine / "SKILL.md").read_text() == "mine\n"

@@ -24,6 +24,15 @@ from ltvm_pkg.priv import invoking_user
 log = logging.getLogger("ltvm.skills")
 
 
+def default_repo_root() -> Path:
+    """The checkout this module was imported from.
+
+    An installed ltvm is a symlink into a checkout, and ``resolve()``
+    follows it, so this lands in the real tree either way.
+    """
+    return Path(__file__).resolve().parent.parent
+
+
 def repo_skills(repo_root: Path) -> Path:
     """Where this checkout keeps its skills."""
     return Path(repo_root) / "skills"
@@ -170,6 +179,45 @@ def uninstall_skills(repo_root: Path, home: Path | None = None) -> dict:
         if removed:
             result["removed"][str(dest_dir)] = removed
     return result
+
+
+def link_status(repo_root: Path, home: Path | None = None) -> dict:
+    """Which skills are linked, missing, or blocked, per destination.
+
+    ``blocked`` is a destination that exists and is not a symlink --
+    someone's own skill of the same name, which installing never
+    replaces.  A symlink pointing at some other checkout counts as
+    missing, because installing would repoint it.
+    """
+    if home is None:
+        target = _target_user()
+        home = target[0] if target is not None else Path.home()
+
+    source = repo_skills(repo_root)
+    status: dict = {"linked": {}, "missing": {}, "blocked": {}}
+    if not source.is_dir():
+        return status
+    names = sorted(
+        p.name for p in source.iterdir() if (p / "SKILL.md").is_file()
+    )
+    if not names:
+        return status
+
+    for dest_dir in skill_destinations(home):
+        for name in names:
+            dest = dest_dir / name
+            if dest.is_symlink():
+                key = (
+                    "linked"
+                    if Path(os.readlink(dest)) == source / name
+                    else "missing"
+                )
+            elif dest.exists():
+                key = "blocked"
+            else:
+                key = "missing"
+            status[key].setdefault(str(dest_dir), []).append(name)
+    return status
 
 
 def describe(result: dict) -> list[str]:
