@@ -201,7 +201,7 @@ anyone is using it, and which parts. It carries:
 |---|---|
 | a random install ID | minted once, not derived from anything about the host |
 | the ltvm version | so we know when an old code path can go |
-| host facts | OS + version, arch, WSL or not, Python, QEMU, podman/docker, and CPU and RAM as *buckets* rather than exact numbers |
+| host facts | OS + version, arch, WSL or not, Python, QEMU, and RAM as a *bucket* rather than an exact number |
 | usage counts | which commands ran, against which targets, with which options, and how many of each succeeded or failed |
 
 No hostnames, usernames, paths, VM or cluster names, Lustre tree

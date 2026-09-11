@@ -196,8 +196,6 @@ def test_payload_is_a_closed_list(_home: Path) -> None:
         "wsl",
         "python",
         "qemu",
-        "runtime",
-        "cpus",
         "ram_gb",
     }
 

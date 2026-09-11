@@ -300,10 +300,9 @@ def _due_for_send(state: dict[str, Any], uid: str) -> bool:
 def _bucket(value: int | None, edges: tuple[int, ...]) -> str | None:
     """Put a count in a bucket rather than reporting it exactly.
 
-    With a population this small, an exact core count next to a country
-    and a version starts to identify a machine.  The questions these
-    answer -- "is 4 cores common enough to matter", "can the default VM
-    size go up" -- are bucket-shaped anyway.
+    With a population this small, an exact number next to a country and
+    a version starts to identify a machine, and "can the default VM
+    size go up" is a bucket-shaped question anyway.
     """
     if value is None or value < 0:
         return None
@@ -372,15 +371,6 @@ def _qemu_version() -> str | None:
     return None
 
 
-def _container_runtime() -> str | None:
-    import shutil
-
-    for name in ("podman", "docker"):
-        if shutil.which(name):
-            return name
-    return None
-
-
 def _host_info() -> dict[str, Any]:
     """What the machine is -- sampled now, not accumulated.
 
@@ -389,6 +379,11 @@ def _host_info() -> dict[str, Any]:
     is WSL (which changes networking, clocks and filesystem behaviour
     enough to be a different product), and whether the Python floor
     can move.
+
+    Deliberately absent: the container runtime, because ltvm only ever
+    drives podman, so the answer is known before asking; and the CPU
+    count, which nothing was going to be decided on.  RAM stays --
+    default VM sizing is a real question.
     """
     import platform
 
@@ -407,8 +402,6 @@ def _host_info() -> dict[str, Any]:
         "wsl": wsl,
         "python": f"{sys.version_info.major}.{sys.version_info.minor}",
         "qemu": _qemu_version(),
-        "runtime": _container_runtime(),
-        "cpus": _bucket(os.cpu_count(), (4, 8, 16, 32, 64)),
         "ram_gb": _bucket(_ram_gb(), (8, 16, 32, 64, 128)),
     }
 
