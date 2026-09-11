@@ -24,7 +24,7 @@ ltvm build status               # what is stale
 ```
 
 `ltvm target fetch` is the fast path, and a fetched image already has
-Lustre baked in -- `ltvm create` then `ltvm llmount` gives a mounted
+Lustre baked in -- `sudo ltvm create` then `ltvm llmount` gives a mounted
 filesystem with no build at all. Build locally only when a target has no
 release, or when the kernel or image genuinely needs to change:
 `ltvm build all rocky9 --lustre-tree <tree>` rebuilds only what is stale,
@@ -119,13 +119,15 @@ and targets were used. No paths, names or error text.
 
 ## Root
 
-- `update`, `cluster create` and `cluster destroy` require root.
-- `create`, `destroy`, `start`, `stop` and `doctor` run as the invoking
-  user; they prompt once and elevate only the host operations that need
-  it. Running them under `sudo` anyway pushes SUDO_USER handling onto a
-  fallback path.
-- Everything else -- `list`, `build *`, `target *`, `deploy-lustre`,
-  `llmount`, `vm *`, `cluster deploy/exec/status/ssh` -- is unprivileged.
+- **Needs root:** `create`, `start`, `update`, `cluster create`,
+  `cluster destroy`. Launching QEMU writes its log into the root-owned
+  `/opt/qemu-vms/sockets/`, so an unprivileged `create` or `start` dies
+  with `PermissionError` on `<vm>.log` rather than anything about
+  privileges.
+- **Does not:** `stop`, `destroy` (running or stopped), `doctor` -- the
+  VM state files belong to the invoking user.
+- **Nor does anything else** -- `list`, `build *`, `target *`,
+  `deploy-lustre`, `llmount`, `vm *`, `cluster deploy/exec/status/ssh`.
 
 ## Talking to a VM
 
