@@ -37,16 +37,41 @@ done
 # perturb the build-container input hash -- every existing container,
 # kernel and image artifact stays valid, and a ZFS build (cached per
 # kernel + version) pays this ~20s once.  The rest of what ZFS needs
-# (gcc, autoconf, libtool, openssl-devel, zlib-devel, elfutils) is
-# already in packages-dev.txt.
+# (gcc, autoconf, libtool, openssl, zlib, elfutils) is already in
+# packages-dev.txt.
 echo "==> Installing ZFS build dependencies"
-dnf -y install \
-    libtirpc-devel \
-    libblkid-devel \
-    libuuid-devel \
-    libattr-devel \
-    systemd-devel \
-    2>&1 | tail -3
+if command -v dnf >/dev/null 2>&1; then
+    dnf -y install \
+        libtirpc-devel \
+        libblkid-devel \
+        libuuid-devel \
+        libattr-devel \
+        systemd-devel \
+        2>&1 | tail -3
+    # rpm knows where this distro puts libraries (lib64 on x86_64 EL,
+    # lib elsewhere); ZFS has to agree with it or the VM's ldconfig
+    # will not find libzfs.
+    LIBDIR=$(rpm --eval '%{_libdir}')
+elif command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq 2>&1 | tail -1
+    apt-get install -y --no-install-recommends \
+        libtirpc-dev \
+        libblkid-dev \
+        uuid-dev \
+        libattr1-dev \
+        libudev-dev \
+        libssl-dev \
+        zlib1g-dev \
+        libelf-dev \
+        2>&1 | tail -3
+    # Debian is multiarch: libraries live under the GNU triplet, and
+    # anything installed to a bare /usr/lib64 is invisible to ldconfig.
+    LIBDIR=/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)
+else
+    echo "error: no dnf or apt-get in this container" >&2
+    exit 2
+fi
 
 cd /zfs-src
 
@@ -57,11 +82,6 @@ cd /zfs-src
 # --enable-pyzfs=no: pyzfs is the libzfs_core Python binding.  Lustre
 # does not use it, and skipping it keeps python3-devel/setuptools out
 # of both the container and the VM.
-#
-# libdir from rpm's %_libdir so this lands in lib64 on the arches that
-# use it and lib on the ones that don't, matching where the VM's
-# ldconfig will look for libzfs.
-LIBDIR=$(rpm --eval '%{_libdir}')
 echo "==> Configuring ZFS (kernel $KVER, libdir $LIBDIR)"
 ./configure \
     --prefix=/usr \

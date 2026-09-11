@@ -56,11 +56,11 @@ _RELEASE_URL = (
     "zfs-{ver}/zfs-{ver}.tar.gz"
 )
 
-# Only rhel-family build containers are wired up: the inner script
-# installs its extra build deps with dnf.  Every target that declares a
-# server lustre.mode today is rhel-family; ubuntu2404 is a client
-# target and has no use for ZFS.
-_SUPPORTED_OS_FAMILIES = ("rhel",)
+# Families the inner script knows how to install build deps for and
+# knows where the distro puts libraries.  Anything else fails here,
+# next to the reason, rather than inside the container on a missing
+# package manager.
+_SUPPORTED_OS_FAMILIES = ("rhel", "debian")
 
 
 class ZfsBuildError(RuntimeError):

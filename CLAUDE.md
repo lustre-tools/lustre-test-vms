@@ -260,9 +260,28 @@ The ZFS a VM receives is never chosen by the command line:
 deploy ships exactly that one, since osd_zfs.ko is linked
 against one specific ZFS build.
 
-Only rhel-family build containers are wired up (the inner
-script installs its extra build deps with dnf).  Client
-targets are refused -- ZFS is a server backend.
+Both rhel and debian build containers work; the inner
+script picks dnf or apt for its extra build deps and takes
+the library directory from `rpm --eval %{_libdir}` or the
+Debian multiarch triplet, which is where the VM's ldconfig
+will look for libzfs.  Any other os_family is refused up
+front rather than inside the container.
+
+`ltvm build zfs` works on a **client** target too -- ZFS is
+a filesystem, not a server component.  What a client target
+cannot do is `--with-zfs`, which needs `--enable-server` to
+have an OSD to build; nothing in ltvm consumes a ZFS
+artifact built for a client target, so it is only useful if
+you are going to install it yourself.
+
+Built per (target, arch, kernel, version):
+
+| target | kernel | ZFS |
+|---|---|---|
+| rocky8 | 4.18 | 2.3.4 |
+| rocky9 | 5.14 | 2.4.0, 2.3.4 |
+| rocky10 | 6.12 | 2.4.0 |
+| ubuntu2404 | 6.8 | 2.4.0 |
 
 ### Publishing
 

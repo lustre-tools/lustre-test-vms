@@ -352,10 +352,18 @@ class TestUnpack:
 
 
 class TestBuildPreconditions:
-    def test_refuses_non_rhel_family(self, tmp_targets: Path) -> None:
+    def test_debian_is_supported(self, tmp_targets: Path) -> None:
+        """The inner script has an apt branch, so debian must not be
+        turned away at the door."""
+        assert "debian" in zb._SUPPORTED_OS_FAMILIES
+        assert "rhel" in zb._SUPPORTED_OS_FAMILIES
+
+    def test_refuses_an_unhandled_family(self, tmp_targets: Path) -> None:
+        """Fail here, next to the reason, rather than inside the
+        container on a package manager that isn't there."""
         yaml_path = tmp_targets / "targets" / "targets.yaml"
         data = yaml.safe_load(yaml_path.read_text())
-        data["targets"]["rocky9"]["os_family"] = "debian"
+        data["targets"]["rocky9"]["os_family"] = "suse"
         data["targets"]["rocky9"]["zfs"] = {"version": "2.4.0"}
         _write_targets_yaml(tmp_targets / "targets", data)
         tc = _make_config(tmp_targets)
@@ -428,6 +436,40 @@ class TestBuildPreconditions:
         with patch.object(zb, "build_zfs") as build:
             zb.ensure_zfs(tc)
         build.assert_called_once()
+
+
+class TestInnerScript:
+    """The one file that runs inside every build container."""
+
+    def _script(self) -> str:
+        return zb.INNER_SCRIPT.read_text()
+
+    def test_has_both_package_managers(self) -> None:
+        s = self._script()
+        assert "command -v dnf" in s
+        assert "command -v apt-get" in s
+
+    def test_libdir_is_per_family(self) -> None:
+        """ZFS has to install where the VM's ldconfig looks: lib64 on
+        x86_64 EL, the multiarch triplet on Debian.  Getting this wrong
+        builds fine and then fails to resolve libzfs at mount time."""
+        s = self._script()
+        assert "rpm --eval '%{_libdir}'" in s
+        assert "dpkg-architecture -qDEB_HOST_MULTIARCH" in s
+
+    def test_refuses_an_unknown_container(self) -> None:
+        s = self._script()
+        assert "no dnf or apt-get in this container" in s
+
+    def test_verifies_both_consumers_outputs(self) -> None:
+        """`make install` can return 0 with a partial DESTDIR, and
+        LB_ZFS silently disables ZFS when its probes miss -- so the
+        script checks for both halves before the host stamps it."""
+        s = self._script()
+        for probe in ("zfs.ko", "usr/sbin/zpool", "libzfs.so"):
+            assert probe in s
+        for probe in ("zfs_config.h", "module/Module.symvers"):
+            assert probe in s
 
 
 class TestPodmanInvocation:

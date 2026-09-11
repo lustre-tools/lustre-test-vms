@@ -683,6 +683,7 @@ class TestCliFlagSemantics:
         assert _resolve_zfs(tc, args, None, True) == (None, None, None)
 
     def test_resolve_zfs_refuses_client_targets(self) -> None:
+        """--with-zfs needs --enable-server to have an OSD to build."""
         from ltvm_pkg.cli.build import _resolve_zfs
         from ltvm_pkg.target_config import LustreMode
 
@@ -692,6 +693,18 @@ class TestCliFlagSemantics:
         args = SimpleNamespace(zfs=True, zfs_version=None, force=False)
         _src, _ver, err = _resolve_zfs(tc, args, None, True)
         assert err is not None and "client target" in err
+        # ...and it points at the thing that does work.
+        assert "ltvm build zfs" in err
+
+    def test_build_zfs_allows_client_targets(self) -> None:
+        """Building ZFS against a kernel is not server-specific.  Only
+        `--with-zfs` on a Lustre build is, and that gate is separate --
+        conflating them blocked `ltvm build zfs ubuntu2404` for no
+        reason."""
+        src = Path("ltvm_pkg/cli/build.py").read_text()
+        body = src[src.index("def cmd_build_zfs") :]
+        body = body[: body.index("def cmd_build_mofed_kmods")]
+        assert "LustreMode.CLIENT" not in body
 
 
 class TestUserspaceOnlyGuard:

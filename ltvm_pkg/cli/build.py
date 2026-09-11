@@ -612,7 +612,9 @@ def _resolve_zfs(
             None,
             None,
             f"target {tc.name!r} is a client target (lustre.mode: "
-            f"client); ZFS is a server backend",
+            f"client), so Lustre is built --disable-server and has no "
+            f"OSD to give ZFS.  `ltvm build zfs {tc.name}` still works "
+            f"if you want the modules themselves.",
         )
     try:
         src, _staging, version = ensure_zfs(
@@ -654,13 +656,9 @@ def cmd_build_zfs(args: argparse.Namespace) -> int:
         zfs_staging_dir,
     )
 
-    if tc.lustre_mode == LustreMode.CLIENT:
-        return _error(
-            f"target {tc.name!r} is a client target (lustre.mode: "
-            f"client); ZFS is a server backend",
-            use_json,
-        )
-
+    # No client-target gate here.  Building ZFS against a kernel is not
+    # server-specific -- it is `--with-zfs` on a *Lustre* build that
+    # needs --enable-server, and that gate lives in _resolve_zfs.
     version = resolve_zfs_version(tc, getattr(args, "zfs_version", None))
     kernel = getattr(args, "kernel", None)
 
