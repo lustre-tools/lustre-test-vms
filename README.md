@@ -194,9 +194,9 @@ is never replaced.
 
 ## More
 
-See [CLAUDE.md](CLAUDE.md) for the full developer reference, and
-[SUGGESTED-AGENTS.md](SUGGESTED-AGENTS.md) for ready-made AGENTS.md /
-CLAUDE.md snippets you can drop into a Lustre workspace.
+See [CLAUDE.md](CLAUDE.md) for the full developer reference. Agents get
+what they need from the `ltvm` skill above, which `ltvm install` links
+into their skill directories.
 
 ## License
 

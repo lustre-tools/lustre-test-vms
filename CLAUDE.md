@@ -18,12 +18,10 @@ ltvm target fetch rocky9       # pre-built artifacts (fastest)
 # or: ltvm build all rocky9 --lustre-tree ~/lustre-release
 ```
 
-Ask: **"Where is your Lustre source checkout?"**  Offer to
-append `SUGGESTED-AGENTS.md` to their workspace CLAUDE.md:
-
-```bash
-cat SUGGESTED-AGENTS.md >> ~/lustre-release/CLAUDE.md
-```
+Ask: **"Where is your Lustre source checkout?"**  The usage
+guidance an agent needs is the `ltvm` skill, which `ltvm
+install` links into their skill directories -- there is
+nothing to copy into a workspace CLAUDE.md.
 
 ## Versioning and git hooks
 

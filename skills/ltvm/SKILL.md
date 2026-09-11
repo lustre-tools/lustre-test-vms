@@ -23,10 +23,18 @@ ltvm target fetch rocky9        # pre-built artifacts -- much faster than buildi
 ltvm build status               # what is stale
 ```
 
-`ltvm target fetch` is the fast path. Build artifacts locally only when a
-target has no release, or when the kernel or image genuinely needs to
-change: `ltvm build all rocky9 --lustre-tree <tree>` rebuilds only what is
-stale, `--force` rebuilds everything.
+`ltvm target fetch` is the fast path, and a fetched image already has
+Lustre baked in -- `ltvm create` then `ltvm llmount` gives a mounted
+filesystem with no build at all. Build locally only when a target has no
+release, or when the kernel or image genuinely needs to change:
+`ltvm build all rocky9 --lustre-tree <tree>` rebuilds only what is stale,
+`--force` rebuilds everything, and `ltvm build status` shows what is.
+
+Images are per-kernel. A target with two kernels has an image for each,
+so `--kernel <name>` on `build image` and on `create` picks which one,
+and creating against a kernel with no matching image fails rather than
+booting the wrong modules. A Lustre build lands in the tree's
+`.ltvm-staging/<target>/<arch>/<kernel>/`.
 
 ## A single VM, from nothing to a mounted filesystem
 
@@ -36,7 +44,14 @@ ltvm deploy-lustre co1-single --lustre-tree <tree> --mount
 ssh co1-single 'lctl dl'
 ```
 
-Name VMs `co<N>-<role>` after the checkout they serve -- `co1-single`,
+```bash
+ltvm list                       # running and stopped
+ltvm start|stop|destroy co1-single
+ltvm doctor [--fix]             # host infrastructure health
+```
+
+`create` is idempotent: it starts a stopped VM and no-ops on a running
+one. Name VMs `co<N>-<role>` after the checkout they serve -- `co1-single`,
 `co2-mds`, `co5-ec-dom`. Never a bare `testvm`: the number is what tells a
 later session which tree the VM belongs to.
 
@@ -105,8 +120,11 @@ piping a slow command through `grep`.
 
 ## Crashes and hangs
 
-VMs have kdump configured. A vmcore lands in `/var/crash/<ip>-<date>/`
-after the reboot, about 15 seconds later.
+VMs boot with `crashkernel=512M`, and the image ships kexec-tools, crash
+and drgn with the kernel and initramfs pre-baked. After a panic kdump
+writes a vmcore to `/var/crash/<ip>-<date>/` and reboots, about 15
+seconds. `ltvm vm nmi` triggers one from the host; `echo c >
+/proc/sysrq-trigger` from inside the VM does the same.
 
 ```bash
 ltvm vm console-log co1-single
@@ -133,8 +151,22 @@ ltvm target validate rocky9 --lustre-tree <tree>   # 0 ok, 1 warn, 2 refused
 ltvm build all rocky9 --lustre-tree <tree> --force-compat
 ```
 
-`--force-compat` silences refusals, not hard errors, and is for known
-work-in-progress branches only.
+The gate reads `lustre/kernel_patches/which_patch` for `server_ldiskfs`
+and `lustre/ChangeLog` for `server_zfs`, and refuses combinations Lustre
+upstream does not declare supported. `--force-compat` silences refusals,
+not hard errors, and is for known work-in-progress branches only. It is
+accepted by `build all`, `build kernel`, `build lustre`, `target publish`
+and `deploy-lustre`.
+
+## Sharing what was built
+
+```bash
+ltvm target publish rocky9                # bundle + upload a GitHub release
+ltvm target publish rocky9 --no-upload    # build the tarballs only
+```
+
+`ltvm target fetch` finds the latest release for a target and downloads
+it; re-running when the local tree is current finishes in under a second.
 
 ## Inside a VM rather than on the host
 
@@ -156,6 +188,13 @@ directory is a Lustre tree. On EL8/EL9 images run them with
 Export `LTVM_OWNER_ID=<durable-session-id>` before creating VMs so the
 owner metadata identifies the session rather than a pid; read it back with
 `ltvm list --json`.
+
+## Flags that apply everywhere
+
+`--json` for machine-readable output, `--verbose`, `--arch <arch>` to
+override the target's configured architecture, `--kernel <name>` on the
+commands that act on one kernel, and `--force-compat` on build, publish
+and deploy.
 
 ## Where the detail lives
 
