@@ -84,6 +84,26 @@ and is usually faster than unpicking a broken mount -- use
 `ltvm llmount <vm> --cleanup` only when the logs or crash dumps on that VM
 still matter.
 
+## Update notices
+
+ltvm checks weekly for a newer version and, when one is available,
+prints one line to stderr on any command:
+
+```
+ltvm: update available (0.5.1.abc1234 -> def5678).  Run: sudo ltvm update
+```
+
+Surface it to the user and offer to run `sudo ltvm update`. Do not run
+it mid-task on your own initiative: the update replaces `targets.yaml`,
+the host-config templates and the kernel build scripts under a process
+that has already imported the old code, so the rest of the task then
+reads new files with old logic. Finish what you are doing, update
+between tasks, and re-run.
+
+The notice repeats at most once a day while an update is pending, so
+seeing it once in a session is the expected behaviour -- not a signal
+that a previous update attempt failed.
+
 ## Root
 
 - `update`, `cluster create` and `cluster destroy` require root.

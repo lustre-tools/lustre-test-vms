@@ -3,34 +3,61 @@
 Compares the local ``ltvm_pkg.__version__`` (which embeds the short
 git sha written to ``_build_info.py`` at install time) against the
 tip of ``master`` on the upstream GitHub repo, and -- if the local
-tree is behind -- prompts the user to update.
+tree is behind -- tells the user.
 
-Triggers:
-  * Once every 24h on any interactive ltvm invocation
-  * Immediately on a schema-version mismatch raised by release
-    fetching
+The work is split three ways because each part has different rules:
 
-Config lives in ``~/.config/ltvm/config.json``::
+  * **refresh** -- hit the network, cache the verdict.  Weekly.
+  * **notify** -- tell somebody.  Interactive callers get the prompt;
+    everyone else gets one line on stderr, at most daily while an
+    update is pending.
+  * **act** -- ``git pull`` + reinstall.  Only ever from an
+    interactive prompt, or an explicit ``sudo ltvm update``.
+
+Splitting them is what makes the check useful to non-TTY callers --
+scripts, CI, and agents driving ltvm through a subprocess.  Those
+callers are a large share of real usage and previously saw nothing
+at all, because one TTY gate suppressed the network check, the
+notice and the action together.
+
+**Acting without a TTY is forbidden, not merely skipped.** ``auto``
+mode runs ``sudo ltvm install`` and then exits 0; with no TTY the
+sudo either fails or blocks on a password, and a "successful" run
+exits 0 *without having run the user's command* -- which a caller
+reads as that command having succeeded.  Non-interactive auto mode
+degrades to a notice.
+
+Preferences live in ``~/.config/ltvm/config.json``::
+
+    {"update_check": {"mode": "prompt" | "auto" | "never"}}
+
+The cached verdict lives apart from them, in
+``~/.local/state/ltvm/update_cache.json``::
 
     {
-      "update_check": {
-        "mode": "prompt" | "auto" | "never",
-        "last_check_iso": "2026-04-16T16:00:00+00:00"
-      }
+      "last_check_iso": "2026-04-16T16:00:00+00:00",
+      "last_notice_iso": "2026-04-16T16:00:00+00:00",
+      "pending_update": {"local": "abc1234", "remote": "def5678"}
     }
 
-Non-interactive callers (``--json`` or no stdin tty) are silently
-skipped -- we never want to block a script on an interactive prompt.
+Two files, because they have different writers.  The config records
+what the human chose and is written only when they answer a prompt;
+the cache is regenerable machine state written by any invocation.
+Keeping the cache separate also means an agent's non-TTY run no
+longer consumes the weekly check that the human's next interactive
+run was going to prompt from -- the verdict persists, so both see it.
 """
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import logging
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -39,17 +66,35 @@ log = logging.getLogger(__name__)
 
 
 REPO_SLUG = "lustre-tools/lustre-test-vms"
-CHECK_INTERVAL = timedelta(hours=24)
+
+# How often we ask GitHub anything.
+CHECK_INTERVAL = timedelta(days=7)
+# How often we mention a pending update to a non-interactive caller.
+# Shorter than CHECK_INTERVAL on purpose: a weekly network check that
+# also notified weekly would leave an available update unmentioned for
+# six days out of seven.
+NOTICE_INTERVAL = timedelta(hours=24)
 
 _CONFIG_DIR = (
     Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "ltvm"
 )
 _CONFIG_FILE = _CONFIG_DIR / "config.json"
 
+_STATE_DIR = (
+    Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    / "ltvm"
+)
+_STATE_FILE = _STATE_DIR / "update_cache.json"
+
 
 Mode = Literal["prompt", "auto", "never"]
 _DEFAULT_CONFIG: dict[str, Any] = {
-    "update_check": {"mode": "prompt", "last_check_iso": None},
+    "update_check": {"mode": "prompt"},
+}
+_DEFAULT_STATE: dict[str, Any] = {
+    "last_check_iso": None,
+    "last_notice_iso": None,
+    "pending_update": None,
 }
 
 
@@ -84,14 +129,15 @@ def _load_config() -> dict[str, Any]:
 def _save_config(cfg: dict[str, Any]) -> None:
     """Persist the config, keeping it owned by the human.
 
-    maybe_check_for_updates() runs on every interactive invocation,
-    including the ones that need root (`sudo ltvm cluster create`).  On
-    a distro that preserves HOME under sudo, the first such call wrote
-    the user's config.json as root; every later unprivileged ltvm could
-    still read it but _bump_last_check raised PermissionError, which
-    ltvm's blanket `except Exception` swallowed.  last_check_iso then
-    never advanced, so _due_for_check was always true -- a git
-    ls-remote on every single command, and an update prompt with it.
+    maybe_check_for_updates() runs on invocations that need root
+    (`sudo ltvm cluster create`).  On a distro that preserves HOME
+    under sudo, the first such call wrote the user's config.json as
+    root; every later unprivileged ltvm could still read it but not
+    write it, and the resulting PermissionError was swallowed by
+    ltvm's blanket `except Exception`.  The schedule stamp then never
+    advanced, so the check was always due -- a git ls-remote on every
+    single command, and an update prompt with it.  _save_state carries
+    the same hazard and the same chown.
     """
     _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     try:
@@ -105,11 +151,75 @@ def _save_config(cfg: dict[str, Any]) -> None:
     chown_to_invoking_user(_CONFIG_FILE)
 
 
-def _bump_last_check(cfg: dict[str, Any]) -> None:
-    cfg["update_check"]["last_check_iso"] = datetime.now(
-        timezone.utc
-    ).isoformat()
-    _save_config(cfg)
+# ---------------------------------------------------------------------------
+# State IO (the cached verdict)
+# ---------------------------------------------------------------------------
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _default_state() -> dict[str, Any]:
+    """A fresh deep copy of the default state."""
+    return copy.deepcopy(_DEFAULT_STATE)
+
+
+def _load_state() -> dict[str, Any]:
+    if not _STATE_FILE.is_file():
+        return _default_state()
+    try:
+        data = json.loads(_STATE_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return _default_state()
+    if not isinstance(data, dict):
+        return _default_state()
+    out = _default_state()
+    out.update(data)
+    return out
+
+
+def _save_state(state: dict[str, Any]) -> None:
+    """Persist the cached verdict, atomically and without nagging.
+
+    Written by every invocation, including the root ones (`sudo ltvm
+    cluster create`), so it hits the same ownership trap documented on
+    _save_config -- hence the chown.  tempfile + replace because two
+    ltvm processes can be running at once and a half-written cache
+    would be read back as corrupt.
+
+    Every failure here is swallowed: a lost cache costs one extra
+    network check, which is not worth failing a user's command over.
+    """
+    try:
+        _STATE_DIR.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(_STATE_DIR), prefix=".update_cache.")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(state, indent=2) + "\n")
+            os.replace(tmp, _STATE_FILE)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
+    except OSError as e:
+        log.debug("cannot write %s: %s", _STATE_FILE, e)
+        return
+
+    from .priv import chown_to_invoking_user
+
+    chown_to_invoking_user(_STATE_DIR)
+    chown_to_invoking_user(_STATE_FILE)
+
+
+def _mark_noticed(state: dict[str, Any]) -> None:
+    state["last_notice_iso"] = _now_iso()
+    _save_state(state)
+
+
+def _clear_pending(state: dict[str, Any]) -> None:
+    state["pending_update"] = None
+    _save_state(state)
 
 
 # ---------------------------------------------------------------------------
@@ -126,15 +236,23 @@ def _is_interactive() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
-def _due_for_check(cfg: dict[str, Any]) -> bool:
-    last = cfg["update_check"].get("last_check_iso")
-    if not last:
+def _elapsed_since(stamp: Any, interval: timedelta) -> bool:
+    """True if *stamp* is missing, unparseable, or older than *interval*."""
+    if not isinstance(stamp, str) or not stamp:
         return True
     try:
-        last_dt = datetime.fromisoformat(last)
+        stamp_dt = datetime.fromisoformat(stamp)
     except ValueError:
         return True
-    return datetime.now(timezone.utc) - last_dt >= CHECK_INTERVAL
+    return datetime.now(timezone.utc) - stamp_dt >= interval
+
+
+def _due_for_check(state: dict[str, Any]) -> bool:
+    return _elapsed_since(state.get("last_check_iso"), CHECK_INTERVAL)
+
+
+def _due_for_notice(state: dict[str, Any]) -> bool:
+    return _elapsed_since(state.get("last_notice_iso"), NOTICE_INTERVAL)
 
 
 # ---------------------------------------------------------------------------
@@ -335,63 +453,98 @@ def _prompt_choice(local: str, remote: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Public entry points
+# Refresh / notify
 # ---------------------------------------------------------------------------
 
 
-def maybe_check_for_updates(
-    *, force: bool = False, use_json: bool = False
-) -> None:
-    """Top-level hook called once per ltvm invocation.
+_NOTICE = "ltvm: update available ({local} -> {remote}).  Run: sudo ltvm update"
 
-    ``force=True`` bypasses the 24h schedule (used when a caller has
-    already seen a schema mismatch).  ``use_json=True`` suppresses
-    the interactive prompt entirely -- JSON callers are scripts, not
-    humans, and we never want to block them.
+
+def _refresh_cache(state: dict[str, Any]) -> None:
+    """Ask GitHub, and cache the verdict in *state*.
+
+    A network or git failure leaves any previous verdict alone rather
+    than clearing it -- an offline week should not make a known-pending
+    update disappear.  last_check_iso is bumped either way so a host
+    that cannot reach GitHub does not retry on every invocation.
     """
-    if use_json or not _is_interactive():
-        return
-    cfg = _load_config()
-    mode = cfg["update_check"].get("mode", "prompt")
-    # "never" means never: not even a schema-mismatch force bypasses
-    # the user's explicit opt-out.  The raw fetch error still surfaces.
-    if mode == "never":
-        return
-    if not force and not _due_for_check(cfg):
-        return
-
     local = _local_hash()
     remote = _remote_hash()
-    if local is None or remote is None:
-        # Can't tell; don't nag.  Still mark the attempt so we don't
-        # pound the network every invocation.
-        _bump_last_check(cfg)
-        return
+    state["last_check_iso"] = _now_iso()
+    if local is not None and remote is not None:
+        state["pending_update"] = (
+            {"local": local, "remote": remote}
+            if _is_newer(local, remote)
+            else None
+        )
+    _save_state(state)
 
-    if not _is_newer(local, remote):
-        _bump_last_check(cfg)
-        return
+
+def _pending_if_current(state: dict[str, Any]) -> dict[str, Any] | None:
+    """The cached verdict, or None if the local tree has moved since.
+
+    Someone who has just run `sudo ltvm update` should not be told
+    about the update they already applied for the rest of the week.
+    _local_hash() prefers the baked BUILD_HASH, so this costs a dict
+    lookup rather than a subprocess.
+    """
+    pending = state.get("pending_update")
+    if not isinstance(pending, dict):
+        return None
+    if _local_hash() != pending.get("local"):
+        _clear_pending(state)
+        return None
+    return pending
+
+
+def _emit_notice(state: dict[str, Any], pending: dict[str, Any]) -> None:
+    """Tell a non-interactive caller, on stderr.
+
+    stderr rather than stdout because stdout is the data channel --
+    `ltvm list --json` is parsed by callers and must stay clean.  We
+    emit under --json for that reason: the JSON itself is untouched,
+    and --json is exactly what a scripted or agent caller reaches for,
+    so suppressing there would hide the notice from the audience that
+    most needs it.
+    """
+    print(
+        _NOTICE.format(
+            local=pending.get("local", "?"), remote=pending.get("remote", "?")
+        ),
+        file=sys.stderr,
+    )
+    _mark_noticed(state)
+
+
+def _handle_interactive(
+    cfg: dict[str, Any],
+    state: dict[str, Any],
+    mode: str,
+    pending: dict[str, Any],
+) -> None:
+    """Prompt (or auto-apply) for a caller that has a human attached."""
+    local = pending.get("local", "?")
+    remote = pending.get("remote", "?")
 
     if mode == "auto":
-        _bump_last_check(cfg)
-        print(
-            f"ltvm: auto-updating ({local} -> {remote})...",
-            file=sys.stderr,
-        )
+        _mark_noticed(state)
+        print(f"ltvm: auto-updating ({local} -> {remote})...", file=sys.stderr)
         if _apply_update():
+            _clear_pending(state)
             _exit_after_update()
         return
 
-    # mode == "prompt"
     choice = _prompt_choice(local, remote)
-    _bump_last_check(cfg)  # always: we DID check, regardless of answer
+    _mark_noticed(state)  # always: we DID tell them, regardless of answer
     if choice == "y":
         if _apply_update():
+            _clear_pending(state)
             _exit_after_update()
     elif choice == "a":
         cfg["update_check"]["mode"] = "auto"
         _save_config(cfg)
         if _apply_update():
+            _clear_pending(state)
             _exit_after_update()
     elif choice == "x":
         cfg["update_check"]["mode"] = "never"
@@ -402,3 +555,41 @@ def maybe_check_for_updates(
             file=sys.stderr,
         )
     # choice == "n" (or unrecognized): nothing further.
+
+
+# ---------------------------------------------------------------------------
+# Public entry points
+# ---------------------------------------------------------------------------
+
+
+def maybe_check_for_updates(
+    *, force: bool = False, use_json: bool = False
+) -> None:
+    """Top-level hook called once per ltvm invocation.
+
+    ``force=True`` bypasses both schedules (used when a caller has
+    already seen a schema mismatch and wants the user told now).
+    ``use_json=True`` suppresses the interactive prompt -- JSON
+    callers are scripts, and we never block a script on a prompt --
+    but they still get the stderr notice.
+    """
+    cfg = _load_config()
+    mode = cfg["update_check"].get("mode", "prompt")
+    # "never" means never: not even a schema-mismatch force bypasses
+    # the user's explicit opt-out.  The raw fetch error still surfaces.
+    if mode == "never":
+        return
+
+    state = _load_state()
+    if force or _due_for_check(state):
+        _refresh_cache(state)
+
+    pending = _pending_if_current(state)
+    if pending is None:
+        return
+
+    if _is_interactive() and not use_json:
+        _handle_interactive(cfg, state, mode, pending)
+    elif force or _due_for_notice(state):
+        # No human on the far end: say it once and act on nothing.
+        _emit_notice(state, pending)
