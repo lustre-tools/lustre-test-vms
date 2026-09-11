@@ -88,11 +88,13 @@ _KNOWN_TARGET_KEYS = frozenset(
         "srpm_url",
         "status",
         "variants",
+        "zfs",
     }
 )
 _KNOWN_KERNELS_KEYS = frozenset({"available", "config", "default"})
 _KNOWN_KERNEL_ENTRY_KEYS = frozenset({"name", "srpm_version"})
 _KNOWN_LUSTRE_KEYS = frozenset({"mode"})
+_KNOWN_ZFS_KEYS = frozenset({"version"})
 _KNOWN_VARIANT_KEYS = frozenset(
     {
         "container_overlay",
@@ -431,6 +433,19 @@ class TargetConfig:
                     f"target {name!r}: unrecognized key(s) under "
                     f"'lustre': {', '.join(sorted(unknown))}"
                 )
+        zfs_block = self._data.get("zfs")
+        if zfs_block is not None:
+            if not isinstance(zfs_block, dict):
+                raise ValueError(
+                    f"target {name!r}: 'zfs' must be a mapping, got "
+                    f"{type(zfs_block).__name__}"
+                )
+            unknown = set(zfs_block) - _KNOWN_ZFS_KEYS
+            if unknown:
+                raise ValueError(
+                    f"target {name!r}: unrecognized key(s) under "
+                    f"'zfs': {', '.join(sorted(unknown))}"
+                )
         for entry in self._kernels.get("available", []):
             if isinstance(entry, dict):
                 if "name" not in entry:
@@ -651,6 +666,20 @@ class TargetConfig:
         """Extra configure args specific to this target (e.g. --with-o2ib=no)."""
         v = self._data.get("configure_args", [])
         return list(v)
+
+    @property
+    def zfs_version(self) -> str | None:
+        """OpenZFS version to use when a build asks for ZFS.
+
+        Declaring this does NOT turn ZFS on -- it only names the version
+        `--zfs` builds.  None means "no target preference"; the caller
+        falls back to zfs_build.DEFAULT_ZFS_VERSION.
+        """
+        block = self._data.get("zfs")
+        if not isinstance(block, dict):
+            return None
+        v = block.get("version")
+        return str(v) if v is not None else None
 
     # ROOT_PASSWORD and SSH_TIMEOUT are hardcoded constants in vm_state.py.
     # If we ever want to make them per-target, add a property here AND
@@ -931,9 +960,21 @@ class TargetConfig:
         # ``variants`` block is excluded here and mixed in separately
         # below (only for the relevant variant), so declaring a new
         # variant doesn't invalidate the base cache.
+        #
+        # ``zfs`` is excluded for a different reason: no byte of the
+        # container, kernel or image depends on it.  ZFS is built
+        # between the kernel and Lustre and installed into the VM at
+        # deploy time, so the only things a version bump must
+        # invalidate are the ZFS artifact itself (zfs_build hashes the
+        # version directly) and the Lustre build (the version reaches
+        # its configure-flags stamp via --with-zfs).  Folding it in
+        # here would rebuild every container and kernel for a knob
+        # they do not read.
         h.update(self.name.encode())
         h.update(self.arch.encode())
-        base_data = {k: v for k, v in self._data.items() if k != "variants"}
+        base_data = {
+            k: v for k, v in self._data.items() if k not in ("variants", "zfs")
+        }
         h.update(json.dumps(base_data, sort_keys=True).encode())
 
         if artifact == "container":

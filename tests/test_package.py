@@ -441,3 +441,134 @@ class TestSnapshotLustreVariant:
         )
         assert dest == kdir / "lustre-artifacts" / "mofed"
         assert (dest / ".ltvm-snapshot.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# ZFS asset
+# ---------------------------------------------------------------------------
+
+
+def _add_lustre_snapshot(out: Path, zfs_version: str | None) -> Path:
+    """Add a lustre-artifacts snapshot, optionally recording a ZFS."""
+    lus = out / "kernels" / "5.14-rhel9.7" / "lustre-artifacts"
+    (lus / "lib" / "modules").mkdir(parents=True)
+    (lus / "lib" / "modules" / "lustre.ko").write_bytes(b"\x7fELF")
+    (lus / ".ltvm-snapshot.json").write_text(
+        json.dumps({"ko_count": 1, "zfs_version": zfs_version})
+    )
+    return lus
+
+
+def _add_zfs_artifact(out: Path, version: str) -> Path:
+    art = out / "kernels" / "5.14-rhel9.7" / "zfs" / version
+    mods = art / "staging" / "lib" / "modules" / "5.14.0-611.test" / "extra"
+    mods.mkdir(parents=True)
+    (mods / "zfs.ko").write_bytes(b"\x7fELF")
+    (art / "src").mkdir()
+    (art / "src" / "zfs_config.h").write_text("")
+    (art / "meta.json").write_text(json.dumps({"zfs_version": version}))
+    return art
+
+
+def _package(out: Path, dest: Path) -> dict:
+    with patch("ltvm_pkg.release_package.export_build_container") as m:
+        m.return_value = out / "container" / "image.tar"
+        return package_target(
+            "rocky9",
+            out,
+            kernel="5.14-rhel9.7",
+            dest_dir=dest,
+            arch="x86_64",
+            variant=DEFAULT_VARIANT,
+        )
+
+
+class TestZfsAsset:
+    def test_published_when_lustre_was_built_with_zfs(
+        self, tmp_path: Path
+    ) -> None:
+        out = _make_fake_output(tmp_path)
+        _add_lustre_snapshot(out, "2.4.0")
+        _add_zfs_artifact(out, "2.4.0")
+        assets = _package(out, tmp_path / "release")
+
+        assert "zfs" in assets
+        assert assets["zfs"].name == (
+            "zfs-rocky9-x86_64-5.14.0-611.test-2.4.0.tar.zst"
+        )
+        manifest = json.loads(assets["manifest"].read_text())
+        assert manifest["zfs_version"] == "2.4.0"
+        assert "zfs" in {a["kind"] for a in manifest["assets"]}
+
+    def test_absent_when_lustre_had_no_zfs(self, tmp_path: Path) -> None:
+        """The default: a release for a target nobody builds ZFS for
+        must not carry 48 MB of it."""
+        out = _make_fake_output(tmp_path)
+        _add_lustre_snapshot(out, None)
+        assets = _package(out, tmp_path / "release")
+        assert "zfs" not in assets
+        manifest = json.loads(assets["manifest"].read_text())
+        assert "zfs_version" not in manifest
+
+    def test_absent_without_a_lustre_snapshot(self, tmp_path: Path) -> None:
+        """A kernel-only publish has nothing to tie a ZFS version to."""
+        out = _make_fake_output(tmp_path)
+        _add_zfs_artifact(out, "2.4.0")
+        assets = _package(out, tmp_path / "release")
+        assert "zfs" not in assets
+
+    def test_skipped_when_the_artifact_is_missing(self, tmp_path: Path) -> None:
+        """Publishing must not die because the ZFS build was cleaned;
+        say so and publish the rest."""
+        out = _make_fake_output(tmp_path)
+        _add_lustre_snapshot(out, "2.4.0")
+        assets = _package(out, tmp_path / "release")
+        assert "zfs" not in assets
+        manifest = json.loads(assets["manifest"].read_text())
+        assert "zfs_version" not in manifest
+        assert "kernel" in assets  # the rest still published
+
+    def test_carries_staging_not_src(self, tmp_path: Path) -> None:
+        """src/ is 180 MB compressed and only needed to *build* Lustre
+        --with-zfs, which `ltvm build zfs` redoes in under two minutes."""
+        out = _make_fake_output(tmp_path)
+        _add_lustre_snapshot(out, "2.4.0")
+        _add_zfs_artifact(out, "2.4.0")
+        assets = _package(out, tmp_path / "release")
+
+        listing = subprocess.run(
+            [
+                "tar",
+                "--use-compress-program=zstd -d",
+                "-tf",
+                str(assets["zfs"]),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert "zfs/2.4.0/staging/" in listing
+        assert "zfs/2.4.0/meta.json" in listing
+        assert "zfs/2.4.0/src" not in listing
+
+    def test_kernel_asset_omits_zfs(self, tmp_path: Path) -> None:
+        """Otherwise every base fetcher pays for a ZFS they never asked
+        for -- the bug mofed-kmods hit before its own exclusion."""
+        out = _make_fake_output(tmp_path)
+        _add_lustre_snapshot(out, "2.4.0")
+        _add_zfs_artifact(out, "2.4.0")
+        assets = _package(out, tmp_path / "release")
+
+        listing = subprocess.run(
+            [
+                "tar",
+                "--use-compress-program=zstd -d",
+                "-tf",
+                str(assets["kernel"]),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert "vmlinuz" in listing
+        assert "/zfs/" not in listing

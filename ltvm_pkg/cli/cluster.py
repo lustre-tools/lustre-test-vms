@@ -198,6 +198,9 @@ def cmd_cluster(args: argparse.Namespace) -> int:
         mount = False
         server_only = False
         force_compat = False
+        zfs = False
+        zfs_version = None
+        fstype = None
         i = 1
         while i < len(cargs):
             if cargs[i] in ("--build", "--lustre-tree") and i + 1 < len(cargs):
@@ -212,12 +215,28 @@ def cmd_cluster(args: argparse.Namespace) -> int:
             elif cargs[i] == "--force-compat":
                 force_compat = True
                 i += 1
+            elif cargs[i] == "--zfs":
+                zfs = True
+                i += 1
+            elif cargs[i] == "--zfs-version" and i + 1 < len(cargs):
+                zfs_version = cargs[i + 1]
+                i += 2
+            elif cargs[i] == "--fstype" and i + 1 < len(cargs):
+                fstype = cargs[i + 1]
+                if fstype not in ("ldiskfs", "zfs"):
+                    return _error(
+                        f"cluster deploy: --fstype must be ldiskfs or "
+                        f"zfs, got '{fstype}'",
+                        use_json,
+                    )
+                i += 2
             else:
                 return _error(
                     f"cluster deploy: unknown argument '{cargs[i]}'",
                     use_json,
                     hint="valid: --build PATH (alias --lustre-tree), "
-                    "--mount, --server-only, --force-compat",
+                    "--mount, --server-only, --force-compat, --zfs, "
+                    "--zfs-version VER, --fstype ldiskfs|zfs",
                 )
         return _call(
             _qc_deploy,
@@ -227,6 +246,9 @@ def cmd_cluster(args: argparse.Namespace) -> int:
                 mount=mount,
                 server_only=server_only,
                 force_compat=force_compat,
+                zfs=zfs,
+                zfs_version=zfs_version,
+                fstype=fstype,
             ),
         )
 

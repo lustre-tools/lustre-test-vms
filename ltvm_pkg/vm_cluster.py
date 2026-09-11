@@ -86,8 +86,20 @@ def parse_node_spec(spec: str) -> ClusterNode:
     )
 
 
-def generate_local_sh(cluster: ClusterInfo, os_family: str = "rhel") -> str:
-    """Generate cfg/local.sh content for a multi-node cluster."""
+def generate_local_sh(
+    cluster: ClusterInfo,
+    os_family: str = "rhel",
+    fstype: str = "ldiskfs",
+) -> str:
+    """Generate cfg/local.sh content for a multi-node cluster.
+
+    ``fstype`` selects the OSD backend.  Only this line changes for
+    ZFS: the MDSDEV*/OSTDEV* written above are the *vdevs* ZFS builds
+    its pools on (test-framework.sh's mdsvdevname/ostvdevname), and the
+    dataset names default to ``$FSNAME-mdt<n>/mdt<n>``.
+    """
+    if fstype not in ("ldiskfs", "zfs"):
+        raise ValueError(f"unsupported fstype: {fstype!r}")
     mgs = cluster.mgs_node()
     mds_list = cluster.mds_nodes()
     oss_list = cluster.oss_nodes()
@@ -193,7 +205,7 @@ def generate_local_sh(cluster: ClusterInfo, os_family: str = "rhel") -> str:
             lines.append('RCLIENTS="{}"'.format(" ".join(rclients)))
     lines.append("")
 
-    lines.append("FSTYPE=ldiskfs")
+    lines.append(f"FSTYPE={fstype}")
     lines.append("OSTSEQWIDTH=${OSTSEQWIDTH:-0x20000}")
     lines.append("")
 
@@ -491,6 +503,7 @@ def _deploy_one_node(
     node_name: str,
     lustre_tree: str | Path,
     os_family: str = "rhel",
+    zfs_staging: Path | None = None,
 ) -> tuple[str, int, str]:
     """Deploy Lustre to one cluster node.
 
@@ -529,7 +542,10 @@ def _deploy_one_node(
         variant=vm.variant,
     )
     try:
-        deploy_to_vm(vm, staging, os_family=os_family)
+        # No fstype here: the cluster's cfg/local.sh is written whole
+        # further down (generate_local_sh), so a per-node FSTYPE block
+        # would be overwritten moments later.
+        deploy_to_vm(vm, staging, os_family=os_family, zfs_staging=zfs_staging)
         return node_name, 0, "ok"
     except RuntimeError as e:
         return node_name, 1, str(e)
@@ -686,6 +702,22 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     # Build Lustre from source before deploying.  All nodes share the
     # same target+kernel+arch, so we run build-lustre once and every
     # node rsyncs from the same staging dir.
+    # --zfs-version implies --zfs; --fstype zfs implies both, since
+    # the cluster cannot mount a ZFS target without ZFS on its nodes.
+    # And --zfs on a deploy means "run on ZFS" unless --fstype says
+    # otherwise -- same rule as single-node deploy-lustre.
+    fstype = getattr(args, "fstype", None)
+    zfs_version_arg = getattr(args, "zfs_version", None)
+    want_zfs = (
+        bool(getattr(args, "zfs", False))
+        or bool(zfs_version_arg)
+        or fstype == "zfs"
+    )
+    if want_zfs and fstype is None:
+        fstype = "zfs"
+    if fstype is None:
+        fstype = "ldiskfs"
+
     build_cmd = ["ltvm", "build", "lustre", target, "--lustre-tree", build]
     if kernel_name:
         build_cmd += ["--kernel", kernel_name]
@@ -695,6 +727,10 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     build_cmd += ["--arch", arch]
     if getattr(args, "force_compat", False):
         build_cmd += ["--force-compat"]
+    if want_zfs:
+        build_cmd += ["--zfs"]
+        if zfs_version_arg:
+            build_cmd += ["--zfs-version", zfs_version_arg]
     sudo_user = os.environ.get("SUDO_USER")
     if sudo_user:
         build_cmd = ["sudo", "-u", sudo_user] + build_cmd
@@ -703,13 +739,48 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     if rb.returncode != 0:
         die(f"Lustre build failed (rc={rb.returncode})")
 
+    # Which ZFS to ship is the staged build's decision (osd_zfs.ko is
+    # linked against one specific build), and every node in a cluster
+    # shares one target+kernel+arch -- so resolve it once here rather
+    # than per node.
+    zfs_staging: Path | None = None
+    if want_zfs:
+        from .lustre_build import read_staging_meta
+        from .lustre_build import staging_path as _staging_path
+        from .target_config import TargetConfig
+        from .zfs_build import zfs_staging_dir
+
+        tc = TargetConfig(target, arch=arch, variant=first_vm.variant)
+        meta = read_staging_meta(
+            _staging_path(
+                build,
+                target,
+                arch=arch,
+                kernel=kernel_name or tc.default_kernel,
+                variant=first_vm.variant,
+            )
+        )
+        staged_zfs = meta.get("zfs_version") if isinstance(meta, dict) else None
+        if not staged_zfs:
+            die(
+                "ZFS was requested but the Lustre build produced no ZFS "
+                "record -- rerun with --force to reconfigure"
+            )
+        zfs_staging = zfs_staging_dir(tc, kernel_name, staged_zfs)
+        if not any((zfs_staging / "lib" / "modules").rglob("zfs.ko*")):
+            die(
+                f"Lustre was built against ZFS {staged_zfs} but its "
+                f"build artifact is missing from {zfs_staging}"
+            )
+        print(f"    ZFS: {staged_zfs}")
+
     print(f"    Deploying to {len(nodes)} nodes in parallel...")
 
     # Deploy to all nodes in parallel -- same as single-node deploy,
     # just run concurrently.
     failed = _parallel_cluster_op(
         nodes,
-        lambda node: _deploy_one_node(node.name, build, os_family),
+        lambda node: _deploy_one_node(node.name, build, os_family, zfs_staging),
         success_verb="deployed",
         failure_verb="FAILED",
     )
@@ -744,7 +815,7 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
         )
 
     # Overwrite single-node local.sh with the cluster topology config.
-    local_sh = generate_local_sh(cluster, os_family=os_family)
+    local_sh = generate_local_sh(cluster, os_family=os_family, fstype=fstype)
     print("\n--- Distributing cluster config (local.sh)...")
     print(local_sh)
 

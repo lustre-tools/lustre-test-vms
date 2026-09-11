@@ -133,6 +133,32 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
     userspace_only = getattr(args, "userspace_only", False)
 
+    # --zfs-version implies --zfs; --fstype zfs implies it too, since
+    # a VM cannot mount a ZFS target without ZFS on it.  Conversely
+    # --zfs on a *deploy* means "run this VM on ZFS", so it implies
+    # --fstype zfs unless the user pinned an fstype explicitly -- the
+    # one case for `--zfs --fstype ldiskfs` is staging ZFS on a VM you
+    # want to keep running ldiskfs for now.
+    fstype = getattr(args, "fstype", None)
+    want_zfs = (
+        bool(getattr(args, "zfs", False))
+        or bool(getattr(args, "zfs_version", None))
+        or fstype == "zfs"
+    )
+    if want_zfs and fstype is None:
+        fstype = "zfs"
+    zfs_version_arg = getattr(args, "zfs_version", None)
+
+    # --userspace-only ships no modules, so it can neither install ZFS
+    # nor make a ZFS mount work.  Silently honouring only the --fstype
+    # half would leave the VM pinned to a backend it cannot mount.
+    if want_zfs and userspace_only:
+        return _error(
+            "--zfs and --userspace-only are incompatible: a "
+            "userspace-only deploy ships no kernel modules",
+            use_json,
+        )
+
     # Staging now lives inside the lustre tree at
     # <build_path>/.ltvm-staging/<target>/<arch>/<kernel>/, per-kernel
     # so two kernels' userland (usr/sbin, etc.) coexist without
@@ -221,6 +247,25 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             if not use_json:
                 print("  Kernel ABI changed since staging was built")
             return False
+
+        # A staging tree built without ZFS carries the same
+        # configure_sha256 as the tree's stamp (both are the non-ZFS
+        # hash), so the checks below would call it fresh and --zfs
+        # would silently do nothing.  The staged build's own record of
+        # which ZFS it used is the only thing that can answer this.
+        staged_zfs = meta.get("zfs_version")
+        if want_zfs:
+            if not staged_zfs:
+                if not use_json:
+                    print("  Staging was built without ZFS")
+                return False
+            if zfs_version_arg and staged_zfs != zfs_version_arg:
+                if not use_json:
+                    print(
+                        f"  Staging was built against ZFS {staged_zfs}, "
+                        f"not {zfs_version_arg}"
+                    )
+                return False
 
         recorded_cfg = meta.get("configure_sha256")
         if not isinstance(recorded_cfg, str) or not recorded_cfg:
@@ -414,6 +459,10 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             # refusal.  cmd_cluster_deploy already forwards it.
             if args.force_compat:
                 build_cmd += ["--force-compat"]
+            if want_zfs:
+                build_cmd += ["--zfs"]
+                if zfs_version_arg:
+                    build_cmd += ["--zfs-version", zfs_version_arg]
             sudo_user = os.environ.get("SUDO_USER")
             if sudo_user:
                 build_cmd = ["sudo", "-u", sudo_user] + build_cmd
@@ -430,6 +479,42 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                     use_json,
                 )
 
+    # Which ZFS to ship is the staged build's decision, not the
+    # command line's: osd_zfs.ko is linked against one specific ZFS
+    # build, so shipping any other would produce a module that won't
+    # load.  build_lustre records the version it used.
+    zfs_staging: Path | None = None
+    staged_meta = read_staging_meta(staging)
+    staged_zfs_version = (
+        staged_meta.get("zfs_version")
+        if isinstance(staged_meta, dict)
+        else None
+    )
+    if staged_zfs_version and not userspace_only:
+        from ltvm_pkg.zfs_build import zfs_staging_dir
+
+        zfs_staging = zfs_staging_dir(tc, deploy_kernel, staged_zfs_version)
+        if not any((zfs_staging / "lib" / "modules").rglob("zfs.ko*")):
+            return _error(
+                f"Lustre staging was built against ZFS "
+                f"{staged_zfs_version}, but its build artifact is missing "
+                f"from {zfs_staging}",
+                use_json,
+                hint=f"Run: ltvm build zfs {target} --kernel "
+                f"{deploy_kernel} --zfs-version {staged_zfs_version}",
+            )
+        if not use_json:
+            print(f"  Shipping ZFS {staged_zfs_version}")
+    elif want_zfs and not userspace_only:
+        return _error(
+            "ZFS was requested but the Lustre staging being deployed "
+            "was not built with it",
+            use_json,
+            hint="This happens with a bundled snapshot from `ltvm "
+            "fetch`, which is published without ZFS.  Pass "
+            "--lustre-tree <source tree> to build one with it.",
+        )
+
     try:
         _cli_attr("deploy_to_vm")(
             vm,
@@ -439,6 +524,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             ram_osts=getattr(args, "ram_osts", 0) or 0,
             ram_ost_size_gb=getattr(args, "ram_ost_size", 32),
             ram_mdt=getattr(args, "ram_mdt", False),
+            zfs_staging=zfs_staging,
+            fstype=fstype,
         )
     except RuntimeError as e:
         return _error(str(e), use_json)

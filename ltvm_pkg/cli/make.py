@@ -133,6 +133,19 @@ def _build_lustre_locally(
         )
 
         enable_server = tc.lustre_mode != LustreMode.CLIENT
+
+        from ltvm_pkg.cli.build import _resolve_zfs
+
+        zfs_src, zfs_version, zfs_err = _resolve_zfs(
+            tc,
+            args,
+            image.kernel,
+            use_json,
+            force=bool(getattr(args, "rebuild", False)),
+        )
+        if zfs_err is not None:
+            return None, _error(zfs_err, use_json)
+
         if not use_json:
             print(
                 f"  Building Lustre for {image.target} "
@@ -151,12 +164,21 @@ def _build_lustre_locally(
                 arch=tc.arch,
                 kernel=image.kernel,
                 variant=tc.variant_name,
+                zfs_src=zfs_src,
+                zfs_version=zfs_version,
             )
         except Exception as e:
             return None, _error(f"Lustre build failed: {e}", use_json)
         autostop.success = True
 
     meta["lustre_tree"] = str(lustre_tree)
+    if zfs_version:
+        from ltvm_pkg.zfs_build import zfs_staging_dir
+
+        meta["zfs_version"] = zfs_version
+        meta["zfs_staging"] = str(
+            zfs_staging_dir(tc, image.kernel, zfs_version)
+        )
     return meta, None
 
 
@@ -193,8 +215,21 @@ def _do_install(args: argparse.Namespace, use_json: bool) -> int:
     if warning and not use_json:
         print(f"  WARNING: {warning}")
 
+    # ZFS goes in first so the single depmod below resolves osd_zfs's
+    # dependency on zfs.ko, and its files land in the SAME manifest --
+    # a second manifest would be overwritten by this one, and
+    # make-uninstall would then leave ZFS behind on the disk forever.
+    zfs_staging = Path(meta["zfs_staging"]) if meta.get("zfs_staging") else None
     try:
         files, dirs = staging_contents(staging)
+        if zfs_staging is not None:
+            zfs_files, zfs_dirs = staging_contents(zfs_staging)
+            install_staging_into_root(zfs_staging)
+            files = sorted(set(files) | set(zfs_files))
+            dirs = sorted(
+                set(dirs) | set(zfs_dirs),
+                key=lambda p: (-p.count("/"), p),
+            )
         install_staging_into_root(staging)
         run_depmod_ldconfig(kver or None)
         write_manifest(
@@ -212,6 +247,7 @@ def _do_install(args: argparse.Namespace, use_json: bool) -> int:
         "kernel_version": kver,
         "lustre_tree": meta["lustre_tree"],
         "staging": str(staging),
+        "zfs_version": meta.get("zfs_version"),
         "files_installed": len(files),
         "manifest": str(MANIFEST_PATH),
         "warning": warning,

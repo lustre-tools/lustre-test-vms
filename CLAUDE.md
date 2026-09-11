@@ -3,7 +3,8 @@
 Build infrastructure for Lustre development/testing using
 QEMU microVMs. Produces four cacheable artifacts per
 target OS: build container, kernel, VM base image, and
-Lustre staging (userland + modules per kernel).
+Lustre staging (userland + modules per kernel), plus an
+optional fifth -- ZFS -- when a build asks for it.
 
 ## LLM: Getting the User Set Up
 
@@ -70,6 +71,7 @@ internals and release mechanics stay in this file.
   is implementation.  `ltvm` script at repo root is the CLI.
 - `artifacts/<target>/<arch>/{container,kernels/<kver>,images/<kver>[/<variant>]}/`
   -- gitignored build artifacts with a `meta.json` each.
+  ZFS, when built, lands at `kernels/<kver>/zfs/<version>/`.
 - `docs/` -- operator notes (getting started, releasing
   prebuilt QEMU, nested virtualization, SoftRoCE setup,
   system test plan).
@@ -192,6 +194,89 @@ ltvm target validate rocky9 --lustre-tree ~/lustre-release
 # Bypass a refusal (not hard errors):
 ltvm build all rocky9 --lustre-tree ~/lustre-release --force-compat
 ```
+
+## ZFS
+
+ZFS is a per-build option, not a property of a target.  It
+is entirely out-of-tree, so it sits between the kernel and
+Lustre: it *reads* the kernel build-tree and changes
+nothing about it, and it is installed into a VM at deploy
+time rather than baked into the image.  Nothing about a
+target's container, kernel or image artifacts depends on
+it -- which is what lets it be a flag.
+
+```bash
+ltvm build zfs rocky9                                  # standalone
+ltvm build lustre rocky9 --lustre-tree ~/lustre-release --zfs
+ltvm deploy-lustre co1-zfs --lustre-tree ~/lustre-release --zfs --mount
+ltvm cluster deploy co2 --build ~/lustre-release --zfs --mount
+```
+
+`--zfs` on a **build** means "build the ZFS OSD".  The
+result has *both* backends: `--enable-server --with-zfs`
+produces osd-ldiskfs and osd-zfs from one build, and
+`FSTYPE` picks between them at test time.
+
+`--zfs` on a **deploy** additionally means "run this VM on
+ZFS", so it implies `--fstype zfs`.  Pass `--fstype
+ldiskfs` alongside it to stage ZFS on a VM you want to
+keep running ldiskfs.  `--fstype` writes the setting into
+the VM's `cfg/local.sh`, which is what `llmount.sh`,
+`auster` and a bare `sanity.sh` all read.
+
+For ZFS the test framework takes `MDSDEV*`/`OSTDEV*` as
+the **vdevs** to build pools on and derives the dataset
+names itself (`$FSNAME-mdt1/mdt1`), so the `/dev/vd*`
+mapping deploy already writes is what ZFS wants too --
+nothing else in cfg/local.sh changes.
+
+### Version
+
+`--zfs-version VER` (implies `--zfs`) overrides the
+target's `zfs.version` in targets.yaml, which in turn
+overrides `DEFAULT_ZFS_VERSION` in
+[ltvm_pkg/zfs_build.py](ltvm_pkg/zfs_build.py).  Release
+tarballs come from openzfs/zfs and cache globally under
+`artifacts/cache/zfs/`.
+
+rocky8 pins 2.3.4 rather than 2.4.0: 2.4 dropped support
+for the 4.18 EL8 kernel.
+
+### Artifact
+
+`kernels/<kver>/zfs/<version>/` holds `src/` (configured
+and built in place, for Lustre's `--with-zfs`) and
+`staging/` (a `make install DESTDIR=` tree, for
+deploy-lustre to stream into a VM).  It is keyed on the
+kernel's release string **and** the kernel artifact's
+`input_hash`, because zfs.ko links against Module.symvers
+-- which moves when a kernel patch changes without
+kernel.release changing.
+
+The ZFS a VM receives is never chosen by the command line:
+`build lustre` records the version in the staging meta and
+deploy ships exactly that one, since osd_zfs.ko is linked
+against one specific ZFS build.
+
+Only rhel-family build containers are wired up (the inner
+script installs its extra build deps with dnf).  Client
+targets are refused -- ZFS is a server backend.
+
+### Publishing
+
+`ltvm target publish` emits a `zfs` asset only when the
+Lustre being published was itself built with ZFS.  It
+carries `staging/` and not `src/`: staging is what a
+fetcher installs into a VM (~48 MB compressed), while
+`src/` is only needed to *build* Lustre `--with-zfs`, adds
+~180 MB, and `ltvm build zfs` reproduces it in well under
+two minutes.  A fetched ZFS therefore reads as stale to
+`ltvm build zfs`, which is correct -- it has no source to
+configure against.
+
+The kernel asset excludes `zfs/` for the same reason it
+excludes `mofed-kmods/`: a fetcher who never passes
+`--zfs` should not pay for it.
 
 ## VM Management
 
@@ -328,6 +413,7 @@ Per-target keys:
 | os_name / os_version | rocky / 9.7 | Distro + version |
 | container_image | rockylinux:9 | Build-container base |
 | lustre.mode | server_ldiskfs | Compat gate mode |
+| zfs.version | 2.4.0 | ZFS release `--zfs` builds (does not enable it) |
 | kernels.default | 5.14-rhel9.7 | Default kernel |
 | kernels.available | [5.14-rhel9.7, ...] | Buildable kernels |
 | kernels.config | {CONFIG_XEN_PVH: y} | Per-target config overrides |

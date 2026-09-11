@@ -1259,3 +1259,124 @@ class TestKernelDirMatchingRunning:
             img = li.resolve_local_image()
         m.assert_not_called()
         assert img.kernel == "5.14-rhel9.7-1.el9"
+
+
+class TestMakeInstallZfs:
+    """`make-install --zfs` installs ZFS into / beside Lustre.
+
+    The property that matters is manifest coverage: install writes ONE
+    manifest and uninstall removes exactly what it lists, so ZFS files
+    that miss it would stay on the disk forever.
+    """
+
+    def _meta(self, tmp_path: Path, zfs: bool):
+        staging = tmp_path / "staging"
+        (staging / "usr" / "sbin").mkdir(parents=True)
+        (staging / "usr" / "sbin" / "mount.lustre").write_text("x")
+        meta = {
+            "staging": str(staging),
+            "lustre_tree": str(tmp_path / "src"),
+            "kernel_version": "5.14.0-611.el9_lustre",
+        }
+        if zfs:
+            zdir = tmp_path / "zfsstaging"
+            (zdir / "usr" / "sbin").mkdir(parents=True)
+            (zdir / "usr" / "sbin" / "zpool").write_text("x")
+            (zdir / "etc" / "zfs").mkdir(parents=True)
+            (zdir / "etc" / "zfs" / "zpool.d").write_text("x")
+            meta["zfs_version"] = "2.4.0"
+            meta["zfs_staging"] = str(zdir)
+        return meta
+
+    def _run(self, tmp_path: Path, zfs: bool):
+        from contextlib import ExitStack
+
+        import ltvm_pkg.cli.make as mk
+
+        meta = self._meta(tmp_path, zfs)
+        installed: list[Path] = []
+        captured: dict = {}
+
+        def _fake_write_manifest(image, staging, tree, kver, files, dirs):
+            captured["files"] = files
+            captured["dirs"] = dirs
+
+        with ExitStack() as st:
+            for cm in TestMakeCommandBehaviour()._on_ltvm(tmp_path):
+                st.enter_context(cm)
+            st.enter_context(
+                patch.object(
+                    mk, "_guard", return_value=(("stamp", tmp_path), None)
+                )
+            )
+            st.enter_context(
+                patch.object(
+                    mk, "_resolve_machine", return_value=(_image(), None)
+                )
+            )
+            st.enter_context(
+                patch.object(
+                    mk, "_build_lustre_locally", return_value=(meta, None)
+                )
+            )
+            st.enter_context(
+                patch.object(
+                    mk,
+                    "install_staging_into_root",
+                    side_effect=lambda p: installed.append(p),
+                )
+            )
+            st.enter_context(patch.object(mk, "run_depmod_ldconfig"))
+            st.enter_context(
+                patch.object(mk, "check_kernel_match", return_value=None)
+            )
+            st.enter_context(
+                patch.object(mk, "write_manifest", _fake_write_manifest)
+            )
+            rc = mk._do_install(
+                TestMakeCommandBehaviour()._args(
+                    tmp_path, zfs=zfs, zfs_version=None
+                ),
+                False,
+            )
+        return rc, installed, captured
+
+    def test_zfs_installed_before_lustre(self, tmp_path: Path) -> None:
+        """One depmod covers both, and osd_zfs depends on zfs.ko."""
+        rc, installed, _ = self._run(tmp_path, zfs=True)
+        assert rc == 0
+        assert [p.name for p in installed] == ["zfsstaging", "staging"]
+
+    def test_manifest_covers_the_zfs_files(self, tmp_path: Path) -> None:
+        rc, _installed, captured = self._run(tmp_path, zfs=True)
+        assert rc == 0
+        assert "usr/sbin/zpool" in captured["files"]
+        assert "usr/sbin/mount.lustre" in captured["files"]
+        assert "etc/zfs" in captured["dirs"]
+
+    def test_manifest_dirs_stay_deepest_first(self, tmp_path: Path) -> None:
+        """make-uninstall rmdirs bottom-up, so the merge must not
+        resort the combined list into lexical order."""
+        _rc, _i, captured = self._run(tmp_path, zfs=True)
+        depths = [d.count("/") for d in captured["dirs"]]
+        assert depths == sorted(depths, reverse=True)
+
+    def test_no_zfs_leaves_everything_alone(self, tmp_path: Path) -> None:
+        rc, installed, captured = self._run(tmp_path, zfs=False)
+        assert rc == 0
+        assert [p.name for p in installed] == ["staging"]
+        assert not any("zpool" in f for f in captured["files"])
+
+
+def _image():
+    from ltvm_pkg.local_install import LocalImage
+
+    return LocalImage(
+        target="rocky9",
+        arch="x86_64",
+        variant="base",
+        kernel="5.14-rhel9.7",
+        kernel_version="5.14.0-611.el9_lustre",
+        os_family="rhel",
+        source="stamp",
+    )

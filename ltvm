@@ -158,6 +158,7 @@ from ltvm_pkg.cli import (  # noqa: E402
     cmd_build_lustre,
     cmd_build_mofed_kmods,
     cmd_build_shell,
+    cmd_build_zfs,
     cmd_clean,
     cmd_cluster,
     cmd_console_log,
@@ -338,6 +339,26 @@ def build_parser() -> argparse.ArgumentParser:
         "Folds into the variant's input hash.",
     )
 
+    # Shared ZFS flags.  ZFS is a per-build option, not a property of a
+    # target: it is built between the kernel and Lustre and installed
+    # into the VM at deploy time, so nothing about a target's
+    # container, kernel or image artifacts depends on it.
+    zfs_arg = argparse.ArgumentParser(add_help=False)
+    zfs_arg.add_argument(
+        "--zfs",
+        action="store_true",
+        default=False,
+        help="Build ZFS against this kernel and build Lustre "
+        "--with-zfs, producing osd-zfs alongside osd-ldiskfs",
+    )
+    zfs_arg.add_argument(
+        "--zfs-version",
+        default=None,
+        metavar="VER",
+        help="OpenZFS release to use (default: the target's zfs.version "
+        "in targets.yaml).  Implies --zfs.",
+    )
+
     # Shared --force-compat flag for subcommands that gate on Lustre-tree
     # compatibility (build + deploy paths).  'refuse' status is bypassed
     # when set; hard errors (parse/IO) are never bypassed.
@@ -475,7 +496,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     bap = build_sub.add_parser(
         "all",
-        parents=[common, kernel_arg, force_arg, force_compat_arg, variant_arg],
+        parents=[
+            common,
+            kernel_arg,
+            force_arg,
+            force_compat_arg,
+            variant_arg,
+            zfs_arg,
+        ],
         help="Build container + kernel + Lustre + image from scratch",
     )
     _add_build_all_args(bap)
@@ -525,7 +553,14 @@ def build_parser() -> argparse.ArgumentParser:
     # but the flag behaviour is identical.
     blp = build_sub.add_parser(
         "lustre",
-        parents=[common, kernel_arg, force_arg, force_compat_arg, variant_arg],
+        parents=[
+            common,
+            kernel_arg,
+            force_arg,
+            force_compat_arg,
+            variant_arg,
+            zfs_arg,
+        ],
         help="Build a Lustre source tree against the target kernel build-tree",
     )
     _add_target_arg(blp, required=True)
@@ -567,6 +602,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to mount in container (default: cwd)",
     )
     bshp.set_defaults(func=cmd_build_shell)
+
+    bzp = build_sub.add_parser(
+        "zfs",
+        parents=[common, kernel_arg, force_arg],
+        help="Build OpenZFS against the target's kernel build-tree",
+    )
+    _add_target_arg(bzp, required=True)
+    bzp.add_argument(
+        "--zfs-version",
+        default=None,
+        metavar="VER",
+        help="OpenZFS release to build (default: the target's "
+        "zfs.version in targets.yaml)",
+    )
+    bzp.add_argument(
+        "--jobs", type=int, default=None, help="Parallel jobs (default: nproc)"
+    )
+    bzp.set_defaults(func=cmd_build_zfs)
 
     bmkp = build_sub.add_parser(
         "mofed-kmods",
@@ -1304,6 +1357,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Put the MDT on a ram device too (default: leave it alone)",
     )
+    sp.add_argument(
+        "--zfs",
+        action="store_true",
+        default=False,
+        help="Build Lustre --with-zfs and install ZFS into the VM "
+        "alongside it.  Implies --fstype zfs unless --fstype says "
+        "otherwise.",
+    )
+    sp.add_argument(
+        "--zfs-version",
+        default=None,
+        metavar="VER",
+        help="OpenZFS release to use (default: the target's zfs.version "
+        "in targets.yaml).  Implies --zfs.",
+    )
+    sp.add_argument(
+        "--fstype",
+        choices=["ldiskfs", "zfs"],
+        default=None,
+        help="Pin FSTYPE in the VM's cfg/local.sh, which is what "
+        "llmount.sh and auster read (default: leave the file's "
+        "existing setting alone)",
+    )
     _dep_tflag = sp.add_argument(
         "--target",
         dest=_TARGET_FLAG_DEST,
@@ -1353,6 +1429,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the Lustre source tree (default: cwd)",
     )
     sp.add_argument(
+        "--zfs",
+        action="store_true",
+        default=False,
+        help="Build Lustre --with-zfs and install ZFS into / alongside it",
+    )
+    sp.add_argument(
+        "--zfs-version",
+        default=None,
+        metavar="VER",
+        help="OpenZFS release to use (default: the target's zfs.version "
+        "in targets.yaml).  Implies --zfs.",
+    )
+    sp.add_argument(
         "--jobs",
         "-j",
         type=int,
@@ -1397,6 +1486,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--lustre-tree",
         default=None,
         help="Path to the Lustre source tree (default: cwd)",
+    )
+    sp.add_argument(
+        "--zfs",
+        action="store_true",
+        default=False,
+        help="Build Lustre --with-zfs and install ZFS into / alongside it",
+    )
+    sp.add_argument(
+        "--zfs-version",
+        default=None,
+        metavar="VER",
+        help="OpenZFS release to use (default: the target's zfs.version "
+        "in targets.yaml).  Implies --zfs.",
     )
     sp.add_argument(
         "--jobs",

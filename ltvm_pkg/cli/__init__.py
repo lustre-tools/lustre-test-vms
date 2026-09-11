@@ -33,6 +33,7 @@ from ltvm_pkg.cli.build import (
     cmd_build_lustre,
     cmd_build_mofed_kmods,
     cmd_build_shell,
+    cmd_build_zfs,
     cmd_clean,
     cmd_status,
 )
@@ -53,7 +54,12 @@ from ltvm_pkg.cli.util import (
     _qemu_ns,
     _require_root,
 )
-from ltvm_pkg.deploy import deploy_to_vm, lustre_mount_vm
+from ltvm_pkg.deploy import (
+    configure_fstype,
+    deploy_to_vm,
+    lustre_mount_vm,
+    retire_stale_zfs,
+)
 from ltvm_pkg.image_build import build_image, image_status
 from ltvm_pkg.kernel_build import (
     SrpmNotFoundError,
@@ -201,6 +207,7 @@ __all__ = [
     "cmd_build_kernel",
     "cmd_build_lustre",
     "cmd_build_mofed_kmods",
+    "cmd_build_zfs",
     "cmd_build_shell",
     "cmd_clean",
     "cmd_cluster",
@@ -232,6 +239,7 @@ __all__ = [
     "cmd_validate",
     "cmd_vm_start",
     "cmd_vm_stop",
+    "configure_fstype",
     "deploy_to_vm",
     "fetch_target",
     "host_setup",
@@ -242,6 +250,7 @@ __all__ = [
     "load_meta_safe",
     "logging",
     "lustre_mount_vm",
+    "retire_stale_zfs",
     "os",
     "package_target",
     "_hash_file",

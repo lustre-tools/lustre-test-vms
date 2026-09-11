@@ -29,6 +29,12 @@ targets:
     os_version: '8.10'
     srpm_url: https://dl.rockylinux.org/pub/rocky/8/BaseOS/source/tree/Packages/k
     status: working
+    # Version `--zfs` builds for this target.  Declaring it does not
+    # turn ZFS on; it only says which release to use when asked.
+    # 2.3.x rather than the 2.4.0 lustre/ChangeLog recommends: 2.4
+    # dropped support for the 4.18 EL8 kernel.
+    zfs:
+      version: 2.3.4
   rocky9:
     # No configure_args: the build container has no Kerberos v5, so
     # --enable-gss makes configure fail with "Kerberos v5 with GSS
@@ -54,6 +60,11 @@ targets:
     os_version: '9.7'
     srpm_url: https://dl.rockylinux.org/pub/rocky/9/BaseOS/source/tree/Packages/k
     status: working
+    # Version `--zfs` builds for this target.  Declaring it does not
+    # turn ZFS on; it only says which release to use when asked.
+    # Tracks the "Recommended ZFS version" line in lustre/ChangeLog.
+    zfs:
+      version: 2.4.0
     variants:
       mofed-24:
         container_overlay: rocky9/variants/mofed-24.container.Dockerfile
@@ -98,6 +109,8 @@ targets:
     os_version: '9.7'
     srpm_url: https://dl.rockylinux.org/pub/rocky/9/BaseOS/source/tree/Packages/k
     status: working
+    zfs:
+      version: 2.4.0
   rocky10:
     configure_args:
     - --enable-gss=yes
@@ -134,6 +147,8 @@ targets:
     os_version: '10.1'
     srpm_url: https://dl.rockylinux.org/pub/rocky/10/BaseOS/source/tree/Packages/k
     status: working
+    zfs:
+      version: 2.4.0
   # Vanilla kernel.org kernels on a Rocky 10 userspace.  Exists to get
   # Lustre building and running against mainline before any distro
   # ships it -- so it is expected to be ahead of lustre/ChangeLog, and
@@ -174,6 +189,8 @@ targets:
     os_name: rocky
     os_version: '10.1'
     status: experimental
+    zfs:
+      version: 2.4.0
   ubuntu2404:
     # --with-o2ib=no is NOT needed here: it has been hard-coded in the
     # base configure line (lustre_build.py) for every target since

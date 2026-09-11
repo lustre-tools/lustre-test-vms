@@ -648,6 +648,23 @@ def cmd_targets(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------
 
 
+def _built_zfs_versions(tc: Any, kernel: str) -> list[str]:
+    """ZFS versions already built against ``kernel``.
+
+    Reported per kernel because that is how the artifact is keyed --
+    a ZFS built for one kernel is useless to another.  Empty for every
+    target nobody has passed --zfs for, which is the normal state.
+    """
+    try:
+        zfs_root = tc.kernel_output_dir(kernel) / "zfs"
+    except ValueError:
+        # resolve_kernel rejects a kernel this target doesn't declare.
+        return []
+    if not zfs_root.is_dir():
+        return []
+    return sorted(d.name for d in zfs_root.iterdir() if d.is_dir())
+
+
 def cmd_target_show(args: argparse.Namespace) -> int:
     use_json = args.json
     tc, err = _load_target_args(args, use_json)
@@ -661,7 +678,7 @@ def cmd_target_show(args: argparse.Namespace) -> int:
     except Exception:
         all_releases = None
 
-    kernels = []
+    kernels: list[dict[str, Any]] = []
     for kname in tc.declared_kernels():
         signature = _cli_attr("_kernel_release_signature")(kname)
         local, remote = _release_status(
@@ -682,6 +699,7 @@ def cmd_target_show(args: argparse.Namespace) -> int:
                 "built": built,
                 "local_release": local,
                 "remote_release": remote,
+                "zfs_built": _built_zfs_versions(tc, kname),
             }
         )
 
@@ -694,6 +712,7 @@ def cmd_target_show(args: argparse.Namespace) -> int:
         "os_version": tc.os_version,
         "container_image": tc.container_image,
         "lustre_mode": tc.lustre_mode.value,
+        "zfs_version": tc.zfs_version,
         "default_mem": tc.default_mem,
         "default_kernel": tc.default_kernel,
         "kernels": kernels,
@@ -715,6 +734,8 @@ def cmd_target_show(args: argparse.Namespace) -> int:
     )
     print(f"container image:  {payload['container_image']}")
     print(f"lustre mode:      {payload['lustre_mode']}")
+    if payload["zfs_version"]:
+        print(f"zfs version:      {payload['zfs_version']}  (on --zfs)")
     print(f"default mem:      {payload['default_mem']} MB")
     print(f"output dir:       {payload['output_dir']}")
     print()
@@ -726,6 +747,8 @@ def cmd_target_show(args: argparse.Namespace) -> int:
             print(f"            local:  {k['local_release']}")
         if k["remote_release"] not in ("-", "?"):
             print(f"            remote: {k['remote_release']}")
+        if k["zfs_built"]:
+            print(f"            zfs:    {', '.join(k['zfs_built'])}")
     return EXIT_OK
 
 

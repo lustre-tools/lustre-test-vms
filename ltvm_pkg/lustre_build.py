@@ -222,6 +222,32 @@ def _container_exists(tag: str) -> bool:
     return r.returncode == 0
 
 
+def configure_stamp_hash(cfg: str, zfs_version: str | None = None) -> str:
+    """Identity of a configure run, for the reconfigure stamp.
+
+    The kernel/server stamps don't capture configure flags, so a changed
+    targets.yaml configure_args (or --configure) on an unchanged kernel
+    would silently reuse the old config.status and the new flags would
+    never take effect.
+
+    The ZFS version is hashed separately from the command line because
+    ``--with-zfs=/zfs`` is spelled identically for every version -- /zfs
+    is a mount point, so switching versions leaves ``cfg``
+    byte-identical.  Without it, ``--zfs-version 2.3.4`` on a tree last
+    built against 2.4.0 skipped the reconfigure and compiled osd-zfs
+    against 2.3.4 headers using the config.h probed against 2.4.0,
+    which fails on the dmu_flags_t argument 2.4.0 added ("too many
+    arguments to function 'dmu_write_by_dnode'").
+    """
+    if not zfs_version:
+        # Hash the bare command line, exactly as this did before ZFS
+        # existed, so adding the parameter does not invalidate the
+        # stamp in every Lustre tree already on disk and cost everyone
+        # one full reconfigure + rebuild per target for nothing.
+        return hashlib.sha256(cfg.encode()).hexdigest()
+    return hashlib.sha256(f"{cfg}\0zfs={zfs_version}".encode()).hexdigest()
+
+
 def _stamp_suffix(target: str, arch: str) -> str:
     """Reconfigure-stamp suffix that captures both target and arch.
 
@@ -313,6 +339,8 @@ def build_lustre(
     arch: str = "x86_64",
     kernel: str | None = None,
     variant: str = "base",
+    zfs_src: str | Path | None = None,
+    zfs_version: str | None = None,
 ) -> BuildResult:
     """Build a Lustre source tree.
 
@@ -327,6 +355,12 @@ def build_lustre(
     extra_configure: list[str] -- additional configure args
     jobs:           int or None -- parallel jobs (None = nproc)
     force:          bool -- force full clean + reconfigure
+    zfs_src:        Path or None -- a built ZFS source tree (see
+                    zfs_build).  When given it is bind-mounted at /zfs
+                    and configure gets --with-zfs=/zfs, so the build
+                    produces osd-zfs alongside osd-ldiskfs.
+    zfs_version:    str or None -- recorded in the staging meta so
+                    deploy knows which ZFS artifact to ship with it
 
     Raises RuntimeError on build failure.
     """
@@ -347,6 +381,20 @@ def build_lustre(
             f"Module.symvers missing from {build_tree}\n"
             f"Kernel build may be incomplete"
         )
+
+    if zfs_src is not None:
+        zfs_src = Path(zfs_src).resolve()
+        if not (zfs_src / "zfs_config.h").is_file():
+            raise ValueError(
+                f"{zfs_src} is not a configured ZFS tree "
+                f"(no zfs_config.h)\n"
+                f"Run 'ltvm build zfs <target>' first"
+            )
+        if not enable_server:
+            raise ValueError(
+                "ZFS is a server backend; --with-zfs makes no sense "
+                "for a client-only build"
+            )
 
     if jobs is None:
         jobs = os.cpu_count() or 4
@@ -377,6 +425,8 @@ def build_lustre(
             target=target,
             kernel=kernel,
             variant=variant,
+            zfs_src=zfs_src,
+            zfs_version=zfs_version,
         )
 
 
@@ -506,12 +556,15 @@ def _build_in_container(
     target: str = DEFAULT_TARGET,
     kernel: str | None = None,
     variant: str = "base",
+    zfs_src: Path | None = None,
+    zfs_version: str | None = None,
 ) -> BuildResult:
     """Build Lustre inside the build container.
 
     Mount layout:
       /lustre  -- Lustre source (read-write, build here)
       /kernel  -- kernel build-tree (read-only)
+      /zfs     -- built ZFS source tree (read-only, only with --zfs)
     """
     print(f"  Container: {container_tag}")
     print(f"  Lustre:    {lustre_tree}")
@@ -690,6 +743,14 @@ def _build_in_container(
         cfg += " --enable-server"
     else:
         cfg += " --disable-server"
+    # --with-zfs points at the tree zfs_build left configured and built
+    # against this same kernel.  Lustre's LB_ZFS reads zfs_config.h and
+    # module/Module.symvers from it for osd_zfs.ko, and LB_ZFS_USER
+    # picks up the in-tree libspl/libzfs headers and .libs for the
+    # mount_osd_zfs.so plugin.  ldiskfs is unaffected: this adds a
+    # second OSD rather than replacing the first.
+    if zfs_src is not None:
+        cfg += " --with-zfs=/zfs"
     if extra_configure:
         # shlex.quote each arg so paths with spaces (e.g.
         # --with-linux="/tmp/build dir/linux") and configure flags with
@@ -700,12 +761,7 @@ def _build_in_container(
         # re-interpreted by the container shell.
         cfg += " " + " ".join(shlex.quote(a) for a in extra_configure)
 
-    # The kernel/server stamps don't capture configure flags, so a
-    # changed targets.yaml configure_args (or --configure) on an
-    # unchanged kernel would silently reuse the old config.status and
-    # the new flags would never take effect.  Stamp the full configure
-    # command line and reconfigure when it changes.
-    cfg_hash = hashlib.sha256(cfg.encode()).hexdigest()
+    cfg_hash = configure_stamp_hash(cfg, zfs_version)
     cfg_stamp = lustre_tree / f".ltvm-configure-{_stamp_suffix(target, arch)}"
     if not need_reconf:
         if not cfg_stamp.exists():
@@ -734,7 +790,21 @@ def _build_in_container(
         # reconfiguring.  distclean only cleans dirs the current
         # Makefile knows about, so server .ko files survive a
         # client-only reconfigure (and vice versa).
-        script_parts.append("find . -name '*.ko' -delete 2>/dev/null || true")
+        #
+        # Excluding .ltvm-staging is load-bearing: staging lives INSIDE
+        # the Lustre tree, one directory per (target, arch, kernel), and
+        # an unqualified sweep from the tree root deletes the staged
+        # modules of every OTHER kernel and target too.  They are not
+        # rebuilt -- the next build writes only its own staging dir --
+        # so the damage surfaces much later as a deploy or publish that
+        # finds a staging tree with directories and no .ko in it.
+        #
+        # -not -path rather than -prune: -delete turns on -depth, which
+        # makes -prune a no-op.
+        script_parts.append(
+            "find . -name '*.ko' -not -path './.ltvm-staging/*' "
+            "-delete 2>/dev/null || true"
+        )
         # Remove configure residue that poisons re-runs: conftest dirs/files
         # and the parallel kconftest/lpb directories.
         script_parts.append(
@@ -920,6 +990,12 @@ fi""")
         "-c",
         script,
     ]
+    if zfs_src is not None:
+        # Insert before the image tag, which must stay the last
+        # argument before "-c".  Read-only: configure reads headers and
+        # Module.symvers out of it and must not write into a shared
+        # artifact that other Lustre trees also build against.
+        cmd[-3:-3] = ["-v", f"{zfs_src}:/zfs:ro"]
 
     # Run podman as whoever ltvm itself runs as: do NOT drop privileges
     # to SUDO_USER here.
@@ -1068,6 +1144,11 @@ fi""")
             # silently shipped the previous build's modules.
             "configure_sha256": cfg_hash,
             "enable_server": enable_server,
+            # Which ZFS this Lustre was built against, or None.
+            # deploy-lustre reads it to decide whether to ship the
+            # matching ZFS artifact alongside these modules -- osd_zfs.ko
+            # and mount_osd_zfs.so are useless in a VM without it.
+            "zfs_version": zfs_version,
         },
         indent=2,
     )

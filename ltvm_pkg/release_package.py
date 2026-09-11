@@ -161,6 +161,15 @@ def _lustre_asset_name(target: str, arch: str, kver: str, variant: str) -> str:
     return f"lustre-{target}-{arch}-{kver}{_variant_suffix(variant)}.tar.zst"
 
 
+def _zfs_asset_name(target: str, arch: str, kver: str, zfs_version: str) -> str:
+    # No variant suffix, for the same reason the kernel asset has none:
+    # ZFS links against the kernel, which is variant-independent.  The
+    # ZFS version IS in the name, because two of them can coexist under
+    # one kernel and a fetcher must get the one its Lustre was built
+    # against.
+    return f"zfs-{target}-{arch}-{kver}-{zfs_version}.tar.zst"
+
+
 def _bootable_asset_name(
     target: str, arch: str, kver: str, variant: str, ext: str = "qcow2"
 ) -> str:
@@ -603,23 +612,53 @@ def snapshot_lustre(
             f"git rev-parse HEAD returned empty output for {lustre_tree}"
         )
 
+    # Which ZFS this Lustre was built against, if any.  build_lustre
+    # records it in the staging meta, which the rsync above copied in;
+    # lifting it to the snapshot is what lets package_target decide
+    # whether to publish a ZFS asset without re-deriving it.
+    staged_meta = load_meta_safe(dest / ".ltvm-staging-meta.json")
+    zfs_version = (
+        staged_meta.get("zfs_version")
+        if isinstance(staged_meta, dict)
+        else None
+    )
+
     snap_meta = {
         "source": str(lustre_tree),
         "kernel": kernel_name,
         "variant": variant,
         "ko_count": len(ko_files),
         "lustre_commit": lustre_commit,
+        "zfs_version": zfs_version,
     }
     (dest / ".ltvm-snapshot.json").write_text(
         json.dumps(snap_meta, indent=2) + "\n"
     )
     print(f"    Lustre commit: {lustre_commit[:12]}")
+    if zfs_version:
+        print(f"    ZFS:           {zfs_version}")
     return dest
 
 
 # ---------------------------------------------------------------------------
 # Packaging: emit split assets + manifest
 # ---------------------------------------------------------------------------
+
+
+def _snapshot_zfs_version(lustre_src: Path) -> str | None:
+    """The ZFS version the snapshotted Lustre was built against.
+
+    Prefers the snapshot meta, which snapshot_lustre writes, and falls
+    back to the staging meta it copied in -- so a snapshot taken by an
+    ltvm that predates the field still publishes its ZFS.
+    """
+    for name in (".ltvm-snapshot.json", ".ltvm-staging-meta.json"):
+        meta = load_meta_safe(lustre_src / name)
+        if isinstance(meta, dict):
+            v = meta.get("zfs_version")
+            if v:
+                return str(v)
+    return None
 
 
 def _asset_entry(kind: str, path: Path, tar_base: Path) -> dict[str, Any]:
@@ -785,6 +824,13 @@ def package_target(
             # MOFED userspace to use them with.
             "--exclude",
             f"{kernel_rel}/mofed-kmods",
+            # ZFS is an opt-in per-build artifact living under
+            # kernels/<kver>/zfs/<version>/.  It is hundreds of MB of
+            # source tree plus a DESTDIR install, and a fetcher who
+            # never passes --zfs has no use for it -- so it is built
+            # locally on demand rather than published.
+            "--exclude",
+            f"{kernel_rel}/zfs",
             "-cf",
             str(kern_asset),
             "-C",
@@ -841,6 +887,43 @@ def package_target(
         _tar_zstd(tar_base, [str(lustre_rel)], lus_asset, exclude=lus_exclude)
         assets["lustre"] = lus_asset
 
+    # ---- zfs asset (optional) ----
+    # Published only when the Lustre being published was itself built
+    # with ZFS: osd_zfs.ko is linked against one specific ZFS build, so
+    # the asset's job is to carry that exact one to the fetcher.  No
+    # ZFS in the build, no asset -- which is what keeps ZFS off every
+    # release of a target nobody builds it for.
+    #
+    # staging/ only, not src/.  The fetcher needs the DESTDIR tree to
+    # install into a VM (48 MB compressed); src/ is only needed to
+    # *build* Lustre --with-zfs, adds 180 MB, and `ltvm build zfs`
+    # reproduces it in well under two minutes.  A fetched artifact
+    # therefore reads as stale to `ltvm build zfs`, which is correct:
+    # it has no source to configure against.
+    zfs_version = (
+        _snapshot_zfs_version(lustre_src) if "lustre" in assets else None
+    )
+    if zfs_version:
+        zfs_art = kernel_dir / "zfs" / zfs_version
+        zfs_staging = zfs_art / "staging"
+        if zfs_staging.is_dir():
+            zfs_asset = dest_dir / _zfs_asset_name(
+                target_name, arch, kver, zfs_version
+            )
+            print(f"  [zfs]       {zfs_asset.name}")
+            zfs_members = [str(zfs_staging.relative_to(tar_base))]
+            zfs_meta = zfs_art / "meta.json"
+            if zfs_meta.exists():
+                zfs_members.append(str(zfs_meta.relative_to(tar_base)))
+            _tar_zstd(tar_base, zfs_members, zfs_asset)
+            assets["zfs"] = zfs_asset
+        else:
+            print(
+                f"  [zfs]       SKIPPED: Lustre was built against ZFS "
+                f"{zfs_version} but {zfs_staging} is missing"
+            )
+            zfs_version = None
+
     # ---- manifest ----
     manifest = {
         "schema": _schema_id(),
@@ -854,6 +937,8 @@ def package_target(
             _asset_entry(kind, path, tar_base) for kind, path in assets.items()
         ],
     }
+    if zfs_version:
+        manifest["zfs_version"] = zfs_version
     # Pick up lustre_commit from the snapshot meta if present.
     if "lustre" in assets:
         snap_meta = load_meta_safe(lustre_src / ".ltvm-snapshot.json")

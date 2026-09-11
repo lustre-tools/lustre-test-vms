@@ -409,6 +409,12 @@ def _cmd_build_all_body(
         print(f"==> Building Lustre against {full_kernel} kernel tree...")
     build_tree = tc.kernel_output_dir(kernel=full_kernel) / "build-tree"
     if not skip_lustre:
+        zfs_src, zfs_version, zfs_err = _resolve_zfs(
+            tc, args, full_kernel, use_json
+        )
+        if zfs_err is not None:
+            return _error(zfs_err, use_json)
+        results["zfs"] = zfs_version or "skipped"
         try:
             container_tag = tc.container_tag
             lmeta = _cli_attr("build_lustre")(
@@ -423,6 +429,8 @@ def _cmd_build_all_body(
                 arch=tc.arch,
                 kernel=full_kernel,
                 variant=tc.variant_name,
+                zfs_src=zfs_src,
+                zfs_version=zfs_version,
             )
             results["lustre"] = lmeta
         except Exception as e:
@@ -576,6 +584,122 @@ def cmd_build_kernel(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------
 # Subcommand: build mofed-kmods
 # ------------------------------------------------------------------
+
+
+def _resolve_zfs(
+    tc: TargetConfig,
+    args: argparse.Namespace,
+    kernel: str | None,
+    use_json: bool,
+    force: bool | None = None,
+) -> tuple[Path | None, str | None, str | None]:
+    """Build ZFS if this invocation asked for it.
+
+    Returns ``(src_dir, version, error_message)``.  ``(None, None,
+    None)`` means "ZFS was not requested", which is the default: --zfs
+    (or --zfs-version, which implies it) is what turns it on.
+    """
+    want = bool(getattr(args, "zfs", False)) or bool(
+        getattr(args, "zfs_version", None)
+    )
+    if not want:
+        return None, None, None
+
+    from ltvm_pkg.zfs_build import ZfsBuildError, ensure_zfs
+
+    if tc.lustre_mode == LustreMode.CLIENT:
+        return (
+            None,
+            None,
+            f"target {tc.name!r} is a client target (lustre.mode: "
+            f"client); ZFS is a server backend",
+        )
+    try:
+        src, _staging, version = ensure_zfs(
+            tc,
+            kernel,
+            version=getattr(args, "zfs_version", None),
+            force=bool(
+                getattr(args, "force", False) if force is None else force
+            ),
+            jobs=getattr(args, "jobs", None),
+        )
+    except (ZfsBuildError, FileNotFoundError, ValueError) as e:
+        return None, None, f"ZFS build failed: {e}"
+    if not use_json:
+        print(f"  zfs:   {version} ({src})")
+    return src, version, None
+
+
+def cmd_build_zfs(args: argparse.Namespace) -> int:
+    use_json = args.json
+    tc, err = _load_target_args(args, use_json)
+    if err is not None:
+        return err
+    assert tc is not None
+
+    err = _preflight_podman(use_json)
+    if err is not None:
+        return err
+
+    err = _preflight_container(tc, use_json)
+    if err is not None:
+        return err
+
+    from ltvm_pkg.zfs_build import (
+        ZfsBuildError,
+        build_zfs,
+        resolve_zfs_version,
+        zfs_src_dir,
+        zfs_staging_dir,
+    )
+
+    if tc.lustre_mode == LustreMode.CLIENT:
+        return _error(
+            f"target {tc.name!r} is a client target (lustre.mode: "
+            f"client); ZFS is a server backend",
+            use_json,
+        )
+
+    version = resolve_zfs_version(tc, getattr(args, "zfs_version", None))
+    kernel = getattr(args, "kernel", None)
+
+    if not use_json:
+        _print_target_header(
+            tc,
+            kernel=kernel,
+            variant=tc.variant_name,
+            action=f"Building ZFS {version}",
+        )
+
+    try:
+        out_dir = build_zfs(
+            tc,
+            kernel=kernel,
+            version=version,
+            force=getattr(args, "force", False),
+            jobs=getattr(args, "jobs", None),
+        )
+    except (ZfsBuildError, FileNotFoundError, ValueError) as e:
+        return _error(f"ZFS build failed: {e}", use_json)
+
+    staging = zfs_staging_dir(tc, kernel, version)
+    modules = sorted(
+        p.name for p in (staging / "lib" / "modules").rglob("*.ko*")
+    )
+    _output(
+        {
+            "target": tc.name,
+            "kernel": tc.resolve_kernel(kernel),
+            "zfs_version": version,
+            "path": str(out_dir),
+            "src": str(zfs_src_dir(tc, kernel, version)),
+            "staging": str(staging),
+            "modules": modules,
+        },
+        use_json,
+    )
+    return EXIT_OK
 
 
 def cmd_build_mofed_kmods(args: argparse.Namespace) -> int:
@@ -927,6 +1051,18 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
             srv = "server+client" if enable_server else "client-only"
             print(f"  scope: {srv}")
 
+        zfs_src, zfs_version, zfs_err = _resolve_zfs(
+            tc, args, resolved_kernel, use_json
+        )
+        if zfs_err is not None:
+            return _error(zfs_err, use_json)
+        if zfs_src is not None and not enable_server:
+            return _error(
+                "--zfs needs a server build, but this build is client-only",
+                use_json,
+                hint="Drop --disable-server, or drop --zfs",
+            )
+
         container_tag = tc.container_tag
 
         try:
@@ -942,6 +1078,8 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
                 arch=tc.arch,
                 kernel=resolved_kernel,
                 variant=tc.variant_name,
+                zfs_src=zfs_src,
+                zfs_version=zfs_version,
             )
         except Exception as e:
             return _error(f"Lustre build failed: {e}", use_json)
