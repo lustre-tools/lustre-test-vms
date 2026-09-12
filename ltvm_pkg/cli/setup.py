@@ -69,10 +69,14 @@ def _maybe_prime_sudo(reason: str, use_json: bool) -> None:
 
 def cmd_create(args: argparse.Namespace) -> int:
     use_json = args.json
-    _maybe_prime_sudo(
-        "ltvm create needs root for bridge/tap/qemu-img writes",
-        use_json,
-    )
+    # A dry run only reads, so priming sudo would prompt for a password
+    # that nothing is going to spend -- the one thing guaranteed to stop
+    # people using --dry-run.
+    if not getattr(args, "dry_run", False):
+        _maybe_prime_sudo(
+            "ltvm create needs root for bridge/tap/qemu-img writes",
+            use_json,
+        )
     from ltvm_pkg.vm_commands import cmd_create as _create
 
     return _vm_call(_create, args, use_json)

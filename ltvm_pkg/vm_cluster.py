@@ -331,6 +331,49 @@ def _create_one_node(
     return node.name, r.returncode, combined.rstrip("\n")
 
 
+def _print_cluster_plan(
+    cluster_name: str,
+    node_specs: list[ClusterNode],
+    *,
+    vcpus: int,
+    mem: int | None,
+    os_target: str | None,
+    arch: str | None,
+    disk_size: str | None,
+    nics: list[str],
+    owner_id: str | None,
+) -> None:
+    """Report what `cluster create` would do, for --dry-run.
+
+    Per-node IPs are not shown: each node's `ltvm create` claims one
+    under a lock, so there is no honest answer without claiming them.
+    """
+    print(
+        f"Would create cluster '{cluster_name}' with {len(node_specs)} nodes:"
+    )
+    for node in node_specs:
+        disks = []
+        if node.mdt_disks:
+            disks.append(f"{node.mdt_disks} MDT")
+        if node.ost_disks:
+            disks.append(f"{node.ost_disks} OST")
+        print(
+            f"  {node.name:<20} roles={'+'.join(node.roles):<16} "
+            f"disks={', '.join(disks) or 'none'}"
+        )
+    mem_desc = f"{mem} MB" if mem is not None else "target default"
+    arch_desc = f" arch={arch}" if arch else ""
+    print("Applied to every node:")
+    print(f"  target:  {os_target or 'default'}{arch_desc}")
+    print(f"  cpu/mem: {vcpus} vcpus, {mem_desc}")
+    if disk_size:
+        print(f"  disk:    {disk_size} each")
+    if nics:
+        print(f"  nics:    eth0 (mgmt) + {', '.join(nics)}")
+    print(f"  owner:   {owner_id}")
+    print("Nothing was written.  Re-run without --dry-run to create it.")
+
+
 def cmd_cluster_create(args: argparse.Namespace) -> None:
     cluster_name = args.name
     # Cluster name flows into filesystem paths (SOCKETS/<name>.cluster)
@@ -408,6 +451,24 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
         owner_id = resolve_owner_id(getattr(args, "owner_id", None))
     except ValueError as e:
         die(str(e))
+
+    if getattr(args, "dry_run", False):
+        # Everything above is validation and reads -- name rules,
+        # duplicate node names, already-taken VMs, the mgs/mds role
+        # rules, owner resolution.  The first thing written is a node,
+        # created by the pool below.
+        _print_cluster_plan(
+            cluster_name,
+            node_specs,
+            vcpus=vcpus,
+            mem=mem,
+            os_target=os_target,
+            arch=arch,
+            disk_size=disk_size,
+            nics=nics,
+            owner_id=owner_id,
+        )
+        return
 
     print(f"=== Creating cluster '{cluster_name}' ===")
     if os_target:

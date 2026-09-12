@@ -548,6 +548,172 @@ class TestCmdConsoleLog:
         with pytest.raises(SystemExit):
             vm_commands.cmd_console_log(args)
 
+    def test_rejects_a_negative_line_count(self, tmp_vmdir: Path) -> None:
+        vm = _seed_vm_files(tmp_vmdir, "neg")
+        vm.log_path.write_text("a\nb\n")
+        args = argparse.Namespace(name="neg", lines=-1)
+        with pytest.raises(SystemExit):
+            vm_commands.cmd_console_log(args)
+
+    def test_zero_lines_prints_nothing(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """lines[-0:] is the whole file, so 0 used to dump everything."""
+        vm = _seed_vm_files(tmp_vmdir, "zero")
+        vm.log_path.write_text("a\nb\nc\n")
+        vm_commands.cmd_console_log(argparse.Namespace(name="zero", lines=0))
+        assert capsys.readouterr().out == ""
+
+    def test_survives_non_utf8_console_output(
+        self, tmp_vmdir: Path, capsysbinary: pytest.CaptureFixture[bytes]
+    ) -> None:
+        """A guest puts arbitrary bytes on its serial line.
+
+        read_text() raised UnicodeDecodeError on the first stray byte,
+        so one garbled character made the whole log unreadable through
+        this command -- exactly when you most want to read it.
+
+        capsysbinary, not capsys: the bytes are passed through verbatim,
+        and asking the text fixture to decode them just moves the same
+        UnicodeDecodeError into the test harness.
+        """
+        vm = _seed_vm_files(tmp_vmdir, "garbled")
+        vm.log_path.write_bytes(b"before\ngarbage \x80\xff here\nafter\n")
+        vm_commands.cmd_console_log(argparse.Namespace(name="garbled", lines=3))
+        out = capsysbinary.readouterr().out.splitlines()
+        assert out == [b"before", b"garbage \x80\xff here", b"after"]
+
+
+# ── cmd_console_log --follow ─────────────────────────────
+
+
+class TestConsoleLogFollow:
+    """Following is `tail -F`, not `tail -f`.
+
+    The distinction is not academic here: QEMU's serial chardev is
+    opened without append=on (see qemu_run), so every boot truncates the
+    log.  A follower that only read forward would go quiet for the rest
+    of the VM's life after the first reboot.
+    """
+
+    @staticmethod
+    def _sleep_that(*actions: Any) -> Any:
+        """Stand in for time.sleep, doing one action per loop iteration.
+
+        The loop only sleeps when it has drained the file, so hooking
+        sleep is what lets a test write to the log *between* reads --
+        which is the only way to exercise streaming rather than just the
+        initial tail.  Ctrl-C ends it once the actions are spent.
+        """
+        calls = []
+
+        def fake_sleep(_seconds: float) -> None:
+            idx = len(calls)
+            calls.append(idx)
+            if idx >= len(actions):
+                raise KeyboardInterrupt
+            actions[idx]()
+
+        return fake_sleep
+
+    def test_streams_data_appended_while_following(
+        self, tmp_vmdir: Path, capsysbinary: pytest.CaptureFixture[bytes]
+    ) -> None:
+        vm = _seed_vm_files(tmp_vmdir, "f1")
+        vm.log_path.write_bytes(b"old1\nold2\n")
+
+        def append() -> None:
+            with open(vm.log_path, "ab") as fh:
+                fh.write(b"new1\n")
+
+        with patch.object(vm_commands.time, "sleep", self._sleep_that(append)):
+            vm_commands._follow_console_log(vm, 1)
+        # The tail, then the line that arrived after it.
+        assert capsysbinary.readouterr().out == b"old2\nnew1\n"
+
+    def test_picks_up_the_new_log_after_a_reboot(
+        self, tmp_vmdir: Path, capsysbinary: pytest.CaptureFixture[bytes]
+    ) -> None:
+        """The case a plain `tail -f` gets wrong, and silently."""
+        vm = _seed_vm_files(tmp_vmdir, "f2")
+        vm.log_path.write_bytes(b"first boot\n")
+
+        def reboot() -> None:
+            # QEMU reopens the chardev without append=on: truncate.
+            vm.log_path.write_bytes(b"second boot\n")
+
+        with patch.object(vm_commands.time, "sleep", self._sleep_that(reboot)):
+            vm_commands._follow_console_log(vm, 1)
+        captured = capsysbinary.readouterr()
+        assert captured.out == b"first boot\nsecond boot\n"
+        assert b"VM rebooted" in captured.err
+
+    def test_a_tail_of_zero_shows_only_new_data(
+        self, tmp_vmdir: Path, capsysbinary: pytest.CaptureFixture[bytes]
+    ) -> None:
+        """`--lines 0 --follow` is `tail -n 0 -f`: nothing pre-existing."""
+        vm = _seed_vm_files(tmp_vmdir, "f1b")
+        vm.log_path.write_bytes(b"existing\n")
+
+        def append() -> None:
+            with open(vm.log_path, "ab") as fh:
+                fh.write(b"fresh\n")
+
+        with patch.object(vm_commands.time, "sleep", self._sleep_that(append)):
+            vm_commands._follow_console_log(vm, 0)
+        assert capsysbinary.readouterr().out == b"fresh\n"
+
+    def test_rotated_detects_truncation(self, tmp_vmdir: Path) -> None:
+        vm = _seed_vm_files(tmp_vmdir, "f3")
+        vm.log_path.write_bytes(b"aaaaaaaaaa\n")
+        with open(vm.log_path, "rb") as fh:
+            fh.read()
+            assert vm_commands._rotated(vm.log_path, fh) is False
+            vm.log_path.write_bytes(b"x\n")
+            assert vm_commands._rotated(vm.log_path, fh) is True
+
+    def test_rotated_detects_replacement(self, tmp_vmdir: Path) -> None:
+        """Unlink-and-recreate leaves our fd on a file nobody writes to."""
+        vm = _seed_vm_files(tmp_vmdir, "f4")
+        vm.log_path.write_bytes(b"original\n")
+        with open(vm.log_path, "rb") as fh:
+            fh.read()
+            vm.log_path.unlink()
+            # Same size, different inode -- size alone would miss this.
+            vm.log_path.write_bytes(b"original\n")
+            assert vm_commands._rotated(vm.log_path, fh) is True
+
+    def test_follow_waits_for_a_log_that_does_not_exist_yet(
+        self, tmp_vmdir: Path
+    ) -> None:
+        """Following a VM you are about to start is reasonable."""
+        vm = _seed_vm_files(tmp_vmdir, "f5")
+        vm.log_path.unlink()
+        # _once returns rather than waiting; the point is that it does
+        # not raise or die.
+        vm_commands._follow_console_log(vm, 10, _once=True)
+
+    def test_follow_on_a_missing_log_does_not_die(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Without --follow a missing log is fatal; with it, it waits."""
+        _seed_vm_files(tmp_vmdir, "f6")
+        (tmp_vmdir / "sockets" / "f6.log").unlink()
+        with patch.object(vm_commands, "_follow_console_log") as follow:
+            vm_commands.cmd_console_log(
+                argparse.Namespace(name="f6", lines=10, follow=True)
+            )
+        assert follow.called
+
+    def test_ctrl_c_returns_quietly(self, tmp_vmdir: Path) -> None:
+        """Ctrl-C is how you stop following, not an error."""
+        vm = _seed_vm_files(tmp_vmdir, "f7")
+        vm.log_path.write_bytes(b"x\n")
+        with patch.object(
+            vm_commands.time, "sleep", side_effect=KeyboardInterrupt
+        ):
+            vm_commands._follow_console_log(vm, 1)  # must not raise
+
 
 # ── cmd_llmount ──────────────────────────────────────────
 

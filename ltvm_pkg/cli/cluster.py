@@ -71,9 +71,13 @@ def cmd_cluster(args: argparse.Namespace) -> int:
             return _error(str(e), use_json)
 
     if action == "create":
-        err = _require_root(use_json)
-        if err is not None:
-            return err
+        # --dry-run only reads, so it must not demand root.  Spotted
+        # before the flag loop below because the root gate comes first;
+        # the loop is still what validates it.
+        if not ({"--dry-run", "-n"} & set(cargs)):
+            err = _require_root(use_json)
+            if err is not None:
+                return err
         if len(cargs) < 2:
             return _error(
                 "cluster create requires a name and at least one node spec",
@@ -94,6 +98,7 @@ def cmd_cluster(args: argparse.Namespace) -> int:
         disk_size: str | None = None
         nics: list[str] = []
         owner_id: str | None = None
+        dry_run = False
         positional: list[str] = []
         i = 0
         while i < len(cargs):
@@ -122,12 +127,15 @@ def cmd_cluster(args: argparse.Namespace) -> int:
             elif cargs[i] in ("--owner", "--owner-id") and i + 1 < len(cargs):
                 owner_id = cargs[i + 1]
                 i += 2
+            elif cargs[i] in ("--dry-run", "-n"):
+                dry_run = True
+                i += 1
             elif cargs[i].startswith("--"):
                 return _error(
                     f"cluster create: unknown argument '{cargs[i]}'",
                     use_json,
                     hint="valid: --vcpus, --mem, --target, --arch, "
-                    "--disk-size, --nic, --owner-id",
+                    "--disk-size, --nic, --owner-id, --dry-run",
                 )
             else:
                 positional.append(cargs[i])
@@ -179,6 +187,7 @@ def cmd_cluster(args: argparse.Namespace) -> int:
                 disk_size=disk_size,
                 nic=nics,
                 owner_id=owner_id,
+                dry_run=dry_run,
             ),
         )
 

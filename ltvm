@@ -1174,6 +1174,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="OS target (e.g. rocky9); also accepts --target",
     )
     _create_target.completer = complete_targets  # type: ignore[attr-defined]
+    sp.add_argument(
+        "--dry-run",
+        "-n",
+        dest="dry_run",
+        action="store_true",
+        help="Resolve and validate everything, print what would be "
+        "created, and write nothing.  Needs no root.",
+    )
     sp.set_defaults(func=cmd_create)
 
     # -- VM lifecycle: destroy --
@@ -1235,6 +1243,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=50,
         help="Number of lines to show (default: 50)",
+    )
+    vclp.add_argument(
+        "-f",
+        "--follow",
+        action="store_true",
+        help="Keep streaming as the VM writes (Ctrl-C to stop).  Picks "
+        "up the new log when the VM reboots, and waits for one if the "
+        "VM has not started yet.",
     )
     vclp.set_defaults(func=cmd_console_log)
 

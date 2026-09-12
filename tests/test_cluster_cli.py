@@ -1065,3 +1065,131 @@ class TestClusterCreateRefusesExistingVMs:
             )
         # Aborted before spawning any `ltvm create`/`ltvm destroy`.
         assert not run.called
+
+
+# ─────────────────────────────────────────────────────────
+# cluster create --dry-run
+# ─────────────────────────────────────────────────────────
+
+
+class TestClusterCreateDryRun:
+    """--dry-run validates the whole spec, prints the node plan, and
+    creates nothing.
+
+    It stops at the thread pool that runs the per-node `ltvm create`:
+    everything before it -- name rules, duplicate node names, VMs that
+    already exist, the one-MGS and at-least-one-MDS rules, owner
+    resolution -- is a read.
+    """
+
+    def test_creates_nothing_and_prints_the_plan(
+        self, tmp_sockets: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with patch.object(vm_cluster, "_create_one_node") as one:
+            rc = cmd_cluster(
+                _ns(
+                    "create",
+                    "co7",
+                    "rocky9",
+                    "mgs+mds:co7-mds:1",
+                    "oss:co7-oss:3",
+                    "--dry-run",
+                )
+            )
+        assert rc == EXIT_OK
+        assert not one.called
+        assert not (tmp_sockets / "co7.cluster").exists()
+        out = capsys.readouterr().out
+        assert "Would create cluster 'co7' with 2 nodes" in out
+        assert "co7-mds" in out and "1 MDT" in out
+        assert "co7-oss" in out and "3 OST" in out
+        assert "Nothing was written" in out
+
+    def test_does_not_require_root(self, tmp_sockets: Path) -> None:
+        """A dry run only reads, so demanding a password for it would
+        just stop people using it.  Note this test does NOT use the
+        as_root fixture."""
+        with patch("ltvm_pkg.cli._require_root") as req:
+            with patch.object(vm_cluster, "_create_one_node"):
+                rc = cmd_cluster(
+                    _ns("create", "co8", "mgs+mds:co8-mds:1", "--dry-run")
+                )
+        assert rc == EXIT_OK
+        assert not req.called
+
+    def test_short_flag_also_skips_root(self, tmp_sockets: Path) -> None:
+        with patch("ltvm_pkg.cli._require_root") as req:
+            with patch.object(vm_cluster, "_create_one_node"):
+                cmd_cluster(_ns("create", "co8b", "mgs+mds:co8b-mds:1", "-n"))
+        assert not req.called
+
+    def test_a_real_create_still_requires_root(self, tmp_sockets: Path) -> None:
+        """The bypass must be scoped to --dry-run and nothing else."""
+        with patch(
+            "ltvm_pkg.cli._require_root", return_value=EXIT_ERROR
+        ) as req:
+            rc = cmd_cluster(_ns("create", "co8c", "mgs+mds:co8c-mds:1"))
+        assert req.called
+        assert rc == EXIT_ERROR
+
+    def test_reports_the_shared_per_node_settings(
+        self, tmp_sockets: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with patch.object(vm_cluster, "_create_one_node"):
+            cmd_cluster(
+                _ns(
+                    "create",
+                    "co9",
+                    "mgs+mds:co9-mds:1",
+                    "--vcpus",
+                    "8",
+                    "--mem",
+                    "4096",
+                    "--target",
+                    "rocky10",
+                    "--nic",
+                    "softroce",
+                    "--dry-run",
+                )
+            )
+        out = capsys.readouterr().out
+        assert "8 vcpus, 4096 MB" in out
+        assert "rocky10" in out
+        assert "softroce" in out
+
+    @pytest.mark.parametrize(
+        "specs,expected",
+        [
+            # No MGS.
+            (["oss:coX-oss:2"], "at least one node with mgs"),
+            # Two MGS nodes.
+            (
+                ["mgs+mds:coX-a:1", "mgs:coX-b"],
+                "only have one MGS",
+            ),
+            # MGS but no MDS.
+            (["mgs:coX-a"], "at least one node with mds"),
+            # Same node named twice.
+            (
+                ["mgs+mds:coX-a:1", "oss:coX-a:3"],
+                "more than once",
+            ),
+            # Unknown role.
+            (["mgs+wat:coX-a:1"], "unknown role"),
+        ],
+    )
+    def test_validation_still_fires(
+        self, tmp_sockets: Path, specs: list[str], expected: str
+    ) -> None:
+        """A dry run that printed a plan for an invalid cluster would be
+        worse than no dry run at all."""
+        with patch.object(vm_cluster, "_create_one_node") as one:
+            rc = cmd_cluster(_ns("create", "coX", *specs, "--dry-run"))
+        assert rc == EXIT_ERROR
+        assert not one.called
+
+    def test_an_unknown_flag_is_still_rejected(self, tmp_sockets: Path) -> None:
+        rc = cmd_cluster(
+            _ns("create", "coY", "mgs+mds:coY-a:1", "--dry-run", "--nope")
+        )
+        assert rc == EXIT_ERROR

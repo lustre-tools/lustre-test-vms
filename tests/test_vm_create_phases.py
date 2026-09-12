@@ -615,3 +615,134 @@ class TestCreateOutput:
         assert out["action"] == "created"
         assert out["name"] == "co1-json"
         assert out["status"] == "running"
+
+
+# ── --dry-run ──────────────────────────────────────────
+
+
+class TestCreateDryRun:
+    """--dry-run resolves and validates, then writes nothing.
+
+    The boundary it stops at is _allocate_and_persist_vm: everything
+    before that -- artifact resolution, bounds checks, the TAP-collision
+    scan -- is a read, and that function is both the first write and
+    where the IP is claimed under a lock.
+    """
+
+    def test_writes_no_state_and_launches_nothing(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with _create_env(tmp_vmdir) as env:
+            vm_commands.cmd_create(
+                _create_args(name="co1-dry", dry_run=True, _quiet=False)
+            )
+        assert not (tmp_vmdir / "sockets" / "co1-dry.info").exists()
+        assert not env["launch"].called
+        assert not env["alloc_ip"].called
+        assert not env["provision"].called
+        # No qemu-img / truncate either: no overlay, no data disks.
+        assert env["run"].call_args_list == []
+        out = capsys.readouterr().out
+        assert "Would create VM: co1-dry" in out
+        assert "Nothing was written" in out
+
+    def test_reports_the_resolved_kernel_and_disks(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The point of a dry run is the *resolved* values, not the flags."""
+        with _create_env(tmp_vmdir):
+            vm_commands.cmd_create(
+                _create_args(
+                    name="co1-dry2",
+                    dry_run=True,
+                    _quiet=False,
+                    mdt_disks=2,
+                    ost_disks=3,
+                    vcpus=8,
+                )
+            )
+        out = capsys.readouterr().out
+        assert "5.14.0-test" in out  # from the kernel meta.json
+        assert "2 MDT + 3 OST" in out
+        assert "8 vcpus" in out
+
+    def test_json_mode_emits_the_plan(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with _create_env(tmp_vmdir):
+            vm_commands.cmd_create(
+                _create_args(name="co1-dry3", dry_run=True, json=True)
+            )
+        plan = json.loads(capsys.readouterr().out)
+        assert plan["action"] == "would-create"
+        assert plan["name"] == "co1-dry3"
+        assert plan["already_exists"] is False
+        # Not claimed, so not reported as a specific address.
+        assert plan["ip"] is None
+
+    def test_an_explicit_ip_is_reported(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with _create_env(tmp_vmdir):
+            vm_commands.cmd_create(
+                _create_args(
+                    name="co1-dry4",
+                    dry_run=True,
+                    json=True,
+                    ip="192.168.100.77",
+                )
+            )
+        assert json.loads(capsys.readouterr().out)["ip"] == "192.168.100.77"
+
+    def test_an_existing_vm_is_reported_not_converged(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """cmd_create is idempotent and starts a stopped VM.  A dry run
+        must say so rather than doing it."""
+        with _create_env(tmp_vmdir):
+            vm_commands.cmd_create(_create_args(name="co1-dry5"))
+        assert (tmp_vmdir / "sockets" / "co1-dry5.info").exists()
+
+        with _create_env(tmp_vmdir) as env:
+            vm_commands.cmd_create(
+                _create_args(name="co1-dry5", dry_run=True, _quiet=False)
+            )
+        out = capsys.readouterr().out
+        assert "already exists" in out
+        assert not env["launch"].called
+
+    def test_validation_still_fires(self, tmp_vmdir: Path) -> None:
+        """A dry run that reported a plan for an invalid request would be
+        worse than useless."""
+        with _create_env(tmp_vmdir):
+            with pytest.raises(SystemExit):
+                vm_commands.cmd_create(
+                    _create_args(name="bad name!", dry_run=True)
+                )
+
+    def test_json_stdout_carries_nothing_but_json(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The "using default target" banner used to land on stdout ahead
+        of the JSON document, under --json, making it unparseable for the
+        callers --json exists for.  It only appeared when the target was
+        defaulted -- as it is here, with target="" -- which is how it
+        went unnoticed.
+        """
+        with _create_env(tmp_vmdir):
+            vm_commands.cmd_create(
+                _create_args(name="co1-dry6", dry_run=True, json=True)
+            )
+        out = capsys.readouterr().out
+        assert "using default target" not in out
+        json.loads(out)  # the whole stream, not just a line of it
+
+    def test_the_banner_survives_for_humans(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Suppressing it under --json must not remove it otherwise."""
+        with _create_env(tmp_vmdir):
+            vm_commands.cmd_create(
+                _create_args(name="co1-dry7", dry_run=True, _quiet=False)
+            )
+        assert "using default target" in capsys.readouterr().out
