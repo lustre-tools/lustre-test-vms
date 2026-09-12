@@ -286,7 +286,16 @@ class TestImageAssetRequiresBaseExt4:
     """
 
     def _publish(self, out: Path, dest: Path) -> None:
-        with patch("ltvm_pkg.release_package.export_build_container") as m:
+        # _check_zstd is neutralized because this asserts a guard that
+        # runs *before* any tarball is written: without it the test
+        # fails on a bare checkout with "zstd not found", which says
+        # nothing about the behaviour under test.  (tests/CLAUDE.md's
+        # unit-vs-integration rule; the real-tarball tests below carry
+        # @needs_host_tools instead.)
+        with (
+            patch("ltvm_pkg.release_package._check_zstd"),
+            patch("ltvm_pkg.release_package.export_build_container") as m,
+        ):
             m.return_value = out / "container" / "image.tar"
             package_target(
                 "rocky9",
