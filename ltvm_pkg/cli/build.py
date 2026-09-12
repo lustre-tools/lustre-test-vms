@@ -26,6 +26,7 @@ from typing import Any
 from ltvm_pkg.cli.util import (
     EXIT_ERROR,
     EXIT_OK,
+    StepTimer,
     _artifact_label,
     _container_status,
     _error,
@@ -358,11 +359,17 @@ def _cmd_build_all_body(
 
     results: dict[str, Any] = {}
 
+    # Times each step and, at the end, prints where the time went and
+    # rings the terminal bell -- a full build all is tens of minutes and
+    # nobody sits and watches it.
+    timer = StepTimer(f"build all {args.target}", quiet=use_json)
+
     # 1. Container
     if not use_json:
         print(f"==> Building container for {args.target}...")
     try:
-        _cli_attr("_do_build_container")(tc)
+        with timer.step("container"):
+            _cli_attr("_do_build_container")(tc)
         results["container"] = "ok"
     except Exception as e:
         return _error(f"Container build failed: {e}", use_json)
@@ -371,12 +378,13 @@ def _cmd_build_all_body(
     if not use_json:
         print(f"==> Building kernel {resolved_kernel} for {args.target}...")
     try:
-        kmeta = _cli_attr("build_kernel")(
-            tc,
-            lustre_tree,
-            force=args.force,
-            kernel=resolved_kernel,
-        )
+        with timer.step("kernel"):
+            kmeta = _cli_attr("build_kernel")(
+                tc,
+                lustre_tree,
+                force=args.force,
+                kernel=resolved_kernel,
+            )
         results["kernel"] = kmeta
     except _cli_attr("SrpmNotFoundError") as e:
         return _error(str(e), use_json)
@@ -417,21 +425,22 @@ def _cmd_build_all_body(
         results["zfs"] = zfs_version or "skipped"
         try:
             container_tag = tc.container_tag
-            lmeta = _cli_attr("build_lustre")(
-                lustre_tree,
-                build_tree,
-                container_tag=container_tag,
-                target=args.target,
-                enable_server=tc.lustre_mode != LustreMode.CLIENT,
-                extra_configure=list(tc.configure_args),
-                jobs=getattr(args, "jobs", None),
-                force=args.force,
-                arch=tc.arch,
-                kernel=full_kernel,
-                variant=tc.variant_name,
-                zfs_src=zfs_src,
-                zfs_version=zfs_version,
-            )
+            with timer.step("lustre"):
+                lmeta = _cli_attr("build_lustre")(
+                    lustre_tree,
+                    build_tree,
+                    container_tag=container_tag,
+                    target=args.target,
+                    enable_server=tc.lustre_mode != LustreMode.CLIENT,
+                    extra_configure=list(tc.configure_args),
+                    jobs=getattr(args, "jobs", None),
+                    force=args.force,
+                    arch=tc.arch,
+                    kernel=full_kernel,
+                    variant=tc.variant_name,
+                    zfs_src=zfs_src,
+                    zfs_version=zfs_version,
+                )
             results["lustre"] = lmeta
         except Exception as e:
             return _error(f"Lustre build failed: {e}", use_json)
@@ -443,14 +452,15 @@ def _cmd_build_all_body(
         if not use_json:
             print("==> Snapshotting Lustre staging into artifacts...")
         try:
-            _cli_attr("snapshot_lustre")(
-                lustre_tree,
-                tc.output_dir,
-                target=args.target,
-                kernel=full_kernel,
-                arch=tc.arch,
-                variant=tc.variant_name,
-            )
+            with timer.step("snapshot"):
+                _cli_attr("snapshot_lustre")(
+                    lustre_tree,
+                    tc.output_dir,
+                    target=args.target,
+                    kernel=full_kernel,
+                    arch=tc.arch,
+                    variant=tc.variant_name,
+                )
         except Exception as e:
             return _error(f"Lustre snapshot failed: {e}", use_json)
     else:
@@ -460,17 +470,21 @@ def _cmd_build_all_body(
     if not use_json:
         print(f"==> Building image for {args.target} (kernel={full_kernel})...")
     try:
-        _cli_attr("build_image")(
-            tc,
-            force=args.force,
-            kernel=full_kernel,
-            with_lustre=None if skip_lustre else str(lustre_tree),
-        )
+        with timer.step("image"):
+            _cli_attr("build_image")(
+                tc,
+                force=args.force,
+                kernel=full_kernel,
+                with_lustre=None if skip_lustre else str(lustre_tree),
+            )
         results["image"] = "ok"
     except Exception as e:
         return _error(f"Image build failed: {e}", use_json)
 
+    results["seconds"] = round(timer.elapsed, 1)
+    results["step_seconds"] = {n: round(s, 1) for n, s in timer.steps}
     _output(results, use_json)
+    timer.report()
     return EXIT_OK
 
 
@@ -498,6 +512,7 @@ def cmd_build_container(args: argparse.Namespace) -> int:
             action="Building container",
         )
 
+    timer = StepTimer(f"build container {args.target}", quiet=use_json)
     with _podman_machine_autostop() as autostop:
         try:
             tag = _cli_attr("_do_build_container")(tc)
@@ -507,6 +522,7 @@ def cmd_build_container(args: argparse.Namespace) -> int:
         result = {"target": args.target, "image_tag": tag}
         _output(result, use_json)
         autostop.success = True
+        timer.report()
         return EXIT_OK
 
 
@@ -530,6 +546,7 @@ def cmd_build_kernel(args: argparse.Namespace) -> int:
     if err is not None:
         return err
 
+    timer = StepTimer(f"build kernel {args.target}", quiet=use_json)
     with _podman_machine_autostop() as autostop:
         kernel = getattr(args, "kernel", None)
 
@@ -578,6 +595,7 @@ def cmd_build_kernel(args: argparse.Namespace) -> int:
 
         _output(meta, use_json)
         autostop.success = True
+        timer.report()
         return EXIT_OK
 
 
@@ -777,6 +795,7 @@ def cmd_build_image(args: argparse.Namespace) -> int:
     if err is not None:
         return err
 
+    timer = StepTimer(f"build image {args.target}", quiet=use_json)
     with _podman_machine_autostop() as autostop:
         kernel = getattr(args, "kernel", None)
         resolved_kernel = tc.resolve_kernel(kernel)
@@ -869,6 +888,7 @@ def cmd_build_image(args: argparse.Namespace) -> int:
         }
         _output(result, use_json)
         autostop.success = True
+        timer.report()
         return EXIT_OK
 
 
@@ -991,6 +1011,7 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
     if err is not None:
         return err
 
+    timer = StepTimer(f"build lustre {args.target}", quiet=use_json)
     with _podman_machine_autostop() as autostop:
         lustre_tree_arg = getattr(args, "lustre_tree_pos", None) or getattr(
             args, "lustre_tree", None
@@ -1084,6 +1105,7 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
 
         _output(meta, use_json)
         autostop.success = True
+        timer.report()
         return EXIT_OK
 
 
