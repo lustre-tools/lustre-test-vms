@@ -161,6 +161,7 @@ from ltvm_pkg.cli import (  # noqa: E402
     cmd_build_zfs,
     cmd_clean,
     cmd_cluster,
+    cmd_completion,
     cmd_console_log,
     cmd_crash_collect,
     cmd_create,
@@ -192,11 +193,20 @@ from ltvm_pkg.cli import (  # noqa: E402
     cmd_vm_stop,
 )
 from ltvm_pkg.completion import (  # noqa: E402
+    complete_arches,
     complete_cluster_remainder,
+    complete_directories,
+    complete_fetch_filter,
     complete_kernels,
+    complete_mofed_versions,
+    complete_snapshot_tags,
     complete_targets,
     complete_variants,
     complete_vms,
+    complete_zfs_versions,
+)
+from ltvm_pkg.shell_completion import (  # noqa: E402
+    SHELLS as SHELL_COMPLETION_SHELLS,
 )
 
 log = logging.getLogger("ltvm")
@@ -244,6 +254,56 @@ def _add_target_arg(
         help=argparse.SUPPRESS,
     )
     flag.completer = complete_targets  # type: ignore[attr-defined]
+
+
+# Completers attached by option string in one pass over the finished
+# parser (see _attach_completers).  These are the options whose meaning
+# is the same everywhere they appear, and most of them appear a lot:
+# --lustre-tree is declared at eight separate call sites, --arch on
+# every subcommand via the `common` parent.  Doing it here means a
+# subcommand added later is covered without anyone remembering to.
+#
+# Options NOT in this table, on purpose:
+#   --kernel   `create --kernel` is an explicit kernel *path*, while
+#              everywhere else it is a version name from targets.yaml.
+#              Wired per-command instead, so the two never get confused.
+#   --image, --ssh-key, --tarball, --output
+#              File paths -- argcomplete's default FilesCompleter is
+#              already the right answer, and naming them here would
+#              only risk overriding it with something worse.
+_COMPLETERS_BY_OPTION: dict[str, Any] = {
+    "--arch": complete_arches,
+    "--build": complete_directories,
+    "--lustre-tree": complete_directories,
+    "--mod-dir": complete_directories,
+    "--mofed-version": complete_mofed_versions,
+    "--outdir": complete_directories,
+    "--variant": complete_variants,
+    "--zfs-version": complete_zfs_versions,
+}
+
+
+def _attach_completers(parser: argparse.ArgumentParser) -> None:
+    """Attach _COMPLETERS_BY_OPTION across the whole subparser tree.
+
+    Only fills arguments that have no completer yet, so an explicit
+    per-command assignment always wins over the table -- the table is
+    the default, not an override.
+    """
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            # Aliases share one parser object; visiting it twice is
+            # harmless (the second pass finds completers already set).
+            for subparser in action.choices.values():
+                _attach_completers(subparser)
+            continue
+        if hasattr(action, "completer"):
+            continue
+        for opt in action.option_strings:
+            completer = _COMPLETERS_BY_OPTION.get(opt)
+            if completer is not None:
+                action.completer = completer  # type: ignore[attr-defined]
+                break
 
 
 class _HideSuppressedSubcommands(argparse.HelpFormatter):
@@ -812,10 +872,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--lustre-tree",
         help="Path to Lustre source tree (default: cwd)",
     )
-    tvp.add_argument(
+    _tvp_kernel = tvp.add_argument(
         "--kernel",
         help="Kernel to validate (default: from targets.yaml)",
     )
+    _tvp_kernel.completer = complete_kernels  # type: ignore[attr-defined]
     tvp.set_defaults(func=cmd_validate)
 
     tfp = target_sub.add_parser(
@@ -827,12 +888,13 @@ def build_parser() -> argparse.ArgumentParser:
         "target", nargs="?", default=None, help="Target name (e.g. rocky9)"
     )
     _tfp_target.completer = complete_targets  # type: ignore[attr-defined]
-    tfp.add_argument(
+    _tfp_filter = tfp.add_argument(
         "filter",
         nargs="?",
         default=None,
         help="Optional filter (e.g. '5.14', '611')",
     )
+    _tfp_filter.completer = complete_fetch_filter  # type: ignore[attr-defined]
     tfp.add_argument(
         "--list", action="store_true", help="List available releases"
     )
@@ -1224,18 +1286,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _vsp_name = vsp.add_argument("name", help="VM name")
     _vsp_name.completer = complete_vms  # type: ignore[attr-defined]
+    # The positional tag names a snapshot being *created*, so existing
+    # tags are not candidates for it -- but --delete names one that has
+    # to already exist.
     vsp.add_argument(
         "tag",
         nargs="?",
         default=None,
         help="Snapshot tag (default: auto-generated timestamp)",
     )
-    vsp.add_argument(
+    _vsp_delete = vsp.add_argument(
         "--delete",
         metavar="TAG",
         default=None,
         help="Delete the named snapshot instead of creating one",
     )
+    _vsp_delete.completer = complete_snapshot_tags  # type: ignore[attr-defined]
     vsp.set_defaults(func=cmd_snapshot)
 
     vrp = vm_sub.add_parser(
@@ -1245,12 +1311,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _vrp_name = vrp.add_argument("name", help="VM name")
     _vrp_name.completer = complete_vms  # type: ignore[attr-defined]
-    vrp.add_argument(
+    _vrp_tag = vrp.add_argument(
         "tag",
         nargs="?",
         default=None,
         help="Snapshot tag to restore (omit to list snapshots)",
     )
+    _vrp_tag.completer = complete_snapshot_tags  # type: ignore[attr-defined]
     vrp.set_defaults(func=cmd_restore)
 
     def _vm_no_action(args: argparse.Namespace) -> int:
@@ -1610,6 +1677,40 @@ def build_parser() -> argparse.ArgumentParser:
     _cluster_rem.completer = complete_cluster_remainder  # type: ignore[attr-defined]
     sp.set_defaults(func=cmd_cluster)
 
+    # -- completion (shell registration) --
+    sp = sub.add_parser(
+        "completion",
+        parents=[common],
+        help="Print the shell code that enables tab completion",
+    )
+    # No completer needed: argcomplete completes `choices` on its own.
+    sp.add_argument(
+        "--shell",
+        default=None,
+        choices=list(SHELL_COMPLETION_SHELLS),
+        help="Shell to emit code for (default: guessed from $SHELL)",
+    )
+    sp.add_argument(
+        "--install",
+        action="store_true",
+        help="Write the code into the system completion directory "
+        "instead of stdout (needs root; `ltvm install` does this too)",
+    )
+    sp.add_argument(
+        "--all-shells",
+        dest="all_shells",
+        action="store_true",
+        help="With --install, install for every supported shell rather "
+        "than only the ones present on this host",
+    )
+    sp.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Remove the installed completion files (needs root)",
+    )
+    sp.set_defaults(func=cmd_completion)
+
+    _attach_completers(p)
     return p
 
 
@@ -1749,7 +1850,13 @@ def main() -> int:
     # --json, and skipped entirely for `install` to avoid recursing
     # during the install that just wrote our baked version).  See
     # ltvm_pkg/update_check.py for the full state machine.
-    if args.command != "install":
+    #
+    # `completion` is skipped for a different reason: the documented way
+    # to use it is `eval "$(ltvm completion)"` from a shell rc file, so
+    # it runs once per new terminal.  A nag there would print into every
+    # shell the user opens, and the check's state file would be written
+    # by however many shells start at once.
+    if args.command not in ("install", "completion"):
         try:
             from ltvm_pkg.update_check import maybe_check_for_updates
 
@@ -1768,7 +1875,10 @@ def main() -> int:
     # runs `ltvm telemetry send`, which would otherwise spawn another).
     # Runs after the command so it can never delay it, and swallows
     # everything: telemetry must not be able to fail a build.
-    if args.command not in ("install", "telemetry"):
+    # `completion` is excluded for the same reason as above: it runs
+    # from shell rc files, and counting one invocation per terminal
+    # opened would drown out every command a human actually ran.
+    if args.command not in ("install", "telemetry", "completion"):
         try:
             from ltvm_pkg.telemetry import maybe_send, record
 

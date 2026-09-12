@@ -2545,37 +2545,31 @@ def run_setup(
         if sudoers_d.is_dir():
             _install_sudoers_fragment(sudoers_d / "ltvm")
 
-    # Install bash tab completion via argcomplete.
-    # We bake the output of `register-python-argcomplete ltvm` straight
-    # into /etc/bash_completion.d/ltvm so the completion file is
-    # self-contained -- no PATH lookup for register-python-argcomplete at
-    # every shell startup, and it keeps working even if the venv moves.
-    comp_dir = Path("/etc/bash_completion.d")
-    register_bin = REPO_ROOT / ".venv" / "bin" / "register-python-argcomplete"
-    if comp_dir.is_dir():
-        if register_bin.exists():
-            try:
-                result = subprocess.run(
-                    [str(register_bin), "ltvm"],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-                comp_dest = comp_dir / "ltvm"
-                comp_dest.write_text(result.stdout)
-                comp_dest.chmod(0o644)
-                log.info("Tab completion installed to %s", comp_dest)
-            except subprocess.CalledProcessError as e:
-                log.warning(
-                    "Failed to generate tab completion (%s): %s",
-                    e.returncode,
-                    (e.stderr or "").strip(),
-                )
-        else:
+    # Install tab completion for every shell this host has.  The
+    # shellcode is baked into the system completion directory rather
+    # than loaded via `register-python-argcomplete` at shell startup:
+    # that script lives in the venv's bin/, which `sudo ltvm install`
+    # does not have on PATH, and baking it keeps completion working if
+    # the venv is later rebuilt or moved.
+    #
+    # Never fatal.  Tab completion is a convenience, and an install
+    # that otherwise succeeded should not report failure because a
+    # completion directory was read-only.
+    from ltvm_pkg import shell_completion
+
+    for result in shell_completion.install():
+        if result.status in ("installed", "unchanged"):
+            log.info("Tab completion (%s): %s", result.shell, result.path)
+        elif result.status == "failed":
             log.warning(
-                "argcomplete not found at %s; run `uv sync` and re-run "
-                "`ltvm install` to get tab completion",
-                register_bin,
+                "Tab completion (%s) failed at %s: %s",
+                result.shell,
+                result.path,
+                result.detail,
+            )
+        else:
+            log.debug(
+                "Tab completion (%s) skipped: %s", result.shell, result.detail
             )
 
     if all_steps:

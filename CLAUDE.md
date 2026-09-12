@@ -60,6 +60,53 @@ Links, not copies: `git pull` or `ltvm update` updates the skill with the
 ltvm it describes. It covers *using* ltvm; target configuration, artifact
 internals and release mechanics stay in this file.
 
+## Tab Completion
+
+Two modules, split along the line between *what* to offer and
+*how a shell gets asked*:
+
+- `ltvm_pkg/completion.py` -- the argcomplete completers.  Every one is
+  wrapped in `_safe`, because an exception here lands as a traceback in
+  the user's prompt.  They read live state (targets.yaml, VM and
+  cluster files, snapshot tags via `qemu-img snapshot -l -U`), so they
+  stay right without a word list to maintain.
+- `ltvm_pkg/shell_completion.py` -- generating and installing the
+  per-shell registration, via `argcomplete.shellcode()` in-process (not
+  the `register-python-argcomplete` script, which lives in the venv's
+  `bin/` that `sudo ltvm install` has no PATH for).
+
+`ltvm install` installs for every shell on the host; `ltvm completion`
+prints or installs it by hand, and `ltvm doctor` reports missing or
+stale files and writes them with `--fix`.  Writes go through
+`priv.atomic_write`, so only the write elevates -- the command itself
+does not need root.
+
+Wiring lives in `ltvm`: `_COMPLETERS_BY_OPTION` is attached across the
+whole subparser tree by `_attach_completers(p)` at the end of
+`build_parser`, so an option that means the same thing everywhere
+(`--arch`, `--lustre-tree`) is covered once and a new subcommand is
+covered for free.  It only fills arguments with no completer, so a
+per-command assignment always wins.
+
+Three traps worth knowing:
+
+- **`create --kernel` is a path**, not a version name, and `create
+  --image` is a base-image path.  They are deliberately absent from the
+  by-option table; argcomplete's default `FilesCompleter` is correct
+  for them and a version completer would be actively wrong.
+- **zsh needs the `#compdef` wrapper.**  An autoloaded `_ltvm`'s body
+  *is* the completion function, so the bare shellcode would define
+  `_python_argcomplete` and return -- first TAB empty, second one works.
+  `shellcode("zsh")` adds the header and a trailing call.
+- **`completion` is excluded from telemetry and the update check** in
+  `main()`.  The documented usage is `eval "$(ltvm completion)"` from a
+  shell rc file, so it runs once per terminal opened.
+
+`LTVM_COMPLETION_ROOT` prefixes every system path -- for staging into an
+image, and for the test suite, which sets it in `tests/conftest.py` so
+`ltvm doctor --fix` under pytest cannot rewrite the developer's real
+`/etc/bash_completion.d`.
+
 ## Repository Layout
 
 - `targets/` -- `targets.yaml` (source of truth), shared

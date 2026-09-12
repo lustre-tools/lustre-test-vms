@@ -371,3 +371,100 @@ def cmd_update(args: argparse.Namespace) -> int:
     else:
         print(json.dumps(result, indent=2))
     return EXIT_OK
+
+
+# ------------------------------------------------------------------
+# Subcommand: completion
+# ------------------------------------------------------------------
+
+
+def cmd_completion(args: argparse.Namespace) -> int:
+    """Print -- or install -- the shell code that enables tab completion.
+
+    `ltvm install` already installs for every shell on the host, so this
+    exists for the cases that does not cover: a host installed before
+    zsh/fish support, a shell whose completion dir appeared later, and
+    anyone who wants it in their own dotfiles rather than system-wide.
+    """
+    from ltvm_pkg import shell_completion
+
+    use_json = args.json
+    shell = args.shell or shell_completion.detect_shell()
+
+    if getattr(args, "uninstall", False):
+        shells = (shell,) if args.shell else None
+        results = shell_completion.uninstall(shells)
+        return _report_completion(results, use_json, "Nothing to remove.")
+
+    if getattr(args, "install", False):
+        # An explicit --shell narrows the install to that one shell;
+        # without it we cover whatever the host has.
+        shells = (shell,) if args.shell else None
+        results = shell_completion.install(
+            shells, all_shells=getattr(args, "all_shells", False)
+        )
+        rc = _report_completion(results, use_json, "Nothing to install.")
+        if rc == EXIT_OK and not use_json:
+            _output(["", "Open a new shell to pick it up."], False)
+        return rc
+
+    try:
+        code = shell_completion.shellcode(shell)
+    except (ImportError, ValueError) as e:
+        return _error(f"Completion: {e}", use_json)
+    if use_json:
+        _output({"shell": shell, "shellcode": code}, True)
+        return EXIT_OK
+    # Straight to stdout with no trailing commentary, so that
+    # `eval "$(ltvm completion)"` and a redirect into a completion
+    # directory both work.  Guidance goes to the log (stderr).
+    print(code, end="" if code.endswith("\n") else "\n")
+    log.info("%s", _completion_hint(shell))
+    return EXIT_OK
+
+
+def _completion_hint(shell: str) -> str:
+    """How to actually use the code we just printed, per shell."""
+    if shell == "fish":
+        return (
+            "save to ~/.config/fish/completions/ltvm.fish, "
+            "or run `ltvm completion --install` as root"
+        )
+    if shell == "zsh":
+        return (
+            "save as _ltvm in a directory on your fpath (after compinit), "
+            "or run `ltvm completion --install` as root"
+        )
+    return (
+        'add `eval "$(ltvm completion)"` to ~/.bashrc, '
+        "or run `ltvm completion --install` as root"
+    )
+
+
+def _report_completion(
+    results: list[Any], use_json: bool, empty_msg: str
+) -> int:
+    """Render install/uninstall results; non-zero if anything failed."""
+    if use_json:
+        _output(
+            [
+                {
+                    "shell": r.shell,
+                    "path": str(r.path),
+                    "status": r.status,
+                    "detail": r.detail,
+                }
+                for r in results
+            ],
+            True,
+        )
+    else:
+        lines = [
+            f"{r.shell}: {r.status} {r.path}"
+            + (f" ({r.detail})" if r.detail else "")
+            for r in results
+        ]
+        _output(lines or [empty_msg], False)
+    if any(r.status == "failed" for r in results):
+        return EXIT_ERROR
+    return EXIT_OK

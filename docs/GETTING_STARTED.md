@@ -19,6 +19,20 @@ This installs QEMU (with microvm support), configures the
 network bridge + dnsmasq, sets up SSH keys, and puts `ltvm`
 on your PATH.
 
+It also installs tab completion for bash, zsh and fish --
+whichever of them the host has. **Open a new shell** to pick
+it up, then TAB completes targets, VMs, clusters, kernels and
+variants from your actual state:
+
+```bash
+ltvm build kernel roc<TAB>        # rocky8 rocky9 rocky9-64k rocky10
+ltvm deploy-lustre co<TAB>        # your VMs
+```
+
+If nothing completes, `ltvm doctor` reports it and `ltvm
+doctor --fix` installs it. To keep it in your own dotfiles
+instead, add `eval "$(ltvm completion)"` to `~/.bashrc`.
+
 ## Simple Flow: Pre-built Artifacts
 
 The fastest path -- download pre-built kernel + image from

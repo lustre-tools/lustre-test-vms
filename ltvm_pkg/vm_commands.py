@@ -2147,6 +2147,47 @@ def _check_skill_links(
     return issues, notes, failures
 
 
+def _check_completion(fix: bool) -> tuple[list[str], list[str], int]:
+    """Report per-shell tab completion, and with *fix* (re)install it.
+
+    `ltvm install` does this, so the hosts that need the check are the
+    ones installed before a shell's support existed -- or before tab
+    completion did -- plus anyone who installed zsh afterwards.  Shells
+    the host does not have are not reported: a missing fish completion
+    on a host without fish is not a problem.
+
+    Returns (issue lines, repair notes, unfixable count).
+    """
+    from ltvm_pkg import shell_completion
+
+    issues: list[str] = []
+    notes: list[str] = []
+    failures = 0
+
+    broken = [
+        r
+        for r in shell_completion.status()
+        if r.status in ("missing", "stale", "failed")
+    ]
+    for r in broken:
+        if r.status == "failed":
+            issues.append(f"tab completion ({r.shell}) unreadable: {r.detail}")
+        else:
+            issues.append(f"tab completion {r.status} for {r.shell}: {r.path}")
+    if not broken or not fix:
+        return issues, notes, failures
+
+    for r in shell_completion.install(tuple(b.shell for b in broken)):
+        if r.status in ("installed", "unchanged"):
+            notes.append(f"  fixed: wrote {r.path}")
+        elif r.status == "failed":
+            notes.append(f"  FAILED to write {r.path}: {r.detail}")
+            failures += 1
+    if notes and failures == 0:
+        notes.append("  open a new shell to pick it up")
+    return issues, notes, failures
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     issues = 0
     # Counts repairs that were attempted and did not work, so --fix
@@ -2379,6 +2420,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for line in skill_notes:
         print(line)
     fix_failures += skill_failures
+
+    comp_issues, comp_notes, comp_failures = _check_completion(args.fix)
+    for line in comp_issues:
+        print(line)
+        issues += 1
+    for line in comp_notes:
+        print(line)
+    fix_failures += comp_failures
 
     # Disk-usage probe.  Always prints the info line so the user has a
     # capacity reference; counts as an issue only when free space is

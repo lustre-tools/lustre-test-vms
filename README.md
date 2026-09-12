@@ -175,6 +175,36 @@ ltvm list --json                    # each VM has owner_id (or null for legacy)
 and `cluster create`. See [VM ownership metadata](docs/VM_OWNERSHIP.md) for the
 precedence, persistence, cluster propagation, and JSON contracts.
 
+## Tab completion
+
+`ltvm install` installs tab completion for every shell it finds on the
+host -- bash, zsh and fish -- into that shell's system completion
+directory. Open a new shell afterwards to pick it up.
+
+```bash
+ltvm completion                      # print the code for $SHELL
+ltvm completion --shell zsh          # ...or for a named shell
+sudo ltvm completion --install       # (re)install system-wide
+sudo ltvm completion --uninstall     # remove it
+ltvm doctor                          # reports missing/stale; --fix installs
+```
+
+To keep it in your own dotfiles rather than system-wide, add
+`eval "$(ltvm completion)"` to `~/.bashrc`; for zsh, save
+`ltvm completion --shell zsh` as `_ltvm` somewhere on your `fpath`.
+
+Completion is dynamic, not a static word list -- it reads the same
+sources the commands do, so it offers your actual targets, VMs,
+clusters, kernels and variants:
+
+```bash
+ltvm build kernel roc<TAB>              # -> rocky8 rocky9 rocky9-64k rocky10
+ltvm build kernel rocky8 --kernel <TAB> # -> only rocky8's kernels
+ltvm deploy-lustre co<TAB>              # -> your VMs
+ltvm cluster exec co2 <TAB>             # -> that cluster's roles, then nodes
+ltvm vm restore co1-single <TAB>        # -> that VM's snapshot tags
+```
+
 ## Agent skills
 
 `ltvm install` links this repo's agent skill (`skills/ltvm/`) into

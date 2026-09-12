@@ -23,6 +23,11 @@ ltvm target fetch rocky9        # pre-built artifacts -- much faster than buildi
 ltvm build status               # what is stale
 ```
 
+`install` also sets up tab completion for the human's shell (bash, zsh,
+fish), which needs a new shell before it works -- worth saying when you
+walk someone through setup, since nothing else announces it. `ltvm
+doctor --fix` installs it on a host that predates it.
+
 `ltvm target fetch` is the fast path, and a fetched image already has
 Lustre baked in -- `ltvm create` then `ltvm llmount` gives a mounted
 filesystem with no build at all. Build locally only when a target has no

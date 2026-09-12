@@ -111,6 +111,13 @@ def _isolate_user_state(
     monkeypatch.setenv("XDG_STATE_HOME", str(root / "state"))
     monkeypatch.setenv("LTVM_TELEMETRY", "0")
     monkeypatch.setenv("LTVM_SITE_CONFIG", str(root / "no-such-ltvm.conf"))
+    # Tab completion installs into /etc/bash_completion.d and the zsh
+    # and fish equivalents, and `ltvm doctor --fix` installs any that
+    # are missing -- so without this a doctor test rewrote the
+    # developer's real system completion files.  Same front-door
+    # principle as LTVM_TELEMETRY above: the real install path runs,
+    # just under a tmpdir.
+    monkeypatch.setenv("LTVM_COMPLETION_ROOT", str(root / "completion"))
     # The update check has no kill switch and would otherwise `git
     # ls-remote` once per test, so it is patched out.  Telemetry needs
     # no patch: the env above disables it through its own front door,
