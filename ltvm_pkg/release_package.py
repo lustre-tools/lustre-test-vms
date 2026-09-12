@@ -71,13 +71,27 @@ from .target_config import (  # noqa: E402
 # it does not explicitly recognize; there is no "we'll muddle through"
 # forward-compat path.
 #
+# Also bump when the *meaning* of a meta.json field changes even though
+# its shape does not -- `input_hash` above all.  An old asset whose
+# recorded hash a new client cannot reproduce is worse than one it
+# refuses: the fetch succeeds and every artifact then reads
+# permanently stale, so `build all` silently rebuilds what was just
+# downloaded.  A refusal names the remedy; silent staleness does not.
+#
 # Bump history:
-#   1  current layout: per-(target, arch, kernel, variant) set of
+#   1  initial layout: per-(target, arch, kernel, variant) set of
 #      zstd-compressed tarballs (container + kernel + image + optional
 #      lustre) plus a manifest JSON.  Image asset carries only this
 #      variant's base.ext4 + meta.json; lustre-artifacts nest under a
 #      variant subdir for non-base variants.
-SCHEMA_VERSION = 1
+#   2  same asset layout; meta.json's `input_hash` is computed by a
+#      narrower formula (targets.yaml's `kernels` block no longer feeds
+#      it -- see TargetConfig._hash_parts), so a schema-1 asset's
+#      recorded hash never matches what a schema-2 client computes and
+#      every fetched artifact would read permanently stale.  The bump is
+#      what turns that silent staleness into a clear refusal, and the
+#      republish is what fixes it.
+SCHEMA_VERSION = 2
 SCHEMA_NAME = "ltvm-release"
 
 
