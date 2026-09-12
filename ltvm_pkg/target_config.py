@@ -202,6 +202,13 @@ class Variant:
         return h.digest()
 
 
+# The ``-<lnxmaj>-<lnxrel>`` tail that turns a short kernel name into a
+# built-dir name: a dotted three-part kernel version, dash-delimited on
+# both sides (``5.14-rhel9.7`` -> ``5.14-rhel9.7-5.14.0-611.13.1.el9_7``).
+# No declared short name is of that shape, so finding it is unambiguous.
+_FULL_KERNEL_TAIL = re.compile(r"-\d+\.\d+\.\d+-")
+
+
 def kernel_dir_version_key(name: str) -> tuple:
     """Natural-order sort key for kernel directory names.
 
@@ -813,12 +820,31 @@ class TargetConfig:
 
         Matches against the declared short names in targets.yaml, so any
         name already in short form passes through unchanged.
+
+        A kernel *not* in ``kernels.available`` still has to normalize,
+        which is why the fallback strips the ``-<lnxmaj>-<lnxrel>`` tail
+        structurally instead of returning the name as-is.  Returning it
+        unchanged broke every later command for that kernel, and two
+        routine things produce one: building with an explicit
+        ``--kernel`` the target does not declare (nothing rejects it),
+        and dropping an old minor from ``kernels.available`` while its
+        built dir is still on disk -- which ``ltvm clean`` explicitly
+        anticipates.  The full name then reached ``parse_target_in`` as
+        a .target basename (``[error] Cannot read .target.in``, which
+        ``--force-compat`` cannot override) and produced a different
+        ``input_hash`` than the short form, so one image was
+        permanently stale and the other permanently rebuilt.
         """
         for entry in self._raw_kernel_entries():
             short = self._kernel_entry_name(entry)
             if name == short or name.startswith(short + "-"):
                 return short
-        # Fallback: if no match, return as-is (new kernel or unknown form)
+        m = _FULL_KERNEL_TAIL.search(name)
+        if m:
+            return name[: m.start()]
+        # Neither declared nor in <short>-<lnxmaj>-<lnxrel> shape: a
+        # short name for an undeclared kernel, or an upstream spec
+        # ("latest", "6.18").  Both are already as short as they get.
         return name
 
     def resolve_kernel(self, kernel: str | None = None) -> str:
@@ -1034,10 +1060,28 @@ class TargetConfig:
         # its configure-flags stamp via --with-zfs).  Folding it in
         # here would rebuild every container and kernel for a knob
         # they do not read.
+        #
+        # ``kernels`` is excluded for the same reason, and is the one
+        # that cost the most: the whole block -- ``available`` list and
+        # ``default`` included -- used to be hashed into every
+        # artifact, so the documented routine operation "for a new
+        # kernel minor on an existing OS, just add the short name to
+        # kernels.available" invalidated that target's container, every
+        # one of its kernels and every one of its images, on every
+        # machine at once, with ``--why`` able to say only
+        # "targets.yaml (changed)".  Nothing in a container, in kernel
+        # N's build, or in an image reads the list of *other* available
+        # kernels.  What a kernel build does read is folded back in
+        # below, per kernel: ``kernels.config`` and that kernel's own
+        # entry (a mapping entry's ``srpm_version``).  The image picks
+        # the same up transitively, through the kernel meta's
+        # input_hash.
         h.update(self.name.encode())
         h.update(self.arch.encode())
         base_data = {
-            k: v for k, v in self._data.items() if k not in ("variants", "zfs")
+            k: v
+            for k, v in self._data.items()
+            if k not in ("variants", "zfs", "kernels")
         }
         h.update(json.dumps(base_data, sort_keys=True).encode())
 
@@ -1068,6 +1112,16 @@ class TargetConfig:
             h.label("kernels.config")
             for k, v in sorted(self.kernel_config_overrides.items()):
                 h.update(f"{k}={v}".encode())
+            # This kernel's own entry in kernels.available, and only
+            # this one: a mapping entry carries per-kernel build input
+            # (rocky10 pins srpm_version that way), while a sibling's
+            # entry changing is none of this kernel's business.
+            h.label("kernel-entry")
+            h.update(
+                json.dumps(
+                    self.kernel_overrides(short_name), sort_keys=True
+                ).encode()
+            )
             common_frag = TARGETS_DIR / "common" / "kernel-config.fragment"
             if common_frag.exists():
                 h.label("common/kernel-config.fragment")

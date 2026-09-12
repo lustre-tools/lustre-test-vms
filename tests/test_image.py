@@ -435,6 +435,13 @@ class TestLustreInjectLines:
         ).read_text() == "X"
 
     def test_debian_same_layout(self, tmp_path: Path) -> None:
+        """An `extra/` layout is staged the same way whatever the family.
+
+        Note this fixture *builds* an extra/ tree, so it pins that the
+        os_family argument changes nothing -- not that Debian's DESTDIR
+        actually produces extra/.  The net/+fs/ layout lustre_build's
+        install verification accepts is covered below.
+        """
         import ltvm_pkg.image_build as image
 
         staging = self._make_staging(tmp_path, "6.1.0-deb")
@@ -448,6 +455,82 @@ class TestLustreInjectLines:
         text = "\n".join(lines)
         assert "COPY lustre-extra/ /lib/modules/6.1.0-deb/extra/" in text
         assert "depmod -a 6.1.0-deb" in text
+
+    def test_modules_outside_extra_are_staged_too(self, tmp_path: Path) -> None:
+        """net/ + fs/ instead of extra/ -- the layout lustre_build's
+        own install verification documents for Debian/Ubuntu.
+
+        This used to COPY extra/ and nothing else, with no else branch:
+        the build stayed green and shipped an image with the Lustre
+        userland, a depmod pass, a meta.json naming a lustre_version --
+        and no Lustre .ko at all.
+        """
+        import ltvm_pkg.image_build as image
+
+        kver = "6.8.0-deb"
+        staging = tmp_path / "staging"
+        mods = staging / "lib" / "modules" / kver
+        (mods / "net" / "lustre").mkdir(parents=True)
+        (mods / "net" / "lustre" / "ptlrpc.ko").write_text("P")
+        (mods / "fs" / "lustre").mkdir(parents=True)
+        (mods / "fs" / "lustre" / "lustre.ko").write_text("L")
+        # depmod output left behind by `make install`: must not be
+        # staged, or it would overwrite the image's own depmod pass.
+        (mods / "modules.dep").write_text("stale")
+        (staging / "usr" / "sbin").mkdir(parents=True)
+        (staging / "usr" / "sbin" / "mount.lustre").write_text("X")
+        inject = tmp_path / "inject"
+        inject.mkdir()
+
+        with patch.object(image, "_is_macos_build_host", return_value=False):
+            lines = image._lustre_inject_lines(staging, inject, kver, "debian")
+        text = "\n".join(lines)
+        assert f"COPY lustre-mod-net/ /lib/modules/{kver}/net/" in text
+        assert f"COPY lustre-mod-fs/ /lib/modules/{kver}/fs/" in text
+        assert (
+            inject / "lustre-mod-net" / "lustre" / "ptlrpc.ko"
+        ).read_text() == "P"
+        assert (
+            inject / "lustre-mod-fs" / "lustre" / "lustre.ko"
+        ).read_text() == ("L")
+        assert not (inject / "modules.dep").exists()
+        assert f"depmod -a {kver}" in text
+
+    def test_no_modules_for_this_kver_raises(self, tmp_path: Path) -> None:
+        """Staging built against a *different* kernel must fail loud.
+
+        The caller's pre-check only asks for any *.ko anywhere under
+        staging, so it passes here -- which is exactly why the silent
+        skip was invisible.
+        """
+        import ltvm_pkg.image_build as image
+
+        staging = self._make_staging(tmp_path, "5.14.0-other")
+        assert any(staging.rglob("*.ko"))  # the pre-check would pass
+        inject = tmp_path / "inject"
+        inject.mkdir()
+
+        with patch.object(image, "_is_macos_build_host", return_value=False):
+            with pytest.raises(FileNotFoundError, match="No Lustre modules"):
+                image._lustre_inject_lines(
+                    staging, inject, "5.14.0-wanted", "rhel"
+                )
+
+    def test_a_module_dir_with_no_ko_is_skipped(self, tmp_path: Path) -> None:
+        """An empty net/ beside a populated extra/ adds no COPY."""
+        import ltvm_pkg.image_build as image
+
+        kver = "5.14.0-foo"
+        staging = self._make_staging(tmp_path, kver)
+        (staging / "lib" / "modules" / kver / "net").mkdir()
+        inject = tmp_path / "inject"
+        inject.mkdir()
+
+        with patch.object(image, "_is_macos_build_host", return_value=False):
+            lines = image._lustre_inject_lines(staging, inject, kver, "rhel")
+        text = "\n".join(lines)
+        assert "lustre-mod-net" not in text
+        assert f"COPY lustre-extra/ /lib/modules/{kver}/extra/" in text
 
     def test_macos_emits_tar_add_lines(self, tmp_path: Path) -> None:
         """On macOS the inject helper bundles each subtree into a

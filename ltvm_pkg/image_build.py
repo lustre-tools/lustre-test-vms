@@ -360,6 +360,11 @@ def _stage_subtree(
     return f"COPY {name}/ {target_path}"
 
 
+def _iterdir(d: Path) -> list[Path]:
+    """``d.iterdir()`` as a list, empty when *d* is not a directory."""
+    return list(d.iterdir()) if d.is_dir() else []
+
+
 def _lustre_inject_lines(
     staging: Path,
     inject_dir: Path,
@@ -377,21 +382,55 @@ def _lustre_inject_lines(
 
     Layout produced in *inject_dir*:
       lustre-extra/            -> /lib/modules/<kver>/extra/
+      lustre-mod-<subdir>/     -> /lib/modules/<kver>/<subdir>/
       lustre-userland-usr/     -> /usr/
       lustre-userland-etc/     -> /etc/
     Only the subtrees that actually exist in staging are copied.
+
+    Raises if *staging* holds no Lustre module under
+    ``lib/modules/<kver>/``.  This used to COPY ``extra/`` and
+    nothing else, with no ``else`` -- so a DESTDIR that laid modules
+    anywhere else produced a green build whose image shipped the
+    Lustre userland, a ``depmod -a``, and a meta.json naming a
+    ``lustre_version`` read from *staging*, with zero Lustre .ko in
+    it.  The caller's pre-check doesn't catch that: it only asks for
+    ``any(rglob("*.ko"))`` anywhere under staging.  This is the Lustre
+    half of the contract the kernel side's ``has_modules`` guard
+    enforces.
     """
     lines: list[str] = []
 
-    modules_src = staging / "lib" / "modules" / kver / "extra"
-    if modules_src.is_dir():
+    # Every module subdirectory, not just extra/: RHEL/Rocky DESTDIR
+    # installs lay them under extra/, and lustre_build's own install
+    # verification accepts Debian/Ubuntu putting them directly under
+    # net/ and fs/.  Each is staged separately rather than copying
+    # lib/modules/<kver>/ wholesale, so a modules.dep or modules.alias
+    # left in staging by `make install` cannot overwrite the one the
+    # image's own depmod pass produced.
+    modules_root = staging / "lib" / "modules" / kver
+    staged_any = False
+    for sub in sorted(p for p in _iterdir(modules_root) if p.is_dir()):
+        if not any(sub.rglob("*.ko")) and not any(sub.rglob("*.ko.*")):
+            continue
+        name = (
+            "lustre-extra" if sub.name == "extra" else f"lustre-mod-{sub.name}"
+        )
         lines.append(
             _stage_subtree(
-                modules_src,
+                sub,
                 inject_dir,
-                "lustre-extra",
-                f"/lib/modules/{kver}/extra/",
+                name,
+                f"/lib/modules/{kver}/{sub.name}/",
             )
+        )
+        staged_any = True
+    if not staged_any:
+        raise FileNotFoundError(
+            f"No Lustre modules under {modules_root} -- the Lustre "
+            f"staging for kernel {kver} is missing or was built "
+            f"against a different kernel.\n"
+            f"  run: ltvm build lustre <target> --kernel <kernel> "
+            f"--lustre-tree <tree> --force"
         )
 
     # Userland subtrees.  /usr/ is the usual catch-all (sbin, bin,

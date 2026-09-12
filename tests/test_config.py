@@ -560,6 +560,38 @@ class TestKernelOverrides:
         full = "5.14-rhel9.5-5.14.0-503.11.1.el9_5"
         assert tc._short_kernel_name(full) == "5.14-rhel9.5"
 
+    def test_short_kernel_name_normalises_an_undeclared_kernel(
+        self, tmp_targets: Path
+    ) -> None:
+        """A built dir for a kernel not in kernels.available still has
+        to normalise to its short form.
+
+        The fallback used to return the name unchanged, which broke
+        every later command for that kernel: the full name reached
+        parse_target_in as a .target basename ("[error] Cannot read
+        .target.in", not overridable by --force-compat), and the image
+        input_hash differed between the two spellings so one was
+        permanently stale.  Two routine things produce such a dir --
+        `--kernel <undeclared>` (nothing rejects it) and dropping an
+        old minor from kernels.available with its dir still on disk.
+        """
+        tc = _make_config(tmp_targets)
+        assert "5.14-rhel9.0" not in tc.declared_kernels()
+        full = "5.14-rhel9.0-5.14.0-305.25.1.el9_0"
+        assert tc._short_kernel_name(full) == "5.14-rhel9.0"
+        assert tc.input_hash("image", kernel=full) == tc.input_hash(
+            "image", kernel="5.14-rhel9.0"
+        )
+
+    def test_short_kernel_name_leaves_a_short_name_alone(
+        self, tmp_targets: Path
+    ) -> None:
+        """Names that are already short, declared or not, pass through
+        -- including an upstream spec, which is not a version."""
+        tc = _make_config(tmp_targets)
+        for name in ("5.14-rhel9.5", "5.14-rhel9.0", "latest", "6.18"):
+            assert tc._short_kernel_name(name) == name
+
 
 class TestLoadMetaSafe:
     """paths.load_meta_safe tolerates corrupt/missing meta.json so a
