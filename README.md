@@ -127,7 +127,23 @@ ltvm build lustre <target>      Lustre against target kernel (+ --lustre-tree, -
 ltvm build mofed-kmods <t>      Per-kernel MOFED kernel modules
 ltvm build shell <target>       Interactive shell in build container
 ltvm build status               Staleness table (one row per built kernel)
+                                --why names the input that went stale
 ```
+
+Long builds report where the time went, and ring the terminal bell
+when they finish (over a minute, on a TTY):
+
+```
+build all rocky9 finished in 41m 51s
+  container   1m 03s
+  kernel     32m 40s
+  lustre      6m 21s
+  snapshot       12s
+  image       1m 56s
+```
+
+`LTVM_NO_BELL=1` silences the bell; `LTVM_NOTIFY_COMMAND` (e.g.
+`notify-send ltvm`) is run with the summary as its last argument.
 
 `target` sub-actions:
 
@@ -148,11 +164,27 @@ ltvm target publish <target>    Bundle artifacts and upload to GitHub release
 `vm` sub-actions:
 
 ```
-ltvm vm console-log   <name>    Show QEMU serial log
+ltvm vm console-log   <name>    Show QEMU serial log (-f to keep streaming;
+                                picks up the new log when the VM reboots)
 ltvm vm crash-collect <name>    Pull vmcore + run lustre_triage
 ltvm vm nmi           <name>    Inject NMI (panic + kdump)
 ltvm vm snapshot      <name>    Snapshot overlay disk
 ltvm vm restore       <name>    Restore to a snapshot
+```
+
+`ltvm create` and `ltvm cluster create` take `--dry-run` (`-n`): they
+resolve and validate everything, print what they would make, and write
+nothing. Needs no root, so it never prompts for a password.
+
+```
+$ ltvm create co1-single rocky9 --dry-run --ost-disks 3
+Would create VM: co1-single
+  target:  rocky9 (variant=base)
+  kernel:  5.14.0-611.13.1.el9_7_lustre
+  cpu/mem: 2 vcpus, 2048 MB
+  disks:   1 MDT + 3 OST @ 500M each
+  ip:      next free (auto)
+Nothing was written.  Re-run without --dry-run to create it.
 ```
 
 VM names MUST include the checkout number and a descriptive role:

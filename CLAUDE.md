@@ -146,9 +146,40 @@ Four cacheable artifacts per (target, arch, variant):
 **Lustre staging** (userland + modules per kernel,
 written into the Lustre tree's `.ltvm-staging/`).  The
 first three each track an `input_hash` in their
-`meta.json`; `ltvm build status` reports staleness.
+`meta.json`; `ltvm build status` reports staleness, and
+`--why` names the input that moved.
 Images are keyed per-kernel (so multiple kernel minors
 can coexist).
+
+### input_hash is load-bearing -- do not perturb it
+
+`input_hash` *is* the staleness decision, so producing a
+different value for unchanged inputs invalidates every
+artifact on every machine at once, costing a kernel rebuild
+per target.  Nothing warns you; builds just start running.
+
+`TargetConfig._hash_parts` feeds the bytes through
+`_HashParts`, which records them under labels while
+concatenating them unchanged -- so `input_hash()` (the
+digest) and `input_components()` (the per-input digests
+`--why` diffs, also stored in `meta.json`) come from one
+code path.  Keep it that way: an explanation that disagrees
+with the rebuild decision is worse than none.
+
+[tests/test_input_hash_stability.py](tests/test_input_hash_stability.py)
+pins the digest for every target and artifact.  If it fails,
+assume you changed the hash by accident.  When the change is
+deliberate, update the goldens in the same commit -- that
+test failing is the one signal anybody gets before the
+rebuilds start.
+
+Three cases `--why` answers honestly rather than
+plausibly, all worth preserving: an artifact built before
+the per-input digests existed reports the cause as unknown
+(not "nothing changed"); the kernel's `lustre-tree-inputs`
+component is never blamed, because `build status` has no
+Lustre tree to recompute it from; and a hash that moved with
+no component accounting for it says exactly that.
 
 ```bash
 ltvm build container rocky9
@@ -356,11 +387,13 @@ excludes `mofed-kmods/`: a fetcher who never passes
 
 ```bash
 ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
+ltvm create co1-single rocky9 --dry-run  # resolve + validate, write nothing
 ltvm deploy-lustre co1-single --lustre-tree ~/lustre-release --mount
 ssh co1-single 'lctl dl'
 ltvm llmount co1-single               # mount
 ltvm llumount co1-single              # unmount (= llmount --cleanup)
 ltvm vm console-log co1-single
+ltvm vm console-log co1-single -f     # keep streaming (tail -F semantics)
 ltvm vm nmi co1-single                # inject NMI -> kdump
 ltvm vm crash-collect co1-single --mod-dir $CO/1
 ltvm destroy co1-single

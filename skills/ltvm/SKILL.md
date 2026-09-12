@@ -146,6 +146,11 @@ timeout 30 ssh co1-single 'uptime'     # when it may be hung
 Wrap anything that might hang in `timeout`. A VM that stops answering is
 a candidate for `ltvm vm console-log`, not for a longer wait.
 
+Do not use `ltvm vm console-log -f`: it streams until Ctrl-C, which is
+useful to a human watching a boot and a way to hang yourself. Take
+another `console-log` snapshot instead -- the log is a file, and re-reading
+it costs nothing.
+
 ## Clusters
 
 ```bash
