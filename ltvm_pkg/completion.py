@@ -264,61 +264,56 @@ def complete_fetch_filter(
     )
 
 
-# Cluster actions whose first remainder token is a cluster name.  The
-# odd ones out are `create` (a name that does not exist yet) and `list`
-# (no arguments at all).
-_CLUSTER_NAME_ACTIONS = frozenset(
-    {"destroy", "deploy", "status", "exec", "ssh"}
-)
-
-# Roles `cluster create` accepts in a node spec, per vm_cluster.parse_spec.
+# Roles a node spec accepts, per vm_cluster.parse_node_spec.
 CLUSTER_ROLES = ("mgs", "mds", "oss", "client")
 
 
 @_safe
-def complete_cluster_remainder(
+def complete_cluster_members(
     prefix: str = "",
     parsed_args: argparse.Namespace | None = None,
     **kwargs: Any,
 ) -> list[str]:
-    """Completer for the cluster-command REMAINDER action.
+    """Complete the role-or-node argument of `cluster exec` / `ssh`.
 
-    The REMAINDER swallows everything after `cluster <action>`, so this
-    one completer has to serve every action.  It keys off how many
-    tokens have been consumed so far:
-
-    * first token -- a cluster name, except for `create` (the user is
-      naming something new, so offering existing names is wrong) and
-      `list` (which takes none);
-    * second token of `exec`/`ssh` -- a role or a member node name,
-      which is exactly what those two accept.
-
-    Anything else gets no completions, which is better than a list that
-    does not apply: `exec`'s trailing command is a shell command, and
-    `create`'s node specs are `roles:name:count` triples that no word
-    list can usefully complete.
+    Both accept either a role, which fans out across every node holding
+    it, or a single node name.  Roles come first because fanning out is
+    the common case.  Scoped to the cluster already named, so it offers
+    that cluster's roles rather than all four.
     """
-    from .vm_state import ClusterInfo
-
-    action = getattr(parsed_args, "action", None) if parsed_args else None
-    consumed = list(getattr(parsed_args, "cluster_args", None) or [])
-    # argcomplete leaves the word being typed in the remainder, so drop
-    # it: with "ltvm cluster exec co2 <TAB>" the remainder is ["co2"]
-    # and we are on token 2, while "ltvm cluster exec co<TAB>" has
-    # remainder ["co"] and is still token 1.
-    if consumed and prefix and consumed[-1] == prefix:
-        consumed.pop()
-    position = len(consumed) + 1
-
-    if position == 1:
-        if action in _CLUSTER_NAME_ACTIONS:
-            return ClusterInfo.all_names()
+    name = getattr(parsed_args, "name", None) if parsed_args else None
+    if not name:
         return []
+    return _cluster_role_and_node_names(name)
 
-    if position == 2 and action in ("exec", "ssh"):
-        return _cluster_role_and_node_names(consumed[0])
 
-    return []
+@_safe
+def complete_cluster_specs(
+    prefix: str = "",
+    parsed_args: argparse.Namespace | None = None,
+    **kwargs: Any,
+) -> list[str]:
+    """Complete `cluster create`'s specs, which start with a bare target.
+
+    The first of these positionals may be an OS target; the rest are
+    ``roles:vm[:disks]`` triples.  Only the target is completable -- a
+    node name is one the user is inventing -- so targets are offered
+    while the word has no ':' in it, and the role prefixes that can
+    legally start a spec once it does not look like a target.
+
+    Offering the roles is worth it because `mgs+mds:` is easy to
+    misremember (the separator is '+', not ','), and a wrong role is
+    refused only after the whole command line is typed.
+    """
+    from .target_config import list_targets
+
+    # Past the first word, a target is no longer accepted.
+    already = list(getattr(parsed_args, "specs", None) or [])
+    if already and prefix and already[-1] == prefix:
+        already.pop()
+    if not already and ":" not in prefix:
+        return [*list_targets(), *CLUSTER_ROLES]
+    return list(CLUSTER_ROLES)
 
 
 def _cluster_role_and_node_names(cluster: str) -> list[str]:

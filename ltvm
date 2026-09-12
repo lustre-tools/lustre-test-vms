@@ -160,7 +160,13 @@ from ltvm_pkg.cli import (  # noqa: E402
     cmd_build_shell,
     cmd_build_zfs,
     cmd_clean,
-    cmd_cluster,
+    cmd_cluster_create,
+    cmd_cluster_deploy,
+    cmd_cluster_destroy,
+    cmd_cluster_exec,
+    cmd_cluster_list,
+    cmd_cluster_ssh,
+    cmd_cluster_status,
     cmd_completion,
     cmd_console_log,
     cmd_crash_collect,
@@ -194,7 +200,9 @@ from ltvm_pkg.cli import (  # noqa: E402
 )
 from ltvm_pkg.completion import (  # noqa: E402
     complete_arches,
-    complete_cluster_remainder,
+    complete_cluster_members,
+    complete_cluster_specs,
+    complete_clusters,
     complete_directories,
     complete_fetch_filter,
     complete_kernels,
@@ -1677,27 +1685,221 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_llmount, cleanup=True)
 
     # -- cluster --
-    sp = sub.add_parser(
+    # Real subparsers, one per action.  This was a `choices` positional
+    # plus argparse.REMAINDER, with each action's flags parsed by hand in
+    # cli/cluster.py -- which meant `ltvm cluster create --help` printed
+    # an error instead of help, `--vcpus=4` was rejected as an unknown
+    # argument because only the space-separated form was anticipated, and
+    # tab completion could offer nothing past a cluster name because
+    # argparse knew nothing about what followed.
+    cluster_parser = sub.add_parser(
         "cluster",
         parents=[common],
         help="Cluster management (create/destroy/...)",
     )
-    sp.add_argument(
-        "action",
-        choices=[
-            "create",
-            "destroy",
-            "deploy",
-            "status",
-            "exec",
-            "list",
-            "ssh",
-        ],
-        help="Cluster action",
+    cluster_sub = cluster_parser.add_subparsers(
+        dest="cluster_action", metavar="<action>"
     )
-    _cluster_rem = sp.add_argument("cluster_args", nargs=argparse.REMAINDER)
-    _cluster_rem.completer = complete_cluster_remainder  # type: ignore[attr-defined]
-    sp.set_defaults(func=cmd_cluster)
+
+    ccp = cluster_sub.add_parser(
+        "create",
+        parents=[common],
+        help="Create a cluster from node specs (needs root)",
+    )
+    ccp.add_argument("name", help="Cluster name (e.g. co2)")
+    # One nargs="+" rather than an optional TARGET positional followed by
+    # the specs: argparse assigns by count, so `co2 mgs+mds:a:1 oss:b:3`
+    # would hand the first spec to an optional TARGET.  A node spec
+    # always contains ':' and a target never does, so the handler splits
+    # them -- the same rule the old parser used, applied after argparse
+    # rather than instead of it.
+    #
+    # The cost: argparse matches positionals in contiguous runs, so an
+    # option *between* two specs ends the run and the rest come back as
+    # "unrecognized arguments".  Before or after the whole run both work,
+    # which is where the help puts them and where people type them.  The
+    # hand-rolled parser this replaced did not care, so that one form
+    # regressed; see tests/test_cli_target_forms.py for the pin.
+    _ccp_specs = ccp.add_argument(
+        "specs",
+        nargs="+",
+        metavar="[TARGET] ROLES:VM[:DISKS]",
+        help="Optional OS target, then one or more node specs "
+        "(e.g. rocky9 mgs+mds:co2-mds:1 oss:co2-oss:3)",
+    )
+    _ccp_specs.completer = complete_cluster_specs  # type: ignore[attr-defined]
+    _ccp_target = ccp.add_argument(
+        "--target",
+        default=None,
+        help="OS target for every node; also accepts the positional form",
+    )
+    _ccp_target.completer = complete_targets  # type: ignore[attr-defined]
+    ccp.add_argument(
+        "--vcpus", type=int, default=2, help="vCPUs per node (default: 2)"
+    )
+    ccp.add_argument(
+        "--mem",
+        type=int,
+        default=None,
+        help="Memory per node in MB (default: the target's default_mem)",
+    )
+    ccp.add_argument(
+        "--disk-size",
+        dest="disk_size",
+        default=None,
+        help="Per-disk size with suffix M or G (e.g. 500M, 2G)",
+    )
+    ccp.add_argument(
+        "--nic",
+        action="append",
+        default=None,
+        metavar="TYPE[:ARG]",
+        help="Extra NIC applied to every node; repeat for multiple. "
+        "Same types as `ltvm create --nic`.",
+    )
+    ccp.add_argument(
+        "--owner",
+        "--owner-id",
+        dest="owner_id",
+        default=None,
+        metavar="ID",
+        help="Opaque lifecycle owner/session ID, applied to every node",
+    )
+    ccp.add_argument(
+        "--dry-run",
+        "-n",
+        dest="dry_run",
+        action="store_true",
+        help="Print the node plan and create nothing.  Needs no root.",
+    )
+    ccp.set_defaults(func=cmd_cluster_create)
+
+    cdp = cluster_sub.add_parser(
+        "destroy",
+        parents=[common],
+        help="Destroy a cluster and every node in it (needs root)",
+    )
+    _cdp_name = cdp.add_argument("name", help="Cluster name")
+    _cdp_name.completer = complete_clusters  # type: ignore[attr-defined]
+    cdp.set_defaults(func=cmd_cluster_destroy)
+
+    cdpl = cluster_sub.add_parser(
+        "deploy",
+        parents=[common],
+        help="Build and deploy Lustre to every node in a cluster",
+    )
+    _cdpl_name = cdpl.add_argument("name", help="Cluster name")
+    _cdpl_name.completer = complete_clusters  # type: ignore[attr-defined]
+    _cdpl_build = cdpl.add_argument(
+        "--build",
+        "--lustre-tree",
+        dest="lustre_source",
+        default=".",
+        help="Lustre source tree to build and deploy (default: cwd)",
+    )
+    _cdpl_build.completer = complete_directories  # type: ignore[attr-defined]
+    cdpl.add_argument(
+        "--mount", action="store_true", help="Mount Lustre after deploying"
+    )
+    cdpl.add_argument(
+        "--server-only",
+        dest="server_only",
+        action="store_true",
+        help="Deploy to server nodes only, skipping clients",
+    )
+    cdpl.add_argument(
+        "--force-compat",
+        dest="force_compat",
+        action="store_true",
+        help="Override a Lustre-tree compatibility refusal (not errors)",
+    )
+    cdpl.add_argument(
+        "--zfs",
+        action="store_true",
+        help="Ship ZFS and run the cluster on it (implies --fstype zfs)",
+    )
+    _cdpl_zfsv = cdpl.add_argument(
+        "--zfs-version",
+        dest="zfs_version",
+        default=None,
+        metavar="VER",
+        help="OpenZFS release to use (implies --zfs)",
+    )
+    _cdpl_zfsv.completer = complete_zfs_versions  # type: ignore[attr-defined]
+    cdpl.add_argument(
+        "--fstype",
+        choices=["ldiskfs", "zfs"],
+        default=None,
+        help="OSD backend written into the cluster's cfg/local.sh",
+    )
+    cdpl.set_defaults(func=cmd_cluster_deploy)
+
+    csp = cluster_sub.add_parser(
+        "status", parents=[common], help="Show a cluster's nodes and state"
+    )
+    _csp_name = csp.add_argument("name", help="Cluster name")
+    _csp_name.completer = complete_clusters  # type: ignore[attr-defined]
+    csp.set_defaults(func=cmd_cluster_status)
+
+    cep = cluster_sub.add_parser(
+        "exec",
+        parents=[common],
+        help="Run a command on every node holding a role (or on one node)",
+    )
+    _cep_name = cep.add_argument("name", help="Cluster name")
+    _cep_name.completer = complete_clusters  # type: ignore[attr-defined]
+    _cep_target = cep.add_argument(
+        "target", help="Role (mgs/mds/oss/client) or a single node name"
+    )
+    _cep_target.completer = complete_cluster_members  # type: ignore[attr-defined]
+    cep.add_argument(
+        "--timeout",
+        type=int,
+        default=120,
+        help="Per-node command timeout in seconds (default: 120).  Must "
+        "come before the role -- everything after it is the command.",
+    )
+    # REMAINDER so the command keeps its own flags verbatim: `cluster
+    # exec co2 oss lctl dl -t` must not have -t parsed as one of ours.
+    # The cost is that ltvm's own flags have to precede the role, the
+    # same bargain ssh and sudo make.
+    cep.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        metavar="COMMAND...",
+        help="Command to run; everything after the role is passed "
+        "through untouched, flags included",
+    )
+    cep.set_defaults(func=cmd_cluster_exec)
+
+    clp = cluster_sub.add_parser(
+        "list", parents=[common], help="List all clusters"
+    )
+    clp.set_defaults(func=cmd_cluster_list)
+
+    cssh = cluster_sub.add_parser(
+        "ssh",
+        parents=[common],
+        help="Open an interactive ssh session on one node of a cluster",
+    )
+    _cssh_name = cssh.add_argument("name", help="Cluster name")
+    _cssh_name.completer = complete_clusters  # type: ignore[attr-defined]
+    _cssh_target = cssh.add_argument(
+        "target", help="Role (first node holding it) or a node name"
+    )
+    _cssh_target.completer = complete_cluster_members  # type: ignore[attr-defined]
+    cssh.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="Optional command to run instead of an interactive shell",
+    )
+    cssh.set_defaults(func=cmd_cluster_ssh)
+
+    def _cluster_no_action(args: argparse.Namespace) -> int:
+        cluster_parser.print_help()
+        return EXIT_ERROR
+
+    cluster_parser.set_defaults(func=_cluster_no_action)
 
     # -- completion (shell registration) --
     sp = sub.add_parser(

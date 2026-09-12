@@ -44,7 +44,6 @@ def _load_ltvm() -> Any:
 
 ltvm = _load_ltvm()
 
-from ltvm_pkg.cli import cmd_cluster  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -233,23 +232,25 @@ _CLUSTER_ARGS: dict[str, list[str]] = {
 
 
 class TestClusterActionsDispatch:
-    """All cluster action choices reach a handler; none fall through."""
+    """Every declared cluster action parses and reaches a handler.
+
+    There is no "unknown action" fallback to fall into any more: each
+    action is a real subparser, so argparse rejects an unknown one and
+    `func` is set per action.  What can still go wrong is an action
+    declared in the parser whose arguments do not match what its wrapper
+    or the vm_cluster handler expects -- which is what this catches, by
+    going through the real parser rather than a hand-built namespace.
+    """
 
     def _make_args(self, action: str) -> argparse.Namespace:
-        return argparse.Namespace(
-            action=action,
-            cluster_args=_CLUSTER_ARGS.get(action, []),
-            json=False,
-            verbose=False,
-            arch=None,
+        return ltvm.build_parser().parse_args(
+            ["cluster", action, *_CLUSTER_ARGS.get(action, [])]
         )
 
     @pytest.mark.parametrize("action", _cluster_parser_choices())
-    def test_cluster_action_does_not_hit_unknown_fallback(
-        self, action: str
-    ) -> None:
-        """cmd_cluster must not return the 'Unknown cluster action' error."""
+    def test_cluster_action_reaches_a_handler(self, action: str) -> None:
         args = self._make_args(action)
+        assert getattr(args, "func", None) is not None
 
         _cluster_patches = [
             patch("ltvm_pkg.cli._require_root", return_value=None),
@@ -264,11 +265,11 @@ class TestClusterActionsDispatch:
         with contextlib.ExitStack() as stack:
             for p in _cluster_patches:
                 stack.enter_context(p)
-            result = cmd_cluster(args)
+            result = args.func(args)
 
-        assert result != 1, (
-            f"cluster action '{action}' fell through to "
-            f"'Unknown cluster action' fallback (returned {result})"
+        assert result == 0, (
+            f"cluster action '{action}' did not dispatch cleanly "
+            f"(returned {result})"
         )
 
 
@@ -799,25 +800,31 @@ class TestJsonErrorShape:
         )
 
     @pytest.mark.parametrize(
-        "action,cluster_args,description",
+        "cluster_args,description",
         [
-            ("destroy", [], "missing cluster name"),
-            ("status", [], "missing cluster name"),
-            ("exec", ["co1", "oss"], "too few args for exec"),
+            (["exec", "co1", "oss"], "exec with no command"),
+            (
+                ["create", "co1", "rocky9", "spec:a:1", "--target", "rocky10"],
+                "create with conflicting targets",
+            ),
+            (["create", "co1", "rocky9"], "create with a target but no specs"),
         ],
     )
     def test_cluster_json_error_has_error_key(
-        self, action: str, cluster_args: list[str], description: str
+        self, cluster_args: list[str], description: str
     ) -> None:
-        """cmd_cluster --json error paths always produce {'error': ...}."""
-        from ltvm_pkg.cli import cmd_cluster
+        """The cluster error paths that are still ltvm's own.
 
-        args = argparse.Namespace(
-            action=action,
-            cluster_args=cluster_args,
-            json=True,
-            verbose=False,
-            arch=None,
+        A malformed *command line* -- a missing cluster name, an unknown
+        flag -- is argparse's to report now that each action is a real
+        subparser, and it exits 2 with a usage message like every other
+        ltvm command (see test_cluster_argparse_errors_exit_two).  What
+        remains here is the checks ltvm performs after a successful
+        parse, and those must still answer --json with an error object.
+        """
+        parser = ltvm.build_parser()
+        args = parser.parse_args(
+            ["cluster", cluster_args[0], "--json", *cluster_args[1:]]
         )
 
         output_lines: list[str] = []
@@ -831,7 +838,7 @@ class TestJsonErrorShape:
                 output_lines.append(str(a[0])) if a else None
             )
             try:
-                cmd_cluster(args)
+                args.func(args)
             except SystemExit:
                 pass
 
@@ -845,15 +852,42 @@ class TestJsonErrorShape:
                     pass
 
         assert json_outputs, (
-            f"cmd_cluster --json action='{action}' ({description}) produced no JSON output.\n"
+            f"cluster --json ({description}) produced no JSON output.\n"
             f"Raw output: {output_lines!r}"
         )
         assert "error" in json_outputs[0], (
-            f"cmd_cluster --json action='{action}' ({description}) JSON output "
-            f"is missing 'error' key.\n"
-            f"Got: {json_outputs[0]!r}\n"
+            f"cluster --json ({description}) JSON output is missing "
+            f"'error' key.\nGot: {json_outputs[0]!r}\n"
             f'All JSON error paths must produce {{"error": "..."}}.'
         )
+
+    @pytest.mark.parametrize(
+        "cluster_args,description",
+        [
+            (["destroy"], "missing cluster name"),
+            (["status"], "missing cluster name"),
+            (["create"], "missing everything"),
+            (["create", "co1"], "no node specs"),
+            (["deploy", "co1", "--frob"], "unknown flag"),
+            (["deploy", "co1", "--fstype", "btrfs"], "invalid fstype"),
+            (["nosuch"], "unknown action"),
+        ],
+    )
+    def test_cluster_argparse_errors_exit_two(
+        self, cluster_args: list[str], description: str
+    ) -> None:
+        """A malformed cluster command line is argparse's to reject.
+
+        It was ltvm's, back when `cluster` was one REMAINDER parsed by
+        hand -- which is why cluster answered a missing name with a JSON
+        error object while `ltvm create` with no name already exited 2.
+        Cluster is the consistent one now.
+        """
+        parser = ltvm.build_parser()
+        with patch("sys.stderr"):
+            with pytest.raises(SystemExit) as exc:
+                parser.parse_args(["cluster", *cluster_args])
+        assert exc.value.code == 2, description
 
 
 class TestDashValuedOptions:

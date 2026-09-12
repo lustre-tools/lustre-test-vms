@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import io
 import json
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ltvm_pkg import vm_cluster
-from ltvm_pkg.cli import EXIT_ERROR, EXIT_OK, cmd_cluster
+from ltvm_pkg.cli import EXIT_ERROR, EXIT_OK
 from ltvm_pkg.vm_state import (
     ClusterInfo,
     ClusterNotFound,
@@ -39,13 +40,55 @@ from ltvm_pkg.vm_state import (
 # ── helpers ──────────────────────────────────────────────
 
 
+def _cluster_parser() -> argparse.ArgumentParser:
+    """The real ltvm parser, loaded once."""
+    from tests.test_parser_coverage import ltvm as ltvm_mod
+
+    return ltvm_mod.build_parser()
+
+
 def _ns(action: str, *cargs: str, json_out: bool = False) -> argparse.Namespace:
-    """Build the namespace cmd_cluster expects (parser-level)."""
-    return argparse.Namespace(
-        action=action,
-        cluster_args=list(cargs),
-        json=json_out,
-    )
+    """Parse a real `ltvm cluster <action> ...` command line.
+
+    These used to hand-build the namespace the old dispatcher expected
+    (an action string plus an opaque REMAINDER list), which meant none of
+    them exercised any parsing -- the parsing lived in cmd_cluster and
+    was tested only through its results.  Now that each action is a real
+    subparser, going through the parser is both more honest and what
+    catches a misdeclared argument.
+
+    --json goes immediately after the action, not at the end: `exec` and
+    `ssh` take their command as REMAINDER, which would otherwise swallow
+    it as part of the command.
+    """
+    argv = ["cluster", action]
+    if json_out:
+        argv.append("--json")
+    argv.extend(cargs)
+    return _cluster_parser().parse_args(argv)
+
+
+def cmd_cluster(args: argparse.Namespace) -> int:
+    """Dispatch a parsed namespace the way main() does."""
+    rc = args.func(args)
+    return int(rc) if isinstance(rc, int) else EXIT_OK
+
+
+def _expect_usage_error(action: str, *cargs: str) -> str:
+    """Assert argparse rejects this command line, and return its stderr.
+
+    A malformed cluster command line used to be ltvm's own EXIT_ERROR,
+    because `cluster` was one REMAINDER parsed by hand.  Each action is a
+    real subparser now, so argparse rejects it with a usage message and
+    exit 2 -- which is what `ltvm create` with no name already did, so
+    cluster is the consistent one now rather than the exception.
+    """
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        with pytest.raises(SystemExit) as exc:
+            _ns(action, *cargs)
+    assert exc.value.code == 2
+    return err.getvalue()
 
 
 @pytest.fixture
@@ -164,9 +207,9 @@ class TestCmdClusterDispatch:
         assert rc == EXIT_OK
         self._assert_only("cmd_cluster_ssh")
 
-    def test_unknown_action_returns_error(self) -> None:
-        rc = cmd_cluster(_ns("bogus"))
-        assert rc == EXIT_ERROR
+    def test_unknown_action_is_rejected_by_the_parser(self) -> None:
+        err = _expect_usage_error("bogus")
+        assert "invalid choice" in err
         for m in self.mocks.values():
             assert not m.called
 
@@ -250,15 +293,19 @@ class TestClusterCreateArgs:
         assert ns.nodes == ["mgs+mds:co1-mds:1"]
 
     def test_positional_and_flag_target_must_agree(self) -> None:
-        """Conflicting positional + --target is an error."""
+        """Conflicting positional + --target is an error.
+
+        Options go after the run of specs, not between them -- see
+        test_cli_target_forms.test_option_between_specs_is_rejected.
+        """
         rc = cmd_cluster(
             _ns(
                 "create",
                 "co1",
                 "rocky10",
+                "mgs+mds:co1-mds:1",
                 "--target",
                 "rocky9",
-                "mgs+mds:co1-mds:1",
             )
         )
         assert rc == EXIT_ERROR
@@ -271,9 +318,9 @@ class TestClusterCreateArgs:
                 "create",
                 "co1",
                 "rocky10",
+                "mgs+mds:co1-mds:1",
                 "--target",
                 "rocky10",
-                "mgs+mds:co1-mds:1",
             )
         )
         ns = self._captured_ns()
@@ -302,15 +349,14 @@ class TestClusterCreateArgs:
         assert ns.nic == ["nat", "softroce"]
 
     def test_unknown_flag_errors(self) -> None:
-        rc = cmd_cluster(
-            _ns("create", "co1", "--frobnicate", "mgs+mds:co1-mds:1")
+        err = _expect_usage_error(
+            "create", "co1", "mgs+mds:co1-mds:1", "--frobnicate"
         )
-        assert rc == EXIT_ERROR
+        assert "--frobnicate" in err
         assert not self.handler.called
 
     def test_missing_node_spec_errors(self) -> None:
-        rc = cmd_cluster(_ns("create", "co1"))
-        assert rc == EXIT_ERROR
+        _expect_usage_error("create", "co1")
         assert not self.handler.called
 
     def test_missing_node_spec_after_positional_target_errors(self) -> None:
@@ -320,8 +366,7 @@ class TestClusterCreateArgs:
         assert not self.handler.called
 
     def test_no_args_errors(self) -> None:
-        rc = cmd_cluster(_ns("create"))
-        assert rc == EXIT_ERROR
+        _expect_usage_error("create")
         assert not self.handler.called
 
     def test_only_flags_no_positionals_errors(self) -> None:
@@ -332,14 +377,12 @@ class TestClusterCreateArgs:
         passes (we have 4 args), so the secondary check at line 2846
         must catch it.
         """
-        rc = cmd_cluster(_ns("create", "--vcpus", "8", "--mem", "4096"))
-        assert rc == EXIT_ERROR
+        _expect_usage_error("create", "--vcpus", "8", "--mem", "4096")
         assert not self.handler.called
 
     def test_only_name_after_flag_parsing_errors(self) -> None:
         """``cluster create --vcpus 8 co1`` -- name but no spec."""
-        rc = cmd_cluster(_ns("create", "--vcpus", "8", "co1"))
-        assert rc == EXIT_ERROR
+        _expect_usage_error("create", "--vcpus", "8", "co1")
         assert not self.handler.called
 
     def test_multiple_node_specs_pass_through(self) -> None:
@@ -470,13 +513,18 @@ class TestClusterDeployArgs:
         assert ns.mount and ns.server_only and ns.force_compat
 
     def test_unknown_flag_errors(self) -> None:
-        rc = cmd_cluster(_ns("deploy", "co1", "--frob"))
-        assert rc == EXIT_ERROR
+        err = _expect_usage_error("deploy", "co1", "--frob")
+        assert "--frob" in err
+        assert not self.handler.called
+
+    def test_invalid_fstype_errors(self) -> None:
+        """--fstype was validated by hand; argparse choices do it now."""
+        err = _expect_usage_error("deploy", "co1", "--fstype", "btrfs")
+        assert "invalid choice" in err
         assert not self.handler.called
 
     def test_missing_name_errors(self) -> None:
-        rc = cmd_cluster(_ns("deploy"))
-        assert rc == EXIT_ERROR
+        _expect_usage_error("deploy")
         assert not self.handler.called
 
 
@@ -503,8 +551,13 @@ class TestClusterExecArgs:
         # Default timeout pinned to 120s.
         assert ns.timeout == 120
 
-    def test_exec_too_few_args_errors(self) -> None:
-        rc = cmd_cluster(_ns("exec", "co1"))
+    def test_exec_without_a_role_is_a_usage_error(self) -> None:
+        _expect_usage_error("exec", "co1")
+        assert not self.handler.called
+
+    def test_exec_without_a_command_is_ltvms_own_error(self) -> None:
+        """The role parses; the missing command is ours to report."""
+        rc = cmd_cluster(_ns("exec", "co1", "oss"))
         assert rc == EXIT_ERROR
         assert not self.handler.called
 
@@ -532,16 +585,14 @@ class TestClusterSshArgs:
         assert ns.command == []
 
     def test_ssh_too_few_args_errors(self) -> None:
-        rc = cmd_cluster(_ns("ssh", "co1"))
-        assert rc == EXIT_ERROR
+        _expect_usage_error("ssh", "co1")
         assert not self.handler.called
 
 
 class TestClusterStatusArgs:
     def test_status_requires_name(self) -> None:
         with patch("ltvm_pkg.vm_cluster.cmd_cluster_status") as m:
-            rc = cmd_cluster(_ns("status"))
-        assert rc == EXIT_ERROR
+            _expect_usage_error("status")
         assert not m.called
 
     def test_status_passes_name(self) -> None:
@@ -554,8 +605,7 @@ class TestClusterStatusArgs:
 class TestClusterDestroyArgs:
     def test_destroy_requires_name(self, as_root: Any) -> None:
         with patch("ltvm_pkg.vm_cluster.cmd_cluster_destroy") as m:
-            rc = cmd_cluster(_ns("destroy"))
-        assert rc == EXIT_ERROR
+            _expect_usage_error("destroy")
         assert not m.called
 
 
@@ -576,33 +626,49 @@ class TestClusterListArgs:
 class TestJsonErrorOutput:
     """``--json`` errors must emit a parseable JSON envelope."""
 
-    def test_create_missing_args_json(
+    def test_create_target_without_specs_json(
         self, as_root: Any, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with patch("ltvm_pkg.vm_cluster.cmd_cluster_create"):
-            rc = cmd_cluster(_ns("create", json_out=True))
+            # name + a bare target, so argparse is satisfied and the
+            # "no node specs" check is ltvm's own.
+            rc = cmd_cluster(_ns("create", "co1", "rocky9", json_out=True))
         assert rc == EXIT_ERROR
         err = capsys.readouterr().err
         payload = json.loads(err)
         assert "error" in payload
         assert "node spec" in payload["error"]
 
-    def test_unknown_action_json(
+    def test_exec_without_a_command_json(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        rc = cmd_cluster(_ns("nosuch", json_out=True))
+        rc = cmd_cluster(_ns("exec", "co1", "oss", json_out=True))
         assert rc == EXIT_ERROR
         payload = json.loads(capsys.readouterr().err)
         assert "error" in payload
 
-    def test_deploy_unknown_flag_json(
-        self, capsys: pytest.CaptureFixture[str]
+    def test_target_conflict_json(
+        self, as_root: Any, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        rc = cmd_cluster(_ns("deploy", "co1", "--bad", json_out=True))
+        rc = cmd_cluster(
+            _ns(
+                "create",
+                "co1",
+                "rocky9",
+                "mgs+mds:co1-mds:1",
+                "--target",
+                "rocky10",
+                json_out=True,
+            )
+        )
         assert rc == EXIT_ERROR
         payload = json.loads(capsys.readouterr().err)
         assert "error" in payload
-        assert "--bad" in payload["error"]
+
+    def test_a_malformed_command_line_is_argparses_to_report(self) -> None:
+        """Not a JSON envelope: argparse owns the command line now, and
+        reports it the same way for every ltvm subcommand."""
+        assert "--bad" in _expect_usage_error("deploy", "co1", "--bad")
 
 
 # ─────────────────────────────────────────────────────────
@@ -1189,7 +1255,7 @@ class TestClusterCreateDryRun:
         assert not one.called
 
     def test_an_unknown_flag_is_still_rejected(self, tmp_sockets: Path) -> None:
-        rc = cmd_cluster(
-            _ns("create", "coY", "mgs+mds:coY-a:1", "--dry-run", "--nope")
+        err = _expect_usage_error(
+            "create", "coY", "mgs+mds:coY-a:1", "--dry-run", "--nope"
         )
-        assert rc == EXIT_ERROR
+        assert "--nope" in err

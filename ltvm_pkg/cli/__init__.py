@@ -92,7 +92,15 @@ GITHUB_REPO = os.environ.get("LTVM_GITHUB_REPO", "lustre-tools/lustre-test-vms")
 # _cli_attr indirection at call time, so order here is mostly a
 # style issue -- but keep it consistent with the "constants first,
 # submodule re-exports second" pattern.
-from ltvm_pkg.cli.cluster import cmd_cluster  # noqa: E402
+from ltvm_pkg.cli.cluster import (  # noqa: E402
+    cmd_cluster_create,
+    cmd_cluster_deploy,
+    cmd_cluster_destroy,
+    cmd_cluster_exec,
+    cmd_cluster_list,
+    cmd_cluster_ssh,
+    cmd_cluster_status,
+)
 from ltvm_pkg.cli.deploy import (  # noqa: E402
     cmd_deploy,
     cmd_llmount,
@@ -212,7 +220,13 @@ __all__ = [
     "cmd_build_zfs",
     "cmd_build_shell",
     "cmd_clean",
-    "cmd_cluster",
+    "cmd_cluster_create",
+    "cmd_cluster_deploy",
+    "cmd_cluster_destroy",
+    "cmd_cluster_exec",
+    "cmd_cluster_list",
+    "cmd_cluster_ssh",
+    "cmd_cluster_status",
     "cmd_completion",
     "cmd_console_log",
     "cmd_crash_collect",

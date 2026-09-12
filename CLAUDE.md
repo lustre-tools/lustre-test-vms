@@ -412,7 +412,8 @@ resolves once and applies the same owner to every member. Discover it through
 **Naming:** always include the checkout number: `co<N>-<role>`.
 
 **Root:** only `update`, `cluster create` and `cluster destroy` need the
-whole command under root.
+whole command under root -- and not `cluster create --dry-run`, which
+only reads.
 
 Single-VM lifecycle -- `create`, `start`, `stop`, `destroy`, `doctor` --
 runs as the invoking user and elevates the individual operations that
@@ -521,6 +522,26 @@ sudo ltvm cluster destroy co2
 `cluster exec <role>` fans out across every node holding the role and
 exits non-zero if any node did; `cluster ssh <role>` opens a session on
 the first, since it execs a single interactive ssh.
+
+Each action is a real subparser, so `ltvm cluster <action> --help`
+works and every action's flags validate and tab-complete.  Two
+consequences worth knowing:
+
+- **`cluster exec` takes its command as a REMAINDER**, so everything
+  after the role is passed through untouched (`lctl dl -t` keeps its
+  `-t`).  The price is that ltvm's own flags must come *before* the
+  role: `cluster exec co2 --timeout 30 oss uptime`, not after it.
+- **An option between two node specs does not parse.**  `create`'s specs
+  are one `nargs="+"` positional -- they have to be, or argparse would
+  assign a bare positional TARGET the first spec -- and argparse matches
+  positionals in contiguous runs, so an option in the middle ends the
+  run and the rest come back as "unrecognized arguments".  Before or
+  after the whole run both work.  The hand-rolled parser this replaced
+  did not care, so that one form regressed.
+
+A malformed cluster command line now exits 2 with a usage message rather
+than ltvm's own error (a JSON envelope under `--json`), which is what
+every other subcommand already did.
 
 ## Target Configuration
 

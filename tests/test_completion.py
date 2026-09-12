@@ -112,68 +112,64 @@ def cluster(tmp_path: Path) -> Path:
         yield sockets
 
 
-class TestClusterRemainderCompleter:
-    """One completer serves every `cluster <action>`, keyed off how many
-    remainder tokens have been consumed."""
+class TestClusterMemberCompleter:
+    """`cluster exec` / `ssh` take a role or a single node name.
 
-    def test_first_token_is_a_cluster_name(self, cluster: Path) -> None:
-        got = completion.complete_cluster_remainder(
-            parsed_args=_args(action="exec", cluster_args=[])
-        )
-        assert got == ["co2"]
+    Before the subparser conversion one completer served every cluster
+    action off a REMAINDER, counting how many tokens had been consumed to
+    guess what was being typed.  argparse knows the shape now, so this is
+    just "the cluster named so far, its roles then its nodes".
+    """
 
-    def test_create_does_not_offer_existing_names(self, cluster: Path) -> None:
-        """`cluster create` names something new; taken names are wrong."""
-        assert (
-            completion.complete_cluster_remainder(
-                parsed_args=_args(action="create", cluster_args=[])
-            )
-            == []
-        )
-
-    def test_second_token_of_exec_is_roles_then_nodes(
-        self, cluster: Path
-    ) -> None:
-        got = completion.complete_cluster_remainder(
-            parsed_args=_args(action="exec", cluster_args=["co2"])
-        )
+    def test_roles_then_node_names(self, cluster: Path) -> None:
+        got = completion.complete_cluster_members(parsed_args=_args(name="co2"))
         assert got == ["mds", "mgs", "oss", "co2-mds", "co2-oss1"]
 
-    def test_ssh_gets_the_same_second_token(self, cluster: Path) -> None:
-        assert completion.complete_cluster_remainder(
-            parsed_args=_args(action="ssh", cluster_args=["co2"])
-        ) == completion.complete_cluster_remainder(
-            parsed_args=_args(action="exec", cluster_args=["co2"])
-        )
-
-    def test_the_word_being_typed_is_not_counted(self, cluster: Path) -> None:
-        """`cluster exec co<TAB>` is still token 1, not token 2.
-
-        argcomplete leaves the partial word in the remainder, so without
-        dropping it the completer would offer roles where a cluster name
-        belongs.
-        """
-        got = completion.complete_cluster_remainder(
-            prefix="co", parsed_args=_args(action="exec", cluster_args=["co"])
-        )
-        assert got == ["co2"]
-
-    def test_nothing_for_execs_trailing_command(self, cluster: Path) -> None:
-        """Past the role, `exec` takes a shell command -- not completable."""
+    def test_nothing_before_a_cluster_is_named(self, cluster: Path) -> None:
         assert (
-            completion.complete_cluster_remainder(
-                parsed_args=_args(action="exec", cluster_args=["co2", "oss"])
-            )
+            completion.complete_cluster_members(parsed_args=_args(name=None))
             == []
         )
 
     def test_unknown_cluster_yields_nothing(self, cluster: Path) -> None:
         assert (
-            completion.complete_cluster_remainder(
-                parsed_args=_args(action="exec", cluster_args=["nope"])
-            )
+            completion.complete_cluster_members(parsed_args=_args(name="nope"))
             == []
         )
+
+
+class TestClusterSpecsCompleter:
+    """`cluster create`'s positionals: an optional target, then specs."""
+
+    def test_first_word_offers_targets(self, cluster: Path) -> None:
+        got = completion.complete_cluster_specs(
+            prefix="roc", parsed_args=_args(specs=["roc"])
+        )
+        assert "rocky9" in got
+
+    def test_first_word_also_offers_role_prefixes(self, cluster: Path) -> None:
+        """`mgs+mds:` is easy to misremember -- the separator is '+', not
+        ',' -- and a wrong role is only refused after the whole line."""
+        got = completion.complete_cluster_specs(parsed_args=_args(specs=[]))
+        for role in completion.CLUSTER_ROLES:
+            assert role in got
+
+    def test_past_the_first_word_a_target_is_not_offered(
+        self, cluster: Path
+    ) -> None:
+        got = completion.complete_cluster_specs(
+            parsed_args=_args(specs=["rocky9", ""])
+        )
+        assert "rocky9" not in got
+        assert set(got) == set(completion.CLUSTER_ROLES)
+
+    def test_a_word_with_a_colon_is_a_spec_not_a_target(
+        self, cluster: Path
+    ) -> None:
+        got = completion.complete_cluster_specs(
+            prefix="mgs:", parsed_args=_args(specs=["mgs:"])
+        )
+        assert "rocky9" not in got
 
 
 # ── completers: snapshot tags ─────────────────────────────
@@ -241,7 +237,8 @@ class TestCompletersNeverRaise:
             "complete_zfs_versions",
             "complete_mofed_versions",
             "complete_fetch_filter",
-            "complete_cluster_remainder",
+            "complete_cluster_members",
+            "complete_cluster_specs",
         ],
     )
     def test_a_broken_registry_yields_no_completions(self, name: str) -> None:
@@ -544,7 +541,18 @@ class TestParserWiring:
             ("ltvm target fetch|<filter>", "complete_fetch_filter"),
             ("ltvm vm restore|<tag>", "complete_snapshot_tags"),
             ("ltvm vm snapshot|--delete", "complete_snapshot_tags"),
-            ("ltvm cluster|<cluster_args>", "complete_cluster_remainder"),
+            ("ltvm cluster exec|<target>", "complete_cluster_members"),
+            ("ltvm cluster ssh|<target>", "complete_cluster_members"),
+            ("ltvm cluster create|<specs>", "complete_cluster_specs"),
+            ("ltvm cluster destroy|<name>", "complete_clusters"),
+            ("ltvm cluster deploy|<name>", "complete_clusters"),
+            ("ltvm cluster status|<name>", "complete_clusters"),
+            ("ltvm cluster exec|<name>", "complete_clusters"),
+            ("ltvm cluster ssh|<name>", "complete_clusters"),
+            (
+                "ltvm cluster deploy|--build/--lustre-tree",
+                "complete_directories",
+            ),
             ("ltvm make-install|--variant", "complete_variants"),
             ("ltvm make-uninstall|--variant", "complete_variants"),
             ("ltvm make-reinstall|--variant", "complete_variants"),
