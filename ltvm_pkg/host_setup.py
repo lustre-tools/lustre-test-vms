@@ -2086,6 +2086,19 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
         "version": zv,
     }
 
+    # Tab completion, per shell.  Reported because `install` sets it up
+    # and this is the "did my install take?" command -- but deliberately
+    # not in `all_ok` below.  A completion file that went stale across a
+    # version bump is normal and self-heals on the next install, and
+    # failing the exit code of `install --verify` over it would cry
+    # wolf.  `ltvm doctor` is the check that exits non-zero and fixes it.
+    from ltvm_pkg import shell_completion
+
+    results["completion"] = {
+        r.shell: {"status": r.status, "path": str(r.path)}
+        for r in shell_completion.status()
+    }
+
     # Overall
     checks = [
         results["qemu"]["installed"],
@@ -2166,6 +2179,20 @@ def print_verify(results: dict[str, Any]) -> None:
         ok(f"zstd: {z['version']}")
     else:
         fail("zstd: not installed (needed by ltvm target publish/fetch)")
+
+    comp = results.get("completion") or {}
+    if not comp:
+        ok("tab completion: no supported shell found")
+    else:
+        broken = {s: c for s, c in comp.items() if c["status"] != "current"}
+        if not broken:
+            ok(f"tab completion: {', '.join(sorted(comp))}")
+        else:
+            for shell in sorted(broken):
+                fail(
+                    f"tab completion ({shell}): {broken[shell]['status']} "
+                    f"-- `ltvm doctor --fix` installs it"
+                )
 
     ssh = results["ssh"]
     if ssh.get("note"):

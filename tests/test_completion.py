@@ -283,7 +283,12 @@ class TestShellcode:
 
         Without the #compdef header and the trailing call, the bare
         argcomplete shellcode defines _python_argcomplete and returns --
-        so the first TAB comes up empty and only the second works.
+        so the first TAB does nothing.  Measured in real zsh through a
+        pty, completing `ltvm build kernel rocky9-`: wrapped gives
+        `rocky9-64k`, bare leaves the line untouched.  Driving zsh needs
+        an interactive pty, which is too slow and too fragile for this
+        suite, so what is pinned here is the two pieces of structure
+        that made the difference.
         """
         code = shell_completion.shellcode("zsh")
         assert code.startswith("#compdef ltvm\n")
@@ -810,3 +815,72 @@ def test_end_to_end_completion_records_no_telemetry(tmp_path: Path) -> None:
     assert got, "sanity: completion produced something"
     counters = list(state.rglob("*.json")) if state.exists() else []
     assert counters == [], f"completion wrote telemetry state: {counters}"
+
+
+# ── `ltvm install --verify` reporting ──────────────────────
+
+
+class TestVerifyReporting:
+    """`install --verify` answers "did my install take?", and install now
+    sets up completion -- so it reports completion too.  Deliberately not
+    part of `all_ok`: a file gone stale across a version bump is normal
+    and self-heals on the next install, and failing the exit code over
+    that would cry wolf.  `ltvm doctor` is what exits non-zero."""
+
+    # verify() itself probes QEMU, /dev/kvm, the bridge and dnsmasq, and
+    # has no unit test in this repo for that reason -- its completion
+    # block is just shell_completion.status(), covered above.  What is
+    # worth pinning is the rendering, which is where a wrong status would
+    # actually mislead someone.
+
+    def test_stale_is_surfaced_as_a_warning(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from ltvm_pkg.host_setup import print_verify
+        from tests.test_setup import _all_ok_result
+
+        r = _all_ok_result()
+        r["completion"] = {
+            "bash": {"status": "stale", "path": "/etc/bash_completion.d/ltvm"}
+        }
+        print_verify(r)
+        out = capsys.readouterr().out
+        assert "tab completion (bash): stale" in out
+        assert "ltvm doctor --fix" in out
+
+    def test_current_shells_are_listed_on_one_line(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from ltvm_pkg.host_setup import print_verify
+        from tests.test_setup import _all_ok_result
+
+        r = _all_ok_result()
+        r["completion"] = {
+            s: {"status": "current", "path": f"/x/{s}"}
+            for s in ("bash", "zsh", "fish")
+        }
+        print_verify(r)
+        assert "tab completion: bash, fish, zsh" in capsys.readouterr().out
+
+    def test_no_supported_shell_is_not_a_warning(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from ltvm_pkg.host_setup import print_verify
+        from tests.test_setup import _all_ok_result
+
+        r = _all_ok_result()
+        r["completion"] = {}
+        print_verify(r)
+        out = capsys.readouterr().out
+        assert "no supported shell found" in out
+        assert "WARNING: tab completion" not in out
+
+    def test_a_result_without_the_key_still_prints(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """An older cached result, or a caller that built its own."""
+        from ltvm_pkg.host_setup import print_verify
+        from tests.test_setup import _all_ok_result
+
+        print_verify(_all_ok_result())
+        assert "All checks passed." in capsys.readouterr().out

@@ -11,12 +11,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+import ltvm_pkg.release_package as release_package
 from ltvm_pkg.release_package import (
     DEFAULT_VARIANT,
     _bootable_asset_name,
@@ -32,6 +35,37 @@ from ltvm_pkg.release_package import (
     package_target,
     snapshot_lustre,
 )
+
+# Tests that really build and unpack the assets need the tools that do
+# it.  They are integration tests by design -- mocking tar and zstd
+# would leave them asserting nothing about the tarballs they exist to
+# check -- so on a host without them the honest outcome is a skip that
+# names what is missing, not eleven failures deep inside subprocess.
+# `sudo ltvm install` installs all three.
+_HOST_TOOLS = ("tar", "zstd", "rsync")
+_MISSING_TOOLS = [t for t in _HOST_TOOLS if shutil.which(t) is None]
+
+needs_host_tools = pytest.mark.skipif(
+    bool(_MISSING_TOOLS),
+    reason=(
+        f"needs host tool(s) {', '.join(_MISSING_TOOLS)}; "
+        f"`sudo ltvm install` installs them"
+    ),
+)
+
+
+@pytest.fixture
+def no_zstd_preflight() -> Iterator[None]:
+    """Neutralize the zstd presence check.
+
+    For the tests that assert a clear error for a *missing input*: that
+    check runs first, so without this they failed on a host without zstd
+    having never reached the behaviour under test -- and they have no
+    need of zstd to reach it.
+    """
+    with patch.object(release_package, "_check_zstd"):
+        yield
+
 
 # ---------------------------------------------------------------------------
 # Low-level unit tests
@@ -240,6 +274,7 @@ def _make_fake_output(tmp: Path, variant: str = DEFAULT_VARIANT) -> Path:
 
 
 class TestPackageTarget:
+    @needs_host_tools
     def test_base_package(self, tmp_path: Path) -> None:
         out = _make_fake_output(tmp_path)
         dest = tmp_path / "release"
@@ -275,6 +310,7 @@ class TestPackageTarget:
         kinds = {a["kind"] for a in manifest["assets"]}
         assert {"container", "kernel", "image"}.issubset(kinds)
 
+    @needs_host_tools
     def test_variant_package(self, tmp_path: Path) -> None:
         out = _make_fake_output(tmp_path, variant="mofed")
         dest = tmp_path / "release"
@@ -299,6 +335,7 @@ class TestPackageTarget:
         manifest = json.loads(assets["manifest"].read_text())
         assert manifest["variant"] == "mofed"
 
+    @needs_host_tools
     def test_manifest_sha256_matches_assets(self, tmp_path: Path) -> None:
         out = _make_fake_output(tmp_path)
         dest = tmp_path / "release"
@@ -319,7 +356,9 @@ class TestPackageTarget:
             assert _sha256(asset_path) == entry["sha256"]
             assert asset_path.stat().st_size == entry["size"]
 
-    def test_missing_container_raises(self, tmp_path: Path) -> None:
+    def test_missing_container_raises(
+        self, tmp_path: Path, no_zstd_preflight: None
+    ) -> None:
         out = _make_fake_output(tmp_path)
         (out / "container" / "image.tar").unlink()
 
@@ -335,6 +374,7 @@ class TestPackageTarget:
 
 
 class TestPackageBootable:
+    @needs_host_tools
     def test_compresses_single_file(self, tmp_path: Path) -> None:
         out = _make_fake_output(tmp_path)
         qcow2 = out / "images" / "5.14-rhel9.7" / "bootable-5.14-rhel9.7.qcow2"
@@ -354,7 +394,9 @@ class TestPackageBootable:
         assert result.name.startswith("bootable-rocky9-x86_64-5.14.0-611")
         assert result.name.endswith(".qcow2.zst")
 
-    def test_missing_qcow2_raises(self, tmp_path: Path) -> None:
+    def test_missing_qcow2_raises(
+        self, tmp_path: Path, no_zstd_preflight: None
+    ) -> None:
         out = _make_fake_output(tmp_path)
         with pytest.raises(FileNotFoundError, match="bootable qcow2 not found"):
             package_bootable(
@@ -365,6 +407,7 @@ class TestPackageBootable:
             )
 
 
+@needs_host_tools
 class TestSnapshotLustreVariant:
     """snapshot_lustre still lives in release_package; cover the
     variant-aware destination path."""
@@ -483,6 +526,7 @@ def _package(out: Path, dest: Path) -> dict:
         )
 
 
+@needs_host_tools
 class TestZfsAsset:
     def test_published_when_lustre_was_built_with_zfs(
         self, tmp_path: Path

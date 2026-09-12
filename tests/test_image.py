@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -232,6 +233,22 @@ class TestImageOutputDirPerKernel:
 
 
 class TestCheckMke2fs:
+    """_check_mke2fs does two things: a `shutil.which` presence check for
+    mke2fs and fakeroot, then a functional check on `mke2fs -V` output.
+
+    These tests are about the second one, so the first is satisfied here
+    rather than left to chance.  Without this they only passed on a host
+    that happened to have both tools installed -- on any other they all
+    failed on the presence check, never reaching the behaviour under
+    test.  `_check_mke2fs` imports shutil inside the function, so
+    patching the attribute on the module is what reaches it.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _tools_present(self) -> Iterator[None]:
+        with patch("shutil.which", return_value="/usr/sbin/mke2fs"):
+            yield
+
     def test_does_not_raise_when_mke2fs_present(self) -> None:
         import ltvm_pkg.image_build as image
 
@@ -540,7 +557,13 @@ class TestBuildImageWithLustre:
         tc = _make_config(tmp_targets)
         lt = tmp_path / "empty-tree"
         lt.mkdir()
-        with pytest.raises(FileNotFoundError, match="ltvm build lustre"):
+        # The staging guard is the subject; build_image's host-tool
+        # preflight runs before it and would otherwise fail this test on
+        # any machine without fakeroot installed, for the wrong reason.
+        with (
+            patch.object(image, "_check_mke2fs"),
+            pytest.raises(FileNotFoundError, match="ltvm build lustre"),
+        ):
             image.build_image(
                 tc, force=True, kernel="5.14-rhel9.7", with_lustre=lt
             )

@@ -490,12 +490,20 @@ class TestCmdDeployPerKernelStaging:
     def test_legacy_staging_triggers_clear_error(
         self, tmp_sockets: Path, tmp_path: Path
     ) -> None:
-        """Legacy per-target staging present + per-kernel missing
-        errors with the build-lustre hint instead of silently shipping
-        the legacy modules."""
+        """Legacy per-target staging present + per-kernel missing must
+        not silently ship the legacy modules.
+
+        cmd_deploy reaches that by rebuilding, so the `ltvm build lustre`
+        child is mocked to fail.  Without the mock this test ran a real
+        `ltvm build lustre` and passed only because that failed -- on a
+        host with no ltvm on PATH it died with FileNotFoundError, and on
+        a host with one it was one missing-artifact check away from
+        starting an actual build from the test suite.
+        """
         import argparse as ap
 
         from ltvm_pkg import cli as cli_mod
+        from ltvm_pkg.cli import deploy as cli_deploy
 
         build_path = tmp_path / "lustre-release"
         self._setup_lustre_tree(build_path)
@@ -516,6 +524,11 @@ class TestCmdDeployPerKernelStaging:
             patch.object(cli_mod, "TargetConfig", return_value=tc),
             patch.object(cli_mod, "_gate_lustre_validation"),
             patch("ltvm_pkg.cli.deploy_to_vm") as deploy_mock,
+            patch.object(
+                cli_deploy.subprocess,
+                "run",
+                return_value=MagicMock(returncode=1, stdout="", stderr=""),
+            ) as run_mock,
         ):
             args = ap.Namespace(
                 vm="co1-eh9-legacy",
@@ -533,6 +546,13 @@ class TestCmdDeployPerKernelStaging:
 
         assert rc == EXIT_ERROR
         assert not deploy_mock.called
+        # It failed at the rebuild, not somewhere earlier for an
+        # unrelated reason -- which is what makes the assertion above
+        # evidence that legacy modules are not shipped.
+        assert any(
+            call.args[0][:3] == ["ltvm", "build", "lustre"]
+            for call in run_mock.call_args_list
+        )
 
 
 # --------------------------------------------------------------------------

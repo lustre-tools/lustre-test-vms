@@ -8,6 +8,7 @@ does and does not contain.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -200,16 +201,45 @@ def test_payload_is_a_closed_list(_home: Path) -> None:
     }
 
 
+def _payload_strings(value: object) -> Iterator[str]:
+    """Every string *value* in a payload, recursively."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _payload_strings(v)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            yield from _payload_strings(v)
+
+
 def test_payload_leaks_nothing_identifying(_home: Path) -> None:
+    """Nothing that names the machine or its user may leave it.
+
+    Checked against the payload's *values*, not its JSON text.  A short
+    hostname is a substring of the serialized blob by coincidence --
+    "vm" is inside the key "ltvm_version", and a host actually named
+    `vm` failed this test with no leak present.  Keys are fixed literals
+    in _payload and are pinned by test_payload_shape above, so only
+    values can carry host data.
+    """
     import getpass
     import socket
 
     import ltvm_pkg.telemetry as t
 
-    blob = json.dumps(t._payload())
+    values = list(_payload_strings(t._payload()))
     for secret in (socket.gethostname(), getpass.getuser(), str(Path.home())):
-        if secret:
-            assert secret not in blob
+        if not secret:
+            continue
+        assert secret not in values, f"payload carries {secret!r} verbatim"
+        # Substring too, to catch a leak embedded in a larger value (a
+        # home path inside some other path).  Only for secrets long
+        # enough that a match means something: at one or two characters
+        # it is noise, and the exact check above still covers them.
+        if len(secret) >= 3:
+            for v in values:
+                assert secret not in v, f"{v!r} carries {secret!r}"
 
 
 def test_preview_matches_what_send_would_post(_home: Path) -> None:

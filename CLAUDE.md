@@ -81,6 +81,12 @@ stale files and writes them with `--fix`.  Writes go through
 `priv.atomic_write`, so only the write elevates -- the command itself
 does not need root.
 
+`ltvm install --verify` reports it too (`host_setup.verify`), but
+deliberately *not* as part of `all_ok`: a file gone stale across a
+version bump is normal and self-heals on the next install, so failing
+that command's exit code over it would cry wolf.  `ltvm doctor` is the
+one that exits non-zero and fixes it.
+
 Wiring lives in `ltvm`: `_COMPLETERS_BY_OPTION` is attached across the
 whole subparser tree by `_attach_completers(p)` at the end of
 `build_parser`, so an option that means the same thing everywhere
@@ -535,6 +541,41 @@ canonical example: an overlay container/image pair plus
 a kernel pin and `params:` consumed by the Dockerfile.
 
 ## Development
+
+### Test suite
+
+`uv run pytest` passes with no failures on two quite different
+machines, and keeping both green is the standard:
+
+- a **provisioned host** (`sudo ltvm install` has run): everything runs;
+- a **bare checkout** with no `zstd`, `rsync`, `fakeroot`, `mke2fs` and
+  no `ltvm` on PATH: the tests that genuinely drive those tools skip,
+  naming what is missing, and nothing fails.
+
+Two rules keep that true, and both came from tests that quietly wanted a
+configured host:
+
+- A **unit** test must not depend on a host tool.  When the code under
+  test sits behind a presence preflight (`image_build._check_mke2fs`,
+  `release_package._check_zstd`), neutralize the preflight -- otherwise
+  the test fails on the preflight having never reached its subject, and
+  what it reports is "fakeroot missing" rather than anything about the
+  behaviour it covers.
+- An **integration** test that really builds and unpacks assets needs
+  the real binaries, since mocking tar and zstd would leave it asserting
+  nothing about the tarballs it exists to check.  Those carry
+  `@needs_host_tools` (tests/test_package.py) and skip with a reason
+  naming the tool and the remedy.
+
+Never let a test shell out to `ltvm` itself for real.  One did, and
+passed only because the child failed; on a host where it would have
+succeeded the suite was one check away from starting an actual Lustre
+build (tests/test_deploy.py::test_legacy_staging_triggers_clear_error).
+
+`tests/conftest.py` holds the autouse isolation that keeps the suite out
+of the developer's real state: XDG config and state, `LTVM_TELEMETRY=0`,
+and `LTVM_COMPLETION_ROOT`.  Add to it rather than patching per test
+whenever a new code path writes outside the repo.
 
 ### Interactive container shell
 
