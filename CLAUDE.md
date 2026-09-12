@@ -171,14 +171,6 @@ digest) and `input_components()` (the per-input digests
 code path.  Keep it that way: an explanation that disagrees
 with the rebuild decision is worse than none.
 
-What targets.yaml contributes is deliberately narrow: `variants`,
-`zfs` and `kernels` are all excluded from the per-target blob, because
-no byte of a container, kernel or image depends on them.  What a kernel
-build *does* read is folded back per kernel -- `kernels.config` and
-that kernel's own `available` entry -- so adding a minor to
-`kernels.available` invalidates nothing, and a mapping entry's
-`srpm_version` invalidates only its own kernel.
-
 [tests/test_input_hash_stability.py](tests/test_input_hash_stability.py)
 pins the digest for every target and artifact.  If it fails,
 assume you changed the hash by accident.  When the change is

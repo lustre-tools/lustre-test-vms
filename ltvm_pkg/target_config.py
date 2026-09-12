@@ -1076,28 +1076,10 @@ class TargetConfig:
         # its configure-flags stamp via --with-zfs).  Folding it in
         # here would rebuild every container and kernel for a knob
         # they do not read.
-        #
-        # ``kernels`` is excluded for the same reason, and is the one
-        # that cost the most: the whole block -- ``available`` list and
-        # ``default`` included -- used to be hashed into every
-        # artifact, so the documented routine operation "for a new
-        # kernel minor on an existing OS, just add the short name to
-        # kernels.available" invalidated that target's container, every
-        # one of its kernels and every one of its images, on every
-        # machine at once, with ``--why`` able to say only
-        # "targets.yaml (changed)".  Nothing in a container, in kernel
-        # N's build, or in an image reads the list of *other* available
-        # kernels.  What a kernel build does read is folded back in
-        # below, per kernel: ``kernels.config`` and that kernel's own
-        # entry (a mapping entry's ``srpm_version``).  The image picks
-        # the same up transitively, through the kernel meta's
-        # input_hash.
         h.update(self.name.encode())
         h.update(self.arch.encode())
         base_data = {
-            k: v
-            for k, v in self._data.items()
-            if k not in ("variants", "zfs", "kernels")
+            k: v for k, v in self._data.items() if k not in ("variants", "zfs")
         }
         h.update(json.dumps(base_data, sort_keys=True).encode())
 
@@ -1128,16 +1110,6 @@ class TargetConfig:
             h.label("kernels.config")
             for k, v in sorted(self.kernel_config_overrides.items()):
                 h.update(f"{k}={v}".encode())
-            # This kernel's own entry in kernels.available, and only
-            # this one: a mapping entry carries per-kernel build input
-            # (rocky10 pins srpm_version that way), while a sibling's
-            # entry changing is none of this kernel's business.
-            h.label("kernel-entry")
-            h.update(
-                json.dumps(
-                    self.kernel_overrides(short_name), sort_keys=True
-                ).encode()
-            )
             common_frag = TARGETS_DIR / "common" / "kernel-config.fragment"
             if common_frag.exists():
                 h.label("common/kernel-config.fragment")
