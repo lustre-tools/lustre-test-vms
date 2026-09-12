@@ -197,37 +197,22 @@ def run_podman_with_cleanup(
             return None
         return text or None
 
-    def _kill_container(sig: str) -> None:
-        cid = _read_cid()
-        if not cid:
-            return
-        try:
-            subprocess.run(
-                ["podman", "kill", "--signal", sig, cid],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-            )
-        except (OSError, subprocess.SubprocessError):
-            pass
-
     def _force_remove_container() -> None:
-        """Last-resort guaranteed cleanup.
+        """Tear the container down through podman's own database.
 
         ``podman rm -f`` sends SIGKILL to the container's PID 1 and
-        waits for the runtime to tear down the namespace.  We call
-        this after the TERM/KILL dance so even if the podman-run
-        process is already gone (so our killpg hit no one) the
-        conmon-owned container still gets cleaned up.
+        waits for the runtime to tear down the namespace, so it works
+        even when the podman-run process is already gone and our killpg
+        reached no one.  The signal handler below explains why this is
+        the only step rather than the last of several.
         """
         cid = _read_cid()
         if not cid:
             return
         try:
-            # --time 0 skips the default 10s stop-timeout -- we've
-            # already sent SIGKILL via `podman kill` above, so there's
-            # no graceful shutdown to wait for.
+            # --time 0 skips the default 10s stop-timeout: rm -f
+            # SIGKILLs PID 1 itself, so there is no graceful shutdown
+            # to wait on.
             subprocess.run(
                 ["podman", "rm", "-f", "--time", "0", cid],
                 check=False,

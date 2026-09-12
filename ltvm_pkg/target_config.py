@@ -654,10 +654,6 @@ class TargetConfig:
         """Podman tag for this target's build container (bound variant)."""
         return build_container_tag(self.name, self.arch, self.variant_name)
 
-    def container_tag_for(self, variant: str) -> str:
-        """Container tag for an explicit variant (bypasses the bound one)."""
-        return build_container_tag(self.name, self.arch, variant)
-
     @property
     def status(self) -> str:
         # __init__ setdefaults this to 'working', so the key is always
