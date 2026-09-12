@@ -720,6 +720,12 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[common],
         help="Show build status of all targets",
     )
+    bstp.add_argument(
+        "--why",
+        action="store_true",
+        help="For each stale artifact, name the input that changed "
+        "(from the per-input digests its meta.json records)",
+    )
     bstp.set_defaults(func=cmd_status)
 
     def _build_no_action(args: argparse.Namespace) -> int:

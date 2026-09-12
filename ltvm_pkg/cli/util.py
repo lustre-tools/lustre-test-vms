@@ -269,6 +269,77 @@ def _artifact_label(status_dict: dict[str, Any]) -> str:
     return "current"
 
 
+# Components whose inputs a given caller cannot reconstruct, and so
+# cannot honestly compare.  `build status` has no Lustre tree on hand,
+# which is the same reason kernel staleness itself shows as "built (?)"
+# there (see kernel_status's extra_hash note).
+_UNCHECKABLE = {"kernel": ("lustre-tree-inputs",)}
+
+
+def staleness_reasons(
+    target_config: _TargetConfig,
+    artifact: str,
+    status: dict[str, Any],
+    kernel: str | None = None,
+    variant: str | None = None,
+) -> list[str]:
+    """Which recorded inputs no longer match, for `build status --why`.
+
+    "stale" on its own leaves the user guessing whether a 40-minute
+    kernel rebuild is really warranted.  This compares the per-input
+    digests in meta.json against freshly computed ones and names the
+    difference.
+
+    Returns an empty list when there is nothing to say -- including for
+    an artifact built before these digests were recorded, which reads as
+    "no recorded inputs" rather than being silently mistaken for "no
+    differences"; the caller distinguishes the two.
+
+    One file can be named twice: packages-dev.txt, for instance, reaches
+    the container hash both through the Dockerfile's COPY scan and
+    through the package-list digest, so editing it changes two
+    components.  Reported as it is rather than deduplicated -- that is
+    genuinely how the hash reads it, and guessing which labels refer to
+    one file would be a worse kind of wrong than a repeated line.
+    """
+    stored = status.get("input_components")
+    if not isinstance(stored, dict) or not stored:
+        return []
+    try:
+        current = target_config.input_components(
+            artifact, kernel=kernel, variant=variant
+        )
+    except Exception as e:  # noqa: BLE001
+        # Explaining staleness must never be what breaks `build status`.
+        log.debug("cannot recompute %s components: %s", artifact, e)
+        return []
+
+    skip = _UNCHECKABLE.get(artifact, ())
+    reasons: list[str] = []
+    for name, digest in current.items():
+        if name in skip:
+            continue
+        if name not in stored:
+            reasons.append(f"{name} (new input)")
+        elif stored[name] != digest:
+            reasons.append(f"{name} (changed)")
+    for name in stored:
+        if name in skip or name in current:
+            continue
+        reasons.append(f"{name} (no longer an input)")
+    return reasons
+
+
+def has_recorded_components(status: dict[str, Any]) -> bool:
+    """True when this artifact's meta.json carries per-input digests.
+
+    False for anything built before they were written, where --why has
+    to say it cannot tell rather than imply nothing changed.
+    """
+    stored = status.get("input_components")
+    return isinstance(stored, dict) and bool(stored)
+
+
 def _local_lustre_version(
     tc: _TargetConfig, kernel: str | None, variant: str
 ) -> str | None:

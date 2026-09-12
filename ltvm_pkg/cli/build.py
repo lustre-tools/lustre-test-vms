@@ -34,7 +34,9 @@ from ltvm_pkg.cli.util import (
     _load_target_args,
     _output,
     _print_target_header,
+    has_recorded_components,
     resolve_arch,
+    staleness_reasons,
 )
 from ltvm_pkg.host_setup import (
     PodmanMachineError,
@@ -1202,6 +1204,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     from ltvm_pkg.cli.util import host_arch
 
     status_arch = getattr(args, "arch", None) or host_arch()
+    explain = bool(getattr(args, "why", False))
     for name in targets:
         try:
             tc = TargetConfig(name, arch=status_arch)
@@ -1252,6 +1255,21 @@ def cmd_status(args: argparse.Namespace) -> int:
                 if not (v_dir / "base.ext4").exists():
                     continue
                 images.append(image_status(tc, kernel=k, variant=v))
+        if explain:
+            # Only for artifacts actually reported stale: recomputing the
+            # component digests re-reads Dockerfiles, fragments and
+            # package lists, and there is nothing to explain about a
+            # current one.
+            _attach_reasons(tc, "container", cs)
+            _attach_reasons(tc, "kernel", ks, kernel=_opt_str(ks.get("kernel")))
+            for ims in images:
+                _attach_reasons(
+                    tc,
+                    "image",
+                    ims,
+                    kernel=_opt_str(ims.get("kernel")),
+                    variant=_opt_str(ims.get("variant")),
+                )
         all_status[name] = {
             "container": cs,
             "kernel": ks,
@@ -1282,8 +1300,58 @@ def cmd_status(args: argparse.Namespace) -> int:
                     f"{name:<12} {c:<14} {k:<26} "
                     f"{image_kernel:<44} {variant:<10} {i:<14}"
                 )
+                if explain:
+                    for line in _why_lines(st["container"], "container"):
+                        print(line)
+                    for line in _why_lines(st["kernel"], "kernel"):
+                        print(line)
+                    for line in _why_lines(ims, "image"):
+                        print(line)
 
     return EXIT_OK
+
+
+def _opt_str(value: object) -> str | None:
+    """Narrow a status-dict value to the str the hash helpers want.
+
+    kernel_status is typed dict[str, object], so its "kernel" comes out
+    as object even though it is always a name or absent.
+    """
+    return value if isinstance(value, str) and value else None
+
+
+def _attach_reasons(
+    tc: TargetConfig,
+    artifact: str,
+    status: dict[str, Any],
+    kernel: str | None = None,
+    variant: str | None = None,
+) -> None:
+    """Record why *status* is stale, in place, for --why."""
+    if not status.get("built") or not status.get("stale"):
+        return
+    status["stale_reasons"] = staleness_reasons(
+        tc, artifact, status, kernel=kernel, variant=variant
+    )
+    status["reasons_available"] = has_recorded_components(status)
+
+
+def _why_lines(status: dict[str, Any], artifact: str) -> list[str]:
+    """Render --why explanation lines for one artifact."""
+    if "stale_reasons" not in status:
+        return []
+    reasons = status["stale_reasons"]
+    if not status.get("reasons_available"):
+        return [
+            f"    {artifact}: stale -- built before per-input digests "
+            f"were recorded, so the cause is unknown; the next build "
+            f"records them"
+        ]
+    if not reasons:
+        # The total moved but no named component did: the hash folds in
+        # something the breakdown does not cover.
+        return [f"    {artifact}: stale -- no single input accounts for it"]
+    return [f"    {artifact}: stale -- {r}" for r in reasons]
 
 
 # ------------------------------------------------------------------
