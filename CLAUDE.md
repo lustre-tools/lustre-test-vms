@@ -121,15 +121,17 @@ image, and for the test suite, which sets it in `tests/conftest.py` so
   `image.Dockerfile` + `packages-os.txt`.  Per-target
   `variants/` dirs hold optional overlay Dockerfiles.
 - `ltvm_pkg/` -- Python package; `cli/` subpackage holds
-  per-area dispatch (`build.py`, `targets.py`, `vm.py`,
-  `cluster.py`, `deploy.py`, `fetch.py`, `setup.py`), rest
-  is implementation.  `ltvm` script at repo root is the CLI.
+  per-area dispatch (`build.py`, `clean.py`, `cluster.py`,
+  `deploy.py`, `fetch.py`, `make.py`, `setup.py`,
+  `targets.py`, `telemetry.py`, `vm.py`) plus shared
+  `util.py`; rest is implementation.  `ltvm` script at repo
+  root is the CLI.
 - `artifacts/<target>/<arch>/{container,kernels/<kver>,images/<kver>[/<variant>]}/`
   -- gitignored build artifacts with a `meta.json` each.
   ZFS, when built, lands at `kernels/<kver>/zfs/<version>/`.
 - `docs/` -- operator notes (getting started, releasing
   prebuilt QEMU, nested virtualization, SoftRoCE setup,
-  system test plan).
+  system test plan, VM ownership).
 
 ## Quick Start
 
@@ -395,6 +397,9 @@ ltvm llumount co1-single              # unmount (= llmount --cleanup)
 ltvm vm console-log co1-single
 ltvm vm console-log co1-single -f     # keep streaming (tail -F semantics)
 ltvm vm nmi co1-single                # inject NMI -> kdump
+ltvm vm snapshot co1-single [tag]     # snapshot the overlay disk
+ltvm vm snapshot co1-single --delete tag
+ltvm vm restore co1-single [tag]      # restore (no tag: list them)
 ltvm vm crash-collect co1-single --mod-dir $CO/1
 ltvm destroy co1-single
 ```
@@ -744,3 +749,5 @@ gh issue list / view <n> / create --title ... --body ...
   o2iblnd over SoftRoCE.
 - [docs/SYSTEM_TEST_PLAN.md](docs/SYSTEM_TEST_PLAN.md) --
   end-to-end test matrix.
+- [docs/VM_OWNERSHIP.md](docs/VM_OWNERSHIP.md) -- the
+  advisory `owner_id` a VM records, and who sets it.

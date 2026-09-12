@@ -102,7 +102,7 @@ ltvm update                     git fast-forward ltvm itself
 ltvm build      <action> ...    Build artifacts (see below)
 ltvm target     <action> ...    Target OS management (see below)
 ltvm vm         <action> ...    VM inspection / crash / snapshot (see below)
-ltvm cluster    <action> ...    Multi-node cluster management
+ltvm cluster    <action> ...    Multi-node cluster management (see below)
 ltvm create     <name>          Create a VM (idempotent)
 ltvm start|stop|destroy <name>  VM power / removal
 ltvm list                       Show all VMs
@@ -113,7 +113,11 @@ ltvm make-uninstall             Remove what make-install put here
 ltvm make-reinstall             make-uninstall + make-install
 ltvm llmount <vm>               Mount Lustre in a VM
 ltvm llumount <vm>              Unmount (same as llmount --cleanup)
+ltvm clean                      Prune superseded artifacts (dry-run by default)
+ltvm completion                 Print/install shell tab completion
 ltvm doctor                     Host health check (--fix on request)
+ltvm skills                     Link the agent skill into ~/.claude/skills
+ltvm telemetry  <action> ...    Anonymous check-in: status/show/on/off/send
 ```
 
 `build` sub-actions:
@@ -125,6 +129,7 @@ ltvm build kernel <target>      Kernel (+ --kernel, --lustre-tree)
 ltvm build image <target>       Per-kernel VM image (+ --kernel)
 ltvm build lustre <target>      Lustre against target kernel (+ --lustre-tree, --kernel)
 ltvm build mofed-kmods <t>      Per-kernel MOFED kernel modules
+ltvm build zfs <target>         ZFS against the target kernel (see --zfs)
 ltvm build shell <target>       Interactive shell in build container
 ltvm build status               Staleness table (one row per built kernel)
                                 --why names the input that went stale
@@ -159,6 +164,18 @@ ltvm target export <target>     Bake a bootable qcow2/raw, or a Google Cloud
                                 image (--format gce); no ltvm runtime needed
 ltvm target publish <target>    Bundle artifacts and upload to GitHub release
                                 (use --no-upload to produce tarballs locally)
+```
+
+`cluster` sub-actions (each takes `--help`):
+
+```
+ltvm cluster create <name> [TARGET] <roles:vm[:disks]> ...   (needs root)
+ltvm cluster destroy <name>     Destroy the cluster and every node (root)
+ltvm cluster deploy <name>      Build + deploy Lustre to every node
+ltvm cluster status <name>      Nodes and their state
+ltvm cluster exec <name> <role> <cmd>...   Run on every node with that role
+ltvm cluster ssh  <name> <role> Interactive ssh to one node
+ltvm cluster list               List all clusters
 ```
 
 `vm` sub-actions:
