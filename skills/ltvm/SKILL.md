@@ -254,6 +254,13 @@ override the target's configured architecture, `--kernel <name>` on the
 commands that act on one kernel, and `--force-compat` on build, publish
 and deploy.
 
+`--json` is accepted everywhere but only some commands have anything
+structured to say.  The ones worth parsing: `list`, `build status`,
+`target show/validate/fetch/delete`, `create`, `deploy-lustre`, and
+`cluster status/list/exec`.  `cluster create/destroy/deploy` stream
+human progress under `--json` too, and `cluster ssh` execs an
+interactive session, so don't parse those.
+
 ## Where the detail lives
 
 This skill covers using ltvm. For target configuration, package lists,

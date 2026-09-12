@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import IO
 
 from .priv import atomic_write as _priv_atomic_write
+from .priv import ensure_lock_file as _ensure_lock_file
 from .priv import sudo_run
 from .qemu_run import die, run
 from .vm_state import (
@@ -100,16 +101,16 @@ def _open_lock_file(path: Path) -> IO[str]:
     leaves these lock files root:root 0644 and a plain open(path, "w")
     from an unprivileged `ltvm create`/`destroy` -- which are *not*
     root-gated -- dies with PermissionError before doing anything.
-    Create through priv.atomic_write (which knows how to escalate) at
-    0666 so either uid can lock later, and fall back to a read-only
+    Create through priv.ensure_lock_file (which knows how to escalate,
+    and never renames -- see there) at 0666 so either uid can lock
+    later, and fall back to a read-only
     descriptor for locks already on disk owned by root: flock() needs
     an open fd, not write access.  Mirrors VMInfo._open_lock_file.
     """
-    if not path.exists():
-        try:
-            _priv_atomic_write(path, "", mode=0o666)
-        except (OSError, RuntimeError):
-            pass
+    try:
+        _ensure_lock_file(path)
+    except (OSError, RuntimeError):
+        pass
     try:
         return open(path, "a")
     except PermissionError:
@@ -509,7 +510,27 @@ def _register_ssh_name_locked(name: str, ip: str) -> None:
     if filtered and not filtered[-1].endswith("\n"):
         filtered[-1] += "\n"
     _atomic_write(hosts, "".join(filtered) + new_entry)
-    reload_dns()
+    # Registration must not stop here either, for the same reason
+    # unregister_vm doesn't (below).  reload_dns() raises when dnsmasq
+    # is not running, and host_setup restarts dnsmasq without ever
+    # `systemctl enable`-ing it while qemu-bridge *is* enabled -- so
+    # after a reboot on EL the bridge comes back and dnsmasq does not.
+    # The VM by this point has booted, answered SSH and been written to
+    # /etc/hosts; raising here reached cmd_create's `except
+    # BaseException`, which rolled the working VM back and re-raised.
+    # A stale DNS cache is not worth a destroyed VM: the host resolves
+    # the VM through /etc/hosts regardless, and `ltvm doctor` reports
+    # dnsmasq.
+    try:
+        reload_dns()
+    except RuntimeError as e:
+        log.warning(
+            "could not reload dnsmasq after registering %s: %s -- "
+            "guest-to-guest name resolution may be stale until dnsmasq "
+            "is running again",
+            name,
+            e,
+        )
 
     # ~/.ssh/config — read existing content, strip any old block for this
     # host, then append the (possibly updated) block atomically.

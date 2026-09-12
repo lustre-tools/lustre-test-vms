@@ -190,6 +190,53 @@ def chown_to_invoking_user(path: Path) -> None:
         pass
 
 
+def ensure_lock_file(path: Path, *, noninteractive: bool = False) -> None:
+    """Create *path* as a 0666 lock file if it is not there yet.
+
+    Deliberately NOT ``atomic_write``: that finishes with a rename, and
+    a rename is exactly wrong for a lock file.  Two processes racing the
+    first acquisition each wrote their own temp file and renamed it into
+    place, so each ended up holding ``flock`` on a different inode --
+    the loser's inode already unlinked -- and both entered the critical
+    section.  That defeated both locks that guard a first create:
+    ``.ip-alloc.lock`` (two VMs handed the same 192.168.100.x) and
+    ``.hosts.lock`` (an unsynchronised /etc/hosts read-modify-write
+    dropping an entry).  The sudo branch made the window tens of
+    milliseconds wide, since it spans two sudo spawns.
+
+    ``open(O_CREAT)`` and ``touch`` both attach to whichever inode
+    exists, which is the property a lock file needs.  The sudo branch
+    exists because /opt/qemu-vms is root-owned 0755, so an
+    unprivileged create cannot make a file there at all.
+    """
+    if path.exists():
+        return
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o666)
+        os.close(fd)
+    except PermissionError:
+        if noninteractive and not sudo_ready():
+            raise
+        sudo_run(
+            ["touch", str(path)], quiet=True, noninteractive=noninteractive
+        )
+    except OSError:
+        return
+    # O_CREAT's mode is masked by umask, and the point of 0666 is that
+    # the *other* uid can open it later.  chmod can fail when the file
+    # is already there and owned by root; that is fine, it means some
+    # earlier call already set the mode.
+    try:
+        os.chmod(path, 0o666)
+    except OSError:
+        sudo_run(
+            ["chmod", "666", str(path)],
+            check=False,
+            quiet=True,
+            noninteractive=noninteractive,
+        )
+
+
 def atomic_write(
     path: Path,
     text: str,

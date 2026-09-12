@@ -38,6 +38,7 @@ from ltvm_pkg.local_install import (
     resolve_local_image,
     run_depmod_ldconfig,
     staging_contents,
+    surviving_installed_files,
     unload_lustre_modules,
     write_manifest,
 )
@@ -309,16 +310,41 @@ def _do_uninstall(
 
     from ltvm_pkg.priv import sudo_run
 
-    sudo_run(["rm", "-f", str(MANIFEST_PATH)], check=False, quiet=True)
+    # The manifest goes only if the uninstall actually finished.  It is
+    # the only record of what ltvm put on this machine (the node has no
+    # configured source tree to `make uninstall` from), so deleting it
+    # with files still on disk strands them permanently -- and that is
+    # what used to happen on any partial failure, while reporting the
+    # attempted count as "Removed N files" and exiting 0.
+    remaining = surviving_installed_files(files)
+    if not remaining:
+        sudo_run(["rm", "-f", str(MANIFEST_PATH)], check=False, quiet=True)
 
     payload = {
         "action": "make-uninstall",
         "files_removed": removed,
+        "files_remaining": len(remaining),
+        "manifest_kept": bool(remaining),
         "dirs_pruned": pruned,
         "modules_unloaded": unloaded,
         "modules_message": unload_msg,
         "still_loaded": loaded_lustre_modules(),
     }
+    if remaining:
+        # The payload still goes to stdout (errors go to stderr), so a
+        # --json consumer gets the counts as well as a non-zero exit.
+        if use_json:
+            _output(payload, True)
+        return _error(
+            f"removed {removed} files but {len(remaining)} could not be "
+            f"removed, starting with "
+            f"{', '.join('/' + r for r in remaining[:3])}",
+            use_json,
+            hint=(
+                f"keeping {MANIFEST_PATH} so the rest can be removed "
+                f"later -- check for a read-only mount, then re-run"
+            ),
+        )
     _output(payload, use_json)
     if not use_json:
         print(f"  Removed {removed} files, pruned {pruned} directories")

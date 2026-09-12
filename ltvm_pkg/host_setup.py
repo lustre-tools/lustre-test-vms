@@ -2070,14 +2070,17 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
             "running": r.returncode == 0,
         }
 
-        # SSH config
-        ssh_config = Path("/root/.ssh/config")
-        results["ssh"] = {
-            "configured": (
-                ssh_config.exists()
-                and SSH_BLOCK_MARKER in ssh_config.read_text()
-            ),
-        }
+        # SSH config.  /root is 0700 on most distros, so a non-root
+        # `ltvm install --verify` cannot read this -- and Path.exists()
+        # does NOT swallow EACCES (only ENOENT/ENOTDIR/EBADF/ELOOP), so
+        # an unguarded probe raised PermissionError straight out of
+        # verify() and cmd_setup's blanket `except Exception` turned the
+        # whole read-only report into "error: [Errno 13] ...", telling
+        # the user nothing about QEMU, the bridge, dnsmasq or podman.
+        # "Cannot tell" is reported as such and counts as OK below,
+        # because this command makes no changes and a permission wall
+        # is not a finding about the host's setup.
+        results["ssh"] = _verify_ssh_config()
 
     # Scripts
     results["ltvm"] = {
@@ -2130,13 +2133,35 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
         results["ltvm"]["installed"],
         results["podman"]["installed"],
         results["zstd"]["installed"],
-        results["ssh"]["configured"],
+        # None == "could not read /root/.ssh/config as this user".
+        results["ssh"]["configured"] is not False,
     ]
     if macos:
         checks.append(results["socket_vmnet"]["installed"])
     results["all_ok"] = all(checks)
 
     return results
+
+
+def _verify_ssh_config() -> dict[str, Any]:
+    """Is ltvm's block in /root/.ssh/config?  ``None`` if unreadable.
+
+    Separated out so the EACCES case is explicit: see the call site in
+    ``verify``.
+    """
+    ssh_config = Path("/root/.ssh/config")
+    try:
+        if not ssh_config.exists():
+            return {"configured": False}
+        return {"configured": SSH_BLOCK_MARKER in ssh_config.read_text()}
+    except PermissionError:
+        return {
+            "configured": None,
+            "reason": (
+                f"cannot read {ssh_config} as this user "
+                f"(run under sudo to check it)"
+            ),
+        }
 
 
 def print_verify(results: dict[str, Any]) -> None:
@@ -2219,6 +2244,8 @@ def print_verify(results: dict[str, Any]) -> None:
     ssh = results["ssh"]
     if ssh.get("note"):
         ok(f"SSH config: {ssh['note']}")
+    elif ssh["configured"] is None:
+        ok(f"SSH config: {ssh.get('reason', 'could not check')}")
     elif ssh["configured"]:
         ok("SSH config: configured")
     else:

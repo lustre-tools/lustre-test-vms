@@ -412,8 +412,13 @@ def configure_fstype(ip: str, fstype: str, os_family: str = "rhel") -> None:
         )
 
 
-def lustre_mount_vm(name: str, os_family: str) -> int:
-    """Run llmount.sh inside a VM. Returns exit code."""
+def lustre_mount_vm(name: str, os_family: str, *, quiet: bool = False) -> int:
+    """Run llmount.sh inside a VM. Returns exit code.
+
+    ``quiet`` sends llmount's own stdout to stderr instead -- for
+    ``deploy-lustre --json``, whose stdout belongs to the JSON
+    document.
+    """
     try:
         vm = VMInfo.load(name)
     except VMNotFound as e:
@@ -456,7 +461,7 @@ def lustre_mount_vm(name: str, os_family: str) -> int:
             timeout=180,
         )
         if r.stdout:
-            print(r.stdout, end="")
+            print(r.stdout, end="", file=sys.stderr if quiet else sys.stdout)
         if r.stderr:
             print(r.stderr, end="", file=sys.stderr)
         return r.returncode

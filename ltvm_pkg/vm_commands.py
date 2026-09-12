@@ -177,11 +177,26 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
         initrd_path = f"/boot/initramfs-{kver}.img"
         reload_cmd = "systemctl restart kdump 2>&1"
 
-    probe = run_ssh(
-        vm.ip,
-        f"test -f /boot/vmlinuz-{kver} && test -f {initrd_path}",
-        timeout=10,
-    )
+    # Every ssh step below is best-effort for the same reason the
+    # reload at the end of this function is (see its comment): kdump is
+    # a debugging convenience, and on a TCG guest or a loaded host any
+    # of these can exceed its timeout.  An unguarded TimeoutExpired
+    # propagated through _launch_and_wait into cmd_create's `except
+    # BaseException`, which destroyed a VM that had booted fine and
+    # exited with a traceback.
+    try:
+        probe = run_ssh(
+            vm.ip,
+            f"test -f /boot/vmlinuz-{kver} && test -f {initrd_path}",
+            timeout=30,
+        )
+    except Exception as e:  # noqa: BLE001 - best-effort step
+        print(
+            f"warning: could not probe kdump files on '{vm.name}': {e} -- "
+            f"skipping kdump setup",
+            file=sys.stderr,
+        )
+        return
     if probe.returncode != 0:
         # Image predates baked-in kdump artifacts (or they got wiped).
         # Fall back to seeding from the host's kernel dir: scp vmlinuz
@@ -212,7 +227,30 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
             regen_cmd = f"update-initramfs -c -k {kver}"
         else:
             regen_cmd = f"dracut --kver {kver} --force {initrd_path}"
-        run_ssh(vm.ip, regen_cmd, timeout=120)
+        # 600s, not 120: dracut on a TCG guest is in the same league as
+        # the kdump restart below, which was raised to 300 for exactly
+        # this reason.  And the return code is checked -- it used to be
+        # discarded entirely, so a failed regen left /boot/vmlinuz-<k>
+        # with no initramfs and `vm crash-collect` later reported "no
+        # vmcore found" with nothing pointing at the cause.
+        try:
+            regen = run_ssh(vm.ip, regen_cmd, timeout=600)
+        except Exception as e:  # noqa: BLE001 - best-effort step
+            print(
+                f"warning: initramfs regen on '{vm.name}' did not "
+                f"complete: {e} -- kdump will not produce a vmcore",
+                file=sys.stderr,
+            )
+            return
+        if regen.returncode != 0:
+            err = (regen.stderr or regen.stdout or "").strip().splitlines()
+            print(
+                f"warning: initramfs regen on '{vm.name}' failed "
+                f"(rc={regen.returncode}): {err[-1] if err else 'no output'}"
+                f" -- kdump will not produce a vmcore",
+                file=sys.stderr,
+            )
+            return
     # kdump seeding is a debugging convenience, not required for the VM to
     # function.  Under TCG emulation -- a cross-arch guest, or any guest
     # started with LTVM_FORCE_TCG -- a kdump restart routinely exceeds 30s,

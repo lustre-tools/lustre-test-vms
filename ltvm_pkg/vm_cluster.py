@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import subprocess
@@ -19,6 +20,7 @@ from .vm_state import (
     EXIT_TIMEOUT,
     ROOT_PASSWORD,
     SOCKETS,
+    SSH_TIMEOUT,
     ClusterInfo,
     ClusterNode,
     ClusterNotFound,
@@ -315,11 +317,10 @@ def _create_one_node(
     for nic in nics or []:
         cmd += ["--nic", nic]
 
-    # 300s: cold boot + disk creation + first-boot SSH wait (the inner
-    # `ltvm create` already enforces SSH_TIMEOUT, but we leave headroom
-    # for slow hosts and large disk allocations).
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        r = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=_node_create_timeout()
+        )
     except subprocess.TimeoutExpired as e:
         # See _write_cluster_local_sh: don't propagate out of the parallel
         # executor; report the failure via the (name, rc, output) tuple
@@ -329,6 +330,26 @@ def _create_one_node(
     if r.stderr:
         combined = combined + r.stderr if combined else r.stderr
     return node.name, r.returncode, combined.rstrip("\n")
+
+
+# Headroom over the inner `ltvm create`'s own wait-for-SSH budget:
+# cold boot, disk creation and first-boot work all happen outside it.
+# 270 keeps the historical 300s total at the default SSH_TIMEOUT of 30.
+_NODE_CREATE_HEADROOM = 270
+
+
+def _node_create_timeout() -> int:
+    """Wall-clock budget for one node's child `ltvm create`.
+
+    Derived from SSH_TIMEOUT rather than hardcoded, because
+    LTVM_SSH_TIMEOUT exists precisely so an operator can raise the
+    wait-for-SSH budget for a TCG guest ("Cross-arch (TCG) boots are
+    5-20x slower", vm_state) -- and a fixed 300s here turned that
+    remedy into a guaranteed failure: every child was SIGKILLed at 300s
+    mid-boot and the cleanup loop then destroyed the whole cluster,
+    with "create timed out after 300s" as the only explanation.
+    """
+    return max(300, SSH_TIMEOUT + _NODE_CREATE_HEADROOM)
 
 
 def _print_cluster_plan(
@@ -960,12 +981,24 @@ def cmd_cluster_destroy(args: argparse.Namespace) -> None:
     print(f"=== Cluster '{cluster.name}' destroyed ===")
 
 
+def _node_state(name: str) -> str:
+    """ "up" / "down" / "missing" / "corrupt" for one cluster member.
+
+    ValueError is VMInfo.load's deliberate failure on a truncated or
+    hand-edited .info; one casualty must not take out a whole listing.
+    """
+    try:
+        return "up" if is_running(VMInfo.load(name)) else "down"
+    except VMNotFound:
+        return "missing"
+    except ValueError:
+        return "corrupt"
+
+
 def cmd_cluster_list(args: argparse.Namespace) -> None:
-    names = ClusterInfo.all_names()
-    if not names:
-        print("(no clusters)")
-        return
-    for cname in names:
+    use_json = bool(getattr(args, "json", False))
+    clusters: list[dict[str, Any]] = []
+    for cname in ClusterInfo.all_names():
         try:
             cluster = ClusterInfo.load(cname)
         except ClusterNotFound:
@@ -975,39 +1008,80 @@ def cmd_cluster_list(args: argparse.Namespace) -> None:
             # Corrupt or malformed cluster file -- flag it and keep
             # listing the rest rather than crashing.  Better to see
             # "clusterA: <BROKEN: ...>" than to get nothing at all.
-            print(f"{cname}: <BROKEN: {e}>")
+            clusters.append({"cluster": cname, "error": str(e)})
             continue
-        nodes = cluster.get_nodes()
-        node_summary = []
-        for n in nodes:
-            roles = "+".join(n.roles)
-            try:
-                running = "up" if is_running(VMInfo.load(n.name)) else "down"
-            except VMNotFound:
-                running = "missing"
-            node_summary.append(f"{n.name}({roles},{running})")
-        owner = cluster.owner_id or "-"
-        print(f"{cname}: {' '.join(node_summary)} owner={owner}")
+        clusters.append(
+            {
+                "cluster": cname,
+                "owner_id": cluster.owner_id,
+                "nodes": [
+                    {
+                        "name": n.name,
+                        "roles": list(n.roles),
+                        "state": _node_state(n.name),
+                    }
+                    for n in cluster.get_nodes()
+                ],
+            }
+        )
+
+    if use_json:
+        print(json.dumps({"clusters": clusters}, indent=2))
+        return
+    if not clusters:
+        print("(no clusters)")
+        return
+    for c in clusters:
+        if "error" in c:
+            print(f"{c['cluster']}: <BROKEN: {c['error']}>")
+            continue
+        summary = " ".join(
+            f"{n['name']}({'+'.join(n['roles'])},{n['state']})"
+            for n in c["nodes"]
+        )
+        print(f"{c['cluster']}: {summary} owner={c['owner_id'] or '-'}")
 
 
 def cmd_cluster_status(args: argparse.Namespace) -> None:
+    use_json = bool(getattr(args, "json", False))
     cluster = ClusterInfo.load(args.name)
     nodes = cluster.get_nodes()
+    rows = [
+        {
+            "name": node.name,
+            "ip": node.ip,
+            "state": _node_state(node.name),
+            "roles": list(node.roles),
+            "mdt_disks": node.mdt_disks,
+            "ost_disks": node.ost_disks,
+            "mgs_disk": bool(node.is_mgs and not node.is_mds),
+        }
+        for node in nodes
+    ]
+
+    if use_json:
+        print(
+            json.dumps(
+                {
+                    "cluster": cluster.name,
+                    "owner_id": cluster.owner_id,
+                    "nodes": rows,
+                },
+                indent=2,
+            )
+        )
+        return
 
     print(f"cluster: {cluster.name}")
     print(f"owner:   {cluster.owner_id or '-'}")
     print(f"nodes:   {len(nodes)}")
     print()
 
+    # The human path walks the nodes, not `rows`: a dict of mixed value
+    # types comes back out as `object`, and "+".join(object) is not a
+    # thing mypy will accept -- nor should it.
     for node in nodes:
-        try:
-            vm = VMInfo.load(node.name)
-            running = is_running(vm)
-        except VMNotFound:
-            running = False
-
-        status = "running" if running else "stopped"
-        roles = "+".join(node.roles)
+        status = "running" if _node_state(node.name) == "up" else "stopped"
         disks = ""
         if node.mdt_disks:
             disks += f" mdt={node.mdt_disks}"
@@ -1015,7 +1089,7 @@ def cmd_cluster_status(args: argparse.Namespace) -> None:
             disks += f" ost={node.ost_disks}"
         if node.is_mgs and not node.is_mds:
             disks += " mgs=1"
-
+        roles = "+".join(node.roles)
         print(
             f"  {node.name:<20} {node.ip:<18} {status:<8} {roles:<12}{disks}",
         )
@@ -1085,29 +1159,69 @@ def cmd_cluster_exec(args: argparse.Namespace) -> None:
         command = args.command[0]
     else:
         command = shlex.join(args.command)
+    use_json = bool(getattr(args, "json", False))
     multi = len(matches) > 1
     worst = 0
+    # Under --json the per-node output is collected and emitted as one
+    # document at the end rather than streamed: a caller parsing stdout
+    # cannot use a stream of remote command output interleaved with
+    # "--- node ---" separators.  The human path is unchanged, and
+    # still streams.
+    results: list[dict[str, Any]] = []
     for node in matches:
         vm = VMInfo.load(node.name)
-        if multi:
+        if multi and not use_json:
             print(f"--- {node.name} ---")
         try:
             r = run_ssh(vm.ip, command, timeout=args.timeout)
         except subprocess.TimeoutExpired:
-            if not multi:
+            if not multi and not use_json:
                 die(f"timeout after {args.timeout}s", EXIT_TIMEOUT)
-            print(
-                f"{node.name}: timeout after {args.timeout}s",
-                file=sys.stderr,
+            results.append(
+                {
+                    "node": node.name,
+                    "rc": EXIT_TIMEOUT,
+                    "timed_out": True,
+                    "stdout": "",
+                    "stderr": f"timeout after {args.timeout}s",
+                }
             )
+            if not use_json:
+                print(
+                    f"{node.name}: timeout after {args.timeout}s",
+                    file=sys.stderr,
+                )
             worst = EXIT_TIMEOUT
             continue
-        if r.stdout:
-            print(r.stdout, end="")
-        if r.stderr:
-            print(r.stderr, end="", file=sys.stderr)
+        results.append(
+            {
+                "node": node.name,
+                "rc": r.returncode,
+                "timed_out": False,
+                "stdout": r.stdout or "",
+                "stderr": r.stderr or "",
+            }
+        )
+        if not use_json:
+            if r.stdout:
+                print(r.stdout, end="")
+            if r.stderr:
+                print(r.stderr, end="", file=sys.stderr)
         # Exit non-zero if any node did; a role-wide command that
         # failed somewhere must not look like a clean run.
         if r.returncode != 0 and worst == 0:
             worst = r.returncode
+    if use_json:
+        print(
+            json.dumps(
+                {
+                    "cluster": args.name,
+                    "target": target,
+                    "command": command,
+                    "rc": worst,
+                    "nodes": results,
+                },
+                indent=2,
+            )
+        )
     sys.exit(worst)

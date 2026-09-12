@@ -202,6 +202,23 @@ def resolve_os_artifacts(
     kernels_root = output_dir / "kernels"
 
     if kernel:
+        # A kernel name is one artifact *directory* name, so it has to
+        # be a single path component.  Python's "/" makes
+        # `kernels_root / "/abs/dir"` yield "/abs/dir", so an absolute
+        # value escaped the artifacts tree entirely: the kernel was
+        # taken from /abs/dir/vmlinuz and the image looked for at
+        # /abs/dir/base.ext4, a pair with no relationship to the
+        # target.  A relative value with a separator escapes the same
+        # way.  Easy to reach, because --kernel's help said "Explicit
+        # kernel path" (it is a version name; fixed) and the file
+        # completer invited one.
+        if Path(kernel).is_absolute() or len(Path(kernel).parts) != 1:
+            raise FileNotFoundError(
+                f"--kernel takes a kernel version name, not a path: "
+                f"{kernel!r}\n"
+                f"Names are the directory names under "
+                f"{kernels_root}  (see: ltvm build status)"
+            )
         # Exact match first, then prefix match -- via the shared
         # resolver, so a VM boots the same kernel that `build status`
         # and `target publish` reason about.  This used to pick the
@@ -532,9 +549,10 @@ class VMInfo:
         read-only descriptor for locks already on disk owned by root:
         flock() needs an open fd, not write access.
         """
+        from .priv import ensure_lock_file
+
         path = self._lock_path
-        if not path.exists():
-            _atomic_write(path, "", mode=0o666, noninteractive=noninteractive)
+        ensure_lock_file(path, noninteractive=noninteractive)
         try:
             return open(path, "a")
         except PermissionError:

@@ -724,6 +724,39 @@ class TestRemoveInstalledFiles:
         assert not (tmp_path / "usr" / "link").exists()
         assert (tmp_path / "usr" / "target").exists()
 
+    def test_counts_what_was_removed_not_what_was_attempted(
+        self, tmp_path: Path
+    ) -> None:
+        """rm failures only warn (one read-only mount fails its chunk
+        and no other), and this count is what make-uninstall reports
+        and what decides whether the manifest may be dropped."""
+        import ltvm_pkg.local_install as li
+
+        (tmp_path / "usr").mkdir()
+        (tmp_path / "usr" / "kept").write_text("x")
+
+        def failed_rm(cmd, check=True, quiet=False):
+            return subprocess.CompletedProcess(cmd, 1, "", "ro fs")
+
+        with patch.object(li, "sudo_run", failed_rm):
+            n = li.remove_installed_files(["usr/kept"], tmp_path)
+
+        assert n == 0
+        assert (tmp_path / "usr" / "kept").exists()
+        assert li.surviving_installed_files(["usr/kept"], tmp_path) == [
+            "usr/kept"
+        ]
+
+    def test_surviving_ignores_unsafe_entries(self, tmp_path: Path) -> None:
+        """An unsafe entry is never removed, so counting it as a
+        survivor would make every uninstall fail forever."""
+        import ltvm_pkg.local_install as li
+
+        (tmp_path / "victim").write_text("x")
+        assert (
+            li.surviving_installed_files(["../victim", "-rf"], tmp_path) == []
+        )
+
     def test_batches_large_lists(self, tmp_path: Path) -> None:
         """Long file lists must not blow past ARG_MAX in one rm."""
         import ltvm_pkg.local_install as li
@@ -1090,6 +1123,74 @@ class TestMakeCommandBehaviour:
 
         assert rc == 0
         rm.assert_called_once()
+
+    def test_a_partial_uninstall_fails_and_keeps_the_manifest(
+        self, tmp_path: Path
+    ) -> None:
+        """A failed rm only warns, so `make-uninstall` used to report
+        the *attempted* count as removed, delete the manifest and exit
+        0 -- stranding the files permanently, since the manifest is the
+        only record of what ltvm put on this machine.
+        """
+        import ltvm_pkg.cli.make as mk
+        import ltvm_pkg.local_install as li
+
+        manifest = {
+            "schema": li.MANIFEST_SCHEMA,
+            "files": ["usr/sbin/mount.lustre"],
+            "dirs": [],
+            "kernel_version": "5.14.0",
+        }
+        with (
+            patch.object(li.platform, "system", return_value="Linux"),
+            patch.object(li, "IMAGE_STAMP_PATH", _write_stamp(tmp_path)),
+            patch.object(mk, "read_manifest", return_value=manifest),
+            patch.object(mk, "unload_lustre_modules", return_value=(True, "")),
+            # The rm failed: the file is still there afterwards.
+            patch.object(mk, "remove_installed_files", return_value=0),
+            patch.object(
+                mk,
+                "surviving_installed_files",
+                return_value=["usr/sbin/mount.lustre"],
+            ),
+            patch.object(mk, "prune_empty_dirs", return_value=0),
+            patch.object(mk, "run_depmod_ldconfig"),
+            patch.object(mk, "loaded_lustre_modules", return_value=[]),
+            patch("ltvm_pkg.priv.sudo_run") as sudo,
+        ):
+            rc = mk.cmd_make_uninstall(self._args(tmp_path))
+
+        assert rc != 0
+        # The manifest rm is the only sudo_run here, and it must not
+        # have happened.
+        assert not sudo.called
+
+    def test_a_clean_uninstall_drops_the_manifest(self, tmp_path: Path) -> None:
+        import ltvm_pkg.cli.make as mk
+        import ltvm_pkg.local_install as li
+
+        manifest = {
+            "schema": li.MANIFEST_SCHEMA,
+            "files": ["usr/sbin/mount.lustre"],
+            "dirs": [],
+            "kernel_version": "5.14.0",
+        }
+        with (
+            patch.object(li.platform, "system", return_value="Linux"),
+            patch.object(li, "IMAGE_STAMP_PATH", _write_stamp(tmp_path)),
+            patch.object(mk, "read_manifest", return_value=manifest),
+            patch.object(mk, "unload_lustre_modules", return_value=(True, "")),
+            patch.object(mk, "remove_installed_files", return_value=1),
+            patch.object(mk, "surviving_installed_files", return_value=[]),
+            patch.object(mk, "prune_empty_dirs", return_value=0),
+            patch.object(mk, "run_depmod_ldconfig"),
+            patch.object(mk, "loaded_lustre_modules", return_value=[]),
+            patch("ltvm_pkg.priv.sudo_run") as sudo,
+        ):
+            rc = mk.cmd_make_uninstall(self._args(tmp_path))
+
+        assert rc == 0
+        assert sudo.called
 
     def test_no_unload_skips_the_unload(self, tmp_path: Path) -> None:
         import ltvm_pkg.cli.make as mk

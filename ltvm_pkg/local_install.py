@@ -689,7 +689,16 @@ def _safe_relative(rel: str) -> bool:
 
 
 def remove_installed_files(files: list[str], root: Path = Path("/")) -> int:
-    """rm the manifest's files.  Returns the number removed."""
+    """rm the manifest's files.  Returns the number actually removed.
+
+    Counted by re-checking the filesystem, not by counting what was
+    attempted: ``rm`` failures are only warned about (one read-only
+    mount, or a sudo that cannot elevate for one chunk, fails that
+    chunk and no other), and this count is what `make-uninstall`
+    reports and what decides whether the manifest may be dropped.
+    Returning the attempt count made a completely failed uninstall
+    print "Removed 1842 files" and exit 0.
+    """
     targets = []
     for rel in files:
         if not _safe_relative(rel):
@@ -704,7 +713,35 @@ def remove_installed_files(files: list[str], root: Path = Path("/")) -> int:
         r = sudo_run(["rm", "-f", *chunk], check=False, quiet=True)
         if r.returncode != 0:
             log.warning("rm exited %d: %s", r.returncode, r.stderr.strip())
-    return len(targets)
+    leftover = [t for t in targets if _still_there(Path(t))]
+    if leftover:
+        log.warning(
+            "%d of %d files could not be removed, starting with %s",
+            len(leftover),
+            len(targets),
+            ", ".join(leftover[:3]),
+        )
+    return len(targets) - len(leftover)
+
+
+def _still_there(p: Path) -> bool:
+    """True if *p* survived an rm -- a broken symlink counts."""
+    return p.is_symlink() or p.exists()
+
+
+def surviving_installed_files(
+    files: list[str], root: Path = Path("/")
+) -> list[str]:
+    """The manifest entries still on disk, as manifest-relative paths.
+
+    `make-uninstall` uses this to decide whether it may delete the
+    manifest.  Dropping it while files remain is unrecoverable: the
+    manifest is the only record of what ltvm put on this machine, so
+    no later `make-uninstall` can ever clean them up.
+    """
+    return [
+        rel for rel in files if _safe_relative(rel) and _still_there(root / rel)
+    ]
 
 
 def prune_empty_dirs(dirs: list[str], root: Path = Path("/")) -> int:

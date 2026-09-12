@@ -1284,7 +1284,98 @@ class TestCmdDeployMountAndKver:
             rc = cli_mod.cmd_deploy(args)
 
         assert rc == 0
-        mount_mock.assert_called_once_with("co1-mount", "rhel")
+        # quiet= is how --json keeps llmount's stdout out of the JSON
+        # document; this is the human path, so it is False.
+        mount_mock.assert_called_once_with("co1-mount", "rhel", quiet=False)
+
+    def test_json_emits_an_envelope_on_success(
+        self, tmp_sockets: Path, tmp_path: Path, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Every print in cmd_deploy is `if not use_json`-guarded and
+        there was no final _output, so `deploy-lustre --json` wrote
+        nothing at all to stdout on success -- an empty document for
+        exactly the consumers --json exists for."""
+        import json as _json
+
+        from ltvm_pkg import cli as cli_mod
+        from ltvm_pkg.lustre_build import staging_path
+
+        build_path = tmp_path / "lustre-release"
+        _setup_lustre_tree(build_path)
+        staging = staging_path(
+            build_path, "rocky9", arch="x86_64", kernel="5.14-rhel9.7"
+        )
+        staging.mkdir(parents=True)
+        (staging / "lustre.ko").write_text("")
+        (staging / ".ltvm-staging-stamp").write_text("")
+        _mark_staging_fresh(staging, build_path, _stub_tc())
+
+        vm = _make_vm(name="co1-json", ip="10.0.0.26")
+        vm.os_id = "rocky9"
+        vm.save()
+
+        args = _deploy_args(
+            vm="co1-json", lustre_tree=str(build_path), json=True
+        )
+        with (
+            patch.object(cli_mod, "TargetConfig", return_value=_stub_tc()),
+            patch("ltvm_pkg.cli.deploy_to_vm"),
+            patch(
+                "subprocess.run",
+                return_value=MagicMock(returncode=0, stdout=""),
+            ),
+        ):
+            rc = cli_mod.cmd_deploy(args)
+
+        assert rc == 0
+        payload = _json.loads(capsys.readouterr().out)
+        assert payload["action"] == "deploy-lustre"
+        assert payload["vm"] == "co1-json"
+        assert payload["target"] == "rocky9"
+        assert payload["mounted"] is False
+        assert payload["staging"] == str(staging)
+
+    def test_json_mount_keeps_llmount_output_off_stdout(
+        self, tmp_sockets: Path, tmp_path: Path
+    ) -> None:
+        """llmount's own stdout was printed unconditionally, landing in
+        the middle of the JSON document under --mount --json."""
+        from ltvm_pkg import cli as cli_mod
+        from ltvm_pkg.lustre_build import staging_path
+
+        build_path = tmp_path / "lustre-release"
+        _setup_lustre_tree(build_path)
+        staging = staging_path(
+            build_path, "rocky9", arch="x86_64", kernel="5.14-rhel9.7"
+        )
+        staging.mkdir(parents=True)
+        (staging / "lustre.ko").write_text("")
+        (staging / ".ltvm-staging-stamp").write_text("")
+        _mark_staging_fresh(staging, build_path, _stub_tc())
+
+        vm = _make_vm(name="co1-jmount", ip="10.0.0.27")
+        vm.os_id = "rocky9"
+        vm.save()
+
+        args = _deploy_args(
+            vm="co1-jmount",
+            lustre_tree=str(build_path),
+            mount=True,
+            json=True,
+        )
+        with (
+            patch.object(cli_mod, "TargetConfig", return_value=_stub_tc()),
+            patch("ltvm_pkg.cli.deploy_to_vm"),
+            patch(
+                "subprocess.run",
+                return_value=MagicMock(returncode=0, stdout=""),
+            ),
+            patch("ltvm_pkg.cli.lustre_mount_vm", return_value=0) as mount_mock,
+        ):
+            rc = cli_mod.cmd_deploy(args)
+
+        assert rc == 0
+        mount_mock.assert_called_once_with("co1-jmount", "rhel", quiet=True)
 
     def test_mount_failure_propagates(
         self, tmp_sockets: Path, tmp_path: Path

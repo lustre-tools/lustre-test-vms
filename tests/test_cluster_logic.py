@@ -354,3 +354,122 @@ class TestGenerateLocalShRunas:
             capture_output=True,
         )
         assert r.returncode == 0, r.stderr
+
+
+class TestClusterJsonOutput:
+    """`--json` was accepted on every `cluster` subcommand and read by
+    none of them, so a machine consumer got a human table and exit 0.
+
+    `cluster status` and `cluster list` are what an agent polls, and
+    `cluster exec` is what it collects results from; those three emit
+    documents now.  `create`/`destroy`/`deploy` still stream human
+    progress under --json, and `ssh` execs an interactive session where
+    the flag has no meaning.
+    """
+
+    def _args(self, **over):
+        import argparse
+
+        base = dict(name="testc", json=True)
+        base.update(over)
+        return argparse.Namespace(**base)
+
+    def test_status_emits_a_document(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json
+
+        c = _cluster(
+            ("testc-mds", ["mgs", "mds"], 1, 0, "192.168.100.11"),
+            ("testc-oss1", ["oss"], 0, 2, "192.168.100.12"),
+        )
+        monkeypatch.setattr(ClusterInfo, "load", staticmethod(lambda n: c))
+        monkeypatch.setattr(vm_cluster, "_node_state", lambda n: "up")
+
+        vm_cluster.cmd_cluster_status(self._args())
+        doc = json.loads(capsys.readouterr().out)
+
+        assert doc["cluster"] == "testc"
+        assert [n["name"] for n in doc["nodes"]] == [
+            "testc-mds",
+            "testc-oss1",
+        ]
+        mds = doc["nodes"][0]
+        assert mds["roles"] == ["mgs", "mds"]
+        assert mds["state"] == "up"
+        assert mds["ip"] == "192.168.100.11"
+        assert doc["nodes"][1]["ost_disks"] == 2
+
+    def test_status_human_output_is_unchanged(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        c = _cluster(("testc-mds", ["mgs", "mds"], 1, 0, "192.168.100.11"))
+        monkeypatch.setattr(ClusterInfo, "load", staticmethod(lambda n: c))
+        monkeypatch.setattr(vm_cluster, "_node_state", lambda n: "down")
+
+        vm_cluster.cmd_cluster_status(self._args(json=False))
+        out = capsys.readouterr().out
+
+        assert "cluster: testc" in out
+        assert "testc-mds" in out
+        assert "stopped" in out
+        assert "mgs+mds" in out
+        assert "mdt=1" in out
+
+    def test_list_emits_a_document(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json
+
+        c = _cluster(("testc-mds", ["mgs", "mds"], 1, 0, "192.168.100.11"))
+        monkeypatch.setattr(
+            ClusterInfo, "all_names", staticmethod(lambda: ["testc"])
+        )
+        monkeypatch.setattr(ClusterInfo, "load", staticmethod(lambda n: c))
+        monkeypatch.setattr(vm_cluster, "_node_state", lambda n: "up")
+
+        vm_cluster.cmd_cluster_list(self._args())
+        doc = json.loads(capsys.readouterr().out)
+
+        assert doc["clusters"][0]["cluster"] == "testc"
+        assert doc["clusters"][0]["nodes"][0]["state"] == "up"
+
+    def test_list_with_no_clusters_is_still_a_document(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The empty case printed "(no clusters)" regardless of --json."""
+        import json
+
+        monkeypatch.setattr(ClusterInfo, "all_names", staticmethod(lambda: []))
+        vm_cluster.cmd_cluster_list(self._args())
+        assert json.loads(capsys.readouterr().out) == {"clusters": []}
+
+    def test_list_reports_a_broken_cluster_file(
+        self, capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json
+
+        def boom(n):
+            raise ValueError("bad node list")
+
+        monkeypatch.setattr(
+            ClusterInfo, "all_names", staticmethod(lambda: ["broken"])
+        )
+        monkeypatch.setattr(ClusterInfo, "load", staticmethod(boom))
+
+        vm_cluster.cmd_cluster_list(self._args())
+        doc = json.loads(capsys.readouterr().out)
+        assert doc["clusters"][0]["error"] == "bad node list"
+
+    def test_node_state_survives_a_corrupt_info(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """VMInfo.load raises ValueError by design on a truncated .info;
+        one casualty must not take out a whole listing."""
+        from ltvm_pkg.vm_state import VMInfo
+
+        def boom(name):
+            raise ValueError("invalid literal for int()")
+
+        monkeypatch.setattr(VMInfo, "load", staticmethod(boom))
+        assert vm_cluster._node_state("whatever") == "corrupt"
