@@ -23,6 +23,11 @@ ltvm target fetch rocky9        # pre-built artifacts -- much faster than buildi
 ltvm build status               # what is stale
 ```
 
+`install` also sets up tab completion for the human's shell (bash, zsh,
+fish), which needs a new shell before it works -- worth saying when you
+walk someone through setup, since nothing else announces it. `ltvm
+doctor --fix` installs it on a host that predates it.
+
 `ltvm target fetch` is the fast path, and a fetched image already has
 Lustre baked in -- `ltvm create` then `ltvm llmount` gives a mounted
 filesystem with no build at all. Build locally only when a target has no
@@ -141,6 +146,11 @@ timeout 30 ssh co1-single 'uptime'     # when it may be hung
 Wrap anything that might hang in `timeout`. A VM that stops answering is
 a candidate for `ltvm vm console-log`, not for a longer wait.
 
+Do not use `ltvm vm console-log -f`: it streams until Ctrl-C, which is
+useful to a human watching a boot and a way to hang yourself. Take
+another `console-log` snapshot instead -- the log is a file, and re-reading
+it costs nothing.
+
 ## Clusters
 
 ```bash
@@ -195,7 +205,7 @@ Before any Lustre-involving build, ltvm checks the tree against the
 target's `lustre.mode`:
 
 ```bash
-ltvm target validate rocky9 --lustre-tree <tree>   # 0 ok, 1 warn, 2 refused
+ltvm target validate rocky9 --lustre-tree <tree>   # 0 ok/warn, 1 refused, 2 error
 ltvm build all rocky9 --lustre-tree <tree> --force-compat
 ```
 
@@ -243,6 +253,13 @@ owner metadata identifies the session rather than a pid; read it back with
 override the target's configured architecture, `--kernel <name>` on the
 commands that act on one kernel, and `--force-compat` on build, publish
 and deploy.
+
+`--json` is accepted everywhere but only some commands have anything
+structured to say.  The ones worth parsing: `list`, `build status`,
+`target show/validate/fetch/delete`, `create`, `deploy-lustre`, and
+`cluster status/list/exec`.  `cluster create/destroy/deploy` stream
+human progress under `--json` too, and `cluster ssh` execs an
+interactive session, so don't parse those.
 
 ## Where the detail lives
 

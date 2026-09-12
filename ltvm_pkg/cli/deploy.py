@@ -21,6 +21,7 @@ from ltvm_pkg.cli.util import (
     EXIT_ERROR,
     EXIT_OK,
     _error,
+    _output,
 )
 from ltvm_pkg.lustre_build import read_staging_meta
 
@@ -466,7 +467,17 @@ def cmd_deploy(args: argparse.Namespace) -> int:
             sudo_user = os.environ.get("SUDO_USER")
             if sudo_user:
                 build_cmd = ["sudo", "-u", sudo_user] + build_cmd
-            build_proc = subprocess.run(build_cmd, capture_output=False)
+            # Under --json the child's human output would land in the
+            # middle of this command's JSON document, so it goes to
+            # stderr instead -- still live, still visible, just not in
+            # the stream a consumer is parsing.  (--json is not
+            # forwarded: the child's own envelope is not this
+            # command's.)
+            build_proc = subprocess.run(
+                build_cmd,
+                capture_output=False,
+                stdout=sys.stderr if use_json else None,
+            )
             if build_proc.returncode != 0:
                 return _error(
                     f"Lustre build failed (rc={build_proc.returncode})",
@@ -579,14 +590,39 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         print(f"  Deployed Lustre to {args.vm}")
 
     # Optionally mount Lustre
+    mounted = False
     if args.mount:
         # _cli_attr resolves at call time (so tests can patch), which
         # means it is typed Any; the callee returns an exit code.
-        rc = int(_cli_attr("lustre_mount_vm")(args.vm, os_family))
+        rc = int(
+            _cli_attr("lustre_mount_vm")(args.vm, os_family, quiet=use_json)
+        )
         if rc != EXIT_OK:
             return rc
+        mounted = True
         if not use_json:
             print(f"  Lustre mounted on {args.vm}")
+
+    # The success envelope.  Every print in this function is
+    # `if not use_json`-guarded and there was no final _output, so
+    # `deploy-lustre --json` wrote nothing at all to stdout on success
+    # -- an empty document for the consumers --json exists for.
+    if use_json:
+        _output(
+            {
+                "action": "deploy-lustre",
+                "vm": args.vm,
+                "target": target,
+                "kernel": deploy_kernel,
+                "kernel_version": kver,
+                "build_path": str(build_path),
+                "staging": str(staging),
+                "os_family": os_family,
+                "zfs": want_zfs,
+                "mounted": mounted,
+            },
+            use_json,
+        )
 
     return EXIT_OK
 

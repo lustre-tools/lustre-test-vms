@@ -177,11 +177,26 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
         initrd_path = f"/boot/initramfs-{kver}.img"
         reload_cmd = "systemctl restart kdump 2>&1"
 
-    probe = run_ssh(
-        vm.ip,
-        f"test -f /boot/vmlinuz-{kver} && test -f {initrd_path}",
-        timeout=10,
-    )
+    # Every ssh step below is best-effort for the same reason the
+    # reload at the end of this function is (see its comment): kdump is
+    # a debugging convenience, and on a TCG guest or a loaded host any
+    # of these can exceed its timeout.  An unguarded TimeoutExpired
+    # propagated through _launch_and_wait into cmd_create's `except
+    # BaseException`, which destroyed a VM that had booted fine and
+    # exited with a traceback.
+    try:
+        probe = run_ssh(
+            vm.ip,
+            f"test -f /boot/vmlinuz-{kver} && test -f {initrd_path}",
+            timeout=30,
+        )
+    except Exception as e:  # noqa: BLE001 - best-effort step
+        print(
+            f"warning: could not probe kdump files on '{vm.name}': {e} -- "
+            f"skipping kdump setup",
+            file=sys.stderr,
+        )
+        return
     if probe.returncode != 0:
         # Image predates baked-in kdump artifacts (or they got wiped).
         # Fall back to seeding from the host's kernel dir: scp vmlinuz
@@ -212,7 +227,30 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
             regen_cmd = f"update-initramfs -c -k {kver}"
         else:
             regen_cmd = f"dracut --kver {kver} --force {initrd_path}"
-        run_ssh(vm.ip, regen_cmd, timeout=120)
+        # 600s, not 120: dracut on a TCG guest is in the same league as
+        # the kdump restart below, which was raised to 300 for exactly
+        # this reason.  And the return code is checked -- it used to be
+        # discarded entirely, so a failed regen left /boot/vmlinuz-<k>
+        # with no initramfs and `vm crash-collect` later reported "no
+        # vmcore found" with nothing pointing at the cause.
+        try:
+            regen = run_ssh(vm.ip, regen_cmd, timeout=600)
+        except Exception as e:  # noqa: BLE001 - best-effort step
+            print(
+                f"warning: initramfs regen on '{vm.name}' did not "
+                f"complete: {e} -- kdump will not produce a vmcore",
+                file=sys.stderr,
+            )
+            return
+        if regen.returncode != 0:
+            err = (regen.stderr or regen.stdout or "").strip().splitlines()
+            print(
+                f"warning: initramfs regen on '{vm.name}' failed "
+                f"(rc={regen.returncode}): {err[-1] if err else 'no output'}"
+                f" -- kdump will not produce a vmcore",
+                file=sys.stderr,
+            )
+            return
     # kdump seeding is a debugging convenience, not required for the VM to
     # function.  Under TCG emulation -- a cross-arch guest, or any guest
     # started with LTVM_FORCE_TCG -- a kdump restart routinely exceeds 30s,
@@ -629,6 +667,85 @@ def _print_create_report(vm: VMInfo, args: argparse.Namespace) -> None:
         )
 
 
+def _print_create_plan(
+    args: argparse.Namespace,
+    *,
+    exists: bool,
+    tap: str,
+    mac: str,
+    image: str,
+    kernel: str,
+    kver: str,
+    os_target: str,
+    variant: str,
+    extra_nic_types: list[str],
+    disk_size: int,
+) -> None:
+    """Report what `create` would do, for --dry-run."""
+    size_mb = disk_size // (1024 * 1024)
+    plan: dict[str, Any] = {
+        "action": "would-create",
+        "name": args.name,
+        "already_exists": exists,
+        "target": os_target,
+        "variant": variant,
+        "arch": getattr(args, "arch", None) or os_arch_of(image),
+        "kernel": kernel,
+        "kernel_version": kver,
+        "image": image,
+        "vcpus": args.vcpus,
+        "mem_mb": args.mem,
+        "mdt_disks": args.mdt_disks,
+        "ost_disks": args.ost_disks,
+        "disk_size_mb": size_mb,
+        "ip": getattr(args, "ip", None),
+        "tap": tap,
+        "mac": mac,
+        "extra_nics": list(extra_nic_types),
+        "owner_id": getattr(args, "owner_id", None),
+    }
+    if args.json:
+        print(json.dumps(plan))
+        return
+
+    if exists:
+        print(
+            f"VM '{args.name}' already exists -- create would converge it "
+            f"(and start it if stopped) rather than build the below."
+        )
+    print(f"Would create VM: {args.name}")
+    print(f"  target:  {os_target} (variant={variant})")
+    print(f"  kernel:  {kver}")
+    print(f"           {kernel}")
+    print(f"  image:   {image}")
+    print(f"  cpu/mem: {args.vcpus} vcpus, {args.mem} MB")
+    print(
+        f"  disks:   {args.mdt_disks} MDT + {args.ost_disks} OST "
+        f"@ {size_mb}M each"
+    )
+    # The IP is claimed under a lock by the step this stops short of, so
+    # there is no honest way to name the one a real run would get.
+    print(f"  ip:      {getattr(args, 'ip', None) or 'next free (auto)'}")
+    print(f"  tap/mac: {tap} / {mac}")
+    if extra_nic_types:
+        print(f"  nics:    eth0 (mgmt) + {', '.join(extra_nic_types)}")
+    print(f"  owner:   {getattr(args, 'owner_id', None)}")
+    print("Nothing was written.  Re-run without --dry-run to create it.")
+
+
+def os_arch_of(image: str) -> str | None:
+    """Best-effort arch from an artifact path (…/<target>/<arch>/…).
+
+    Only for the dry-run report, where naming the arch that was actually
+    resolved beats echoing the flag the user may not have passed.
+    """
+    parts = Path(image).parts
+    for i, part in enumerate(parts):
+        if part == "artifacts" and i + 2 < len(parts):
+            return parts[i + 2]
+    return None
+
+
 def _resolve_os_and_kernel(
     args: argparse.Namespace, extra_nic_types: list[str] | None = None
 ) -> tuple:
@@ -661,7 +778,16 @@ def _resolve_os_and_kernel(
     # so we can distinguish "user said 2048" from "user said nothing".
     if args.mem is None:
         args.mem = os_arts.default_mem
-    if defaulted_target and not explicit_image and not explicit_kernel:
+    # Suppressed under --json: this is a human banner, and printing it
+    # on stdout ahead of the JSON document made `ltvm create --json`
+    # unparseable for exactly the callers --json exists for.  It only
+    # appeared when the target was defaulted, which is why it survived.
+    if (
+        defaulted_target
+        and not explicit_image
+        and not explicit_kernel
+        and not getattr(args, "json", False)
+    ):
         kver_short = os_arts.kernel.parent.name
         disk_desc = (
             f"mdt={args.mdt_disks} ost={args.ost_disks}"
@@ -1015,14 +1141,20 @@ def cmd_create(args: argparse.Namespace) -> None:
     except ValueError as e:
         die(str(e))
 
+    dry_run = getattr(args, "dry_run", False)
     info_path = SOCKETS / f"{name}.info"
-    if _handle_existing_vm(name, args):
+    exists = info_path.exists()
+    # _handle_existing_vm converges an existing VM (it can start one), so
+    # a dry run reports the name is taken rather than calling it.
+    if not dry_run and _handle_existing_vm(name, args):
         return
 
     extra_nic_types, passthrough_bdfs = _validate_create_bounds(args)
 
     # Refuse now rather than letting two VMs fight over one host TAP
-    # once they are both running (see check_tap_collision).
+    # once they are both running (see check_tap_collision).  Read-only,
+    # so a dry run runs it too -- a collision is exactly the kind of
+    # thing you want surfaced before committing.
     check_tap_collision(name, len(extra_nic_types))
 
     tap = tap_for_name(name)
@@ -1035,6 +1167,27 @@ def cmd_create(args: argparse.Namespace) -> None:
     os_id = os_target
 
     disk_size = _parse_disk_size(getattr(args, "disk_size", None))
+
+    if dry_run:
+        # Everything above resolves and validates without writing: the
+        # artifact lookup, the bounds checks and the TAP-collision scan
+        # are all reads.  The first write is _allocate_and_persist_vm
+        # below, which is also where the IP is claimed under a lock --
+        # so the plan names the IP only when the user pinned one.
+        _print_create_plan(
+            args,
+            exists=exists,
+            tap=tap,
+            mac=mac,
+            image=image,
+            kernel=kernel,
+            kver=kver,
+            os_target=os_target,
+            variant=variant,
+            extra_nic_types=extra_nic_types,
+            disk_size=disk_size,
+        )
+        return
 
     vm = _allocate_and_persist_vm(
         args,
@@ -1399,16 +1552,182 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 def cmd_console_log(args: argparse.Namespace) -> None:
     vm = VMInfo.load(args.name)
-    if not vm.log_path.exists():
-        die(f"no log for VM '{args.name}'")
-    lines = vm.log_path.read_text().splitlines()
     # lines[-0:] is lines[0:] -- the whole file -- so --lines 0 dumped
     # a long-lived VM's entire serial log instead of nothing.
     if args.lines < 0:
         die(f"--lines must be >= 0, got {args.lines}")
-    tail = lines[-args.lines :] if args.lines > 0 else []
-    for line in tail:
-        print(line)
+
+    follow = getattr(args, "follow", False)
+    if not vm.log_path.exists():
+        if not follow:
+            die(f"no log for VM '{args.name}'")
+        # Following a VM that has not booted yet is a reasonable thing
+        # to ask for -- start the follow and wait for the file.
+        print(
+            f"waiting for {vm.log_path} (VM not started yet)",
+            file=sys.stderr,
+        )
+
+    # Bytes, not read_text(): a serial console emits whatever the guest
+    # puts on it, and a stray non-UTF-8 byte made this command fail with
+    # a UnicodeDecodeError instead of showing the log.  Following makes
+    # that near-certain, since a read can land mid-character.
+    if not follow:
+        raw = vm.log_path.read_bytes()
+        for line in _tail_lines(raw, args.lines):
+            sys.stdout.buffer.write(line + b"\n")
+        sys.stdout.buffer.flush()
+        return
+
+    _follow_console_log(vm, args.lines)
+
+
+def _tail_lines(raw: bytes, count: int) -> list[bytes]:
+    """The last *count* lines of *raw*, or none when count is 0."""
+    if count <= 0:
+        return []
+    return raw.splitlines()[-count:]
+
+
+# How long to wait between reads while following.  Short enough that
+# output feels live, long enough that a quiet VM costs nothing.
+_FOLLOW_POLL_SECONDS = 0.25
+
+
+def _follow_console_log(vm: VMInfo, lines: int, *, _once: bool = False) -> None:
+    """Stream the console log as it grows, like `tail -F`.
+
+    Handles the VM rebooting underneath us, which is not an edge case
+    here: QEMU's serial chardev opens the log without ``append=on`` (see
+    qemu_run), so every boot truncates it.  A follower that only ever
+    read forward would sit past the new end-of-file and print nothing
+    more for the rest of the VM's life -- silently, which is the worst
+    way to get this wrong.  Both truncation and outright replacement are
+    detected, and the stream picks up from the start of the new log.
+
+    Ctrl-C is the documented way to stop, so it returns quietly rather
+    than reporting an abort.
+    """
+    path = vm.log_path
+    out = sys.stdout.buffer
+    fh = None
+    anchor = b""
+    try:
+        while True:
+            if fh is None:
+                try:
+                    fh = open(path, "rb")
+                except FileNotFoundError:
+                    if _once:
+                        return
+                    time.sleep(_FOLLOW_POLL_SECONDS)
+                    continue
+                anchor = _read_anchor(fh)
+                # First open prints the requested tail; a reopen after a
+                # reboot starts from the top of the new log.
+                if lines >= 0:
+                    for line in _tail_lines(fh.read(), lines):
+                        out.write(line + b"\n")
+                    out.flush()
+                    lines = -1  # only the first open gets a tail
+                else:
+                    fh.seek(0)
+
+            # Checked before the read, not after an empty one: the log
+            # can be replaced while we are sleeping, and reading first
+            # would emit whatever happens to sit at our stale offset --
+            # a fragment of a line whose start we never showed -- before
+            # noticing.  A stat plus a short pread per iteration is
+            # nothing next to the sleep.
+            if _rotated(path, fh, anchor):
+                print(
+                    f"--- {vm.name}: log truncated (VM rebooted), "
+                    f"following the new one ---",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                fh.close()
+                fh = None
+                continue
+
+            chunk = fh.read()
+            if chunk:
+                out.write(chunk)
+                out.flush()
+                # The head can only be fingerprinted once there is one;
+                # a log that was empty at open gets its anchor here.
+                if not anchor:
+                    anchor = _read_anchor(fh)
+                continue
+
+            if _once:
+                return
+            time.sleep(_FOLLOW_POLL_SECONDS)
+    except KeyboardInterrupt:
+        return
+    finally:
+        if fh is not None:
+            fh.close()
+
+
+# How much of the log's head to remember as a rotation fingerprint.
+# Enough to differ between two boots, small enough that re-reading it on
+# every idle poll costs nothing.
+_ANCHOR_BYTES = 256
+
+
+def _read_anchor(fh: Any) -> bytes:
+    """The first bytes of the open log, without moving its position."""
+    try:
+        return os.pread(fh.fileno(), _ANCHOR_BYTES, 0)
+    except OSError:
+        return b""
+
+
+def _rotated(path: Path, fh: Any, anchor: bytes = b"") -> bool:
+    """Has *path* been truncated or replaced since *fh* was opened?
+
+    Three signals, because no one of them is sufficient:
+
+    * a different inode -- something unlinked and recreated the log,
+      leaving our descriptor on a file nobody will write to again;
+    * a size below our read position -- the ordinary reboot, caught on
+      the next poll while the new log is still short;
+    * a changed *head* -- the same reboot when the new log has already
+      grown past where we had read to. Size alone misses that: truncate
+      a 11-byte log and write 12 bytes and the size only went up, so a
+      size check reads forward from the stale offset and emits the tail
+      of a line it never showed the start of. One poll interval is
+      usually too short for a booting VM to outrun the old offset, but
+      "usually" is doing real work there, and a previous boot that only
+      logged a few hundred bytes makes it likely rather than rare.
+
+    What remains uncaught: a truncation that, within a single poll,
+    both outgrows the old offset *and* reproduces the first
+    ``_ANCHOR_BYTES`` exactly. Two boots of one kernel do print the same
+    banner, so that is not impossible -- it just needs the whole race to
+    land inside 0.25s as well.
+    """
+    try:
+        on_disk = os.stat(path)
+    except OSError:
+        return False
+    try:
+        ours = os.fstat(fh.fileno())
+    except OSError:
+        return False
+    if on_disk.st_ino != ours.st_ino or on_disk.st_dev != ours.st_dev:
+        return True
+    if on_disk.st_size < fh.tell():
+        return True
+    if not anchor:
+        return False
+    # Compared as a prefix, not for equality: the log is usually shorter
+    # than _ANCHOR_BYTES when it is first opened, so the anchor is the
+    # whole file -- and then every append would "change" it and look
+    # like a rotation.  Appending never alters a prefix, truncating
+    # almost always does.
+    return _read_anchor(fh)[: len(anchor)] != anchor
 
 
 # ── nmi ──────────────────────────────────────────────────
@@ -2147,6 +2466,47 @@ def _check_skill_links(
     return issues, notes, failures
 
 
+def _check_completion(fix: bool) -> tuple[list[str], list[str], int]:
+    """Report per-shell tab completion, and with *fix* (re)install it.
+
+    `ltvm install` does this, so the hosts that need the check are the
+    ones installed before a shell's support existed -- or before tab
+    completion did -- plus anyone who installed zsh afterwards.  Shells
+    the host does not have are not reported: a missing fish completion
+    on a host without fish is not a problem.
+
+    Returns (issue lines, repair notes, unfixable count).
+    """
+    from ltvm_pkg import shell_completion
+
+    issues: list[str] = []
+    notes: list[str] = []
+    failures = 0
+
+    broken = [
+        r
+        for r in shell_completion.status()
+        if r.status in ("missing", "stale", "failed")
+    ]
+    for r in broken:
+        if r.status == "failed":
+            issues.append(f"tab completion ({r.shell}) unreadable: {r.detail}")
+        else:
+            issues.append(f"tab completion {r.status} for {r.shell}: {r.path}")
+    if not broken or not fix:
+        return issues, notes, failures
+
+    for r in shell_completion.install(tuple(b.shell for b in broken)):
+        if r.status in ("installed", "unchanged"):
+            notes.append(f"  fixed: wrote {r.path}")
+        elif r.status == "failed":
+            notes.append(f"  FAILED to write {r.path}: {r.detail}")
+            failures += 1
+    if notes and failures == 0:
+        notes.append("  open a new shell to pick it up")
+    return issues, notes, failures
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     issues = 0
     # Counts repairs that were attempted and did not work, so --fix
@@ -2379,6 +2739,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for line in skill_notes:
         print(line)
     fix_failures += skill_failures
+
+    comp_issues, comp_notes, comp_failures = _check_completion(args.fix)
+    for line in comp_issues:
+        print(line)
+        issues += 1
+    for line in comp_notes:
+        print(line)
+    fix_failures += comp_failures
 
     # Disk-usage probe.  Always prints the info line so the user has a
     # capacity reference; counts as an issue only when free space is

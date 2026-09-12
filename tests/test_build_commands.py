@@ -1395,3 +1395,110 @@ class TestCmdStatusInvalidTarget:
         out = capsys.readouterr().out
         assert "CONFIG ERROR" in out
         assert "configure_arg" in out
+
+
+# ---------------------------------------------------------------------------
+# Build step timing
+# ---------------------------------------------------------------------------
+
+
+class TestBuildAllTiming:
+    """`build all` reports where the time went.
+
+    A run is tens of minutes, mostly the kernel, and without this there
+    is no record afterwards of which step ate it.
+    """
+
+    def _run_build_all(
+        self, tmp_targets: Path, lustre_tree: Path, *extra: str
+    ) -> int:
+        from ltvm_pkg import cli as cli_mod
+        from ltvm_pkg.lustre_compat import ValidationResult
+
+        tc = _make_tc(tmp_targets)
+        vr = ValidationResult(
+            status="ok",
+            mode=None,
+            kernel_version=None,
+            matched_in=None,
+            message="ok",
+        )
+        with (
+            patch.object(cli_mod, "TargetConfig", return_value=tc),
+            patch.object(cli_mod, "validate_target", return_value=vr),
+            patch.object(cli_mod, "_do_build_container"),
+            patch.object(cli_mod, "build_kernel", return_value={"ok": True}),
+            patch.object(cli_mod, "build_lustre", return_value={"ok": True}),
+            patch.object(cli_mod, "snapshot_lustre"),
+            patch.object(cli_mod, "build_image"),
+        ):
+            return _run_main(
+                [
+                    "build",
+                    "all",
+                    "rocky9",
+                    "--yes",
+                    "--lustre-tree",
+                    str(lustre_tree),
+                    *extra,
+                ]
+            )
+
+    def test_human_output_breaks_the_time_down_by_step(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+        lustre_tree: Path,
+    ) -> None:
+        rc = self._run_build_all(tmp_targets, lustre_tree)
+        assert rc == EXIT_OK
+        out = capsys.readouterr().out
+        assert "build all rocky9 finished in" in out
+        for step in ("container", "kernel", "lustre", "snapshot", "image"):
+            assert f"{step} took" in out
+
+    def test_json_carries_the_timings(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+        lustre_tree: Path,
+    ) -> None:
+        rc = self._run_build_all(tmp_targets, lustre_tree, "--json")
+        assert rc == EXIT_OK
+        payload = json.loads(capsys.readouterr().out)
+        assert "seconds" in payload
+        assert set(payload["step_seconds"]) == {
+            "container",
+            "kernel",
+            "lustre",
+            "snapshot",
+            "image",
+        }
+
+    def test_json_output_is_still_only_json(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+        lustre_tree: Path,
+    ) -> None:
+        """The per-step and summary lines are for humans; emitting them
+        under --json would break every consumer of it."""
+        self._run_build_all(tmp_targets, lustre_tree, "--json")
+        out = capsys.readouterr().out
+        assert "took" not in out
+        assert "finished in" not in out
+        json.loads(out)
+
+    def test_a_skipped_lustre_step_is_absent_from_the_breakdown(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+        lustre_tree: Path,
+    ) -> None:
+        rc = self._run_build_all(tmp_targets, lustre_tree, "--skip-lustre")
+        assert rc == EXIT_OK
+        out = capsys.readouterr().out
+        assert "lustre took" not in out
+        assert "snapshot took" not in out
+        assert "kernel took" in out
+        assert "image took" in out

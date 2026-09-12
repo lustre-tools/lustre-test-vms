@@ -727,30 +727,39 @@ def package_target(
             + (f" --variant {variant}" if variant != DEFAULT_VARIANT else "")
         )
 
-    # Prefer the canonical base.ext4 -- mke2fs writes a temp
+    # Require the canonical base.ext4 -- mke2fs writes a temp
     # ltvm-image-XXXXXXXX.ext4 first and renames it once the build is
     # complete, but interrupted builds leave 0-byte (or stale, full-
     # size but non-renamed) temp files alongside the real base.ext4.
-    # A naive glob("*.ext4") then picks one of those at random, and
-    # the published release ships a broken image asset.
+    # A glob("*.ext4") then picks one of those, and the published
+    # release ships a broken image asset.
+    #
+    # This used to fall back to the first non-empty *.ext4 whenever
+    # base.ext4 was missing or zero-length -- doing exactly what the
+    # paragraph above warns about.  The tar member keeps its real
+    # name, and every consumer of a fetched image looks for
+    # "base.ext4" specifically (vm_state.resolve_os_artifacts,
+    # image_status, image_export), so such an asset extracted cleanly
+    # and then read as "not built": `ltvm create` failed on a target
+    # that had just been fetched successfully.
     base_ext4 = paths["image_dir"] / "base.ext4"
-    image_ext4 = (
-        base_ext4
-        if base_ext4.exists() and base_ext4.stat().st_size > 0
-        else next(
-            (
-                p
-                for p in paths["image_dir"].glob("*.ext4")
-                if p.stat().st_size > 0
-            ),
-            None,
+    if not base_ext4.exists() or base_ext4.stat().st_size == 0:
+        strays = sorted(
+            p.name
+            for p in paths["image_dir"].glob("*.ext4")
+            if p.name != "base.ext4" and p.stat().st_size > 0
         )
-    )
-    if image_ext4 is None:
+        hint = (
+            f"\n  ({', '.join(strays)} is a leftover mke2fs temp file, "
+            f"not a usable image -- the build it came from did not finish)"
+            if strays
+            else ""
+        )
         raise ValueError(
-            f"no non-empty *.ext4 in {paths['image_dir']} -- did "
-            f"`ltvm build image` finish successfully?"
+            f"no usable base.ext4 in {paths['image_dir']} -- did "
+            f"`ltvm build image` finish successfully?{hint}"
         )
+    image_ext4 = base_ext4
 
     # Read version for naming.
     kmeta = load_meta_safe(kernel_dir / "meta.json")

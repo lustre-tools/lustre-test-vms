@@ -60,6 +60,62 @@ Links, not copies: `git pull` or `ltvm update` updates the skill with the
 ltvm it describes. It covers *using* ltvm; target configuration, artifact
 internals and release mechanics stay in this file.
 
+## Tab Completion
+
+Two modules, split along the line between *what* to offer and
+*how a shell gets asked*:
+
+- `ltvm_pkg/completion.py` -- the argcomplete completers.  Every one is
+  wrapped in `_safe`, because an exception here lands as a traceback in
+  the user's prompt.  They read live state (targets.yaml, VM and
+  cluster files, snapshot tags via `qemu-img snapshot -l -U`), so they
+  stay right without a word list to maintain.
+- `ltvm_pkg/shell_completion.py` -- generating and installing the
+  per-shell registration, via `argcomplete.shellcode()` in-process (not
+  the `register-python-argcomplete` script, which lives in the venv's
+  `bin/` that `sudo ltvm install` has no PATH for).
+
+`ltvm install` installs for every shell on the host; `ltvm completion`
+prints or installs it by hand, and `ltvm doctor` reports missing or
+stale files and writes them with `--fix`.  Writes go through
+`priv.atomic_write`, so only the write elevates -- the command itself
+does not need root.
+
+`ltvm install --verify` reports it too (`host_setup.verify`), but
+deliberately *not* as part of `all_ok`: a file gone stale across a
+version bump is normal and self-heals on the next install, so failing
+that command's exit code over it would cry wolf.  `ltvm doctor` is the
+one that exits non-zero and fixes it.
+
+Wiring lives in `ltvm`: `_COMPLETERS_BY_OPTION` is attached across the
+whole subparser tree by `_attach_completers(p)` at the end of
+`build_parser`, so an option that means the same thing everywhere
+(`--arch`, `--lustre-tree`) is covered once and a new subcommand is
+covered for free.  It only fills arguments with no completer, so a
+per-command assignment always wins.
+
+Three traps worth knowing:
+
+- **`create --kernel` is a version name**, despite reading like a
+  path: `_resolve_os_and_kernel` hands it to `resolve_os_artifacts`,
+  which matches it against artifact *directory* names, so a real path
+  gets "No kernel matching".  It is in the by-option table with every
+  other `--kernel` for that reason.  `create --image` genuinely is a
+  path and stays out, where argcomplete's default `FilesCompleter` is
+  the right answer -- as it is for `--ssh-key`, `--tarball`, `--output`.
+- **zsh needs the `#compdef` wrapper.**  An autoloaded `_ltvm`'s body
+  *is* the completion function, so the bare shellcode would define
+  `_python_argcomplete` and return -- first TAB empty, second one works.
+  `shellcode("zsh")` adds the header and a trailing call.
+- **`completion` is excluded from telemetry and the update check** in
+  `main()`.  The documented usage is `eval "$(ltvm completion)"` from a
+  shell rc file, so it runs once per terminal opened.
+
+`LTVM_COMPLETION_ROOT` prefixes every system path -- for staging into an
+image, and for the test suite, which sets it in `tests/conftest.py` so
+`ltvm doctor --fix` under pytest cannot rewrite the developer's real
+`/etc/bash_completion.d`.
+
 ## Repository Layout
 
 - `targets/` -- `targets.yaml` (source of truth), shared
@@ -68,15 +124,17 @@ internals and release mechanics stay in this file.
   `image.Dockerfile` + `packages-os.txt`.  Per-target
   `variants/` dirs hold optional overlay Dockerfiles.
 - `ltvm_pkg/` -- Python package; `cli/` subpackage holds
-  per-area dispatch (`build.py`, `targets.py`, `vm.py`,
-  `cluster.py`, `deploy.py`, `fetch.py`, `setup.py`), rest
-  is implementation.  `ltvm` script at repo root is the CLI.
+  per-area dispatch (`build.py`, `clean.py`, `cluster.py`,
+  `deploy.py`, `fetch.py`, `make.py`, `setup.py`,
+  `targets.py`, `telemetry.py`, `vm.py`) plus shared
+  `util.py`; rest is implementation.  `ltvm` script at repo
+  root is the CLI.
 - `artifacts/<target>/<arch>/{container,kernels/<kver>,images/<kver>[/<variant>]}/`
   -- gitignored build artifacts with a `meta.json` each.
   ZFS, when built, lands at `kernels/<kver>/zfs/<version>/`.
 - `docs/` -- operator notes (getting started, releasing
   prebuilt QEMU, nested virtualization, SoftRoCE setup,
-  system test plan).
+  system test plan, VM ownership).
 
 ## Quick Start
 
@@ -93,9 +151,40 @@ Four cacheable artifacts per (target, arch, variant):
 **Lustre staging** (userland + modules per kernel,
 written into the Lustre tree's `.ltvm-staging/`).  The
 first three each track an `input_hash` in their
-`meta.json`; `ltvm build status` reports staleness.
+`meta.json`; `ltvm build status` reports staleness, and
+`--why` names the input that moved.
 Images are keyed per-kernel (so multiple kernel minors
 can coexist).
+
+### input_hash is load-bearing -- do not perturb it
+
+`input_hash` *is* the staleness decision, so producing a
+different value for unchanged inputs invalidates every
+artifact on every machine at once, costing a kernel rebuild
+per target.  Nothing warns you; builds just start running.
+
+`TargetConfig._hash_parts` feeds the bytes through
+`_HashParts`, which records them under labels while
+concatenating them unchanged -- so `input_hash()` (the
+digest) and `input_components()` (the per-input digests
+`--why` diffs, also stored in `meta.json`) come from one
+code path.  Keep it that way: an explanation that disagrees
+with the rebuild decision is worse than none.
+
+[tests/test_input_hash_stability.py](tests/test_input_hash_stability.py)
+pins the digest for every target and artifact.  If it fails,
+assume you changed the hash by accident.  When the change is
+deliberate, update the goldens in the same commit -- that
+test failing is the one signal anybody gets before the
+rebuilds start.
+
+Three cases `--why` answers honestly rather than
+plausibly, all worth preserving: an artifact built before
+the per-input digests existed reports the cause as unknown
+(not "nothing changed"); the kernel's `lustre-tree-inputs`
+component is never blamed, because `build status` has no
+Lustre tree to recompute it from; and a hash that moved with
+no component accounting for it says exactly that.
 
 ```bash
 ltvm build container rocky9
@@ -191,7 +280,7 @@ before any Lustre-involving build.
 
 ```bash
 ltvm target validate rocky9 --lustre-tree ~/lustre-release
-# Exit: 0 compatible, 1 warning, 2 refused
+# Exit: 0 compatible (or warning), 1 refused, 2 could not tell
 
 # Bypass a refusal (not hard errors):
 ltvm build all rocky9 --lustre-tree ~/lustre-release --force-compat
@@ -303,12 +392,17 @@ excludes `mofed-kmods/`: a fetcher who never passes
 
 ```bash
 ltvm create co1-single --vcpus 2 --mem 4096 --mdt-disks 1 --ost-disks 3
+ltvm create co1-single rocky9 --dry-run  # resolve + validate, write nothing
 ltvm deploy-lustre co1-single --lustre-tree ~/lustre-release --mount
 ssh co1-single 'lctl dl'
 ltvm llmount co1-single               # mount
 ltvm llumount co1-single              # unmount (= llmount --cleanup)
 ltvm vm console-log co1-single
+ltvm vm console-log co1-single -f     # keep streaming (tail -F semantics)
 ltvm vm nmi co1-single                # inject NMI -> kdump
+ltvm vm snapshot co1-single [tag]     # snapshot the overlay disk
+ltvm vm snapshot co1-single --delete tag
+ltvm vm restore co1-single [tag]      # restore (no tag: list them)
 ltvm vm crash-collect co1-single --mod-dir $CO/1
 ltvm destroy co1-single
 ```
@@ -326,7 +420,8 @@ resolves once and applies the same owner to every member. Discover it through
 **Naming:** always include the checkout number: `co<N>-<role>`.
 
 **Root:** only `update`, `cluster create` and `cluster destroy` need the
-whole command under root.
+whole command under root -- and not `cluster create --dry-run`, which
+only reads.
 
 Single-VM lifecycle -- `create`, `start`, `stop`, `destroy`, `doctor` --
 runs as the invoking user and elevates the individual operations that
@@ -436,6 +531,26 @@ sudo ltvm cluster destroy co2
 exits non-zero if any node did; `cluster ssh <role>` opens a session on
 the first, since it execs a single interactive ssh.
 
+Each action is a real subparser, so `ltvm cluster <action> --help`
+works and every action's flags validate and tab-complete.  Two
+consequences worth knowing:
+
+- **`cluster exec` takes its command as a REMAINDER**, so everything
+  after the role is passed through untouched (`lctl dl -t` keeps its
+  `-t`).  The price is that ltvm's own flags must come *before* the
+  role: `cluster exec co2 --timeout 30 oss uptime`, not after it.
+- **An option between two node specs does not parse.**  `create`'s specs
+  are one `nargs="+"` positional -- they have to be, or argparse would
+  assign a bare positional TARGET the first spec -- and argparse matches
+  positionals in contiguous runs, so an option in the middle ends the
+  run and the rest come back as "unrecognized arguments".  Before or
+  after the whole run both work.  The hand-rolled parser this replaced
+  did not care, so that one form regressed.
+
+A malformed cluster command line now exits 2 with a usage message rather
+than ltvm's own error (a JSON envelope under `--json`), which is what
+every other subcommand already did.
+
 ## Target Configuration
 
 Targets live in [targets/targets.yaml](targets/targets.yaml).
@@ -488,6 +603,53 @@ canonical example: an overlay container/image pair plus
 a kernel pin and `params:` consumed by the Dockerfile.
 
 ## Development
+
+### Test suite
+
+`uv run pytest` passes with no failures on two quite different
+machines, and keeping both green is the standard:
+
+- a **provisioned host** (`sudo ltvm install` has run): everything runs;
+- a **bare checkout** with no `zstd`, `rsync`, `fakeroot`, `mke2fs` and
+  no `ltvm` on PATH: the tests that genuinely drive those tools skip,
+  naming what is missing, and nothing fails.
+
+Two rules keep that true, and both came from tests that quietly wanted a
+configured host:
+
+- A **unit** test must not depend on a host tool.  When the code under
+  test sits behind a presence preflight (`image_build._check_mke2fs`,
+  `release_package._check_zstd`), neutralize the preflight -- otherwise
+  the test fails on the preflight having never reached its subject, and
+  what it reports is "fakeroot missing" rather than anything about the
+  behaviour it covers.
+- An **integration** test that really builds and unpacks assets needs
+  the real binaries, since mocking tar and zstd would leave it asserting
+  nothing about the tarballs it exists to check.  Those carry
+  `@needs_host_tools` (tests/test_package.py) and skip with a reason
+  naming the tool and the remedy.
+
+Never let a test shell out to `ltvm` itself for real.  One did, and
+passed only because the child failed; on a host where it would have
+succeeded the suite was one check away from starting an actual Lustre
+build (tests/test_deploy.py::test_legacy_staging_triggers_clear_error).
+
+To assert that something is **absent** -- a hostname, a username, a path
+-- substitute a sentinel and look for that, rather than searching for the
+machine's real value.  The telemetry leak test did the latter and was
+wrong in both directions: it failed on a host named `vm` because "vm" is
+inside the key `ltvm_version`, and it would have failed on one named
+`ubuntu` or `x86_64` by colliding with a legitimate value, while
+narrowing the match enough to dodge that left it blind to a real leak on
+the short-named host.  A sentinel collides with nothing, so the whole
+payload can be searched and the answer is the same on every machine.
+Better still where it fits: assert the output does not *change* when the
+identity does (`test_payload_does_not_depend_on_the_machine_name`).
+
+`tests/conftest.py` holds the autouse isolation that keeps the suite out
+of the developer's real state: XDG config and state, `LTVM_TELEMETRY=0`,
+and `LTVM_COMPLETION_ROOT`.  Add to it rather than patching per test
+whenever a new code path writes outside the repo.
 
 ### Interactive container shell
 
@@ -590,3 +752,5 @@ gh issue list / view <n> / create --title ... --body ...
   o2iblnd over SoftRoCE.
 - [docs/SYSTEM_TEST_PLAN.md](docs/SYSTEM_TEST_PLAN.md) --
   end-to-end test matrix.
+- [docs/VM_OWNERSHIP.md](docs/VM_OWNERSHIP.md) -- the
+  advisory `owner_id` a VM records, and who sets it.

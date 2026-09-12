@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ltvm_pkg import vm_cluster, vm_commands
-from ltvm_pkg.cli import cmd_cluster
 from ltvm_pkg.vm_owner import resolve_owner_id, validate_owner_id
 from ltvm_pkg.vm_state import ClusterInfo, VMInfo
 
@@ -217,22 +216,24 @@ class TestVMOwnerPersistence:
 
 class TestClusterOwnerPropagation:
     def test_cluster_cli_accepts_both_owner_flag_names(self) -> None:
+        from tests.test_parser_coverage import ltvm as ltvm_mod
+
         for flag in ("--owner", "--owner-id"):
-            args = argparse.Namespace(
-                action="create",
-                cluster_args=[
+            args = ltvm_mod.build_parser().parse_args(
+                [
+                    "cluster",
+                    "create",
                     "cluster-a",
                     flag,
                     "session:cluster",
                     "mgs+mds:cluster-a-mds:1",
-                ],
-                json=False,
+                ]
             )
             with (
                 patch("ltvm_pkg.cli._require_root", return_value=None),
                 patch("ltvm_pkg.vm_cluster.cmd_cluster_create") as handler,
             ):
-                assert cmd_cluster(args) == 0
+                assert args.func(args) == 0
             assert handler.call_args.args[0].owner_id == "session:cluster"
 
     def test_child_command_receives_resolved_owner(self) -> None:

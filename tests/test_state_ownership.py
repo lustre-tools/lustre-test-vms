@@ -68,6 +68,76 @@ class TestInfoLock:
         assert VMInfo.load("co1-lock").pid == 777
 
 
+class TestEnsureLockFile:
+    """A lock file must never be created by rename.
+
+    atomic_write finishes with os.rename (or sudo install + sudo mv),
+    so two processes racing the *first* acquisition each replaced the
+    other's inode and each held flock on a different one -- the loser's
+    already unlinked -- and both entered the critical section.  That
+    defeated both locks that guard a first create: .ip-alloc.lock (two
+    VMs handed the same 192.168.100.x) and .hosts.lock (an
+    unsynchronised /etc/hosts read-modify-write dropping an entry).
+    """
+
+    def _both_acquire(self, path: Path, create: Any) -> bool:
+        """Replay the race: A creates and locks, then B creates and
+        tries to lock.  True means both got in."""
+        import fcntl
+
+        create(path)
+        a = open(path, "a")
+        fcntl.flock(a, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        create(path)  # B's create step, while A holds the lock
+        b = open(path, "a")
+        try:
+            fcntl.flock(b, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            return False
+        finally:
+            a.close()
+            b.close()
+
+    def test_a_renaming_create_would_lose_the_lock(
+        self, tmp_path: Path
+    ) -> None:
+        """The bug, stated as a property of atomic_write -- so the
+        reason ensure_lock_file exists stays legible."""
+        assert self._both_acquire(
+            tmp_path / "renamed.lock",
+            lambda p: priv.atomic_write(p, "", mode=0o666),
+        )
+
+    def test_ensure_lock_file_serialises(self, tmp_path: Path) -> None:
+        assert not self._both_acquire(
+            tmp_path / "good.lock", priv.ensure_lock_file
+        )
+
+    def test_is_world_writable(self, tmp_path: Path) -> None:
+        """0666 is the point: /opt/qemu-vms is root-owned, so the other
+        uid has to be able to open the file later.  O_CREAT's mode is
+        masked by umask, so this needs the explicit chmod."""
+        lock = tmp_path / "mode.lock"
+        priv.ensure_lock_file(lock)
+        assert lock.stat().st_mode & 0o666 == 0o666
+
+    def test_keeps_the_existing_inode(self, tmp_path: Path) -> None:
+        lock = tmp_path / "same.lock"
+        priv.ensure_lock_file(lock)
+        first = lock.stat().st_ino
+        priv.ensure_lock_file(lock)
+        assert lock.stat().st_ino == first
+
+    def test_existing_content_is_not_truncated(self, tmp_path: Path) -> None:
+        """O_CREAT without O_TRUNC: a lock file someone wrote to stays
+        as it is, and in particular is not replaced."""
+        lock = tmp_path / "kept.lock"
+        lock.write_text("marker")
+        priv.ensure_lock_file(lock)
+        assert lock.read_text() == "marker"
+
+
 class TestInvokingUser:
     def test_none_when_plain_root(self) -> None:
         with (

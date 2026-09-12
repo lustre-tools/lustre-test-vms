@@ -82,6 +82,16 @@ def normalize_arch(arch: str) -> str:
     return _ARCH_ALIASES.get(arch, arch)
 
 
+def supported_arches() -> list[str]:
+    """Canonical architecture names ltvm can build for.
+
+    Aliases are deliberately excluded: `--arch` accepts them, but
+    offering both spellings of one architecture in tab completion would
+    read as four choices instead of two.
+    """
+    return sorted(_ARCH_TABLE)
+
+
 def cross_info(target_arch: str, host_arch: str) -> CrossInfo:
     """Return resolved cross-compile parameters for target + host arch."""
     target_arch = normalize_arch(target_arch)

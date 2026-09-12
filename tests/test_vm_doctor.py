@@ -66,6 +66,13 @@ def doctor_env(tmp_vmdir: Path, tmp_path: Path) -> Iterator[dict]:
             "ltvm_pkg.vm_commands._check_skill_links",
             return_value=([], [], 0),
         ),
+        # Completion is installed under a tmpdir for the suite (see
+        # conftest), so it always reads as missing here; these tests are
+        # about orphaned VM state, and _check_completion has its own.
+        patch(
+            "ltvm_pkg.vm_commands._check_completion",
+            return_value=([], [], 0),
+        ),
         patch("ltvm_pkg.vm_commands.is_running", return_value=False),
     ):
         # cmd_doctor reads vm_commands.HOSTS_FILE (re-exported from

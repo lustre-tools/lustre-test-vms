@@ -183,6 +183,43 @@ def _losetup_attach(image: Path) -> str:
     return r.stdout.strip()
 
 
+def _fsck_partition(part: str) -> None:
+    """Check the just-written rootfs, and act on the answer.
+
+    Called while the loop device is still attached, and asserts that:
+    this used to run *after* ``losetup -d``, where ``part``
+    ("<loop>p1") no longer exists, so e2fsck exited "No such file or
+    directory" into ``check=False, quiet=True`` and every
+    ``ltvm target export`` shipped with its final consistency check
+    silently skipped -- a filesystem damaged by the ``cp -a`` +
+    ``grub2-install`` pass converted and published as good.
+
+    e2fsck exit codes: 0 clean, 1|2 errors corrected, >=4 not
+    corrected or an operational failure.  Corrections are worth saying
+    out loud; anything above them means the disk about to be published
+    is not sound.
+    """
+    if not Path(part).exists():
+        raise RuntimeError(
+            f"cannot fsck {part}: no such device.  The partition must "
+            f"still be attached when this runs."
+        )
+    r = sudo_run(["e2fsck", "-fy", part], check=False, quiet=True)
+    if r.returncode in (1, 2):
+        log.warning(
+            "e2fsck corrected errors on %s (rc=%d) -- the exported disk "
+            "is consistent but something wrote badly",
+            part,
+            r.returncode,
+        )
+    elif r.returncode != 0:
+        raise RuntimeError(
+            f"e2fsck failed on {part} (rc={r.returncode}); refusing to "
+            f"publish a disk whose filesystem did not check out.\n"
+            f"{(r.stdout or '') + (r.stderr or '')}"
+        )
+
+
 def _losetup_detach(dev: str) -> None:
     sudo_run(["losetup", "-d", dev], check=False, quiet=True)
 
@@ -692,11 +729,12 @@ def export_image(
             ]
         )
 
-        # 6. Tidy up.
+        # 6. Tidy up.  The check runs BEFORE the detach -- see
+        #    _fsck_partition for why that ordering is load-bearing.
         _run(["umount", str(dst_mnt)])
+        _fsck_partition(part)
         _losetup_detach(loop)
         loop = None
-        sudo_run(["e2fsck", "-fy", part], check=False, quiet=True)
 
         # 7. Convert to final format.
         output.parent.mkdir(parents=True, exist_ok=True)

@@ -341,21 +341,76 @@ class TestClusterCreateTargetForms:
     def test_cluster_create_both_conflict(
         self, capsys: pytest.CaptureFixture[str]
     ) -> None:
+        # Options after the specs, not between them -- see
+        # test_option_between_specs_is_rejected below.
         rc, ns = self._run(
             [
                 "cluster",
                 "create",
                 "co9",
                 "rocky9",
+                "mgs+mds:co9-mds:1",
                 "--target",
                 "rocky10",
-                "mgs+mds:co9-mds:1",
             ],
             capsys,
         )
         assert rc != 0
         err = capsys.readouterr().err
         assert "conflict" in err.lower()
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            # Between the positional target and the spec.
+            ["co9", "rocky9", "--vcpus", "4", "mgs+mds:co9-mds:1"],
+            # Between two specs.
+            ["co9", "mgs+mds:co9-mds:1", "--vcpus", "4", "oss:co9-oss:3"],
+        ],
+    )
+    def test_option_between_specs_is_rejected(self, argv: list[str]) -> None:
+        """An option *between* node specs does not parse, by design.
+
+        The specs are one ``nargs="+"`` positional (they have to be --
+        see the class docstring), and argparse matches positionals in
+        contiguous runs: an option in the middle ends the run, so the
+        specs after it have nothing left to match and come back as
+        "unrecognized arguments".
+
+        Before the subparser conversion, cluster flags were matched by
+        hand in a loop that did not care where they appeared, so this one
+        form worked and no longer does.  Options before or after the
+        whole run of specs both work, which is where people put them --
+        and what the help output shows.  Pinned here so the limitation is
+        a known one rather than a surprise.
+        """
+        import contextlib
+        import io
+
+        p = ltvm.build_parser()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with pytest.raises(SystemExit) as exc:
+                p.parse_args(["cluster", "create", *argv])
+        assert exc.value.code == 2
+        assert "unrecognized arguments" in err.getvalue()
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["co9", "--vcpus", "4", "mgs+mds:co9-mds:1"],
+            ["co9", "mgs+mds:co9-mds:1", "--vcpus", "4"],
+            ["co9", "rocky9", "mgs+mds:co9-mds:1", "--vcpus", "4"],
+            ["co9", "mgs+mds:co9-mds:1", "oss:co9-oss:3", "--vcpus", "4"],
+        ],
+    )
+    def test_options_before_or_after_the_specs_work(
+        self, argv: list[str]
+    ) -> None:
+        """The positions people actually use, for all of which it parses."""
+        args = ltvm.build_parser().parse_args(["cluster", "create", *argv])
+        assert args.vcpus == 4
+        assert any(":" in spec for spec in args.specs)
 
 
 class TestLlumountAlias:

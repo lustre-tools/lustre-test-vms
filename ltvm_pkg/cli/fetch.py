@@ -1237,9 +1237,15 @@ def cmd_delete(args: argparse.Namespace) -> int:
             (p, _dir_size_bytes(p)) for p in preview_paths if p.exists()
         ]
         if not existing:
-            for p in preview_paths:
-                print(f"nothing to delete at {p}")
-            return EXIT_OK
+            # Nothing to confirm, so hand straight to _cmd_clean: it
+            # reports an absent path in BOTH modes (a `wiped` entry with
+            # removed=false under --json, "nothing to clean at <p>"
+            # otherwise).  This branch used to print plain text
+            # unconditionally -- the one path in cmd_delete that did --
+            # so `target delete --json` emitted a bare sentence on
+            # stdout and exit 0 where every other path emits an
+            # envelope.
+            return _cmd_clean(args)
         if not use_json:
             from ltvm_pkg.cli.util import _print_target_header
 

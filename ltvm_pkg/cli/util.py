@@ -9,11 +9,16 @@ dependency graph cycle-free).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
 import platform
+import shlex
+import subprocess
 import sys
+import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +36,8 @@ def _cli_attr(name: str) -> Any:
 
     return getattr(_cli, name)
 
+
+log = logging.getLogger("ltvm.cli")
 
 # Exit codes
 EXIT_OK = 0
@@ -260,6 +267,77 @@ def _artifact_label(status_dict: dict[str, Any]) -> str:
     if stale:
         return "stale"
     return "current"
+
+
+# Components whose inputs a given caller cannot reconstruct, and so
+# cannot honestly compare.  `build status` has no Lustre tree on hand,
+# which is the same reason kernel staleness itself shows as "built (?)"
+# there (see kernel_status's extra_hash note).
+_UNCHECKABLE = {"kernel": ("lustre-tree-inputs",)}
+
+
+def staleness_reasons(
+    target_config: _TargetConfig,
+    artifact: str,
+    status: dict[str, Any],
+    kernel: str | None = None,
+    variant: str | None = None,
+) -> list[str]:
+    """Which recorded inputs no longer match, for `build status --why`.
+
+    "stale" on its own leaves the user guessing whether a 40-minute
+    kernel rebuild is really warranted.  This compares the per-input
+    digests in meta.json against freshly computed ones and names the
+    difference.
+
+    Returns an empty list when there is nothing to say -- including for
+    an artifact built before these digests were recorded, which reads as
+    "no recorded inputs" rather than being silently mistaken for "no
+    differences"; the caller distinguishes the two.
+
+    One file can be named twice: packages-dev.txt, for instance, reaches
+    the container hash both through the Dockerfile's COPY scan and
+    through the package-list digest, so editing it changes two
+    components.  Reported as it is rather than deduplicated -- that is
+    genuinely how the hash reads it, and guessing which labels refer to
+    one file would be a worse kind of wrong than a repeated line.
+    """
+    stored = status.get("input_components")
+    if not isinstance(stored, dict) or not stored:
+        return []
+    try:
+        current = target_config.input_components(
+            artifact, kernel=kernel, variant=variant
+        )
+    except Exception as e:  # noqa: BLE001
+        # Explaining staleness must never be what breaks `build status`.
+        log.debug("cannot recompute %s components: %s", artifact, e)
+        return []
+
+    skip = _UNCHECKABLE.get(artifact, ())
+    reasons: list[str] = []
+    for name, digest in current.items():
+        if name in skip:
+            continue
+        if name not in stored:
+            reasons.append(f"{name} (new input)")
+        elif stored[name] != digest:
+            reasons.append(f"{name} (changed)")
+    for name in stored:
+        if name in skip or name in current:
+            continue
+        reasons.append(f"{name} (no longer an input)")
+    return reasons
+
+
+def has_recorded_components(status: dict[str, Any]) -> bool:
+    """True when this artifact's meta.json carries per-input digests.
+
+    False for anything built before they were written, where --why has
+    to say it cannot tell rather than imply nothing changed.
+    """
+    stored = status.get("input_components")
+    return isinstance(stored, dict) and bool(stored)
 
 
 def _local_lustre_version(
@@ -513,3 +591,138 @@ def released_kvers(
         for p in d.iterdir()
         if p.is_file() and p.name.startswith(pre)
     )
+
+
+# ------------------------------------------------------------------
+# Build progress: step timing and a completion notification.
+#
+# A full `build all` is tens of minutes, most of it the kernel.  Without
+# timings there is no way to know whether a run is progressing normally
+# or wedged, and no record afterwards of where the time went.
+# ------------------------------------------------------------------
+
+# Below this, a run finished quickly enough that nobody walked away from
+# it, so there is nobody to notify.
+NOTIFY_AFTER_SECONDS = 60
+
+
+def format_duration(seconds: float) -> str:
+    """A duration a human reads at a glance: 9s, 45s, 2m 05s, 1h 12m."""
+    total = int(round(seconds))
+    if total < 60:
+        return f"{total}s"
+    minutes, secs = divmod(total, 60)
+    if minutes < 60:
+        return f"{minutes}m {secs:02d}s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
+
+
+class StepTimer:
+    """Collects per-step durations and renders a closing summary.
+
+    Used by the build commands, which print their own ``==> step`` banner
+    and then hand the step here to be timed, so the summary at the end
+    accounts for the whole run rather than just totalling what the
+    individual builders happened to log.
+    """
+
+    def __init__(self, label: str, *, quiet: bool = False) -> None:
+        self.label = label
+        self.quiet = quiet
+        self._start = time.monotonic()
+        self.steps: list[tuple[str, float]] = []
+
+    def step(self, name: str) -> Any:
+        """Context manager timing one named step."""
+
+        @contextlib.contextmanager
+        def _timer() -> Iterator[None]:
+            began = time.monotonic()
+            try:
+                yield
+            finally:
+                # Recorded even when the step raised: knowing a failure
+                # took 30 minutes is worth as much as knowing a success
+                # did.
+                elapsed = time.monotonic() - began
+                self.steps.append((name, elapsed))
+                if not self.quiet:
+                    print(f"    {name} took {format_duration(elapsed)}")
+
+        return _timer()
+
+    @property
+    def elapsed(self) -> float:
+        return time.monotonic() - self._start
+
+    def summary_lines(self) -> list[str]:
+        total = self.elapsed
+        lines = [f"{self.label} finished in {format_duration(total)}"]
+        name_width = max((len(n) for n, _ in self.steps), default=0)
+        shown = [(n, format_duration(s)) for n, s in self.steps]
+        # Durations right-aligned: the column mixes "12s" with "32m 40s",
+        # and the point of the breakdown is comparing them at a glance.
+        time_width = max((len(d) for _, d in shown), default=0)
+        for name, duration in shown:
+            lines.append(f"  {name:<{name_width}}  {duration:>{time_width}}")
+        return lines
+
+    def report(self) -> None:
+        """Print the summary and notify, when not in JSON mode.
+
+        The rule separates a per-step breakdown from the output above it;
+        a single-step command has nothing to break down, so it just gets
+        its one line.
+        """
+        if not self.quiet:
+            if self.steps:
+                print("---")
+            for line in self.summary_lines():
+                print(line)
+        notify_done(self.label, self.elapsed)
+
+
+def notify_done(label: str, seconds: float) -> None:
+    """Nudge a human who walked away from a long build.
+
+    A terminal bell, because it is the one mechanism every terminal has
+    and many turn into a desktop notification on their own.  Skipped for
+    quick runs, skipped when stdout is not a terminal (so it never ends
+    up in CI logs or a pipe), and skipped when LTVM_NO_BELL is set.
+
+    $LTVM_NOTIFY_COMMAND, if set, is also run with the summary appended
+    as one argument -- the hook for `notify-send`, `terminal-notifier`
+    or anything else.  Split with shlex and executed as an argument
+    list, never through a shell.
+    """
+    if seconds < NOTIFY_AFTER_SECONDS:
+        return
+    message = f"ltvm: {label} finished in {format_duration(seconds)}"
+
+    if not os.environ.get("LTVM_NO_BELL") and sys.stdout.isatty():
+        # stderr: a bell on stdout would land in anything redirecting it.
+        sys.stderr.write("\a")
+        sys.stderr.flush()
+
+    command = os.environ.get("LTVM_NOTIFY_COMMAND")
+    if not command:
+        return
+    try:
+        argv = shlex.split(command)
+    except ValueError as e:
+        log.debug("LTVM_NOTIFY_COMMAND is not parseable: %s", e)
+        return
+    if not argv:
+        return
+    try:
+        subprocess.run(
+            [*argv, message],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        # A notification that fails must never fail the build it is
+        # announcing.
+        log.debug("LTVM_NOTIFY_COMMAND failed: %s", e)

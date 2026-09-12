@@ -1942,18 +1942,40 @@ def setup_ssh(subnet: str = DEFAULT_SUBNET) -> None:
                 return
             # Subnet changed -- strip old block
             log.info("Updating SSH config for new subnet")
+            # Strip from the marker to the end of ltvm's own stanza --
+            # its `Host <subnet>.*` line plus the indented options under
+            # it -- and no further.
+            #
+            # This used to stop skipping only at a blank line, and the
+            # block appended below ends with "    User root\n" and no
+            # blank line after it.  So anything a user had added *below*
+            # ltvm's stanza, with no intervening blank line, was skipped
+            # to EOF and silently deleted from /root/.ssh/config on any
+            # `ltvm install --subnet <other>`.
             lines = text.splitlines(keepends=True)
             out = []
             skip = False
+            seen_host = False
             for line in lines:
                 if SSH_BLOCK_MARKER in line:
                     skip = True
+                    seen_host = False
                     continue
-                if skip and line.strip() == "":
+                if not skip:
+                    out.append(line)
+                    continue
+                stripped = line.strip()
+                if stripped == "":
                     skip = False
                     continue
-                if skip:
-                    continue
+                if line[:1].isspace():
+                    continue  # an indented option of ltvm's stanza
+                if not seen_host and stripped.startswith("Host "):
+                    seen_host = True
+                    continue  # ltvm's own Host line
+                # A second unindented directive: somebody else's stanza
+                # starts here, and it is not ours to remove.
+                skip = False
                 out.append(line)
             text = "".join(out)
             config.write_text(text)
@@ -2048,14 +2070,17 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
             "running": r.returncode == 0,
         }
 
-        # SSH config
-        ssh_config = Path("/root/.ssh/config")
-        results["ssh"] = {
-            "configured": (
-                ssh_config.exists()
-                and SSH_BLOCK_MARKER in ssh_config.read_text()
-            ),
-        }
+        # SSH config.  /root is 0700 on most distros, so a non-root
+        # `ltvm install --verify` cannot read this -- and Path.exists()
+        # does NOT swallow EACCES (only ENOENT/ENOTDIR/EBADF/ELOOP), so
+        # an unguarded probe raised PermissionError straight out of
+        # verify() and cmd_setup's blanket `except Exception` turned the
+        # whole read-only report into "error: [Errno 13] ...", telling
+        # the user nothing about QEMU, the bridge, dnsmasq or podman.
+        # "Cannot tell" is reported as such and counts as OK below,
+        # because this command makes no changes and a permission wall
+        # is not a finding about the host's setup.
+        results["ssh"] = _verify_ssh_config()
 
     # Scripts
     results["ltvm"] = {
@@ -2086,6 +2111,19 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
         "version": zv,
     }
 
+    # Tab completion, per shell.  Reported because `install` sets it up
+    # and this is the "did my install take?" command -- but deliberately
+    # not in `all_ok` below.  A completion file that went stale across a
+    # version bump is normal and self-heals on the next install, and
+    # failing the exit code of `install --verify` over it would cry
+    # wolf.  `ltvm doctor` is the check that exits non-zero and fixes it.
+    from ltvm_pkg import shell_completion
+
+    results["completion"] = {
+        r.shell: {"status": r.status, "path": str(r.path)}
+        for r in shell_completion.status()
+    }
+
     # Overall
     checks = [
         results["qemu"]["installed"],
@@ -2095,13 +2133,35 @@ def verify(subnet: str = DEFAULT_SUBNET) -> dict[str, Any]:
         results["ltvm"]["installed"],
         results["podman"]["installed"],
         results["zstd"]["installed"],
-        results["ssh"]["configured"],
+        # None == "could not read /root/.ssh/config as this user".
+        results["ssh"]["configured"] is not False,
     ]
     if macos:
         checks.append(results["socket_vmnet"]["installed"])
     results["all_ok"] = all(checks)
 
     return results
+
+
+def _verify_ssh_config() -> dict[str, Any]:
+    """Is ltvm's block in /root/.ssh/config?  ``None`` if unreadable.
+
+    Separated out so the EACCES case is explicit: see the call site in
+    ``verify``.
+    """
+    ssh_config = Path("/root/.ssh/config")
+    try:
+        if not ssh_config.exists():
+            return {"configured": False}
+        return {"configured": SSH_BLOCK_MARKER in ssh_config.read_text()}
+    except PermissionError:
+        return {
+            "configured": None,
+            "reason": (
+                f"cannot read {ssh_config} as this user "
+                f"(run under sudo to check it)"
+            ),
+        }
 
 
 def print_verify(results: dict[str, Any]) -> None:
@@ -2167,9 +2227,25 @@ def print_verify(results: dict[str, Any]) -> None:
     else:
         fail("zstd: not installed (needed by ltvm target publish/fetch)")
 
+    comp = results.get("completion") or {}
+    if not comp:
+        ok("tab completion: no supported shell found")
+    else:
+        broken = {s: c for s, c in comp.items() if c["status"] != "current"}
+        if not broken:
+            ok(f"tab completion: {', '.join(sorted(comp))}")
+        else:
+            for shell in sorted(broken):
+                fail(
+                    f"tab completion ({shell}): {broken[shell]['status']} "
+                    f"-- `ltvm doctor --fix` installs it"
+                )
+
     ssh = results["ssh"]
     if ssh.get("note"):
         ok(f"SSH config: {ssh['note']}")
+    elif ssh["configured"] is None:
+        ok(f"SSH config: {ssh.get('reason', 'could not check')}")
     elif ssh["configured"]:
         ok("SSH config: configured")
     else:
@@ -2545,37 +2621,31 @@ def run_setup(
         if sudoers_d.is_dir():
             _install_sudoers_fragment(sudoers_d / "ltvm")
 
-    # Install bash tab completion via argcomplete.
-    # We bake the output of `register-python-argcomplete ltvm` straight
-    # into /etc/bash_completion.d/ltvm so the completion file is
-    # self-contained -- no PATH lookup for register-python-argcomplete at
-    # every shell startup, and it keeps working even if the venv moves.
-    comp_dir = Path("/etc/bash_completion.d")
-    register_bin = REPO_ROOT / ".venv" / "bin" / "register-python-argcomplete"
-    if comp_dir.is_dir():
-        if register_bin.exists():
-            try:
-                result = subprocess.run(
-                    [str(register_bin), "ltvm"],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-                comp_dest = comp_dir / "ltvm"
-                comp_dest.write_text(result.stdout)
-                comp_dest.chmod(0o644)
-                log.info("Tab completion installed to %s", comp_dest)
-            except subprocess.CalledProcessError as e:
-                log.warning(
-                    "Failed to generate tab completion (%s): %s",
-                    e.returncode,
-                    (e.stderr or "").strip(),
-                )
-        else:
+    # Install tab completion for every shell this host has.  The
+    # shellcode is baked into the system completion directory rather
+    # than loaded via `register-python-argcomplete` at shell startup:
+    # that script lives in the venv's bin/, which `sudo ltvm install`
+    # does not have on PATH, and baking it keeps completion working if
+    # the venv is later rebuilt or moved.
+    #
+    # Never fatal.  Tab completion is a convenience, and an install
+    # that otherwise succeeded should not report failure because a
+    # completion directory was read-only.
+    from ltvm_pkg import shell_completion
+
+    for result in shell_completion.install():
+        if result.status in ("installed", "unchanged"):
+            log.info("Tab completion (%s): %s", result.shell, result.path)
+        elif result.status == "failed":
             log.warning(
-                "argcomplete not found at %s; run `uv sync` and re-run "
-                "`ltvm install` to get tab completion",
-                register_bin,
+                "Tab completion (%s) failed at %s: %s",
+                result.shell,
+                result.path,
+                result.detail,
+            )
+        else:
+            log.debug(
+                "Tab completion (%s) skipped: %s", result.shell, result.detail
             )
 
     if all_steps:

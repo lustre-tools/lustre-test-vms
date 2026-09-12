@@ -14,6 +14,7 @@ properties worth pinning down are:
 from __future__ import annotations
 
 import json
+import platform
 import tarfile
 import urllib.error
 from io import BytesIO
@@ -369,6 +370,43 @@ class TestBuildPreconditions:
         tc = _make_config(tmp_targets)
         with pytest.raises(zb.ZfsBuildError, match="os_family"):
             zb.build_zfs(tc)
+
+    def test_refuses_a_cross_arch_build(self, tmp_targets: Path) -> None:
+        """`--arch` is advertised by every build command, and nothing
+        in zfs_build or zfs-build-inner.sh cross-compiles.
+
+        The inner script passes no ARCH / CROSS_COMPILE / --host and
+        never sources cross-compile-env.sh (both kernel inner scripts
+        do), while the container runs as the HOST -- so a cross-arch
+        request configured ZFS with the host gcc against a foreign
+        kernel build-tree and failed somewhere inside the container.
+        Refuse at the door, next to the reason, as an unsupported
+        os_family already is.
+        """
+        tc = _zfs_tc(tmp_targets)
+        other = "aarch64" if platform.machine() != "aarch64" else "x86_64"
+        with patch.object(type(tc), "arch", property(lambda self: other)):
+            with pytest.raises(zb.ZfsBuildError, match="cross-compile"):
+                zb.build_zfs(tc)
+
+    def test_a_native_arch_build_is_not_refused(
+        self, tmp_targets: Path
+    ) -> None:
+        """The guard must not fire on the ordinary case, including an
+        explicit --arch naming the host's own arch under either of its
+        accepted spellings."""
+        from ltvm_pkg.cross_compile import normalize_arch
+
+        tc = _zfs_tc(tmp_targets)
+        native = normalize_arch(platform.machine())
+        alias = {"x86_64": "amd64", "aarch64": "arm64"}.get(native, native)
+        for spelling in (native, alias):
+            with patch.object(
+                type(tc), "arch", property(lambda self, s=spelling: s)
+            ):
+                # Gets past the arch guard to the next precondition.
+                with pytest.raises(FileNotFoundError, match="build kernel"):
+                    zb.build_zfs(tc)
 
     def test_refuses_without_kernel_build_tree(self, tmp_targets: Path) -> None:
         tc = _zfs_tc(tmp_targets)

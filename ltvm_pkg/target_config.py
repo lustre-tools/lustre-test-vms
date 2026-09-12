@@ -202,6 +202,13 @@ class Variant:
         return h.digest()
 
 
+# The ``-<lnxmaj>-<lnxrel>`` tail that turns a short kernel name into a
+# built-dir name: a dotted three-part kernel version, dash-delimited on
+# both sides (``5.14-rhel9.7`` -> ``5.14-rhel9.7-5.14.0-611.13.1.el9_7``).
+# No declared short name is of that shape, so finding it is unambiguous.
+_FULL_KERNEL_TAIL = re.compile(r"-\d+\.\d+\.\d+-")
+
+
 def kernel_dir_version_key(name: str) -> tuple:
     """Natural-order sort key for kernel directory names.
 
@@ -318,6 +325,65 @@ def build_container_tag(
     if variant != DEFAULT_VARIANT:
         tag = f"{tag}-{variant}"
     return tag
+
+
+def _component_label(path: Path) -> str:
+    """Name a hashed file the way `build status --why` should print it.
+
+    Relative to ``targets/``, so a per-target file reads as
+    ``rocky9/packages-os.txt`` rather than ``common/packages-os.txt``
+    -- which was a path that does not exist, and would have collapsed
+    two same-named files from different directories into one
+    component.  Labels do not feed the digest (see _HashParts), so this
+    cannot perturb staleness.
+    """
+    try:
+        return str(path.relative_to(TARGETS_DIR))
+    except ValueError:
+        return path.name
+
+
+class _HashParts:
+    """Accumulates the bytes fed to a staleness hash, grouped by name.
+
+    ``input_hash`` answers "must this be rebuilt"; `build status --why`
+    answers "because of what".  Both read the same byte stream through
+    this, rather than the second growing its own copy of the list of
+    inputs -- a copy would drift, and an explanation that disagrees with
+    the decision is worse than no explanation.
+
+    ``update`` keeps hashlib's interface, so the hash body reads as it
+    did before and the concatenation order -- the only thing the digest
+    depends on -- is unchanged by construction.  Consecutive updates
+    under one label are merged, so a group of related fields counts as
+    one component.
+    """
+
+    def __init__(self) -> None:
+        self._parts: list[tuple[str, bytearray]] = []
+        self._label = "targets.yaml"
+
+    def label(self, name: str) -> None:
+        self._label = name
+
+    def update(self, data: bytes) -> None:
+        if self._parts and self._parts[-1][0] == self._label:
+            self._parts[-1][1].extend(data)
+        else:
+            self._parts.append((self._label, bytearray(data)))
+
+    def digest(self) -> str:
+        h = hashlib.sha256()
+        for _name, data in self._parts:
+            h.update(data)
+        return h.hexdigest()[:16]
+
+    def components(self) -> dict[str, str]:
+        """Per-component digests, in the order they were fed."""
+        return {
+            name: hashlib.sha256(bytes(data)).hexdigest()[:12]
+            for name, data in self._parts
+        }
 
 
 def _dockerfile_referenced_files(dockerfile: Path) -> list[Path]:
@@ -611,10 +677,6 @@ class TargetConfig:
         """Podman tag for this target's build container (bound variant)."""
         return build_container_tag(self.name, self.arch, self.variant_name)
 
-    def container_tag_for(self, variant: str) -> str:
-        """Container tag for an explicit variant (bypasses the bound one)."""
-        return build_container_tag(self.name, self.arch, variant)
-
     @property
     def status(self) -> str:
         # __init__ setdefaults this to 'working', so the key is always
@@ -774,12 +836,31 @@ class TargetConfig:
 
         Matches against the declared short names in targets.yaml, so any
         name already in short form passes through unchanged.
+
+        A kernel *not* in ``kernels.available`` still has to normalize,
+        which is why the fallback strips the ``-<lnxmaj>-<lnxrel>`` tail
+        structurally instead of returning the name as-is.  Returning it
+        unchanged broke every later command for that kernel, and two
+        routine things produce one: building with an explicit
+        ``--kernel`` the target does not declare (nothing rejects it),
+        and dropping an old minor from ``kernels.available`` while its
+        built dir is still on disk -- which ``ltvm clean`` explicitly
+        anticipates.  The full name then reached ``parse_target_in`` as
+        a .target basename (``[error] Cannot read .target.in``, which
+        ``--force-compat`` cannot override) and produced a different
+        ``input_hash`` than the short form, so one image was
+        permanently stale and the other permanently rebuilt.
         """
         for entry in self._raw_kernel_entries():
             short = self._kernel_entry_name(entry)
             if name == short or name.startswith(short + "-"):
                 return short
-        # Fallback: if no match, return as-is (new kernel or unknown form)
+        m = _FULL_KERNEL_TAIL.search(name)
+        if m:
+            return name[: m.start()]
+        # Neither declared nor in <short>-<lnxmaj>-<lnxrel> shape: a
+        # short name for an undeclared kernel, or an upstream spec
+        # ("latest", "6.18").  Both are already as short as they get.
         return name
 
     def resolve_kernel(self, kernel: str | None = None) -> str:
@@ -939,6 +1020,31 @@ class TargetConfig:
         extra: bytes = b"",
         variant: str | None = None,
     ) -> str:
+        """The staleness key for an artifact: see _hash_parts."""
+        return self._hash_parts(artifact, kernel, extra, variant).digest()
+
+    def input_components(
+        self,
+        artifact: str,
+        kernel: str | None = None,
+        extra: bytes = b"",
+        variant: str | None = None,
+    ) -> dict[str, str]:
+        """Per-input digests behind :meth:`input_hash`.
+
+        What `build status --why` diffs against the values recorded in
+        meta.json to name the input that moved, instead of reporting only
+        that something did.
+        """
+        return self._hash_parts(artifact, kernel, extra, variant).components()
+
+    def _hash_parts(
+        self,
+        artifact: str,
+        kernel: str | None = None,
+        extra: bytes = b"",
+        variant: str | None = None,
+    ) -> _HashParts:
         """Hash inputs for an artifact to detect staleness.
 
         ``extra`` lets a caller fold additional input bytes into the hash
@@ -952,7 +1058,7 @@ class TargetConfig:
         skipping the rebuild that the user is iterating on -- the
         primary workflow this tool exists for.
         """
-        h = hashlib.sha256()
+        h = _HashParts()
 
         # Always fold in this target's slice of targets.yaml so changes
         # to container_image, srpm_url, kernel_deb_source, configure
@@ -980,13 +1086,16 @@ class TargetConfig:
         if artifact == "container":
             dockerfile = self.target_dir / "container.Dockerfile"
             if dockerfile.exists():
+                h.label("container.Dockerfile")
                 h.update(dockerfile.read_bytes())
                 # Only hash common/ files actually referenced by this
                 # Dockerfile's COPY lines -- otherwise unrelated changes
                 # (e.g. image-only setup scripts) invalidate the container.
                 for f in _dockerfile_referenced_files(dockerfile):
                     if f.is_file():
+                        h.label(_component_label(f))
                         h.update(f.read_bytes())
+            h.label("packages-dev")
             h.update(self._hash_package_lists("dev").encode())
 
         elif artifact == "kernel":
@@ -996,11 +1105,14 @@ class TargetConfig:
             # either form.
             raw = kernel if kernel is not None else self.default_kernel
             short_name = self._short_kernel_name(raw)
+            h.label("kernel-name")
             h.update(short_name.encode())
+            h.label("kernels.config")
             for k, v in sorted(self.kernel_config_overrides.items()):
                 h.update(f"{k}={v}".encode())
             common_frag = TARGETS_DIR / "common" / "kernel-config.fragment"
             if common_frag.exists():
+                h.label("common/kernel-config.fragment")
                 h.update(common_frag.read_bytes())
             # The arch-specific fragment is also consumed by
             # kernel_build._build_config_fragment, so it must contribute
@@ -1009,6 +1121,7 @@ class TargetConfig:
                 TARGETS_DIR / "common" / f"kernel-config-{self.arch}.fragment"
             )
             if arch_frag.exists():
+                h.label(f"common/kernel-config-{self.arch}.fragment")
                 h.update(arch_frag.read_bytes())
             # Hash only the inner build script that THIS target's
             # os_family actually invokes -- editing the deb script
@@ -1022,12 +1135,14 @@ class TargetConfig:
                 inner_name = "kernel-build-inner.sh"
             inner_path = ltvm_pkg_dir / inner_name
             if inner_path.exists():
+                h.label(inner_name)
                 h.update(inner_path.read_bytes())
             # Also fold in the shared cross-compile helper -- both
             # inner scripts source it, so editing it MUST invalidate
             # the cached vmlinux or is_stale silently returns False.
             cross_helper = TARGETS_DIR / "common" / "cross-compile-env.sh"
             if cross_helper.exists():
+                h.label("common/cross-compile-env.sh")
                 h.update(cross_helper.read_bytes())
 
         elif artifact == "image":
@@ -1037,17 +1152,21 @@ class TargetConfig:
             # don't collide on the same cached image.
             raw_k = kernel if kernel is not None else self.default_kernel
             short_k = self._short_kernel_name(raw_k)
+            h.label("image-kernel")
             h.update(b"image-kernel:")
             h.update(short_k.encode())
 
             dockerfile = self.target_dir / "image.Dockerfile"
             if dockerfile.exists():
+                h.label("image.Dockerfile")
                 h.update(dockerfile.read_bytes())
                 # Only hash common/ files actually referenced by this
                 # Dockerfile's COPY lines.
                 for f in _dockerfile_referenced_files(dockerfile):
                     if f.is_file():
+                        h.label(_component_label(f))
                         h.update(f.read_bytes())
+            h.label("packages-base+test+debug")
             h.update(self._hash_package_lists("base", "test", "debug").encode())
             # Note: packages-server.txt is already hashed via the
             # Dockerfile COPY scan above, so we deliberately do NOT
@@ -1071,10 +1190,17 @@ class TargetConfig:
             if km is not None:
                 kh = km.get("input_hash")
                 if isinstance(kh, str) and kh:
+                    h.label("kernel-artifact")
                     h.update(b"kernel:")
                     h.update(kh.encode())
 
         if extra:
+            # For a kernel this is the Lustre tree's patch series, config
+            # and .target file, mixed in by kernel_build (see the
+            # docstring); nothing else passes it today.
+            h.label(
+                "lustre-tree-inputs" if artifact == "kernel" else "extra-inputs"
+            )
             h.update(extra)
 
         # Fold variant inputs last so the base hash composition above
@@ -1088,9 +1214,10 @@ class TargetConfig:
             # name to a str, and mypy scopes a name to one type per
             # function.
             variant_obj = self.variant(v_name)
+            h.label(f"variant:{v_name}")
             h.update(variant_obj.hash_bytes(artifact))
 
-        return h.hexdigest()[:16]
+        return h
 
     def _kernel_meta_file(self, kernel: str | None) -> Path:
         return self.meta_path("kernel", kernel)
@@ -1214,11 +1341,23 @@ class TargetConfig:
         else:
             out_dir = self.output_dir / artifact
         out_dir.mkdir(parents=True, exist_ok=True)
+        hash_kernel_arg = hash_kernel if hash_kernel is not None else kernel
         meta = {
             "target": self.name,
             "input_hash": self.input_hash(
                 artifact,
-                kernel=hash_kernel if hash_kernel is not None else kernel,
+                kernel=hash_kernel_arg,
+                extra=extra_hash,
+                variant=v,
+            ),
+            # The per-input digests behind that hash, so `build status
+            # --why` can name which one moved rather than reporting only
+            # that the total did.  Computed from the same arguments,
+            # necessarily: a breakdown over different inputs than the
+            # hash would explain the wrong thing.
+            "input_components": self.input_components(
+                artifact,
+                kernel=hash_kernel_arg,
                 extra=extra_hash,
                 variant=v,
             ),

@@ -102,7 +102,7 @@ ltvm update                     git fast-forward ltvm itself
 ltvm build      <action> ...    Build artifacts (see below)
 ltvm target     <action> ...    Target OS management (see below)
 ltvm vm         <action> ...    VM inspection / crash / snapshot (see below)
-ltvm cluster    <action> ...    Multi-node cluster management
+ltvm cluster    <action> ...    Multi-node cluster management (see below)
 ltvm create     <name>          Create a VM (idempotent)
 ltvm start|stop|destroy <name>  VM power / removal
 ltvm list                       Show all VMs
@@ -113,7 +113,11 @@ ltvm make-uninstall             Remove what make-install put here
 ltvm make-reinstall             make-uninstall + make-install
 ltvm llmount <vm>               Mount Lustre in a VM
 ltvm llumount <vm>              Unmount (same as llmount --cleanup)
+ltvm clean                      Prune superseded artifacts (dry-run by default)
+ltvm completion                 Print/install shell tab completion
 ltvm doctor                     Host health check (--fix on request)
+ltvm skills                     Link the agent skill into ~/.claude/skills
+ltvm telemetry  <action> ...    Anonymous check-in: status/show/on/off/send
 ```
 
 `build` sub-actions:
@@ -125,9 +129,26 @@ ltvm build kernel <target>      Kernel (+ --kernel, --lustre-tree)
 ltvm build image <target>       Per-kernel VM image (+ --kernel)
 ltvm build lustre <target>      Lustre against target kernel (+ --lustre-tree, --kernel)
 ltvm build mofed-kmods <t>      Per-kernel MOFED kernel modules
+ltvm build zfs <target>         ZFS against the target kernel (see --zfs)
 ltvm build shell <target>       Interactive shell in build container
 ltvm build status               Staleness table (one row per built kernel)
+                                --why names the input that went stale
 ```
+
+Long builds report where the time went, and ring the terminal bell
+when they finish (over a minute, on a TTY):
+
+```
+build all rocky9 finished in 41m 51s
+  container   1m 03s
+  kernel     32m 40s
+  lustre      6m 21s
+  snapshot       12s
+  image       1m 56s
+```
+
+`LTVM_NO_BELL=1` silences the bell; `LTVM_NOTIFY_COMMAND` (e.g.
+`notify-send ltvm`) is run with the summary as its last argument.
 
 `target` sub-actions:
 
@@ -145,14 +166,42 @@ ltvm target publish <target>    Bundle artifacts and upload to GitHub release
                                 (use --no-upload to produce tarballs locally)
 ```
 
+`cluster` sub-actions (each takes `--help`):
+
+```
+ltvm cluster create <name> [TARGET] <roles:vm[:disks]> ...   (needs root)
+ltvm cluster destroy <name>     Destroy the cluster and every node (root)
+ltvm cluster deploy <name>      Build + deploy Lustre to every node
+ltvm cluster status <name>      Nodes and their state
+ltvm cluster exec <name> <role> <cmd>...   Run on every node with that role
+ltvm cluster ssh  <name> <role> Interactive ssh to one node
+ltvm cluster list               List all clusters
+```
+
 `vm` sub-actions:
 
 ```
-ltvm vm console-log   <name>    Show QEMU serial log
+ltvm vm console-log   <name>    Show QEMU serial log (-f to keep streaming;
+                                picks up the new log when the VM reboots)
 ltvm vm crash-collect <name>    Pull vmcore + run lustre_triage
 ltvm vm nmi           <name>    Inject NMI (panic + kdump)
 ltvm vm snapshot      <name>    Snapshot overlay disk
 ltvm vm restore       <name>    Restore to a snapshot
+```
+
+`ltvm create` and `ltvm cluster create` take `--dry-run` (`-n`): they
+resolve and validate everything, print what they would make, and write
+nothing. Needs no root, so it never prompts for a password.
+
+```
+$ ltvm create co1-single rocky9 --dry-run --ost-disks 3
+Would create VM: co1-single
+  target:  rocky9 (variant=base)
+  kernel:  5.14.0-611.13.1.el9_7_lustre
+  cpu/mem: 2 vcpus, 2048 MB
+  disks:   1 MDT + 3 OST @ 500M each
+  ip:      next free (auto)
+Nothing was written.  Re-run without --dry-run to create it.
 ```
 
 VM names MUST include the checkout number and a descriptive role:
@@ -174,6 +223,36 @@ ltvm list --json                    # each VM has owner_id (or null for legacy)
 `--owner ID` and `--owner-id ID` override the environment for both `create`
 and `cluster create`. See [VM ownership metadata](docs/VM_OWNERSHIP.md) for the
 precedence, persistence, cluster propagation, and JSON contracts.
+
+## Tab completion
+
+`ltvm install` installs tab completion for every shell it finds on the
+host -- bash, zsh and fish -- into that shell's system completion
+directory. Open a new shell afterwards to pick it up.
+
+```bash
+ltvm completion                      # print the code for $SHELL
+ltvm completion --shell zsh          # ...or for a named shell
+sudo ltvm completion --install       # (re)install system-wide
+sudo ltvm completion --uninstall     # remove it
+ltvm doctor                          # reports missing/stale; --fix installs
+```
+
+To keep it in your own dotfiles rather than system-wide, add
+`eval "$(ltvm completion)"` to `~/.bashrc`; for zsh, save
+`ltvm completion --shell zsh` as `_ltvm` somewhere on your `fpath`.
+
+Completion is dynamic, not a static word list -- it reads the same
+sources the commands do, so it offers your actual targets, VMs,
+clusters, kernels and variants:
+
+```bash
+ltvm build kernel roc<TAB>              # -> rocky8 rocky9 rocky9-64k rocky10
+ltvm build kernel rocky8 --kernel <TAB> # -> only rocky8's kernels
+ltvm deploy-lustre co<TAB>              # -> your VMs
+ltvm cluster exec co2 <TAB>             # -> that cluster's roles, then nodes
+ltvm vm restore co1-single <TAB>        # -> that VM's snapshot tags
+```
 
 ## Agent skills
 

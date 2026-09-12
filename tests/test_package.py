@@ -11,12 +11,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+import ltvm_pkg.release_package as release_package
 from ltvm_pkg.release_package import (
     DEFAULT_VARIANT,
     _bootable_asset_name,
@@ -32,6 +35,37 @@ from ltvm_pkg.release_package import (
     package_target,
     snapshot_lustre,
 )
+
+# Tests that really build and unpack the assets need the tools that do
+# it.  They are integration tests by design -- mocking tar and zstd
+# would leave them asserting nothing about the tarballs they exist to
+# check -- so on a host without them the honest outcome is a skip that
+# names what is missing, not eleven failures deep inside subprocess.
+# `sudo ltvm install` installs all three.
+_HOST_TOOLS = ("tar", "zstd", "rsync")
+_MISSING_TOOLS = [t for t in _HOST_TOOLS if shutil.which(t) is None]
+
+needs_host_tools = pytest.mark.skipif(
+    bool(_MISSING_TOOLS),
+    reason=(
+        f"needs host tool(s) {', '.join(_MISSING_TOOLS)}; "
+        f"`sudo ltvm install` installs them"
+    ),
+)
+
+
+@pytest.fixture
+def no_zstd_preflight() -> Iterator[None]:
+    """Neutralize the zstd presence check.
+
+    For the tests that assert a clear error for a *missing input*: that
+    check runs first, so without this they failed on a host without zstd
+    having never reached the behaviour under test -- and they have no
+    need of zstd to reach it.
+    """
+    with patch.object(release_package, "_check_zstd"):
+        yield
+
 
 # ---------------------------------------------------------------------------
 # Low-level unit tests
@@ -239,7 +273,71 @@ def _make_fake_output(tmp: Path, variant: str = DEFAULT_VARIANT) -> Path:
     return out
 
 
+class TestImageAssetRequiresBaseExt4:
+    """`target publish` must not substitute an mke2fs temp file.
+
+    The packager used to fall back to the first non-empty *.ext4
+    whenever base.ext4 was missing or zero-length -- which is the exact
+    hazard its own comment describes.  The tar member keeps its real
+    name, and every consumer of a fetched image looks for "base.ext4"
+    specifically, so the asset extracted cleanly and then read as "not
+    built": `ltvm create` failed on a target that had just been fetched
+    successfully.  Raising is the honest answer.
+    """
+
+    def _publish(self, out: Path, dest: Path) -> None:
+        # _check_zstd is neutralized because this asserts a guard that
+        # runs *before* any tarball is written: without it the test
+        # fails on a bare checkout with "zstd not found", which says
+        # nothing about the behaviour under test.  (tests/CLAUDE.md's
+        # unit-vs-integration rule; the real-tarball tests below carry
+        # @needs_host_tools instead.)
+        with (
+            patch("ltvm_pkg.release_package._check_zstd"),
+            patch("ltvm_pkg.release_package.export_build_container") as m,
+        ):
+            m.return_value = out / "container" / "image.tar"
+            package_target(
+                "rocky9",
+                out,
+                kernel="5.14-rhel9.7",
+                dest_dir=dest,
+                arch="x86_64",
+                variant=DEFAULT_VARIANT,
+            )
+
+    def test_a_leftover_temp_file_is_not_published(
+        self, tmp_path: Path
+    ) -> None:
+        out = _make_fake_output(tmp_path)
+        idir = out / "images" / "5.14-rhel9.7"
+        (idir / "base.ext4").unlink()
+        # What _export_to_ext4's NamedTemporaryFile leaves behind when
+        # the build is killed (OOM during mke2fs -d, say).
+        (idir / "ltvm-image-ab12cd.ext4").write_bytes(b"partial" * 1024)
+
+        with pytest.raises(ValueError, match="no usable base.ext4"):
+            self._publish(out, tmp_path / "release")
+
+    def test_the_error_names_the_stray(self, tmp_path: Path) -> None:
+        out = _make_fake_output(tmp_path)
+        idir = out / "images" / "5.14-rhel9.7"
+        (idir / "base.ext4").unlink()
+        (idir / "ltvm-image-ab12cd.ext4").write_bytes(b"partial" * 1024)
+
+        with pytest.raises(ValueError, match="ltvm-image-ab12cd.ext4"):
+            self._publish(out, tmp_path / "release")
+
+    def test_a_zero_length_base_is_refused(self, tmp_path: Path) -> None:
+        out = _make_fake_output(tmp_path)
+        (out / "images" / "5.14-rhel9.7" / "base.ext4").write_bytes(b"")
+
+        with pytest.raises(ValueError, match="no usable base.ext4"):
+            self._publish(out, tmp_path / "release")
+
+
 class TestPackageTarget:
+    @needs_host_tools
     def test_base_package(self, tmp_path: Path) -> None:
         out = _make_fake_output(tmp_path)
         dest = tmp_path / "release"
@@ -275,6 +373,7 @@ class TestPackageTarget:
         kinds = {a["kind"] for a in manifest["assets"]}
         assert {"container", "kernel", "image"}.issubset(kinds)
 
+    @needs_host_tools
     def test_variant_package(self, tmp_path: Path) -> None:
         out = _make_fake_output(tmp_path, variant="mofed")
         dest = tmp_path / "release"
@@ -299,6 +398,7 @@ class TestPackageTarget:
         manifest = json.loads(assets["manifest"].read_text())
         assert manifest["variant"] == "mofed"
 
+    @needs_host_tools
     def test_manifest_sha256_matches_assets(self, tmp_path: Path) -> None:
         out = _make_fake_output(tmp_path)
         dest = tmp_path / "release"
@@ -319,7 +419,9 @@ class TestPackageTarget:
             assert _sha256(asset_path) == entry["sha256"]
             assert asset_path.stat().st_size == entry["size"]
 
-    def test_missing_container_raises(self, tmp_path: Path) -> None:
+    def test_missing_container_raises(
+        self, tmp_path: Path, no_zstd_preflight: None
+    ) -> None:
         out = _make_fake_output(tmp_path)
         (out / "container" / "image.tar").unlink()
 
@@ -335,6 +437,7 @@ class TestPackageTarget:
 
 
 class TestPackageBootable:
+    @needs_host_tools
     def test_compresses_single_file(self, tmp_path: Path) -> None:
         out = _make_fake_output(tmp_path)
         qcow2 = out / "images" / "5.14-rhel9.7" / "bootable-5.14-rhel9.7.qcow2"
@@ -354,7 +457,9 @@ class TestPackageBootable:
         assert result.name.startswith("bootable-rocky9-x86_64-5.14.0-611")
         assert result.name.endswith(".qcow2.zst")
 
-    def test_missing_qcow2_raises(self, tmp_path: Path) -> None:
+    def test_missing_qcow2_raises(
+        self, tmp_path: Path, no_zstd_preflight: None
+    ) -> None:
         out = _make_fake_output(tmp_path)
         with pytest.raises(FileNotFoundError, match="bootable qcow2 not found"):
             package_bootable(
@@ -365,6 +470,7 @@ class TestPackageBootable:
             )
 
 
+@needs_host_tools
 class TestSnapshotLustreVariant:
     """snapshot_lustre still lives in release_package; cover the
     variant-aware destination path."""
@@ -483,6 +589,7 @@ def _package(out: Path, dest: Path) -> dict:
         )
 
 
+@needs_host_tools
 class TestZfsAsset:
     def test_published_when_lustre_was_built_with_zfs(
         self, tmp_path: Path
