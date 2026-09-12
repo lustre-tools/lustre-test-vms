@@ -67,6 +67,27 @@ class TestInputComponents:
         )
         assert "lustre-tree-inputs" in comps
 
+    def test_a_component_is_named_by_its_real_path(self) -> None:
+        """Every hashed file was labelled "common/<basename>", so a
+        per-target file was reported at a path that does not exist --
+        and two same-named files from different directories would have
+        collapsed into one component.  Labels do not feed the digest,
+        so this only ever affected what `--why` printed.
+        """
+        comps = TargetConfig("rocky9").input_components("image")
+        assert "rocky9/packages-os.txt" in comps
+        assert "common/packages-os.txt" not in comps
+        # Genuinely shared files keep reading as common/.
+        assert "common/packages-base.txt" in comps
+
+    def test_relabelling_did_not_move_the_digest(self) -> None:
+        """The guard for the above: _HashParts.label records a name and
+        never feeds the hash, and the goldens pin that."""
+        tc = TargetConfig("rocky9")
+        comps = tc.input_components("image")
+        assert any("/" in k for k in comps)
+        assert tc.input_hash("image") == tc._hash_parts("image").digest()
+
     def test_a_variant_adds_its_own_component(self) -> None:
         comps = TargetConfig("rocky9", variant="mofed-24").input_components(
             "container", variant="mofed-24"

@@ -281,6 +281,29 @@ def build_zfs(
             f"build containers"
         )
 
+    # Refused up front, for the same reason an unsupported os_family is:
+    # nothing in this module or in zfs-build-inner.sh cross-compiles.
+    # The script passes no ARCH / CROSS_COMPILE / --host and never
+    # sources targets/common/cross-compile-env.sh, which both kernel
+    # inner scripts do, while the container itself runs as the HOST
+    # (kernel_build._ensure_container_image -> host_podman_platform).
+    # So a cross-arch request would configure ZFS with the host gcc
+    # against a foreign kernel build-tree and fail somewhere inside the
+    # container -- and `--arch` is advertised by every build command.
+    import platform as _platform
+
+    from .cross_compile import normalize_arch
+
+    host_arch = normalize_arch(_platform.machine())
+    if normalize_arch(tc.arch) != host_arch:
+        raise ZfsBuildError(
+            f"cannot build ZFS for {tc.arch} on a {host_arch} host: the "
+            f"ZFS build has no cross-compile path (unlike the kernel and "
+            f"Lustre builds).\n"
+            f"  Build it on a native {tc.arch} host, or drop --zfs for "
+            f"this arch."
+        )
+
     build_tree = tc.kernel_output_dir(kernel) / "build-tree"
     if not build_tree.is_dir():
         raise FileNotFoundError(

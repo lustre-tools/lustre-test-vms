@@ -273,6 +273,60 @@ def _make_fake_output(tmp: Path, variant: str = DEFAULT_VARIANT) -> Path:
     return out
 
 
+class TestImageAssetRequiresBaseExt4:
+    """`target publish` must not substitute an mke2fs temp file.
+
+    The packager used to fall back to the first non-empty *.ext4
+    whenever base.ext4 was missing or zero-length -- which is the exact
+    hazard its own comment describes.  The tar member keeps its real
+    name, and every consumer of a fetched image looks for "base.ext4"
+    specifically, so the asset extracted cleanly and then read as "not
+    built": `ltvm create` failed on a target that had just been fetched
+    successfully.  Raising is the honest answer.
+    """
+
+    def _publish(self, out: Path, dest: Path) -> None:
+        with patch("ltvm_pkg.release_package.export_build_container") as m:
+            m.return_value = out / "container" / "image.tar"
+            package_target(
+                "rocky9",
+                out,
+                kernel="5.14-rhel9.7",
+                dest_dir=dest,
+                arch="x86_64",
+                variant=DEFAULT_VARIANT,
+            )
+
+    def test_a_leftover_temp_file_is_not_published(
+        self, tmp_path: Path
+    ) -> None:
+        out = _make_fake_output(tmp_path)
+        idir = out / "images" / "5.14-rhel9.7"
+        (idir / "base.ext4").unlink()
+        # What _export_to_ext4's NamedTemporaryFile leaves behind when
+        # the build is killed (OOM during mke2fs -d, say).
+        (idir / "ltvm-image-ab12cd.ext4").write_bytes(b"partial" * 1024)
+
+        with pytest.raises(ValueError, match="no usable base.ext4"):
+            self._publish(out, tmp_path / "release")
+
+    def test_the_error_names_the_stray(self, tmp_path: Path) -> None:
+        out = _make_fake_output(tmp_path)
+        idir = out / "images" / "5.14-rhel9.7"
+        (idir / "base.ext4").unlink()
+        (idir / "ltvm-image-ab12cd.ext4").write_bytes(b"partial" * 1024)
+
+        with pytest.raises(ValueError, match="ltvm-image-ab12cd.ext4"):
+            self._publish(out, tmp_path / "release")
+
+    def test_a_zero_length_base_is_refused(self, tmp_path: Path) -> None:
+        out = _make_fake_output(tmp_path)
+        (out / "images" / "5.14-rhel9.7" / "base.ext4").write_bytes(b"")
+
+        with pytest.raises(ValueError, match="no usable base.ext4"):
+            self._publish(out, tmp_path / "release")
+
+
 class TestPackageTarget:
     @needs_host_tools
     def test_base_package(self, tmp_path: Path) -> None:

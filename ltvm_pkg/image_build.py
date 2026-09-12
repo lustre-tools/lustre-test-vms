@@ -211,7 +211,19 @@ def _prebuild_tools_native(
     # for crt*.o / libc.so / headers; kernel-headers provides
     # <linux/limits.h> (PATH_MAX); libuuid-devel is needed for
     # e2fsprogs's lib/ext2fs/blkid.
+    # set -e / pipefail, because neither failure below is otherwise
+    # visible: `bash build-tools.sh` is not the last command, so its
+    # exit status was discarded entirely (only build-e2fsprogs.sh could
+    # fail the check=True), and the `dnf ... | tail -3` pipeline exits 0
+    # on a failed install.  build-tools.sh creates $PREFIX/bin early, so
+    # a failure partway through (drgn, FlameGraph, pjdfstest) left
+    # _prebuilt/usr/local/ present but partial -- the COPY then
+    # succeeded and the image shipped silently missing test tools, with
+    # the build reported green.  lustre_build's container script has
+    # had `set -e` all along.
     script = (
+        "set -e\n"
+        "set -o pipefail\n"
         f"export TARGET_ARCH={arch} DESTDIR=/output\n"
         "if command -v dnf >/dev/null; then\n"
         f"  RELEASE=$(rpm --eval %rhel) && SYSROOT=/sysroot-{arch} && "

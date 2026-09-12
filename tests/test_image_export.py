@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -37,6 +38,81 @@ def _make_target_config(
     tc.image_output_dir.return_value = image_dir
     tc.kernel_output_dir.return_value = kernel_dir
     return tc
+
+
+class TestFsckPartition:
+    """The export's final consistency check.
+
+    It used to run after `losetup -d`, against a "<loop>p1" that no
+    longer existed, with check=False and quiet=True -- so it never
+    checked anything and said nothing.  Every ltvm target export
+    shipped its disk unverified.
+    """
+
+    def test_missing_device_raises(self, tmp_path: Path) -> None:
+        """The ordering bug itself, turned into a loud failure."""
+        import ltvm_pkg.image_export as ie
+
+        with pytest.raises(RuntimeError, match="no such device"):
+            ie._fsck_partition(str(tmp_path / "loop9p1"))
+
+    def _fake_part(self, tmp_path: Path) -> str:
+        part = tmp_path / "loop9p1"
+        part.write_bytes(b"")
+        return str(part)
+
+    def test_clean_is_silent(self, tmp_path: Path) -> None:
+        import ltvm_pkg.image_export as ie
+
+        with patch.object(
+            ie,
+            "sudo_run",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ):
+            ie._fsck_partition(self._fake_part(tmp_path))
+
+    @pytest.mark.parametrize("rc", [1, 2])
+    def test_corrections_warn_but_pass(self, tmp_path: Path, rc: int) -> None:
+        """1|2 mean e2fsck fixed it: the disk is publishable, but the
+        cp -a + grub2-install pass wrote something badly."""
+        import ltvm_pkg.image_export as ie
+
+        with patch.object(
+            ie,
+            "sudo_run",
+            return_value=subprocess.CompletedProcess([], rc, "", ""),
+        ):
+            with patch.object(ie.log, "warning") as warn:
+                ie._fsck_partition(self._fake_part(tmp_path))
+        assert warn.called
+
+    @pytest.mark.parametrize("rc", [4, 8, 127])
+    def test_uncorrected_errors_refuse_to_publish(
+        self, tmp_path: Path, rc: int
+    ) -> None:
+        import ltvm_pkg.image_export as ie
+
+        with patch.object(
+            ie,
+            "sudo_run",
+            return_value=subprocess.CompletedProcess([], rc, "out", "err"),
+        ):
+            with pytest.raises(RuntimeError, match="e2fsck failed"):
+                ie._fsck_partition(self._fake_part(tmp_path))
+
+    def test_runs_before_the_detach(self) -> None:
+        """Pinned by source order: the two calls are three lines apart
+        in export_image and nothing else distinguishes them, so a
+        future edit that moves the detach up would silently restore the
+        original bug."""
+        import inspect
+
+        import ltvm_pkg.image_export as ie
+
+        src = inspect.getsource(ie.export_image)
+        assert src.index("_fsck_partition(part)") < src.index(
+            "_losetup_detach(loop)\n        loop = None"
+        )
 
 
 class TestCheckHostTools:

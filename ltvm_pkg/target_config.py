@@ -327,6 +327,22 @@ def build_container_tag(
     return tag
 
 
+def _component_label(path: Path) -> str:
+    """Name a hashed file the way `build status --why` should print it.
+
+    Relative to ``targets/``, so a per-target file reads as
+    ``rocky9/packages-os.txt`` rather than ``common/packages-os.txt``
+    -- which was a path that does not exist, and would have collapsed
+    two same-named files from different directories into one
+    component.  Labels do not feed the digest (see _HashParts), so this
+    cannot perturb staleness.
+    """
+    try:
+        return str(path.relative_to(TARGETS_DIR))
+    except ValueError:
+        return path.name
+
+
 class _HashParts:
     """Accumulates the bytes fed to a staleness hash, grouped by name.
 
@@ -1095,7 +1111,7 @@ class TargetConfig:
                 # (e.g. image-only setup scripts) invalidate the container.
                 for f in _dockerfile_referenced_files(dockerfile):
                     if f.is_file():
-                        h.label(f"common/{f.name}")
+                        h.label(_component_label(f))
                         h.update(f.read_bytes())
             h.label("packages-dev")
             h.update(self._hash_package_lists("dev").encode())
@@ -1176,7 +1192,7 @@ class TargetConfig:
                 # Dockerfile's COPY lines.
                 for f in _dockerfile_referenced_files(dockerfile):
                     if f.is_file():
-                        h.label(f"common/{f.name}")
+                        h.label(_component_label(f))
                         h.update(f.read_bytes())
             h.label("packages-base+test+debug")
             h.update(self._hash_package_lists("base", "test", "debug").encode())

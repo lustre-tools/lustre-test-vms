@@ -394,6 +394,62 @@ class TestKdumpInjectLines:
         )
 
 
+class TestPrebuildToolsNative:
+    """The cross-build prebuild script runs two builder scripts in one
+    `podman run -c`, so its failure handling is the only thing standing
+    between a partial cross build and a green image."""
+
+    def _script(self, tmp_path: Path) -> str:
+        import ltvm_pkg.image_build as image
+
+        tc = MagicMock()
+        tc.name = "rocky9-64k"
+        tc.arch = "aarch64"
+        tc.container_image = "rockylinux:9"
+        tc.kernel_deb_source = None
+        tc.variant_name = "base"
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **kw: object) -> MagicMock:
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="")
+
+        # fake_run returns returncode=0 for the `podman image exists`
+        # probe, so the native-container build branch is skipped.
+        with patch.object(image.subprocess, "run", side_effect=fake_run):
+            image._prebuild_tools_native(tc, tmp_path / "out")
+        # The podman run that carries the script is the one with -c.
+        for cmd in calls:
+            if "-c" in cmd:
+                return cmd[cmd.index("-c") + 1]
+        raise AssertionError(f"no `-c` invocation among {calls}")
+
+    def test_script_aborts_on_a_failed_builder_script(
+        self, tmp_path: Path
+    ) -> None:
+        """`bash build-tools.sh` is not the last command in the script.
+
+        Without `set -e` its exit status was discarded outright -- only
+        build-e2fsprogs.sh could fail the check=True -- so a failure
+        partway through build-tools.sh (which creates $PREFIX/bin early)
+        left a partial _prebuilt/usr/local/, the COPY succeeded, and the
+        image shipped silently missing test tools.
+        """
+        script = self._script(tmp_path)
+        assert script.startswith("set -e\n")
+        assert "bash /input/build-tools.sh" in script
+
+    def test_script_sets_pipefail_for_the_dnf_pipeline(
+        self, tmp_path: Path
+    ) -> None:
+        """The cross-sysroot install is piped into `tail -3`, which
+        exits 0 whatever dnf did -- and configure cannot succeed
+        without that sysroot."""
+        script = self._script(tmp_path)
+        assert "set -o pipefail\n" in script
+        assert "| tail -3" in script
+
+
 class TestLustreInjectLines:
     """_lustre_inject_lines stages Lustre modules+userland into the
     image build context."""
