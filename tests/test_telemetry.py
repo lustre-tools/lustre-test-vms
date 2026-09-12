@@ -213,33 +213,119 @@ def _payload_strings(value: object) -> Iterator[str]:
             yield from _payload_strings(v)
 
 
-def test_payload_leaks_nothing_identifying(_home: Path) -> None:
+# Distinctive enough that they cannot collide with anything the payload
+# legitimately carries, which is the whole point of using them instead
+# of the machine's real name -- see the test below.
+SENTINEL_HOST = "ZZ-SENTINEL-HOSTNAME-ZZ"
+SENTINEL_USER = "ZZ-SENTINEL-USERNAME-ZZ"
+SENTINEL_HOME = "/ZZ-SENTINEL-HOME-ZZ"
+
+
+def _mask_machine_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every way of asking "who and where am I" return a sentinel."""
+    import getpass
+    import platform
+    import socket
+
+    monkeypatch.setattr(socket, "gethostname", lambda: SENTINEL_HOST)
+    monkeypatch.setattr(socket, "getfqdn", lambda *a: SENTINEL_HOST)
+    monkeypatch.setattr(platform, "node", lambda: SENTINEL_HOST)
+    monkeypatch.setattr(getpass, "getuser", lambda: SENTINEL_USER)
+    monkeypatch.setenv("HOSTNAME", SENTINEL_HOST)
+    monkeypatch.setenv("USER", SENTINEL_USER)
+    monkeypatch.setenv("LOGNAME", SENTINEL_USER)
+    # Path.home() and expanduser("~") both prefer $HOME on POSIX.  The
+    # _home fixture has already pointed XDG_* at a tmpdir, so nothing
+    # resolves state through this.
+    monkeypatch.setenv("HOME", SENTINEL_HOME)
+
+
+def test_payload_leaks_nothing_identifying(
+    _home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Nothing that names the machine or its user may leave it.
 
-    Checked against the payload's *values*, not its JSON text.  A short
-    hostname is a substring of the serialized blob by coincidence --
-    "vm" is inside the key "ltvm_version", and a host actually named
-    `vm` failed this test with no leak present.  Keys are fixed literals
-    in _payload and are pinned by test_payload_shape above, so only
-    values can carry host data.
+    The machine's identity is replaced with sentinels first, rather than
+    searching the payload for whatever this host happens to be called.
+    Comparing against the real name made the test's behaviour depend on
+    the name, and it failed both ways: a host named `vm` failed with no
+    leak present ("vm" is inside the key "ltvm_version"), and narrowing
+    the match to dodge that left it blind to a genuine leak on the same
+    host, because a two-character name cannot be matched as a substring
+    without noise.  A host named `ubuntu` or `x86_64` -- both plausible
+    -- would have failed too, by colliding with a legitimate value.
+
+    A sentinel collides with nothing, so the whole serialized blob can
+    be searched, keys included, and the result is the same on every
+    machine.
+    """
+    import ltvm_pkg.telemetry as t
+
+    _mask_machine_identity(monkeypatch)
+    blob = json.dumps(t._payload())
+    for what, sentinel in (
+        ("hostname", SENTINEL_HOST),
+        ("username", SENTINEL_USER),
+        ("home directory", SENTINEL_HOME),
+    ):
+        assert sentinel not in blob, f"payload carries the {what}"
+
+
+def test_payload_carries_no_filesystem_paths(_home: Path) -> None:
+    """Not one payload string may look like a path.
+
+    The sentinels above only catch a leak that went through an accessor
+    they patch.  This catches the rest of the class -- a cwd, a Lustre
+    tree, an artifacts dir -- on the invariant instead: nothing ltvm
+    legitimately sends contains a slash (versions, an ISO timestamp, a
+    uuid, os/arch names and a RAM bucket all do without one), and error
+    sites are exactly where paths come from.
+    """
+    import ltvm_pkg.telemetry as t
+
+    for s in _payload_strings(t._payload()):
+        assert "/" not in s, f"payload carries a path: {s!r}"
+
+
+def test_payload_does_not_depend_on_the_machine_name(
+    _home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two machines differing only in identity must send the same thing.
+
+    The strongest form of the property, and the one that cannot give a
+    false answer either way: it never consults this host's real name, so
+    a host called `ubuntu` (which equals the `os` value) or `x86_64`
+    (the `arch` value) cannot fail it for a leak it does not have --
+    which is what used to happen.
     """
     import getpass
+    import platform
     import socket
 
     import ltvm_pkg.telemetry as t
 
-    values = list(_payload_strings(t._payload()))
-    for secret in (socket.gethostname(), getpass.getuser(), str(Path.home())):
-        if not secret:
-            continue
-        assert secret not in values, f"payload carries {secret!r} verbatim"
-        # Substring too, to catch a leak embedded in a larger value (a
-        # home path inside some other path).  Only for secrets long
-        # enough that a match means something: at one or two characters
-        # it is noise, and the exact check above still covers them.
-        if len(secret) >= 3:
-            for v in values:
-                assert secret not in v, f"{v!r} carries {secret!r}"
+    def render(host: str, user: str, home: str) -> dict:
+        monkeypatch.setattr(socket, "gethostname", lambda: host)
+        monkeypatch.setattr(socket, "getfqdn", lambda *a: host)
+        monkeypatch.setattr(platform, "node", lambda: host)
+        monkeypatch.setattr(getpass, "getuser", lambda: user)
+        monkeypatch.setenv("HOSTNAME", host)
+        monkeypatch.setenv("USER", user)
+        monkeypatch.setenv("LOGNAME", user)
+        monkeypatch.setenv("HOME", home)
+        payload = t._payload()
+        # Clocks, not identity: both are read from time.now() on a call
+        # with no counters file yet, so they differ by microseconds
+        # between the two renders.  install_id is minted once into the
+        # fixture's tmpdir config, so it is stable across both -- which
+        # is itself worth having in the comparison.
+        payload.pop("sent_at")
+        payload.pop("since")
+        return payload
+
+    assert render("ubuntu", "alice", "/home/alice") == render(
+        "x86_64", "bob", "/var/home/bob"
+    )
 
 
 def test_preview_matches_what_send_would_post(_home: Path) -> None:

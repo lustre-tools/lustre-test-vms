@@ -572,6 +572,18 @@ passed only because the child failed; on a host where it would have
 succeeded the suite was one check away from starting an actual Lustre
 build (tests/test_deploy.py::test_legacy_staging_triggers_clear_error).
 
+To assert that something is **absent** -- a hostname, a username, a path
+-- substitute a sentinel and look for that, rather than searching for the
+machine's real value.  The telemetry leak test did the latter and was
+wrong in both directions: it failed on a host named `vm` because "vm" is
+inside the key `ltvm_version`, and it would have failed on one named
+`ubuntu` or `x86_64` by colliding with a legitimate value, while
+narrowing the match enough to dodge that left it blind to a real leak on
+the short-named host.  A sentinel collides with nothing, so the whole
+payload can be searched and the answer is the same on every machine.
+Better still where it fits: assert the output does not *change* when the
+identity does (`test_payload_does_not_depend_on_the_machine_name`).
+
 `tests/conftest.py` holds the autouse isolation that keeps the suite out
 of the developer's real state: XDG config and state, `LTVM_TELEMETRY=0`,
 and `LTVM_COMPLETION_ROOT`.  Add to it rather than patching per test
