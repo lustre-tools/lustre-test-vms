@@ -567,14 +567,30 @@ class TestParserWiring:
     ) -> None:
         assert wiring[key] is getattr(completion, expected)
 
-    def test_create_kernel_and_image_stay_file_paths(
+    def test_create_image_stays_a_file_path(self, wiring: dict) -> None:
+        """`create --image` is a base-image path, so the default
+        FilesCompleter is right and a name completer would be wrong."""
+        assert wiring["ltvm create|--image"] is None
+
+    def test_create_kernel_completes_kernel_names(self, wiring: dict) -> None:
+        """`create --kernel` reads like a path and is not one.
+
+        It goes to ``resolve_os_artifacts``, which matches it against
+        artifact *directory* names -- a real path gets "No kernel
+        matching" -- so it takes the same completer as every other
+        ``--kernel``.  Pinned because the shape of the flag invites the
+        opposite conclusion; this test existed asserting it, wrongly.
+        """
+        assert wiring["ltvm create|--kernel"] is completion.complete_kernels
+
+    def test_every_kernel_flag_completes_kernel_names(
         self, wiring: dict
     ) -> None:
-        """`create --kernel` is an explicit kernel *path*, and --image a
-        base-image path -- so argcomplete's default FilesCompleter is
-        right and a version-name completer would be actively wrong."""
-        assert wiring["ltvm create|--kernel"] is None
-        assert wiring["ltvm create|--image"] is None
+        """--kernel means a version name everywhere it appears."""
+        keys = [k for k in wiring if k.endswith("|--kernel")]
+        assert len(keys) >= 10
+        for k in keys:
+            assert wiring[k] is completion.complete_kernels, k
 
     def test_snapshot_positional_tag_is_not_completed(
         self, wiring: dict

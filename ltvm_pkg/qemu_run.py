@@ -104,6 +104,22 @@ def _check_memory_for_launch(vm: VMInfo) -> None:
             other = VMInfo.load(name)
         except VMNotFound:
             continue
+        except ValueError as e:
+            # VMInfo.load fails loud on a corrupt int field by design
+            # (TestVMInfoLoadCorruption), and that must stay scoped to
+            # the damaged VM.  This walk runs before every launch, so
+            # letting it out meant one truncated .info made `create`
+            # and `start` fail for every *other* VM on the host -- and
+            # inside cmd_create the raise lands in `except
+            # BaseException`, which rolls back the healthy VM being
+            # built.  vm_net._used_ips guards the same hazard for the
+            # same reason; this call site was missed.
+            print(
+                f"warning: ignoring corrupt VM state for {name!r} "
+                f"while checking host memory: {e}",
+                file=sys.stderr,
+            )
+            continue
         if is_running(other):
             running.append((other.name, other.mem))
 

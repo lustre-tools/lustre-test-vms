@@ -272,16 +272,18 @@ def _add_target_arg(
 # subcommand added later is covered without anyone remembering to.
 #
 # Options NOT in this table, on purpose:
-#   --kernel   `create --kernel` is an explicit kernel *path*, while
-#              everywhere else it is a version name from targets.yaml.
-#              Wired per-command instead, so the two never get confused.
 #   --image, --ssh-key, --tarball, --output
 #              File paths -- argcomplete's default FilesCompleter is
 #              already the right answer, and naming them here would
 #              only risk overriding it with something worse.
+#              `create --kernel` looks like it belongs with them and
+#              does not: it is resolved as an artifact directory name
+#              (vm_commands._resolve_os_and_kernel -> resolve_os_artifacts),
+#              so a path there is rejected with "No kernel matching".
 _COMPLETERS_BY_OPTION: dict[str, Any] = {
     "--arch": complete_arches,
     "--build": complete_directories,
+    "--kernel": complete_kernels,
     "--lustre-tree": complete_directories,
     "--mod-dir": complete_directories,
     "--mofed-version": complete_mofed_versions,
@@ -796,7 +798,14 @@ def build_parser() -> argparse.ArgumentParser:
     # interchangeable by sharing the argument-attach helper above.
     tbp = target_sub.add_parser(
         "build",
-        parents=[common, kernel_arg, force_arg, force_compat_arg, variant_arg],
+        parents=[
+            common,
+            kernel_arg,
+            force_arg,
+            force_compat_arg,
+            variant_arg,
+            zfs_arg,
+        ],
         help="Build container + kernel + image from scratch "
         "(alias for `build all`)",
     )
@@ -1104,7 +1113,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--image", default=None, help="Explicit base image path"
     )
     _vm_create_args.add_argument(
-        "--kernel", default=None, help="Explicit kernel path"
+        "--kernel",
+        default=None,
+        help="Kernel version to boot (default: the target's)",
     )
     # --target accepts the same OS name as the positional 'target'.
     # Parked on a sentinel dest; the CLI reconciler sets both

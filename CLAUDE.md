@@ -96,10 +96,13 @@ per-command assignment always wins.
 
 Three traps worth knowing:
 
-- **`create --kernel` is a path**, not a version name, and `create
-  --image` is a base-image path.  They are deliberately absent from the
-  by-option table; argcomplete's default `FilesCompleter` is correct
-  for them and a version completer would be actively wrong.
+- **`create --kernel` is a version name**, despite reading like a
+  path: `_resolve_os_and_kernel` hands it to `resolve_os_artifacts`,
+  which matches it against artifact *directory* names, so a real path
+  gets "No kernel matching".  It is in the by-option table with every
+  other `--kernel` for that reason.  `create --image` genuinely is a
+  path and stays out, where argcomplete's default `FilesCompleter` is
+  the right answer -- as it is for `--ssh-key`, `--tarball`, `--output`.
 - **zsh needs the `#compdef` wrapper.**  An autoloaded `_ltvm`'s body
   *is* the completion function, so the bare shellcode would define
   `_python_argcomplete` and return -- first TAB empty, second one works.
@@ -277,7 +280,7 @@ before any Lustre-involving build.
 
 ```bash
 ltvm target validate rocky9 --lustre-tree ~/lustre-release
-# Exit: 0 compatible, 1 warning, 2 refused
+# Exit: 0 compatible (or warning), 1 refused, 2 could not tell
 
 # Bypass a refusal (not hard errors):
 ltvm build all rocky9 --lustre-tree ~/lustre-release --force-compat

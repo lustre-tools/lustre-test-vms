@@ -205,7 +205,7 @@ Before any Lustre-involving build, ltvm checks the tree against the
 target's `lustre.mode`:
 
 ```bash
-ltvm target validate rocky9 --lustre-tree <tree>   # 0 ok, 1 warn, 2 refused
+ltvm target validate rocky9 --lustre-tree <tree>   # 0 ok/warn, 1 refused, 2 error
 ltvm build all rocky9 --lustre-tree <tree> --force-compat
 ```
 
