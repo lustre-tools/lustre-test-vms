@@ -26,31 +26,31 @@ from ltvm_pkg.target_config import TargetConfig
 
 # (target, artifact, kernel, variant, expected)
 GOLDEN = [
-    ("rocky8", "container", None, None, "4220fc23dca0f512"),
-    ("rocky8", "kernel", None, None, "2fc26cb838a21c93"),
-    ("rocky8", "image", None, None, "eb25bed2b8d736cb"),
-    ("rocky9", "container", None, None, "53ff92f0c29a2c1a"),
-    ("rocky9", "kernel", None, None, "54e1f16b54b180b3"),
-    ("rocky9", "image", None, None, "446a4ffd0b5a7c9d"),
-    ("rocky9-64k", "container", None, None, "2b44594e1b246688"),
-    ("rocky9-64k", "kernel", None, None, "3650a25517ffed13"),
-    ("rocky9-64k", "image", None, None, "3ff60ca267f08b89"),
-    ("rocky10", "container", None, None, "a8b1c88bcad5e635"),
-    ("rocky10", "kernel", None, None, "d12f8b2e1233413a"),
-    ("rocky10", "image", None, None, "e6c2f40a0588fc5e"),
-    ("mainline", "container", None, None, "3e5f339a82347536"),
-    ("mainline", "kernel", None, None, "8a48d68aa12f941b"),
-    ("mainline", "image", None, None, "1a9b6b740f679ab7"),
-    ("ubuntu2404", "container", None, None, "eebd5c4d9d582ce5"),
-    ("ubuntu2404", "kernel", None, None, "955f58eda24d55d4"),
-    ("ubuntu2404", "image", None, None, "484dc30417ae8725"),
+    ("rocky8", "container", None, None, "9e11ed638f52633a"),
+    ("rocky8", "kernel", None, None, "e843357a885eb539"),
+    ("rocky8", "image", None, None, "967600d4671b3ec2"),
+    ("rocky9", "container", None, None, "3e3483d4f53cdd18"),
+    ("rocky9", "kernel", None, None, "1485949f7a6473db"),
+    ("rocky9", "image", None, None, "d7a07fada94d9c89"),
+    ("rocky9-64k", "container", None, None, "07ce85d20cd087d2"),
+    ("rocky9-64k", "kernel", None, None, "4245925c36d098eb"),
+    ("rocky9-64k", "image", None, None, "c2601dec8babe1f8"),
+    ("rocky10", "container", None, None, "b290e5e6638f8755"),
+    ("rocky10", "kernel", None, None, "1037d062e354c6b6"),
+    ("rocky10", "image", None, None, "8852957af5cb682e"),
+    ("mainline", "container", None, None, "969d2693b0a5b00a"),
+    ("mainline", "kernel", None, None, "5a30ae513ab3098a"),
+    ("mainline", "image", None, None, "79f7e0927adc1585"),
+    ("ubuntu2404", "container", None, None, "45d60623743a35ca"),
+    ("ubuntu2404", "kernel", None, None, "dc8fdebadd7c2925"),
+    ("ubuntu2404", "image", None, None, "227881da2e0c18c7"),
     # A variant must not perturb the base hashes above, and must differ
     # from them.
-    ("rocky9", "container", None, "mofed-24", "388eb197f85522fe"),
-    ("rocky9", "image", None, "mofed-24", "c3899bb4fe5bb76a"),
+    ("rocky9", "container", None, "mofed-24", "23a82735caa4c736"),
+    ("rocky9", "image", None, "mofed-24", "0dc548ea2642e0bf"),
     # An explicitly named kernel.
-    ("rocky9", "kernel", "5.14-rhel9.5", None, "da5d0ef496a45b25"),
-    ("rocky9", "image", "5.14-rhel9.5", None, "c40338473697a3a4"),
+    ("rocky9", "kernel", "5.14-rhel9.5", None, "d8a7a2972f902189"),
+    ("rocky9", "image", "5.14-rhel9.5", None, "f47482b297d701ac"),
 ]
 
 
@@ -86,7 +86,85 @@ def test_extra_bytes_still_fold_in() -> None:
     vmlinuz -- the exact workflow ltvm exists for.
     """
     tc = TargetConfig("rocky9")
-    assert tc.input_hash("kernel", extra=b"patchbytes") == "5cddb9cc7956a553"
+    assert tc.input_hash("kernel", extra=b"patchbytes") == "f55467f5dd11eafd"
     assert tc.input_hash("kernel", extra=b"patchbytes") != tc.input_hash(
         "kernel"
     )
+
+
+class TestKernelsAvailableIsNotFoldedIn:
+    """Adding a kernel minor must invalidate nothing.
+
+    ``kernels.available`` and ``kernels.default`` used to be hashed
+    into every artifact via the whole-``kernels`` blob, so the
+    documented routine operation -- "for a new kernel minor on an
+    existing OS, just add the short name to kernels.available" --
+    rebuilt that target's container, every kernel and every image on
+    every machine, for a list none of them read.
+    """
+
+    def _with_extra_minor(self, target: str) -> TargetConfig:
+        import copy
+
+        tc = TargetConfig(target)
+        tc._data = copy.deepcopy(tc._data)
+        tc._kernels = tc._data["kernels"]
+        tc._kernels["available"].append("5.14-rhel9.99")
+        return tc
+
+    @pytest.mark.parametrize("artifact", ["container", "kernel", "image"])
+    def test_adding_a_minor_changes_nothing(self, artifact: str) -> None:
+        before = TargetConfig("rocky9").input_hash(
+            artifact, kernel="5.14-rhel9.5"
+        )
+        after = self._with_extra_minor("rocky9").input_hash(
+            artifact, kernel="5.14-rhel9.5"
+        )
+        assert before == after
+
+    def test_a_kernels_own_entry_still_invalidates_it(self) -> None:
+        """rocky10 pins srpm_version per kernel in a mapping entry.
+
+        That is real build input, so it has to keep invalidating its
+        own kernel -- and only its own, which the whole-blob hash could
+        not express.
+        """
+        import copy
+
+        tc = TargetConfig("rocky10")
+        names = [
+            e if isinstance(e, str) else e["name"]
+            for e in tc._kernels["available"]
+        ]
+        pinned = [
+            e["name"]
+            for e in tc._kernels["available"]
+            if isinstance(e, dict) and "srpm_version" in e
+        ]
+        assert pinned, "rocky10 no longer pins an srpm_version"
+        before = {n: tc.input_hash("kernel", kernel=n) for n in names}
+
+        tc2 = TargetConfig("rocky10")
+        tc2._data = copy.deepcopy(tc2._data)
+        tc2._kernels = tc2._data["kernels"]
+        for e in tc2._kernels["available"]:
+            if isinstance(e, dict) and "srpm_version" in e:
+                e["srpm_version"] = "9.9.9-bogus.el10_0"
+        for n in names:
+            after = tc2.input_hash("kernel", kernel=n)
+            if n in pinned:
+                assert after != before[n], n
+            else:
+                assert after == before[n], n
+
+    def test_kernel_config_overrides_still_fold_in(self) -> None:
+        """kernels.config is read by the kernel build, so it stays."""
+        import copy
+
+        tc = TargetConfig("rocky9")
+        before = tc.input_hash("kernel", kernel="5.14-rhel9.5")
+        tc2 = TargetConfig("rocky9")
+        tc2._data = copy.deepcopy(tc2._data)
+        tc2._kernels = tc2._data["kernels"]
+        tc2._kernels.setdefault("config", {})["CONFIG_LTVM_TEST"] = "y"
+        assert tc2.input_hash("kernel", kernel="5.14-rhel9.5") != before

@@ -202,6 +202,20 @@ class Variant:
         return h.digest()
 
 
+# Which formula produced an artifact's ``input_hash``.  Bumped only when
+# the *composition* of the hash changes -- not when an input's contents
+# do.  Recorded in every meta.json, so a stale artifact can be explained
+# honestly: without it, narrowing the hash in scheme 2 made `--why`
+# report "targets.yaml (changed)" for a targets.yaml that had not
+# changed, at exactly the moment someone is asking why a rebuild started.
+#
+# History:
+#   1  targets.yaml's whole per-target slice minus `variants` and `zfs`.
+#   2  `kernels` excluded too; `kernels.config` and the built kernel's
+#      own `available` entry folded back per kernel instead.
+HASH_SCHEME = 2
+
+
 # The ``-<lnxmaj>-<lnxrel>`` tail that turns a short kernel name into a
 # built-dir name: a dotted three-part kernel version, dash-delimited on
 # both sides (``5.14-rhel9.7`` -> ``5.14-rhel9.7-5.14.0-611.13.1.el9_7``).
@@ -1076,10 +1090,28 @@ class TargetConfig:
         # its configure-flags stamp via --with-zfs).  Folding it in
         # here would rebuild every container and kernel for a knob
         # they do not read.
+        #
+        # ``kernels`` is excluded for the same reason, and is the one
+        # that cost the most: the whole block -- ``available`` list and
+        # ``default`` included -- used to be hashed into every
+        # artifact, so the documented routine operation "for a new
+        # kernel minor on an existing OS, just add the short name to
+        # kernels.available" invalidated that target's container, every
+        # one of its kernels and every one of its images, on every
+        # machine at once, with ``--why`` able to say only
+        # "targets.yaml (changed)".  Nothing in a container, in kernel
+        # N's build, or in an image reads the list of *other* available
+        # kernels.  What a kernel build does read is folded back in
+        # below, per kernel: ``kernels.config`` and that kernel's own
+        # entry (a mapping entry's ``srpm_version``).  The image picks
+        # the same up transitively, through the kernel meta's
+        # input_hash.
         h.update(self.name.encode())
         h.update(self.arch.encode())
         base_data = {
-            k: v for k, v in self._data.items() if k not in ("variants", "zfs")
+            k: v
+            for k, v in self._data.items()
+            if k not in ("variants", "zfs", "kernels")
         }
         h.update(json.dumps(base_data, sort_keys=True).encode())
 
@@ -1110,6 +1142,16 @@ class TargetConfig:
             h.label("kernels.config")
             for k, v in sorted(self.kernel_config_overrides.items()):
                 h.update(f"{k}={v}".encode())
+            # This kernel's own entry in kernels.available, and only
+            # this one: a mapping entry carries per-kernel build input
+            # (rocky10 pins srpm_version that way), while a sibling's
+            # entry changing is none of this kernel's business.
+            h.label("kernel-entry")
+            h.update(
+                json.dumps(
+                    self.kernel_overrides(short_name), sort_keys=True
+                ).encode()
+            )
             common_frag = TARGETS_DIR / "common" / "kernel-config.fragment"
             if common_frag.exists():
                 h.label("common/kernel-config.fragment")
@@ -1344,6 +1386,11 @@ class TargetConfig:
         hash_kernel_arg = hash_kernel if hash_kernel is not None else kernel
         meta = {
             "target": self.name,
+            # Which formula the hash below came from.  An artifact whose
+            # scheme predates this ltvm's is stale for a reason no
+            # per-input diff can express, and staleness_reasons says so
+            # rather than blaming an input that did not move.
+            "hash_scheme": HASH_SCHEME,
             "input_hash": self.input_hash(
                 artifact,
                 kernel=hash_kernel_arg,

@@ -1087,6 +1087,17 @@ def build_parser() -> argparse.ArgumentParser:
             "transfer or inspecting what would be published."
         ),
     )
+    tpbp.add_argument(
+        "--allow-stale",
+        action="store_true",
+        default=False,
+        help=(
+            "Publish even when an artifact's meta.json was written by an "
+            "older staleness hash scheme.  Such a release fetches "
+            "cleanly and then reads stale on every client, so the "
+            "default is to refuse and ask for a rebuild."
+        ),
+    )
     tpbp.set_defaults(func=cmd_publish)
 
     def _target_no_action(args: argparse.Namespace) -> int:

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from ltvm_pkg.paths import load_meta_safe
+from ltvm_pkg.target_config import HASH_SCHEME as _HASH_SCHEME
 from ltvm_pkg.target_config import TargetConfig as _TargetConfig
 
 
@@ -302,9 +303,31 @@ def staleness_reasons(
     genuinely how the hash reads it, and guessing which labels refer to
     one file would be a worse kind of wrong than a repeated line.
     """
+    # A scheme mismatch outranks any per-input diff, and replaces it:
+    # when the *formula* changed, the components are not comparable, and
+    # diffing them anyway blames inputs that did not move.  Narrowing the
+    # hash in scheme 2 made this say "targets.yaml (changed)" for a
+    # targets.yaml nobody had touched -- which is the one thing the --why
+    # design says not to do.
     stored = status.get("input_components")
     if not isinstance(stored, dict) or not stored:
         return []
+
+    recorded_scheme = status.get("hash_scheme")
+    if not isinstance(recorded_scheme, int):
+        # No scheme recorded, but per-input digests are: the key was
+        # introduced *with* scheme 2, so anything carrying components and
+        # no scheme is scheme 1.  That inference is what makes this
+        # message reach the artifacts scheme 2 actually invalidated --
+        # every one of them was built before the key existed.
+        recorded_scheme = 1
+    if recorded_scheme != _HASH_SCHEME:
+        return [
+            f"built under hash scheme {recorded_scheme}, this ltvm uses "
+            f"{_HASH_SCHEME} -- the staleness formula changed, not your "
+            f"inputs (re-fetch with `ltvm target fetch <target> "
+            f"--replace`, or rebuild)"
+        ]
     try:
         current = target_config.input_components(
             artifact, kernel=kernel, variant=variant
@@ -575,6 +598,43 @@ def write_release_tag(
     f = release_tag_file(root, kver, variant)
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(tag + "\n")
+
+
+def release_stamp_file(root: Path, kver: str, variant: str = "base") -> Path:
+    """Where the fetched release's content fingerprint is recorded.
+
+    A sibling of the tag file, because the two answer different
+    questions: the tag says *which* release, the fingerprint says
+    *which contents of it*.  Publish clobbers assets into an existing
+    tag, so only the second can tell a republish from a no-op.
+    """
+    return release_tag_dir(root) / f"{variant}__{kver.replace('/', '_')}.fp"
+
+
+def read_release_stamp(root: Path, kver: str, variant: str = "base") -> str:
+    """Fingerprint recorded for this (kernel, variant), or "".
+
+    Empty means "fetched before fingerprints were recorded" -- not
+    "up to date".  Callers must treat the two differently.
+    """
+    try:
+        return release_stamp_file(root, kver, variant).read_text().strip()
+    except OSError:
+        return ""
+
+
+def write_release_stamp(
+    root: Path,
+    target: str,
+    arch: str,
+    tag: str,
+    fingerprint: str,
+    variant: str = "base",
+) -> None:
+    kver = kver_from_release_tag(tag, target, arch, variant)
+    f = release_stamp_file(root, kver, variant)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(fingerprint + "\n")
 
 
 def released_kvers(
