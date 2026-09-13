@@ -751,6 +751,14 @@ assume and wrong:
   records it beside the tag.  No fingerprint on disk means
   "fetched by an older ltvm, cannot verify" -- which re-fetches
   rather than claiming freshness.
+- **A release index is published alongside**, at the `release-index`
+  tag: one `ltvm-index.json` mapping (target, arch, kernel, variant) to
+  the manifest describing it.  Strictly advisory -- fetch consults it
+  only *after* resolving by asset name has failed, so a missing index
+  costs nothing and the name walk stays the thing that has to be
+  correct.  Asking the index first would put a download in front of
+  every fetch to improve a lookup that had already answered.  A failed
+  index update warns and leaves the release published.
 - **Publish refuses an older `HASH_SCHEME`.**  Republishing
   without rebuilding first would wrap old-formula hashes in a
   new-schema manifest, which fetches cleanly and then reads
@@ -799,7 +807,8 @@ gh issue list / view <n> / create --title ... --body ...
 - [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) --
   first-time setup walkthrough.
 - [docs/RELEASING.md](docs/RELEASING.md) -- rebuilding the
-  pre-built QEMU tarballs.
+  pre-built QEMU tarballs, and republishing target
+  releases after a schema bump.
 - [docs/NESTED_VIRTUALIZATION.md](docs/NESTED_VIRTUALIZATION.md)
   -- running ltvm under a nested hypervisor.
 - [docs/SOFTROCE_SETUP.md](docs/SOFTROCE_SETUP.md) -- LNet

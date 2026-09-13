@@ -1219,6 +1219,78 @@ def package_bootable(
 # ---------------------------------------------------------------------------
 
 
+# The release index: one asset, in its own release, mapping
+# (target, arch, kernel, variant) to the manifest that describes it.
+#
+# It exists to retire name parsing on the fetch side.  Discovery was
+# entirely string surgery over tags and asset names --
+# _kernel_release_signature turning "5.14-rhel9.8" into "el9_8" (and
+# admitting in its own docstring that same-major Ubuntu kernels
+# collide), plus a variant heuristic resting on "a kver's last segment
+# carries a digit".  The fields were in each manifest all along; what
+# was missing was a way to find the right manifest without guessing.
+#
+# Strictly advisory.  Every consumer falls back to the name walk when
+# the index is absent, unreadable, or has no entry -- and validates an
+# entry by using its manifest URL, so a stale entry for a deleted
+# release degrades to the fallback instead of failing the fetch.  It is
+# a cache over the names, never the source of truth.
+INDEX_TAG = "release-index"
+INDEX_ASSET = "ltvm-index.json"
+INDEX_SCHEMA = "ltvm-index/1"
+
+
+def index_key(target: str, arch: str, kernel_short: str, variant: str) -> str:
+    """The index key for one publishable combination."""
+    return f"{target}/{arch}/{kernel_short}/{variant}"
+
+
+def index_entry_for(
+    manifest: dict[str, Any], tag: str, manifest_asset: str
+) -> tuple[str, dict[str, Any]]:
+    """Build this release's index entry from the manifest just written."""
+    target = str(manifest.get("target", ""))
+    arch = str(manifest.get("arch", ""))
+    variant = str(manifest.get("variant", DEFAULT_VARIANT))
+    kernel_short = str(
+        manifest.get("kernel_short") or manifest.get("kernel", "")
+    )
+    entry = {
+        "target": target,
+        "arch": arch,
+        "kernel": manifest.get("kernel", ""),
+        "kernel_short": kernel_short,
+        "kernel_version": manifest.get("kernel_version", ""),
+        "variant": variant,
+        "schema": manifest.get("schema", ""),
+        "hash_scheme": manifest.get("hash_scheme"),
+        "tag": tag,
+        "manifest_asset": manifest_asset,
+        "built_at": (manifest.get("producer") or {}).get("built_at", ""),
+        "fingerprint": manifest_fingerprint(manifest),
+    }
+    return index_key(target, arch, kernel_short, variant), entry
+
+
+def merge_index(
+    existing: dict[str, Any] | None, key: str, entry: dict[str, Any]
+) -> dict[str, Any]:
+    """This release's entry, folded into whatever index already exists.
+
+    Updated in place rather than regenerated from every manifest: a
+    regeneration costs a download per release and, worse, a publish that
+    raced another one would write back a view missing the other's entry.
+    Replacing a single key leaves every other entry exactly as it was.
+    """
+    out: dict[str, Any] = {"schema": INDEX_SCHEMA, "releases": {}}
+    if isinstance(existing, dict) and isinstance(
+        existing.get("releases"), dict
+    ):
+        out["releases"] = dict(existing["releases"])
+    out["releases"][key] = entry
+    return out
+
+
 def manifest_fingerprint(manifest: dict[str, Any]) -> str:
     """A short digest of what a release actually ships.
 

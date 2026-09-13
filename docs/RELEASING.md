@@ -1,5 +1,14 @@
 # Releasing
 
+Two unrelated things are released from this repo, and this file used to
+cover only the first:
+
+- **Pre-built QEMU binaries** -- the tarballs `ltvm install` downloads,
+  rebuilt by hand when QEMU is bumped.  Below.
+- **Target releases** -- the per-(target, arch, kernel, variant) asset
+  sets `ltvm target publish` produces and `ltvm target fetch` consumes.
+  Republishing those is a different procedure, at the end of this file.
+
 ## Rebuilding Pre-built QEMU Binaries
 
 Rocky Linux ships QEMU without microvm support, so we publish
@@ -53,3 +62,37 @@ Notes:
 - Rocky 8 needs `dnf install python38` (system python too old)
 - Ubuntu uses system QEMU package (has microvm)
 - Bump `QEMU_VERSION` in `ltvm_pkg/host_setup.py` when updating
+
+
+## Republishing Target Releases
+
+Needed when `SCHEMA_VERSION` moves (see CLAUDE.md's *Release Manifest
+Schema*), because fetch compares the manifest schema for equality and
+refuses anything else.  Until a release is republished, clients on the
+new ltvm cannot fetch it at all.
+
+```bash
+# For every (target, arch, kernel, variant) that should stay fetchable:
+ltvm build all <target> --lustre-tree ~/lustre-release   # see below
+ltvm target publish <target>
+```
+
+The rebuild is not optional, and `target publish` enforces it: it
+refuses artifacts whose `meta.json` records an older `HASH_SCHEME`,
+because publishing those wraps old-formula hashes in a new-schema
+manifest -- which fetches cleanly and then reads stale on every client.
+`--allow-stale` overrides if you know what you are doing.
+
+Two things worth knowing:
+
+- **Publish clobbers into the existing tag**, so a republished release
+  keeps its name.  Clients notice by comparing the manifest's content
+  fingerprint, not the tag, and record it beside the tag file.  A client
+  that fetched with an older ltvm has no fingerprint recorded, so its
+  next fetch re-downloads once and then has one.
+- **The republish is the rebuild.**  Whoever publishes holds the
+  artifacts locally and pays the one-time rebuild; every fetcher then
+  gets matching hashes for free.  So republish before people next fetch,
+  not after.
+
+To check what is out there: `ltvm target fetch --list`.

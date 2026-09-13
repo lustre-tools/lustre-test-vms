@@ -20,6 +20,7 @@ import logging
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -197,6 +198,7 @@ def _find_release_url(
     kernel_signature: str | None = None,
     variant: str = "base",
     mode: str = "ecosystem",
+    kernel_short: str | None = None,
 ) -> str:
     """Find an asset download URL from GitHub releases.
 
@@ -295,6 +297,22 @@ def _find_release_url(
                 continue
             return str(asset["browser_download_url"])
 
+    # Names did not resolve.  Only now consult the published index --
+    # deliberately not before.  Asking first would put a network
+    # round-trip in front of every fetch, and a missing index (the
+    # normal state until one has been published) would pay the download
+    # timeout each time, to improve a lookup that had already answered
+    # correctly.  Here it costs nothing in the common case and still
+    # rescues what names genuinely cannot resolve: mainline's moving
+    # aliases, which yield no kernel signature at all.
+    if mode == "ecosystem":
+        from_index = _resolve_from_index(
+            target, arch=arch, kernel=kernel_short, variant=variant
+        )
+        if from_index:
+            log.debug("resolved %s from the release index", target)
+            return from_index
+
     avail = [r.get("tag_name", "?") for r in releases]
     hint = f" matching '{filter_str}'" if filter_str else ""
     if kernel_signature:
@@ -316,6 +334,121 @@ def _find_release_url(
         # the possibility rather than leaving it to be guessed.
         f"  If these releases were published by a newer ltvm, this one "
         f"may not recognize their naming: try `ltvm update`."
+    )
+
+
+def _update_release_index(
+    manifest_path: Path, tag: str, *, use_json: bool
+) -> None:
+    """Add this release to the published index.
+
+    Best-effort on purpose: the index only ever saves the fetch side from
+    parsing names, and the name walk still works without it.  So a
+    failure here warns and leaves the release -- which is fully
+    published and fetchable -- alone.  Failing the publish over an
+    optional convenience asset would be the worse trade.
+    """
+    from ltvm_pkg.release_package import (
+        INDEX_ASSET,
+        INDEX_TAG,
+        index_entry_for,
+        merge_index,
+    )
+
+    try:
+        manifest = json.loads(manifest_path.read_text())
+        key, entry = index_entry_for(manifest, tag, manifest_path.name)
+        merged = merge_index(_download_index(), key, entry)
+        with tempfile.TemporaryDirectory(prefix="ltvm-index-") as td:
+            out = Path(td) / INDEX_ASSET
+            out.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n")
+            exit_code, err_msg = _cli_attr("_gh_release_upload")(
+                INDEX_TAG,
+                [out],
+                notes=(
+                    "Index of published ltvm releases -- maps "
+                    "(target, arch, kernel, variant) to its manifest. "
+                    "Regenerated on every publish; advisory, fetch falls "
+                    "back to asset names without it."
+                ),
+                use_json=use_json,
+            )
+        if exit_code is not None:
+            raise RuntimeError(err_msg or "upload failed")
+        if not use_json:
+            print(f"  Indexed: {key}")
+    except Exception as e:  # noqa: BLE001 - see docstring
+        if not use_json:
+            print(
+                f"  warning: could not update the release index: {e}\n"
+                f"    The release itself is published; fetch will find it "
+                f"by asset name.",
+                file=sys.stderr,
+            )
+
+
+def _download_index() -> dict[str, Any] | None:
+    """The published release index, or None when there isn't a usable one.
+
+    Every failure mode -- no index release, no asset, a network hiccup,
+    malformed JSON, a schema this ltvm doesn't know -- returns None, and
+    the caller then resolves by name as it always did.  An index that
+    cannot be read must never be the reason a fetch fails.
+    """
+    import ltvm_pkg.cli as _cli
+    from ltvm_pkg.release_package import (
+        INDEX_ASSET,
+        INDEX_SCHEMA,
+        INDEX_TAG,
+        fetch_manifest,
+    )
+
+    url = (
+        f"https://github.com/{_cli.GITHUB_REPO}/releases/download/"
+        f"{INDEX_TAG}/{INDEX_ASSET}"
+    )
+    try:
+        doc = fetch_manifest(url)
+    except Exception:  # noqa: BLE001 - advisory, see docstring
+        return None
+    if not isinstance(doc, dict) or doc.get("schema") != INDEX_SCHEMA:
+        return None
+    return doc if isinstance(doc.get("releases"), dict) else None
+
+
+def _resolve_from_index(
+    target: str,
+    *,
+    arch: str,
+    kernel: str | None,
+    variant: str,
+) -> str | None:
+    """Manifest URL for this combination per the index, or None.
+
+    Matches on the fields a publish declared.  With no ``kernel`` the
+    caller has already resolved the target's default, so an exact key
+    lookup is the whole algorithm -- no signature, no stem heuristic.
+    """
+    from ltvm_pkg.release_package import index_key
+
+    doc = _download_index()
+    if doc is None:
+        return None
+    if not kernel:
+        return None
+    entry = doc["releases"].get(index_key(target, arch, kernel, variant))
+    if not isinstance(entry, dict):
+        return None
+    tag = entry.get("tag")
+    asset = entry.get("manifest_asset")
+    if not tag or not asset:
+        return None
+
+    import ltvm_pkg.cli as _cli
+
+    log.debug("resolved %s from the release index (tag %s)", target, tag)
+    return (
+        f"https://github.com/{_cli.GITHUB_REPO}/releases/download/{tag}/{asset}"
     )
 
 
@@ -617,6 +750,9 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
 
+    # The short kernel name this fetch is for: what --kernel takes, and
+    # the key the release index is organised by.
+    kernel_short: str | None = kernel or None
     if not kernel and tc is not None:
         # No --kernel: aim at the target's configured default rather
         # than whatever GitHub happens to list first.  Release order is
@@ -630,6 +766,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         except Exception:  # noqa: BLE001 - fall back to today's behaviour
             default_kernel = ""
         if default_kernel:
+            kernel_short = default_kernel
             kernel_signature = _kernel_release_signature(default_kernel)
 
     # --list: show available releases
@@ -756,6 +893,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                 kernel_signature=kernel_signature,
                 variant=variant,
                 mode="ecosystem",
+                kernel_short=kernel_short,
             )
         except RuntimeError as e:
             return _error(str(e), use_json)
@@ -1346,6 +1484,8 @@ def cmd_publish(args: argparse.Namespace) -> int:
     # tests that patch only the TargetConfig, and reaching for the
     # global wrote release tags into the real artifacts tree.
     write_release_tag(tc.output_dir, tc.name, tc.arch, tag, variant)
+
+    _update_release_index(assets["manifest"], tag, use_json=use_json)
 
     result = {
         "target": args.target,

@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import ltvm_pkg.cli.fetch as _fetch_mod
 from ltvm_pkg import cli as cli_mod
 from ltvm_pkg.cli import (
     EXIT_ERROR,
@@ -52,6 +53,29 @@ def _tc(tmp_targets: Path) -> Any:
         ),
     ):
         return cfg.TargetConfig("rocky9")
+
+
+# Captured at import, before the autouse guard below replaces the module
+# attribute -- the two tests that exercise _download_index itself need
+# the real one, and the guard makes it unreachable by name.
+_REAL_DOWNLOAD_INDEX = _fetch_mod._download_index
+
+
+@pytest.fixture(autouse=True)
+def _no_release_index():
+    """Keep the release-index probe off the network.
+
+    It is consulted when asset names do not resolve, and updated after
+    every publish -- both real downloads otherwise, against URLs these
+    tests invent, so each waits out the curl timeout.  Returning None is
+    the "no index published" state, which is also what the fallback
+    paths are written for.  A test that wants the index patches this
+    itself.
+    """
+    import ltvm_pkg.cli.fetch as f
+
+    with patch.object(f, "_download_index", return_value=None):
+        yield
 
 
 def _tag_path(
@@ -1761,7 +1785,14 @@ class TestCmdPublish:
             rc = cmd_publish(args)
 
         assert rc == EXIT_OK
-        assert captured_tag == ["my-explicit-tag"]
+        # The release goes to the explicit tag; the index follows, into
+        # its own release.  Pinned as a pair: writing the index into the
+        # release's tag would mix a shared asset into a per-kernel
+        # release and make it collide on the next publish.
+        from ltvm_pkg.release_package import INDEX_TAG
+
+        assert captured_tag[0] == "my-explicit-tag"
+        assert captured_tag[1:] == [INDEX_TAG]
 
     def test_image_mode_packages_bootable_and_uploads(
         self,
@@ -2117,3 +2148,158 @@ class TestPublishedSha256:
         digest, name = companion.read_text().split()
         assert name == "disk.qcow2.zst"
         assert digest == rp._sha256(asset)
+
+
+class TestReleaseIndex:
+    """Discovery was string surgery: a kernel signature derived by
+    regex (whose docstring admits same-major Ubuntu kernels collide),
+    plus a variant rule resting on "a kver's last segment carries a
+    digit".  The index resolves from fields a publish declared instead.
+
+    It is advisory everywhere.  These tests pin that as hard as they pin
+    the happy path, because a required index would be a new way for
+    every fetch to fail.
+    """
+
+    def _manifest(self) -> dict:
+        return {
+            "schema": "ltvm-release/2",
+            "target": "ubuntu2404",
+            "arch": "x86_64",
+            "kernel": "6.8-ubuntu2404",
+            "kernel_short": "6.8-ubuntu2404",
+            "kernel_version": "6.8.12",
+            "variant": "base",
+            "producer": {"built_at": "2026-09-01T00:00:00Z"},
+            "assets": [{"name": "image.tar.zst", "sha256": "aa"}],
+        }
+
+    def test_entry_is_keyed_by_declared_fields(self) -> None:
+        from ltvm_pkg.release_package import index_entry_for
+
+        key, entry = index_entry_for(
+            self._manifest(), "ubuntu2404-x86_64-6.8.12", "manifest-u.json"
+        )
+        assert key == "ubuntu2404/x86_64/6.8-ubuntu2404/base"
+        assert entry["tag"] == "ubuntu2404-x86_64-6.8.12"
+        assert entry["manifest_asset"] == "manifest-u.json"
+        assert entry["kernel_version"] == "6.8.12"
+
+    def test_merge_preserves_other_entries(self) -> None:
+        """Updated in place, not regenerated: a publish racing another
+        must not write back a view missing the other's entry."""
+        from ltvm_pkg.release_package import merge_index
+
+        existing = {
+            "schema": "ltvm-index/1",
+            "releases": {"rocky9/x86_64/5.14-rhel9.7/base": {"tag": "keep"}},
+        }
+        merged = merge_index(existing, "new/key/a/base", {"tag": "added"})
+        assert merged["releases"]["rocky9/x86_64/5.14-rhel9.7/base"] == {
+            "tag": "keep"
+        }
+        assert merged["releases"]["new/key/a/base"] == {"tag": "added"}
+
+    def test_merge_from_nothing_starts_a_fresh_index(self) -> None:
+        from ltvm_pkg.release_package import INDEX_SCHEMA, merge_index
+
+        merged = merge_index(None, "k", {"tag": "t"})
+        assert merged["schema"] == INDEX_SCHEMA
+        assert list(merged["releases"]) == ["k"]
+
+    def test_resolver_returns_the_manifest_url(self) -> None:
+        import ltvm_pkg.cli.fetch as f
+
+        doc = {
+            "schema": "ltvm-index/1",
+            "releases": {
+                "ubuntu2404/x86_64/6.8-ubuntu2404/base": {
+                    "tag": "ubuntu2404-x86_64-6.8.12",
+                    "manifest_asset": "manifest-u.json",
+                }
+            },
+        }
+        with patch.object(f, "_download_index", return_value=doc):
+            url = f._resolve_from_index(
+                "ubuntu2404",
+                arch="x86_64",
+                kernel="6.8-ubuntu2404",
+                variant="base",
+            )
+        assert url is not None
+        assert url.endswith(
+            "/releases/download/ubuntu2404-x86_64-6.8.12/manifest-u.json"
+        )
+
+    def test_no_index_resolves_to_nothing(self) -> None:
+        import ltvm_pkg.cli.fetch as f
+
+        with patch.object(f, "_download_index", return_value=None):
+            assert (
+                f._resolve_from_index(
+                    "rocky9",
+                    arch="x86_64",
+                    kernel="5.14-rhel9.7",
+                    variant="base",
+                )
+                is None
+            )
+
+    def test_a_stale_entry_without_a_tag_resolves_to_nothing(self) -> None:
+        """Half an entry is not an answer."""
+        import ltvm_pkg.cli.fetch as f
+
+        doc = {
+            "schema": "ltvm-index/1",
+            "releases": {"rocky9/x86_64/5.14-rhel9.7/base": {"tag": ""}},
+        }
+        with patch.object(f, "_download_index", return_value=doc):
+            assert (
+                f._resolve_from_index(
+                    "rocky9",
+                    arch="x86_64",
+                    kernel="5.14-rhel9.7",
+                    variant="base",
+                )
+                is None
+            )
+
+    def test_an_unknown_index_schema_is_ignored(self) -> None:
+        """A future index format must read as "no index", not as data
+        this ltvm can interpret."""
+
+        with patch(
+            "ltvm_pkg.release_package.fetch_manifest",
+            return_value={"schema": "ltvm-index/99", "releases": {}},
+        ):
+            assert _REAL_DOWNLOAD_INDEX() is None
+
+    def test_a_well_formed_index_is_accepted(self) -> None:
+        from ltvm_pkg.release_package import INDEX_SCHEMA
+
+        doc = {"schema": INDEX_SCHEMA, "releases": {"k": {"tag": "t"}}}
+        with patch("ltvm_pkg.release_package.fetch_manifest", return_value=doc):
+            assert _REAL_DOWNLOAD_INDEX() == doc
+
+    def test_a_failed_index_download_is_not_an_error(self) -> None:
+
+        with patch(
+            "ltvm_pkg.release_package.fetch_manifest",
+            side_effect=RuntimeError("404"),
+        ):
+            assert _REAL_DOWNLOAD_INDEX() is None
+
+    def test_a_failed_index_update_does_not_fail_the_publish(
+        self, capsys: pytest.CaptureFixture[str], tmp_path: Path
+    ) -> None:
+        """The release is published and fetchable by name; losing an
+        optional convenience asset must not undo that."""
+        import ltvm_pkg.cli.fetch as f
+
+        manifest = tmp_path / "manifest-rocky9-x86_64-5.14.0.json"
+        manifest.write_text(json.dumps({"target": "rocky9"}))
+        with patch.object(
+            f, "_download_index", side_effect=RuntimeError("no net")
+        ):
+            f._update_release_index(manifest, "t", use_json=False)
+        assert "could not update the release index" in capsys.readouterr().err
