@@ -56,6 +56,25 @@ ZSTD_THREADS = "0"  # "0" = all cores
 
 DEFAULT_VARIANT = "base"
 
+# Tar flags that keep a published asset about its contents and nothing
+# else.  Without them every member carried the publisher's username and
+# uid, and two runs over identical bytes produced different tarballs --
+# which also rules out ever deduplicating assets by digest.  --sort=name
+# and a fixed --mtime are what make the output actually reproducible;
+# numeric root ownership is also what podman's ADD wants on extract.
+_TAR_REPRODUCIBLE = [
+    "--owner=0",
+    "--group=0",
+    "--numeric-owner",
+    "--sort=name",
+    "--mtime=@0",
+]
+
+# GitHub refuses a release asset over 2 GiB.  Checked before upload --
+# discovering it afterwards means the whole zstd pipeline ran for
+# nothing.
+GITHUB_ASSET_LIMIT = 2 * 1024 * 1024 * 1024
+
 # Shared with TargetConfig.resolve_kernel so the packager and the
 # builder agree on which of several built kernels is the newest --
 # a disagreement means publishing artifacts the build never produced.
@@ -100,47 +119,82 @@ def _schema_id() -> str:
     return f"{SCHEMA_NAME}/{SCHEMA_VERSION}"
 
 
+def _git_field(*args: str) -> str:
+    """One-line `git -C <ltvm_pkg> ...` output, or "" if unavailable."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(Path(__file__).parent), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def _git_field_in(tree: Path, *args: str) -> str:
+    """One-line `git -C <tree> ...` output, or "" if unavailable."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(tree), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def _lustre_tree_version_of(tree: Path) -> str:
+    """The Lustre version a tree declares, or "".
+
+    Shares cli.util's reader rather than re-parsing
+    LUSTRE-VERSION-FILE, so the value published matches the one the
+    build header prints.
+    """
+    from .cli.util import _lustre_tree_version
+
+    try:
+        return _lustre_tree_version(tree) or ""
+    except Exception:  # noqa: BLE001 - provenance is never fatal
+        return ""
+
+
 def _producer_metadata() -> dict[str, str]:
     """Descriptive info about which ltvm wrote this manifest.
 
     Not part of the compat check -- purely for debugging ("which build
     published this?") when a release looks wrong.  Consumers MUST NOT
     key behavior off these fields; use SCHEMA_VERSION for that.
+
+    ``ltvm_version`` used to be looked for at ``_build_info.VERSION``,
+    which nothing writes -- the post-commit hook bakes ``BUILD_HASH`` --
+    so it always fell through to a bare ``git describe --always`` short
+    hash.  Published releases therefore identified their producer by a
+    seven-character string that need not resolve in a fresh clone.  Take
+    the version ltvm reports for itself, and record the full commit
+    separately so it is actually findable.
     """
     from datetime import datetime, timezone
 
+    from . import __version__
+
     info: dict[str, str] = {
         "built_at": datetime.now(timezone.utc).isoformat(),
+        "ltvm_version": str(__version__),
     }
-    # Try an in-tree build-info module first (populated at install time
-    # by `sudo ./ltvm install`), then fall back to a git describe.
-    try:
-        from . import _build_info
-
-        v = getattr(_build_info, "VERSION", None)
-        if v:
-            info["ltvm_version"] = str(v)
-    except ImportError:
-        pass
-    if "ltvm_version" not in info:
-        try:
-            r = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(Path(__file__).parent),
-                    "describe",
-                    "--always",
-                    "--dirty",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if r.returncode == 0 and r.stdout.strip():
-                info["ltvm_version"] = r.stdout.strip()
-        except FileNotFoundError:
-            pass
+    commit = _git_field("rev-parse", "HEAD")
+    if commit:
+        info["ltvm_commit"] = commit
+        # A dirty tree is the single most useful thing to know about a
+        # release that behaves unlike the commit it claims.
+        if _git_field("status", "--porcelain"):
+            info["ltvm_dirty"] = "true"
+    origin = _git_field("remote", "get-url", "origin")
+    if origin:
+        info["ltvm_origin"] = origin
     return info
 
 
@@ -242,7 +296,7 @@ def _tar_zstd(
     """
     _check_zstd()
     compress_prog = f"zstd -{ZSTD_LEVEL} -T{ZSTD_THREADS} --long={ZSTD_LONG}"
-    cmd = ["tar", f"--use-compress-program={compress_prog}"]
+    cmd = ["tar", f"--use-compress-program={compress_prog}", *_TAR_REPRODUCIBLE]
     for pat in exclude or []:
         cmd += ["--exclude", pat]
     cmd += [
@@ -638,14 +692,31 @@ def snapshot_lustre(
         else None
     )
 
-    snap_meta = {
-        "source": str(lustre_tree),
+    # Identify the tree by what it *is*, not where it sat on the
+    # publisher's disk.  This recorded `"source": "/home/<someone>/
+    # lustre-release"` into public releases -- a path no consumer reads
+    # and nobody meant to publish.  Origin, branch and Lustre version
+    # answer the question the field was reaching for.
+    snap_meta: dict[str, Any] = {
         "kernel": kernel_name,
         "variant": variant,
         "ko_count": len(ko_files),
         "lustre_commit": lustre_commit,
         "zfs_version": zfs_version,
     }
+    for key, value in (
+        ("lustre_version", _lustre_tree_version_of(lustre_tree)),
+        (
+            "lustre_origin",
+            _git_field_in(lustre_tree, "remote", "get-url", "origin"),
+        ),
+        (
+            "lustre_branch",
+            _git_field_in(lustre_tree, "rev-parse", "--abbrev-ref", "HEAD"),
+        ),
+    ):
+        if value:
+            snap_meta[key] = value
     (dest / ".ltvm-snapshot.json").write_text(
         json.dumps(snap_meta, indent=2) + "\n"
     )
@@ -674,6 +745,51 @@ def _snapshot_zfs_version(lustre_src: Path) -> str | None:
             if v:
                 return str(v)
     return None
+
+
+def _warn_if_oversized(asset: Path) -> None:
+    """Warn when an asset cannot be uploaded.
+
+    Only the bootable asset used to be checked, so an oversized
+    container, kernel or image asset was discovered by GitHub rejecting
+    the upload -- after minutes of zstd.  The kernel asset is the one
+    most likely to cross the line.
+    """
+    size = asset.stat().st_size
+    if size <= GITHUB_ASSET_LIMIT:
+        return
+    over = (size - GITHUB_ASSET_LIMIT) / (1024 * 1024)
+    print(
+        f"  WARNING: {asset.name} is {size / (1024 * 1024 * 1024):.2f} GiB, "
+        f"{over:.0f} MiB over GitHub's 2 GiB asset cap; the upload will "
+        f"be rejected.",
+        file=sys.stderr,
+    )
+
+
+def _asset_input_hashes(
+    paths: dict[str, Path], kernel_dir: Path, variant: str
+) -> dict[str, str]:
+    """The ``input_hash`` recorded in each packaged artifact's meta.json.
+
+    Read back from the metas being published rather than recomputed, so
+    what the manifest advertises is exactly what the assets carry -- a
+    recomputation here could disagree with them, which is the one thing
+    worse than not publishing the values at all.
+    """
+    out: dict[str, str] = {}
+    for kind, meta_file in (
+        ("container", paths["container_dir"] / "meta.json"),
+        ("kernel", kernel_dir / "meta.json"),
+        ("image", paths["image_dir"] / "meta.json"),
+    ):
+        meta = load_meta_safe(meta_file)
+        if meta is None:
+            continue
+        h = meta.get("input_hash")
+        if isinstance(h, str) and h:
+            out[kind] = h
+    return out
 
 
 def _asset_entry(kind: str, path: Path, tar_base: Path) -> dict[str, Any]:
@@ -837,6 +953,10 @@ def package_target(
         [
             "tar",
             f"--use-compress-program=zstd -{ZSTD_LEVEL} -T{ZSTD_THREADS} --long={ZSTD_LONG}",
+            # This asset builds its tar by hand rather than through
+            # _tar_zstd, so it has to carry the same flags or it would be
+            # the one published asset still stamped with the publisher.
+            *_TAR_REPRODUCIBLE,
             "--exclude",
             f"{kernel_rel}/lustre-artifacts",
             # MOFED kmods are variant content living under
@@ -951,6 +1071,11 @@ def package_target(
     # ---- manifest ----
     manifest = {
         "schema": _schema_id(),
+        # What extraction expects of these tar members.  Theirs is
+        # "relative to the artifacts root", which until now was carried
+        # only by a code comment -- so a future layout change would have
+        # been mis-extracted rather than refused.
+        "layout": "artifacts-root",
         # Which input_hash formula produced the metas inside these
         # assets.  The schema id already implies it today, but they are
         # free to diverge later (a layout change at a fixed formula, or
@@ -961,8 +1086,18 @@ def package_target(
         "target": target_name,
         "arch": arch,
         "kernel": kernel_name,
+        # The short name `--kernel` takes, spelled out rather than left
+        # for a consumer to reconstruct from the directory name -- which
+        # is what _kernel_release_signature does, by a heuristic its own
+        # docstring admits collides for same-major Ubuntu kernels.
+        "kernel_short": kmeta.get("lustre_target") or kernel_name,
         "kernel_version": kver,
         "variant": variant,
+        # Each artifact's staleness key, so a client can tell whether a
+        # release is current for its own formula *before* paying for a
+        # multi-gigabyte download, and so a future hash change is
+        # diagnosable rather than mysterious.
+        "input_hashes": _asset_input_hashes(paths, kernel_dir, variant),
         "assets": [
             _asset_entry(kind, path, tar_base) for kind, path in assets.items()
         ],
@@ -978,6 +1113,9 @@ def package_target(
     manifest_path = dest_dir / _manifest_name(target_name, arch, kver, variant)
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     assets["manifest"] = manifest_path
+
+    for asset in assets.values():
+        _warn_if_oversized(asset)
 
     total_mb = sum(p.stat().st_size for p in assets.values()) / (1024 * 1024)
     print(f"    Total published size: {total_mb:.0f} MB")
@@ -1055,13 +1193,7 @@ def package_bootable(
         f"    Compressed: {size_mb:.0f} MB "
         f"(from {qcow2_path.stat().st_size / (1024 * 1024):.0f} MB)"
     )
-    if out.stat().st_size > 2 * 1024 * 1024 * 1024:
-        print(
-            f"  WARNING: {out.name} is larger than GitHub's 2 GiB asset "
-            f"cap; publish will fail.  Consider re-building with a "
-            f"smaller image or splitting.",
-            file=sys.stderr,
-        )
+    _warn_if_oversized(out)
     return out
 
 
@@ -1234,7 +1366,16 @@ def fetch_target(
     output_base.mkdir(parents=True, exist_ok=True)
 
     print(f"  Fetching manifest from {manifest_url}...")
-    with tempfile.TemporaryDirectory(prefix="ltvm-fetch-") as td_str:
+    # Staged under the artifacts tree rather than /tmp: assets run to
+    # gigabytes, and on a host with a tmpfs /tmp a large one fails on a
+    # full filesystem instead of on the disk it is being written to.
+    # Each asset is unlinked as soon as it is extracted, so this holds
+    # one asset at a time, not the whole release.
+    staging = output_base / ".ltvm-fetch-tmp"
+    staging.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="ltvm-fetch-", dir=str(staging)
+    ) as td_str:
         td = Path(td_str)
         manifest_path = td / "manifest.json"
         _download(manifest_url, manifest_path, quiet=True)
@@ -1257,6 +1398,23 @@ def fetch_target(
             raise RuntimeError(
                 f"manifest target mismatch: asked for {target_name!r}, "
                 f"got {manifest.get('target')!r}"
+            )
+        # Arch was unchecked, and extraction is driven by the tar
+        # members' own paths -- so `--url` pointed at an aarch64
+        # manifest on an x86_64 host extracted into
+        # artifacts/<target>/aarch64/ and then `podman load`ed a
+        # foreign-arch builder, with nothing said about it.
+        m_arch = manifest.get("arch")
+        if m_arch is not None and m_arch != arch:
+            raise RuntimeError(
+                f"manifest arch mismatch: asked for {arch!r}, got "
+                f"{m_arch!r}.  Pass --arch {m_arch} to fetch this release."
+            )
+        m_layout = manifest.get("layout")
+        if m_layout is not None and m_layout != "artifacts-root":
+            raise RuntimeError(
+                f"manifest declares an extraction layout this ltvm does "
+                f"not know: {m_layout!r}"
             )
         m_variant = manifest.get("variant", DEFAULT_VARIANT)
         if m_variant != variant:

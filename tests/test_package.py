@@ -15,6 +15,7 @@ import shutil
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -679,3 +680,131 @@ class TestZfsAsset:
         ).stdout
         assert "vmlinuz" in listing
         assert "/zfs/" not in listing
+
+
+class TestPublishedMetadata:
+    """What a release says about itself, and what it must not say."""
+
+    @needs_host_tools
+    def _manifest(self, tmp_path: Path) -> dict:
+        """A real publish, read back.  Stubbing the tarball step would
+        leave _asset_entry with no file to stat, so this does the real
+        thing -- which is also what checks the manifest describes assets
+        that exist."""
+        out = _make_fake_output(tmp_path)
+        dest = tmp_path / "release"
+        with patch("ltvm_pkg.release_package.export_build_container") as m:
+            m.return_value = out / "container" / "image.tar"
+            package_target(
+                "rocky9",
+                out,
+                kernel="5.14-rhel9.7",
+                dest_dir=dest,
+                arch="x86_64",
+                variant=DEFAULT_VARIANT,
+            )
+        manifests = list(dest.glob("manifest-*.json"))
+        assert manifests, f"no manifest written into {dest}"
+        return json.loads(manifests[0].read_text())
+
+    @needs_host_tools
+    def test_manifest_names_the_short_kernel(self, tmp_path: Path) -> None:
+        """`--kernel` takes the short name, and a consumer should be told
+        it rather than reconstructing it from the directory name."""
+        assert self._manifest(tmp_path)["kernel_short"] == "5.14-rhel9.7"
+
+    @needs_host_tools
+    def test_manifest_declares_its_extraction_layout(
+        self, tmp_path: Path
+    ) -> None:
+        assert self._manifest(tmp_path)["layout"] == "artifacts-root"
+
+    @needs_host_tools
+    def test_manifest_carries_the_artifact_input_hashes(
+        self, tmp_path: Path
+    ) -> None:
+        """So a client can tell a release is not current for its formula
+        without downloading gigabytes to find out."""
+        hashes = self._manifest(tmp_path)["input_hashes"]
+        # The fixture writes an image meta and a kernel meta; neither
+        # carries input_hash, so the map is honest about what it found
+        # rather than inventing entries.
+        assert isinstance(hashes, dict)
+
+    @needs_host_tools
+    def test_producer_records_a_findable_commit(self, tmp_path: Path) -> None:
+        """ltvm_version used to be a bare 7-char describe that need not
+        resolve in a fresh clone, because the field it read is never
+        written."""
+        prod = self._manifest(tmp_path)["producer"]
+        assert prod["ltvm_version"]
+        if "ltvm_commit" in prod:  # absent outside a git checkout
+            assert len(prod["ltvm_commit"]) == 40
+
+
+class TestTarballsCarryNoPublisherIdentity:
+    @needs_host_tools
+    def test_members_are_owned_by_numeric_root(self, tmp_path: Path) -> None:
+        """Every member used to carry the publisher's username and uid."""
+        import ltvm_pkg.release_package as rp
+
+        src = tmp_path / "tree"
+        (src / "sub").mkdir(parents=True)
+        (src / "sub" / "f").write_text("x")
+        out = tmp_path / "a.tar.zst"
+        rp._tar_zstd(src, ["sub"], out)
+
+        listing = subprocess.run(
+            ["tar", "--numeric-owner", "-tvf", str(out)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert "0/0" in listing
+        assert os.environ.get("USER", "nobody-xyzzy") not in listing
+
+    @needs_host_tools
+    def test_two_runs_produce_identical_bytes(self, tmp_path: Path) -> None:
+        """Reproducibility is the precondition for ever deduplicating
+        assets by digest."""
+        import ltvm_pkg.release_package as rp
+
+        src = tmp_path / "tree"
+        src.mkdir()
+        (src / "a").write_text("one")
+        (src / "b").write_text("two")
+        first = tmp_path / "1.tar.zst"
+        second = tmp_path / "2.tar.zst"
+        rp._tar_zstd(src, ["a", "b"], first)
+        rp._tar_zstd(src, ["a", "b"], second)
+        assert first.read_bytes() == second.read_bytes()
+
+
+class TestOversizedAssetWarning:
+    def test_warns_past_the_github_cap(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Only the bootable asset was checked, so an oversized kernel or
+        image asset was discovered by the upload being rejected --
+        after minutes of zstd."""
+        import ltvm_pkg.release_package as rp
+
+        big = tmp_path / "kernel-rocky9.tar.zst"
+        big.write_bytes(b"")
+        with patch.object(
+            Path, "stat", lambda self: SimpleNamespace(st_size=3 * 1024**3)
+        ):
+            rp._warn_if_oversized(big)
+        err = capsys.readouterr().err
+        assert "2 GiB asset cap" in err
+        assert "kernel-rocky9.tar.zst" in err
+
+    def test_silent_under_the_cap(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        import ltvm_pkg.release_package as rp
+
+        small = tmp_path / "small.tar.zst"
+        small.write_bytes(b"x" * 10)
+        rp._warn_if_oversized(small)
+        assert capsys.readouterr().err == ""
