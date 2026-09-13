@@ -309,7 +309,13 @@ def _find_release_url(
     raise RuntimeError(
         f"No {kind} found for '{target}'{hint}\n"
         f"  Available releases: {', '.join(avail)}\n"
-        f"  Try: ltvm target fetch --list"
+        f"  Try: ltvm target fetch --list\n"
+        # Releases exist but none matched, and discovery here is by name.
+        # A release published by a newer ltvm under a changed naming or
+        # manifest scheme looks exactly like this -- absence -- so name
+        # the possibility rather than leaving it to be guessed.
+        f"  If these releases were published by a newer ltvm, this one "
+        f"may not recognize their naming: try `ltvm update`."
     )
 
 
@@ -611,6 +617,21 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
 
+    if not kernel and tc is not None:
+        # No --kernel: aim at the target's configured default rather
+        # than whatever GitHub happens to list first.  Release order is
+        # by the tagged commit's date, which is not a choice ltvm made
+        # and is identical across releases cut from one commit -- so a
+        # bare `ltvm target fetch rocky9` could land a kernel other than
+        # kernels.default, after which `ltvm create` fails with "Default
+        # kernel ... is not built".  That is the documented quick start.
+        try:
+            default_kernel = tc.resolve_kernel(None)
+        except Exception:  # noqa: BLE001 - fall back to today's behaviour
+            default_kernel = ""
+        if default_kernel:
+            kernel_signature = _kernel_release_signature(default_kernel)
+
     # --list: show available releases
     if getattr(args, "list", False):
         try:
@@ -683,8 +704,26 @@ def cmd_fetch(args: argparse.Namespace) -> int:
             return EXIT_OK
 
         try:
+            # The bootable asset has no manifest, so its digest comes
+            # from the published companion.  Absent means the release
+            # predates it: say so rather than refusing, which would
+            # strand every release already out there.
+            from ltvm_pkg.release_package import published_sha256
+
+            expected = published_sha256(url)
+            if expected is None and not use_json:
+                print(
+                    "  warning: no published sha256 beside this asset -- "
+                    "the download cannot be verified",
+                    file=sys.stderr,
+                )
             path = fetch_bootable(
-                target, url, ARTIFACTS_DIR, arch=arch, variant=variant
+                target,
+                url,
+                ARTIFACTS_DIR,
+                arch=arch,
+                variant=variant,
+                expected_sha256=expected,
             )
         except Exception as e:
             return _error(f"Fetch bootable failed: {e}", use_json)
@@ -1131,9 +1170,13 @@ def cmd_publish(args: argparse.Namespace) -> int:
 
         if not use_json:
             print(f"  Tag: {tag}")
+        # The companion goes up with the asset, or the fetcher has
+        # nothing to verify against.
+        companion = asset.with_name(asset.name + ".sha256")
+        uploads = [asset] + ([companion] if companion.is_file() else [])
         exit_code, err_msg = _cli_attr("_gh_release_upload")(
             tag,
-            [asset],
+            uploads,
             notes=(
                 f"Bootable disk image for {args.target} ({variant}) -- "
                 f"self-contained, no ltvm runtime required"

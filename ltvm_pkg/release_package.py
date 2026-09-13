@@ -747,6 +747,22 @@ def _snapshot_zfs_version(lustre_src: Path) -> str | None:
     return None
 
 
+def write_sha256_companion(asset: Path) -> Path:
+    """Write ``<asset>.sha256`` beside *asset* and return its path.
+
+    The ecosystem assets are covered by the manifest's per-asset
+    digests; the bootable asset has no manifest, so until now it had no
+    integrity check of any kind -- ``cmd_fetch`` called
+    ``fetch_bootable`` with no expected hash, and verification there is
+    conditional on having one.  Same ``<name>.sha256`` convention the
+    pre-built QEMU tarballs already use (host_setup._verify_qemu_asset),
+    so there is one format to know rather than two.
+    """
+    companion = asset.with_name(asset.name + ".sha256")
+    companion.write_text(f"{_sha256(asset)}  {asset.name}\n")
+    return companion
+
+
 def _warn_if_oversized(asset: Path) -> None:
     """Warn when an asset cannot be uploaded.
 
@@ -1194,6 +1210,7 @@ def package_bootable(
         f"(from {qcow2_path.stat().st_size / (1024 * 1024):.0f} MB)"
     )
     _warn_if_oversized(out)
+    write_sha256_companion(out)
     return out
 
 
@@ -1432,11 +1449,20 @@ def fetch_target(
             f"{total_bytes / (1024 * 1024):.0f} MB total"
         )
 
+        wanted_hashes = manifest.get("input_hashes") or {}
         for asset in manifest["assets"]:
             name = asset["name"]
             sha = asset["sha256"]
             size = asset["size"]
             tarball = td / name
+            if _container_already_current(
+                asset, wanted_hashes, output_base, target_name, arch, variant
+            ):
+                print(
+                    f"    [{asset['kind']}] {name} -- already current, "
+                    f"skipping ({size / (1024 * 1024):.0f} MB)"
+                )
+                continue
             print(
                 f"    [{asset['kind']}] {name} ({size / (1024 * 1024):.0f} MB)"
             )
@@ -1487,6 +1513,75 @@ def fetch_target(
         print(f"    {loaded_line}")
 
     return target_dir
+
+
+def _container_already_current(
+    asset: dict[str, Any],
+    wanted_hashes: dict[str, Any],
+    output_base: Path,
+    target_name: str,
+    arch: str,
+    variant: str,
+) -> bool:
+    """Can this container asset be skipped?
+
+    The container is per (target, arch) but every kernel release carries
+    its own copy, so fetching a second kernel for a target re-downloads
+    a few hundred megabytes and re-runs ``podman load`` for an image
+    already in the store.
+
+    Skipped only on positive evidence: the manifest states the
+    container's ``input_hash``, the local container meta records the same
+    one, and podman actually still has the image.  Anything missing --
+    an older manifest with no ``input_hashes``, no local meta, an image
+    pruned from the store -- falls through to the download, because a
+    wrongly skipped container means ``build lustre`` runs in a builder
+    that does not match what was fetched.
+    """
+    if asset.get("kind") != "container":
+        return False
+    wanted = wanted_hashes.get("container")
+    if not isinstance(wanted, str) or not wanted:
+        return False
+
+    cdir = output_base / target_name / arch / "container"
+    if variant != DEFAULT_VARIANT:
+        cdir = cdir / variant
+    local = load_meta_safe(cdir / "meta.json")
+    if local is None or local.get("input_hash") != wanted:
+        return False
+
+    from .target_config import build_container_tag
+
+    tag = build_container_tag(target_name, arch, variant)
+    r = subprocess.run(["podman", "image", "exists", tag], capture_output=True)
+    return r.returncode == 0
+
+
+def published_sha256(asset_url: str) -> str | None:
+    """The digest published beside *asset_url*, or None if there is none.
+
+    Absent means "published before the companion existed", which is a
+    warning rather than a failure: refusing outright would strand every
+    release already out there.
+    """
+    with tempfile.TemporaryDirectory(prefix="ltvm-sha-") as td:
+        dest = Path(td) / "asset.sha256"
+        try:
+            _download(
+                asset_url + ".sha256",
+                dest,
+                quiet=True,
+                max_time=30,
+                retries=1,
+            )
+        except RuntimeError:
+            return None
+        try:
+            first = dest.read_text().split()
+        except OSError:
+            return None
+    return first[0].strip().lower() if first else None
 
 
 def fetch_bootable(

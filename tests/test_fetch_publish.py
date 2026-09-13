@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -1354,6 +1355,12 @@ class TestCmdFetch:
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
             patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
+            # The digest probe is a real download otherwise: these
+            # tests point at a fake URL, so it waits out the timeout.
+            patch(
+                "ltvm_pkg.release_package.published_sha256",
+                return_value=None,
+            ),
             patch(
                 "ltvm_pkg.release_package.fetch_bootable",
                 return_value=Path("/fake/disk.qcow2"),
@@ -1394,6 +1401,12 @@ class TestCmdFetch:
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
             patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
+            # The digest probe is a real download otherwise: these
+            # tests point at a fake URL, so it waits out the timeout.
+            patch(
+                "ltvm_pkg.release_package.published_sha256",
+                return_value=None,
+            ),
             patch(
                 "ltvm_pkg.release_package.fetch_bootable",
                 return_value=Path("/fake/disk.qcow2"),
@@ -1428,6 +1441,12 @@ class TestCmdFetch:
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
             patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
+            # The digest probe is a real download otherwise: these
+            # tests point at a fake URL, so it waits out the timeout.
+            patch(
+                "ltvm_pkg.release_package.published_sha256",
+                return_value=None,
+            ),
             patch(
                 "ltvm_pkg.release_package.fetch_bootable",
                 side_effect=RuntimeError("disk corrupt"),
@@ -1996,3 +2015,105 @@ class TestPublishRefusesAnOlderHashScheme:
         tc.name = "rocky9"
         tc.meta_path.side_effect = lambda a, k=None: tmp_path / a / "meta.json"
         assert _outdated_scheme_artifacts(tc, None, "base") == []
+
+
+class TestContainerSkip:
+    """The container is per (target, arch), but every kernel release
+    carries its own copy -- so fetching a second kernel for a target
+    re-downloaded a few hundred MB and re-ran `podman load` for an image
+    already in the store.  Skipped only on positive evidence, because a
+    wrongly skipped container means `build lustre` runs in a builder
+    that does not match what was fetched."""
+
+    def _setup(self, tmp_path: Path, local_hash: str | None):
+        cdir = tmp_path / "rocky9" / "x86_64" / "container"
+        cdir.mkdir(parents=True)
+        if local_hash is not None:
+            (cdir / "meta.json").write_text(
+                json.dumps({"input_hash": local_hash})
+            )
+        return {"kind": "container", "name": "container-rocky9.tar.zst"}
+
+    def _call(self, asset, wanted, tmp_path, podman_rc=0):
+        import ltvm_pkg.release_package as rp
+
+        with patch.object(
+            rp.subprocess,
+            "run",
+            return_value=SimpleNamespace(returncode=podman_rc),
+        ):
+            return rp._container_already_current(
+                asset, wanted, tmp_path, "rocky9", "x86_64", "base"
+            )
+
+    def test_skips_when_hash_matches_and_image_exists(
+        self, tmp_path: Path
+    ) -> None:
+        asset = self._setup(tmp_path, "abc123")
+        assert self._call(asset, {"container": "abc123"}, tmp_path)
+
+    def test_downloads_when_the_hash_differs(self, tmp_path: Path) -> None:
+        asset = self._setup(tmp_path, "old")
+        assert not self._call(asset, {"container": "new"}, tmp_path)
+
+    def test_downloads_when_podman_lost_the_image(self, tmp_path: Path) -> None:
+        """Meta on disk is not evidence the image is still loaded."""
+        asset = self._setup(tmp_path, "abc123")
+        assert not self._call(
+            asset, {"container": "abc123"}, tmp_path, podman_rc=1
+        )
+
+    def test_downloads_when_there_is_no_local_meta(
+        self, tmp_path: Path
+    ) -> None:
+        asset = self._setup(tmp_path, None)
+        assert not self._call(asset, {"container": "abc123"}, tmp_path)
+
+    def test_downloads_when_the_manifest_states_no_hash(
+        self, tmp_path: Path
+    ) -> None:
+        """An older manifest carries no input_hashes at all."""
+        asset = self._setup(tmp_path, "abc123")
+        assert not self._call(asset, {}, tmp_path)
+
+    def test_never_skips_a_non_container_asset(self, tmp_path: Path) -> None:
+        self._setup(tmp_path, "abc123")
+        kernel = {"kind": "kernel", "name": "kernel-rocky9.tar.zst"}
+        assert not self._call(kernel, {"container": "abc123"}, tmp_path)
+
+
+class TestPublishedSha256:
+    """The bootable asset has no manifest, so its digest rides in a
+    `<name>.sha256` companion -- the same convention the pre-built QEMU
+    tarballs already use."""
+
+    def test_reads_the_companion(self, tmp_path: Path) -> None:
+        import ltvm_pkg.release_package as rp
+
+        def fake(url, dest, **kw):
+            assert url.endswith(".sha256")
+            dest.write_text("abc123  disk.qcow2.zst\n")
+
+        with patch.object(rp, "_download", fake):
+            assert rp.published_sha256("https://x/disk.qcow2.zst") == "abc123"
+
+    def test_absent_companion_is_none_not_an_error(
+        self, tmp_path: Path
+    ) -> None:
+        """Releases published before the companion existed must still
+        fetch -- with a warning, not a refusal."""
+        import ltvm_pkg.release_package as rp
+
+        with patch.object(rp, "_download", side_effect=RuntimeError("404")):
+            assert rp.published_sha256("https://x/disk.qcow2.zst") is None
+
+    def test_publisher_writes_it_beside_the_asset(self, tmp_path: Path) -> None:
+        import ltvm_pkg.release_package as rp
+
+        asset = tmp_path / "disk.qcow2.zst"
+        asset.write_bytes(b"payload")
+        companion = rp.write_sha256_companion(asset)
+        assert companion.name == "disk.qcow2.zst.sha256"
+        digest, name = companion.read_text().split()
+        assert name == "disk.qcow2.zst"
+        assert digest == rp._sha256(asset)
