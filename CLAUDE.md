@@ -193,10 +193,21 @@ deliberate, update the goldens in the same commit -- that
 test failing is the one signal anybody gets before the
 rebuilds start.
 
-Three cases `--why` answers honestly rather than
+`HASH_SCHEME` names the formula itself, and every meta.json
+records it.  When it moves, the components either side are
+not comparable -- so `staleness_reasons` reports the scheme
+and stops, rather than diffing them and blaming an input
+that never moved.  A meta carrying components but no
+`hash_scheme` is read as scheme 1, because the key arrived
+with scheme 2: without that inference the message would
+miss every artifact the change actually invalidated.
+
+Four cases `--why` answers honestly rather than
 plausibly, all worth preserving: an artifact built before
 the per-input digests existed reports the cause as unknown
-(not "nothing changed"); the kernel's `lustre-tree-inputs`
+(not "nothing changed"); one built under an older
+`HASH_SCHEME` says the formula changed rather than naming
+an input; the kernel's `lustre-tree-inputs`
 component is never blamed, because `build status` has no
 Lustre tree to recompute it from; and a hash that moved with
 no component accounting for it says exactly that.
@@ -725,6 +736,28 @@ to the bump-history comment above it, republish every
 release that should stay fetchable.  Old clients get a
 clear "upgrade ltvm" error and (interactive) an update
 prompt via [ltvm_pkg/update_check.py](ltvm_pkg/update_check.py).
+
+Two things make a republish land, and both are easy to
+assume and wrong:
+
+- **Fetch compares contents, not the tag.**  Publish
+  clobbers assets into the existing tag, so a republished
+  release keeps its name -- and comparing tags reported
+  "Already up to date" for a release whose every asset had
+  changed, skipping even the schema check that would have
+  said otherwise.  `fetch_target` reports the manifest
+  fingerprint it computed (schema + every asset's sha256,
+  deliberately not `producer.built_at`), and `cmd_fetch`
+  records it beside the tag.  No fingerprint on disk means
+  "fetched by an older ltvm, cannot verify" -- which re-fetches
+  rather than claiming freshness.
+- **Publish refuses an older `HASH_SCHEME`.**  Republishing
+  without rebuilding first would wrap old-formula hashes in a
+  new-schema manifest, which fetches cleanly and then reads
+  stale everywhere.  `--allow-stale` overrides.  The gate keys
+  on the recorded scheme rather than `is_stale`, because the
+  kernel and image hashes fold a Lustre-tree digest that
+  publish has no tree to recompute.
 
 ## Code Review Guidance
 

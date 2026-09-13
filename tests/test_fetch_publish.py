@@ -74,6 +74,42 @@ def _write_tag(
     return p
 
 
+def _fake_manifest(sha: str = "aa11") -> dict:
+    """The few manifest fields the content fingerprint reads."""
+    return {
+        "schema": "ltvm-release/2",
+        "producer": {"built_at": "2026-09-01T00:00:00Z"},
+        "assets": [
+            {"kind": "image", "name": "image-rocky9.tar.zst", "sha256": sha},
+            {"kind": "kernel", "name": "kernel-rocky9.tar.zst", "sha256": "bb"},
+        ],
+    }
+
+
+def _write_stamp(
+    out: Path,
+    target: str,
+    arch: str,
+    tag: str,
+    manifest: dict,
+    variant: str = "base",
+) -> Path:
+    """Record the fingerprint of *manifest* as the fetched contents.
+
+    Derived through the real ``manifest_fingerprint`` rather than a
+    hardcoded digest, so these tests pin the comparison and not one
+    particular hash.
+    """
+    from ltvm_pkg.cli.util import kver_from_release_tag
+    from ltvm_pkg.release_package import manifest_fingerprint
+
+    kver = kver_from_release_tag(tag, target, arch, variant)
+    p = _tag_path(out, target, arch, kver, variant).with_suffix(".fp")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(manifest_fingerprint(manifest) + "\n")
+    return p
+
+
 def _ns(**kwargs: Any) -> argparse.Namespace:
     """Build an argparse.Namespace with sensible cli defaults."""
     defaults: dict[str, Any] = {
@@ -828,24 +864,31 @@ class TestCmdFetch:
         assert tag_file.exists()
         assert tag_file.read_text().strip() == "rocky9-x86_64-foo"
 
-    def test_already_up_to_date_no_op(
+    # Three cases share one tag on disk and differ only in what the
+    # recorded contents say.  A tag cannot tell them apart -- publish
+    # clobbers assets into the existing tag -- and treating all three as
+    # "up to date" is what let a republish go unnoticed.
+
+    def _fetch_with(
         self,
-        capsys: pytest.CaptureFixture[str],
         tmp_targets: Path,
-    ) -> None:
-        """Same release tag on disk: no fetch, no error, success."""
+        out: Path,
+        tag: str,
+        *,
+        remote: dict,
+        replace: bool = False,
+        force: bool = False,
+    ):
         import ltvm_pkg.target_config as cfg
 
-        out = tmp_targets / "artifacts"
-        target_dir = out / "rocky9" / "x86_64"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        (target_dir / ".ltvm-release-tag").write_text("rocky9-x86_64-cached\n")
-        url = "https://x/releases/download/rocky9-x86_64-cached/manifest.json"
-
+        url = f"https://x/releases/download/{tag}/manifest.json"
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
             patch.object(cfg, "ARTIFACTS_DIR", out),
             patch.object(cli_mod, "fetch_target") as ft,
+            # Stubbed: the fingerprint probe is the only network call on
+            # this path, and a unit test must not reach for it.
+            patch.object(cli_mod, "fetch_manifest", return_value=remote),
         ):
             args = _ns(
                 target="rocky9",
@@ -855,48 +898,139 @@ class TestCmdFetch:
                 kernel=None,
                 variant="base",
                 list=False,
-                replace=False,
-                force=False,
+                replace=replace,
+                force=force,
                 image=False,
             )
-            rc = cmd_fetch(args)
+            return cmd_fetch(args), ft
+
+    def test_up_to_date_when_the_contents_match(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+    ) -> None:
+        """Same tag AND same contents: no fetch, no error, success."""
+        out = tmp_targets / "artifacts"
+        tag = "rocky9-x86_64-cached"
+        (out / "rocky9" / "x86_64").mkdir(parents=True, exist_ok=True)
+        _write_tag(out, "rocky9", "x86_64", tag)
+        manifest = _fake_manifest()
+        _write_stamp(out, "rocky9", "x86_64", tag, manifest)
+
+        rc, ft = self._fetch_with(tmp_targets, out, tag, remote=manifest)
 
         assert rc == EXIT_OK
         assert not ft.called
         assert "Already up to date" in capsys.readouterr().out
 
-    def test_replace_without_force_refuses_when_same_tag(
+    def test_refetches_when_the_release_was_republished(
         self,
         capsys: pytest.CaptureFixture[str],
         tmp_targets: Path,
     ) -> None:
-        """--replace + same tag refuses unless --force overrides."""
+        """Same tag, different asset hashes -- the case that was silent.
+
+        Publish clobbers into the existing tag, so a republished release
+        keeps its name.  Reporting "Already up to date" here left the
+        client on its old metas and, worse, skipped the schema check that
+        would otherwise have told it to re-fetch.
+        """
+        out = tmp_targets / "artifacts"
+        tag = "rocky9-x86_64-cached"
+        (out / "rocky9" / "x86_64").mkdir(parents=True, exist_ok=True)
+        _write_tag(out, "rocky9", "x86_64", tag)
+        _write_stamp(out, "rocky9", "x86_64", tag, _fake_manifest("old"))
+
+        rc, ft = self._fetch_with(
+            tmp_targets, out, tag, remote=_fake_manifest("new")
+        )
+
+        assert rc == EXIT_OK
+        assert ft.called
+        assert "republished" in capsys.readouterr().out
+
+    def test_refetches_when_there_is_no_content_record(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+    ) -> None:
+        """Fetched by an older ltvm: no fingerprint on disk.
+
+        "Cannot verify" is not "up to date", so re-fetch and say why.
+        One download, after which the record exists.
+        """
+        out = tmp_targets / "artifacts"
+        tag = "rocky9-x86_64-cached"
+        (out / "rocky9" / "x86_64").mkdir(parents=True, exist_ok=True)
+        _write_tag(out, "rocky9", "x86_64", tag)
+
+        rc, ft = self._fetch_with(
+            tmp_targets, out, tag, remote=_fake_manifest()
+        )
+
+        assert rc == EXIT_OK
+        assert ft.called
+        assert "older" in capsys.readouterr().out
+
+    def test_an_unreachable_manifest_refetches_rather_than_skipping(
+        self,
+        tmp_targets: Path,
+    ) -> None:
+        """The probe feeds a cache decision, so failing it must degrade
+        to doing the work, never to claiming it was unnecessary."""
         import ltvm_pkg.target_config as cfg
 
         out = tmp_targets / "artifacts"
-        target_dir = out / "rocky9" / "x86_64"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        (target_dir / ".ltvm-release-tag").write_text("rocky9-x86_64-same\n")
-        url = "https://x/releases/download/rocky9-x86_64-same/manifest.json"
+        tag = "rocky9-x86_64-cached"
+        (out / "rocky9" / "x86_64").mkdir(parents=True, exist_ok=True)
+        _write_tag(out, "rocky9", "x86_64", tag)
+        _write_stamp(out, "rocky9", "x86_64", tag, _fake_manifest())
+        url = f"https://x/releases/download/{tag}/manifest.json"
 
         with (
             patch.object(cli_mod, "TargetConfig", _tc_factory(tmp_targets)),
             patch.object(cfg, "ARTIFACTS_DIR", out),
             patch.object(cli_mod, "fetch_target") as ft,
+            patch.object(
+                cli_mod, "fetch_manifest", side_effect=RuntimeError("no net")
+            ),
         ):
-            args = _ns(
-                target="rocky9",
-                url=url,
-                filter=None,
-                arch="x86_64",
-                kernel=None,
-                variant="base",
-                list=False,
-                replace=True,
-                force=False,
-                image=False,
+            rc = cmd_fetch(
+                _ns(
+                    target="rocky9",
+                    url=url,
+                    filter=None,
+                    arch="x86_64",
+                    kernel=None,
+                    variant="base",
+                    list=False,
+                    replace=False,
+                    force=False,
+                    image=False,
+                )
             )
-            rc = cmd_fetch(args)
+
+        assert rc == EXIT_OK
+        assert ft.called
+
+    def test_replace_without_force_refuses_when_contents_match(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+    ) -> None:
+        """--replace + genuinely identical release refuses unless --force."""
+        out = tmp_targets / "artifacts"
+        tag = "rocky9-x86_64-same"
+        (out / "rocky9" / "x86_64").mkdir(parents=True, exist_ok=True)
+        _write_tag(out, "rocky9", "x86_64", tag)
+        # The refusal's claim -- "identical bytes" -- is only true when
+        # the contents match, so the stamp has to agree with the remote.
+        manifest = _fake_manifest()
+        _write_stamp(out, "rocky9", "x86_64", tag, manifest)
+
+        rc, ft = self._fetch_with(
+            tmp_targets, out, tag, remote=manifest, replace=True
+        )
 
         assert rc == EXIT_ERROR
         assert not ft.called
@@ -1731,3 +1865,134 @@ class TestCmdPublish:
             rc = cmd_publish(args)
 
         assert rc == EXIT_NOT_FOUND
+
+
+class TestManifestFingerprint:
+    """The fingerprint is what lets fetch tell "same release" from
+    "same tag, republished" -- so what it does and does not cover is
+    the whole point of it."""
+
+    def test_moves_when_an_asset_changes(self) -> None:
+        from ltvm_pkg.release_package import manifest_fingerprint
+
+        assert manifest_fingerprint(_fake_manifest("aa")) != (
+            manifest_fingerprint(_fake_manifest("bb"))
+        )
+
+    def test_ignores_the_publish_timestamp(self) -> None:
+        """producer.built_at changes on every publish.  Folding it in
+        would make a cosmetic re-publish of identical assets force a
+        multi-gigabyte re-download for nothing."""
+        from ltvm_pkg.release_package import manifest_fingerprint
+
+        a = _fake_manifest()
+        b = _fake_manifest()
+        b["producer"] = {"built_at": "2099-01-01T00:00:00Z"}
+        assert manifest_fingerprint(a) == manifest_fingerprint(b)
+
+    def test_moves_when_the_schema_changes(self) -> None:
+        """A schema bump alone must invalidate a cached copy, since the
+        recorded meta.json values can mean something different."""
+        from ltvm_pkg.release_package import manifest_fingerprint
+
+        a = _fake_manifest()
+        b = _fake_manifest()
+        b["schema"] = "ltvm-release/3"
+        assert manifest_fingerprint(a) != manifest_fingerprint(b)
+
+    def test_asset_order_does_not_matter(self) -> None:
+        """Nothing promises the writer's asset order is stable."""
+        from ltvm_pkg.release_package import manifest_fingerprint
+
+        a = _fake_manifest()
+        b = _fake_manifest()
+        b["assets"] = list(reversed(b["assets"]))
+        assert manifest_fingerprint(a) == manifest_fingerprint(b)
+
+    def test_fetch_target_reports_it(self, tmp_path: Path) -> None:
+        """cmd_fetch records what it fetched from this, rather than
+        downloading the manifest a second time."""
+        import ltvm_pkg.release_package as rp
+
+        manifest = _fake_manifest()
+        report: dict = {}
+
+        def fake_download(url, dest, **kw):
+            dest.write_text(json.dumps(manifest))
+
+        # Fails after the schema check, which is fine: the report is
+        # filled before any asset is touched.
+        with patch.object(rp, "_download", fake_download):
+            with pytest.raises(Exception):
+                rp.fetch_target(
+                    "rocky9",
+                    "https://x/releases/download/t/manifest.json",
+                    tmp_path,
+                    report=report,
+                )
+
+        from ltvm_pkg.release_package import manifest_fingerprint
+
+        assert report["fingerprint"] == manifest_fingerprint(manifest)
+
+
+class TestPublishRefusesAnOlderHashScheme:
+    """Publish checks that files exist, not that their metadata is
+    current.  A release packaged from artifacts built under the previous
+    hash scheme fetches cleanly and then reads stale on every client --
+    the exact failure the schema bump exists to prevent, arriving from
+    the publisher's side instead."""
+
+    def _tc(self, tmp_path: Path, scheme: int | None):
+        """A stub target whose three metas record *scheme*."""
+        metas = {}
+        for artifact in ("container", "kernel", "image"):
+            d = tmp_path / artifact
+            d.mkdir(parents=True, exist_ok=True)
+            meta: dict = {"target": "rocky9", "input_hash": "abc"}
+            if scheme is not None:
+                meta["hash_scheme"] = scheme
+            (d / "meta.json").write_text(json.dumps(meta))
+            metas[artifact] = d / "meta.json"
+
+        tc = MagicMock()
+        tc.name = "rocky9"
+        tc.meta_path.side_effect = lambda a, k=None: metas[a]
+        return tc
+
+    def test_current_scheme_passes_the_gate(self, tmp_path: Path) -> None:
+        from ltvm_pkg.cli.fetch import _outdated_scheme_artifacts
+        from ltvm_pkg.target_config import HASH_SCHEME
+
+        tc = self._tc(tmp_path, HASH_SCHEME)
+        assert _outdated_scheme_artifacts(tc, None, "base") == []
+
+    def test_an_older_scheme_is_listed(self, tmp_path: Path) -> None:
+        from ltvm_pkg.cli.fetch import _outdated_scheme_artifacts
+
+        tc = self._tc(tmp_path, 1)
+        found = _outdated_scheme_artifacts(tc, None, "base")
+        assert len(found) == 3
+        assert all("scheme 1" in f for f in found)
+
+    def test_a_meta_with_no_scheme_counts_as_scheme_1(
+        self, tmp_path: Path
+    ) -> None:
+        """Same inference staleness_reasons makes: the key arrived with
+        scheme 2, so its absence dates the artifact."""
+        from ltvm_pkg.cli.fetch import _outdated_scheme_artifacts
+
+        tc = self._tc(tmp_path, None)
+        assert len(_outdated_scheme_artifacts(tc, None, "base")) == 3
+
+    def test_a_missing_meta_is_not_a_scheme_complaint(
+        self, tmp_path: Path
+    ) -> None:
+        """An unbuilt artifact is package_target's problem to report,
+        with a message that names what to build."""
+        from ltvm_pkg.cli.fetch import _outdated_scheme_artifacts
+
+        tc = MagicMock()
+        tc.name = "rocky9"
+        tc.meta_path.side_effect = lambda a, k=None: tmp_path / a / "meta.json"
+        assert _outdated_scheme_artifacts(tc, None, "base") == []

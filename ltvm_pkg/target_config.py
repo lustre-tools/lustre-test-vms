@@ -202,6 +202,20 @@ class Variant:
         return h.digest()
 
 
+# Which formula produced an artifact's ``input_hash``.  Bumped only when
+# the *composition* of the hash changes -- not when an input's contents
+# do.  Recorded in every meta.json, so a stale artifact can be explained
+# honestly: without it, narrowing the hash in scheme 2 made `--why`
+# report "targets.yaml (changed)" for a targets.yaml that had not
+# changed, at exactly the moment someone is asking why a rebuild started.
+#
+# History:
+#   1  targets.yaml's whole per-target slice minus `variants` and `zfs`.
+#   2  `kernels` excluded too; `kernels.config` and the built kernel's
+#      own `available` entry folded back per kernel instead.
+HASH_SCHEME = 2
+
+
 # The ``-<lnxmaj>-<lnxrel>`` tail that turns a short kernel name into a
 # built-dir name: a dotted three-part kernel version, dash-delimited on
 # both sides (``5.14-rhel9.7`` -> ``5.14-rhel9.7-5.14.0-611.13.1.el9_7``).
@@ -1372,6 +1386,11 @@ class TargetConfig:
         hash_kernel_arg = hash_kernel if hash_kernel is not None else kernel
         meta = {
             "target": self.name,
+            # Which formula the hash below came from.  An artifact whose
+            # scheme predates this ltvm's is stale for a reason no
+            # per-input diff can express, and staleness_reasons says so
+            # rather than blaming an input that did not move.
+            "hash_scheme": HASH_SCHEME,
             "input_hash": self.input_hash(
                 artifact,
                 kernel=hash_kernel_arg,

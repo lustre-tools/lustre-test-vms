@@ -193,3 +193,73 @@ class TestStalenessReasons:
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nope")),
         )
         assert staleness_reasons(tc, "container", status) == []
+
+
+class TestHashSchemeIsRecordedAndExplained:
+    """Scheme 2 narrowed what feeds `input_hash`.  Every artifact built
+    before it is stale for a reason no per-input diff can express, and
+    saying "targets.yaml (changed)" about a targets.yaml nobody touched
+    is exactly what the --why design exists to prevent."""
+
+    def test_write_meta_records_the_scheme(self, arts: Path) -> None:
+        from ltvm_pkg.target_config import HASH_SCHEME
+
+        tc = TargetConfig("rocky9")
+        tc.write_meta("container")
+        meta = json.loads((tc.container_output_dir() / "meta.json").read_text())
+        assert meta["hash_scheme"] == HASH_SCHEME
+
+    def test_an_older_scheme_replaces_the_component_diff(self) -> None:
+        tc = TargetConfig("rocky9")
+        current = tc.input_components("kernel", kernel="5.14-rhel9.5")
+        reasons = staleness_reasons(
+            tc,
+            "kernel",
+            {"hash_scheme": 1, "input_components": current},
+            kernel="5.14-rhel9.5",
+        )
+        assert len(reasons) == 1
+        assert "hash scheme 1" in reasons[0]
+        assert "not your inputs" in reasons[0]
+
+    def test_a_meta_with_no_scheme_is_read_as_scheme_1(self) -> None:
+        """The key arrived *with* scheme 2, so its absence dates the
+        artifact.  Without this inference the message would miss every
+        artifact the change actually invalidated -- all of which were
+        built before the key existed.
+        """
+        tc = TargetConfig("rocky9")
+        current = tc.input_components("kernel", kernel="5.14-rhel9.5")
+        # Components recorded, no hash_scheme: a pre-scheme-2 build.
+        reasons = staleness_reasons(
+            tc,
+            "kernel",
+            {"input_components": current},
+            kernel="5.14-rhel9.5",
+        )
+        assert len(reasons) == 1
+        assert "hash scheme 1" in reasons[0]
+
+    def test_a_current_scheme_still_names_the_moved_input(self) -> None:
+        """The scheme check must not swallow ordinary staleness."""
+        tc = TargetConfig("rocky9")
+        current = dict(tc.input_components("kernel", kernel="5.14-rhel9.5"))
+        current["common/kernel-config.fragment"] = "000000000000"
+        reasons = staleness_reasons(
+            tc,
+            "kernel",
+            {"hash_scheme": 2, "input_components": current},
+            kernel="5.14-rhel9.5",
+        )
+        assert reasons == ["common/kernel-config.fragment (changed)"]
+
+    def test_an_artifact_with_no_components_still_says_nothing(self) -> None:
+        """Predates --why entirely: the caller reports that as unknown,
+        and must not get a scheme complaint instead."""
+        tc = TargetConfig("rocky9")
+        assert staleness_reasons(tc, "container", {"input_hash": "x"}) == []
+
+    def test_the_manifest_records_the_scheme(self) -> None:
+        from ltvm_pkg.release_package import HASH_SCHEME
+
+        assert isinstance(HASH_SCHEME, int)

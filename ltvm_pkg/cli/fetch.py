@@ -33,6 +33,7 @@ from ltvm_pkg.cli.util import (
     host_arch,
     resolve_arch,
 )
+from ltvm_pkg.paths import load_meta_safe
 
 log = logging.getLogger("ltvm")
 
@@ -503,6 +504,50 @@ def _replace_scope(
     return victims
 
 
+def _manifest_fingerprint_of(manifest_url: str) -> str:
+    """Fingerprint of the release at *manifest_url*, or "" if unreadable.
+
+    Best-effort by design: this feeds a *caching* decision, so a network
+    hiccup must degrade to "re-fetch" rather than abort a fetch the user
+    asked for.  Resolved through _cli_attr so tests can stub the one
+    network call in this path.
+    """
+    try:
+        manifest = _cli_attr("fetch_manifest")(manifest_url)
+    except Exception:  # noqa: BLE001 - any failure means "cannot tell"
+        return ""
+    try:
+        return str(_cli_attr("manifest_fingerprint")(manifest))
+    except Exception:  # noqa: BLE001 - a malformed manifest is not ours to fix
+        return ""
+
+
+def _release_contents_match(
+    manifest_url: str, tag_root: Path, kver: str, variant: str
+) -> tuple[bool, str]:
+    """Is the local copy the same *contents* as the remote release?
+
+    Returns (match, reason-when-not).  False with a reason covers both
+    "the release was republished" and "we have no record of what was
+    fetched" -- the caller prints the reason, because they cost the user
+    different things and conflating them is what hid the republish.
+    """
+    from ltvm_pkg.cli.util import read_release_stamp
+
+    local = read_release_stamp(tag_root, kver, variant)
+    if not local:
+        return False, (
+            "no record of the fetched contents (fetched by an older "
+            "ltvm), so the local copy cannot be verified"
+        )
+    remote = _manifest_fingerprint_of(manifest_url)
+    if not remote:
+        return False, "could not read the published manifest to compare"
+    if remote == local:
+        return True, ""
+    return False, "the release was republished since this copy was fetched"
+
+
 def cmd_fetch(args: argparse.Namespace) -> int:
     use_json = args.json
     url = getattr(args, "url", None)
@@ -691,6 +736,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         kver_from_release_tag,
         read_release_tag,
         release_tag_file,
+        write_release_stamp,
         write_release_tag,
     )
 
@@ -727,26 +773,38 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         return EXIT_OK
 
     if release_tag and existing_tag == release_tag:
-        # Same tag already on disk.  Without --replace: no-op success.
-        # With --replace but no --force: refuse, because the "clean
-        # re-fetch" would produce identical bytes -- probably not
-        # what the user meant to pay for.
-        if replace and not force:
-            return _error(
-                f"local copy already at {release_tag}; "
-                f"--replace would re-download identical bytes",
-                use_json,
-                hint="pass --force to re-fetch anyway",
-            )
-        if not replace:
-            if not use_json:
-                print(f"  Already up to date ({release_tag})")
-            result = {
-                "target": target,
-                "path": str(ARTIFACTS_DIR / target / arch),
-            }
-            _output(result, use_json)
-            return EXIT_OK
+        # Same tag -- but a tag does not identify contents.  Publish
+        # clobbers assets into the existing tag, so a republished
+        # release keeps its name, and comparing tags alone reported
+        # "Already up to date" for a release whose every asset had
+        # changed.  That is how a schema bump gets defeated: the client
+        # keeps its old metas, never reaches the schema check that
+        # would have told it to re-fetch, and every artifact then reads
+        # stale.  So compare what the release actually ships.
+        same_contents, why = _release_contents_match(
+            url, tag_root, fetch_kver, variant
+        )
+        if same_contents:
+            if replace and not force:
+                return _error(
+                    f"local copy already at {release_tag}; "
+                    f"--replace would re-download identical bytes",
+                    use_json,
+                    hint="pass --force to re-fetch anyway",
+                )
+            if not replace:
+                if not use_json:
+                    print(f"  Already up to date ({release_tag})")
+                result = {
+                    "target": target,
+                    "path": str(ARTIFACTS_DIR / target / arch),
+                }
+                _output(result, use_json)
+                return EXIT_OK
+        elif not use_json:
+            # Say which of the two reasons it was: a republish is
+            # expected news, a missing record is a one-time cost.
+            print(f"  Re-fetching {release_tag}: {why}")
     elif release_tag and existing_tag and existing_tag != release_tag:
         # Different tag already on disk.  Silently extracting the new
         # release on top of (or alongside) the existing one mixes two
@@ -823,12 +881,28 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         print(f"Fetching {target}...")
 
     try:
+        # `report` comes back carrying the fingerprint of what was
+        # actually fetched, computed from the manifest fetch_target
+        # already read -- no second download just to record it.
+        report: dict[str, Any] = {}
         target_dir = _cli_attr("fetch_target")(
-            target, url, ARTIFACTS_DIR, arch=arch, variant=variant
+            target,
+            url,
+            ARTIFACTS_DIR,
+            arch=arch,
+            variant=variant,
+            report=report,
         )
-        # Record the release tag so repeat fetches are instant
+        # Record the release tag so repeat fetches are instant, and the
+        # content fingerprint beside it so the next fetch can tell a
+        # republish from a no-op.
         if release_tag:
             write_release_tag(tag_root, target, arch, release_tag, variant)
+            fp = str(report.get("fingerprint") or "")
+            if fp:
+                write_release_stamp(
+                    tag_root, target, arch, release_tag, fp, variant
+                )
     except Exception as e:
         # A schema-mismatch error means the published manifest was
         # produced by a newer (or older) ltvm.  Force an immediate
@@ -947,6 +1021,45 @@ def _gh_release_upload(
     return None, None
 
 
+def _outdated_scheme_artifacts(
+    tc: Any, kernel: str | None, variant: str
+) -> list[str]:
+    """Artifacts whose meta.json predates this ltvm's hash scheme.
+
+    Publishing one wraps an old formula's ``input_hash`` in a manifest
+    that claims the current scheme.  A fetcher accepts that release and
+    then reads every artifact as stale -- the silent-staleness failure
+    the schema bump exists to prevent, reintroduced from the publisher's
+    side.  Nothing else in the publish path would notice: it checks that
+    files exist, not that their metadata is current.
+
+    Deliberately narrower than a general staleness check.  The kernel
+    and image hashes fold in a Lustre-tree digest that publish has no
+    tree to recompute, so `is_stale` cannot answer honestly for them
+    here -- but the recorded scheme is a plain recorded fact, decidable
+    without any of that.
+    """
+    from ltvm_pkg.target_config import HASH_SCHEME
+
+    outdated: list[str] = []
+    for artifact in ("container", "kernel", "image"):
+        try:
+            meta_path = tc.meta_path(artifact, kernel)
+        except Exception:  # noqa: BLE001 - an artifact this target lacks
+            continue
+        meta = load_meta_safe(meta_path)
+        if meta is None:
+            continue
+        recorded = meta.get("hash_scheme")
+        if not isinstance(recorded, int):
+            # Same inference as staleness_reasons: the key arrived with
+            # scheme 2, so a meta carrying none was written by scheme 1.
+            recorded = 1
+        if recorded != HASH_SCHEME:
+            outdated.append(f"{artifact} (scheme {recorded})")
+    return outdated
+
+
 def cmd_publish(args: argparse.Namespace) -> int:
     """Upload a packaged asset set to a GitHub release.
 
@@ -1044,6 +1157,21 @@ def cmd_publish(args: argparse.Namespace) -> int:
             use_json,
         )
         return EXIT_OK
+
+    # Refuse before packaging anything: a release built under an older
+    # hash scheme fetches cleanly and then reads stale on every client.
+    outdated = _outdated_scheme_artifacts(tc, kernel, variant)
+    if outdated and not bool(getattr(args, "allow_stale", False)):
+        return _error(
+            f"refusing to publish artifacts built under an older "
+            f"staleness hash scheme: {', '.join(outdated)}",
+            use_json,
+            hint=(
+                f"rebuild first (`ltvm build all {args.target}`), or pass "
+                f"--allow-stale to publish anyway -- fetchers will then "
+                f"read these artifacts as stale and rebuild them"
+            ),
+        )
 
     # --- Ecosystem publish: package, then upload every asset (unless
     # --no-upload, which short-circuits after packaging). ---

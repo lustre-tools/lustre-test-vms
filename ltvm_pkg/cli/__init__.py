@@ -76,7 +76,9 @@ from ltvm_pkg.lustre_build import (
 from ltvm_pkg.lustre_compat import ValidationResult, validate_target
 from ltvm_pkg.paths import load_meta_safe
 from ltvm_pkg.release_package import (
+    fetch_manifest,
     fetch_target,
+    manifest_fingerprint,
     package_target,
     snapshot_lustre,
 )
@@ -259,7 +261,9 @@ __all__ = [
     "cmd_vm_stop",
     "configure_fstype",
     "deploy_to_vm",
+    "fetch_manifest",
     "fetch_target",
+    "manifest_fingerprint",
     "host_setup",
     "image_status",
     "json",

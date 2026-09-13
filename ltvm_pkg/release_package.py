@@ -60,6 +60,7 @@ DEFAULT_VARIANT = "base"
 # builder agree on which of several built kernels is the newest --
 # a disagreement means publishing artifacts the build never produced.
 from .target_config import (  # noqa: E402
+    HASH_SCHEME,
     kernel_dir_version_key,
     resolve_kernel_dir,
 )
@@ -950,6 +951,12 @@ def package_target(
     # ---- manifest ----
     manifest = {
         "schema": _schema_id(),
+        # Which input_hash formula produced the metas inside these
+        # assets.  The schema id already implies it today, but they are
+        # free to diverge later (a layout change at a fixed formula, or
+        # the reverse), and a fetcher that can read this does not have to
+        # infer one from the other.
+        "hash_scheme": HASH_SCHEME,
         "producer": _producer_metadata(),
         "target": target_name,
         "arch": arch,
@@ -1063,12 +1070,63 @@ def package_bootable(
 # ---------------------------------------------------------------------------
 
 
-def _download(url: str, dest: Path, *, quiet: bool = False) -> None:
+def manifest_fingerprint(manifest: dict[str, Any]) -> str:
+    """A short digest of what a release actually ships.
+
+    Covers the schema id and every asset's (name, sha256) -- so it moves
+    when any published byte moves, and does NOT move for a cosmetic
+    re-publish of identical assets.  Deliberately excludes
+    ``producer.built_at``, which changes on every publish and would
+    otherwise force a multi-gigabyte re-download for nothing.
+
+    This is what lets fetch tell "same release" from "same tag, new
+    contents".  Publish clobbers assets into the existing tag, so the
+    tag alone cannot: a republished release kept its name.
+    """
+    parts = [str(manifest.get("schema", ""))]
+    for a in sorted(
+        manifest.get("assets", []) or [], key=lambda a: str(a.get("name", ""))
+    ):
+        parts.append(f"{a.get('name', '')}:{a.get('sha256', '')}")
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
+
+
+def fetch_manifest(manifest_url: str) -> dict[str, Any]:
+    """Download and parse just the manifest (about a kilobyte).
+
+    Separate from ``fetch_target`` so a caller can inspect a release
+    before committing to its assets.
+    """
+    with tempfile.TemporaryDirectory(prefix="ltvm-manifest-") as td:
+        dest = Path(td) / "manifest.json"
+        # Tight budget: this is a kilobyte of metadata, and on the
+        # up-to-date path the user is waiting on it before any real
+        # work starts.  One retry, not three.
+        _download(manifest_url, dest, quiet=True, max_time=30, retries=1)
+        loaded = json.loads(dest.read_text())
+    if not isinstance(loaded, dict):
+        raise RuntimeError(f"manifest at {manifest_url} is not a JSON object")
+    return loaded
+
+
+def _download(
+    url: str,
+    dest: Path,
+    *,
+    quiet: bool = False,
+    max_time: int = 1800,
+    retries: int = 3,
+) -> None:
     """Fetch ``url`` to ``dest`` with curl; fail loudly on non-2xx.
 
     On KeyboardInterrupt (Ctrl+C) the partial ``dest`` file is removed
     before re-raising so a subsequent retry doesn't see a truncated
     file masquerading as a full download.
+
+    The defaults suit a multi-gigabyte asset.  A small metadata probe
+    should pass a much tighter ``max_time``: 1800s of patience is right
+    for an image and wrong for a manifest, where it turns an unreachable
+    host into a half-hour stall.
     """
     # -s silences curl's default throughput table (we print our own
     # "Fetching..." lines above); -S keeps error messages visible.
@@ -1081,9 +1139,9 @@ def _download(url: str, dest: Path, *, quiet: bool = False) -> None:
         "--connect-timeout",
         "15",
         "--max-time",
-        "1800",
+        str(max_time),
         "--retry",
-        "3",
+        str(retries),
         "--retry-delay",
         "5",
         "--retry-all-errors",
@@ -1092,7 +1150,7 @@ def _download(url: str, dest: Path, *, quiet: bool = False) -> None:
         r = subprocess.run(
             ["curl", *flags, "-o", str(dest), url],
             check=False,
-            timeout=1850,
+            timeout=max_time + 50,
         )
     except FileNotFoundError:
         raise RuntimeError("curl not found -- run `sudo ltvm install`")
@@ -1155,6 +1213,7 @@ def fetch_target(
     output_base: str | Path,
     arch: str = "x86_64",
     variant: str = DEFAULT_VARIANT,
+    report: dict[str, Any] | None = None,
 ) -> Path:
     """Download and extract a split-asset release.
 
@@ -1164,6 +1223,12 @@ def fetch_target(
 
     After extraction, the build container tar is ``podman load``-ed so
     ``ltvm build lustre`` can find it.
+
+    ``report``, when given, is filled with facts about what was fetched
+    -- currently ``fingerprint`` (see ``manifest_fingerprint``).  The
+    caller needs that to record what it got, and this function has the
+    manifest in hand already: the alternative was a second download of
+    the same file right after this returns.
     """
     output_base = Path(output_base)
     output_base.mkdir(parents=True, exist_ok=True)
@@ -1174,6 +1239,9 @@ def fetch_target(
         manifest_path = td / "manifest.json"
         _download(manifest_url, manifest_path, quiet=True)
         manifest = json.loads(manifest_path.read_text())
+
+        if report is not None:
+            report["fingerprint"] = manifest_fingerprint(manifest)
 
         m_schema = manifest.get("schema")
         if m_schema != _schema_id():
