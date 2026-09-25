@@ -16,6 +16,7 @@ from typing import Any
 from ltvm_pkg.cli.util import (
     EXIT_ERROR,
     EXIT_OK,
+    _claim_error,
     _drop_to_vm_owner,
     _error,
     _uses_passthrough,
@@ -45,6 +46,9 @@ def _vm_call(fn: Any, ns: argparse.Namespace, use_json: bool) -> int:
 def cmd_vm_start(args: argparse.Namespace) -> int:
     use_json = args.json
     names = list(args.names)
+    err = _claim_error(list(args.names), "start", use_json)
+    if err is not None:
+        return err
     err = _vm_privileges(
         "ltvm start needs root for tap setup",
         use_json,
@@ -60,6 +64,9 @@ def cmd_vm_start(args: argparse.Namespace) -> int:
 
 def cmd_vm_stop(args: argparse.Namespace) -> int:
     use_json = args.json
+    err = _claim_error(list(args.names), "stop", use_json)
+    if err is not None:
+        return err
     err = _vm_privileges(
         "ltvm stop needs root for tap teardown",
         use_json,

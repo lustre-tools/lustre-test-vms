@@ -350,6 +350,30 @@ Export `LTVM_OWNER_ID=<durable-session-id>` before creating VMs so the
 owner metadata identifies the session rather than a pid; read it back with
 `ltvm list --json`.
 
+## Sharing VMs with other sessions
+
+Other sessions on the host see the same VMs, and one deploying over
+another's test run wrecks both.  Claim a VM before using it:
+
+```bash
+ltvm claim co1-single --tree ~/src/lustre-release   # or: ltvm claim (list)
+ltvm release co1-single                              # when done with it
+```
+
+`deploy-lustre` claims an unclaimed VM for you.  `deploy-lustre`,
+`llmount`, `start`/`stop`/`destroy`, `vm snapshot/restore/nmi/crash-collect/set`
+and the cluster commands refuse a VM another live session has claimed, and
+`ltvm list` shows `claimed=<owner>`.  When refused, use another VM or ask
+the user -- do not `ltvm release --force` someone else's claim on your own.
+Plain `ssh` is not gated, so claim before ssh-only work too.
+
+A Claude Code session is recognised by itself (`claude:<session-id>`), and
+its claims end when it exits.  Another agent exports `LTVM_OWNER_ID` and
+`LTVM_OWNER_PID` (the agent's own long-lived process: each command it runs
+is a fresh shell), or passes `--owner`/`--pid`; `--ttl 4h` ends a claim
+after a while regardless.  A human's claims (`user:<name>`) last until
+released, and a hand deploy never claims.
+
 ## Flags that apply everywhere
 
 `--json` for machine-readable output, `--verbose`, `--arch <arch>` to

@@ -459,6 +459,18 @@ def _require_root(use_json: bool, hint: str = "") -> int | None:
     return None
 
 
+def _claim_error(names: list[str], verb: str, use_json: bool) -> int | None:
+    """Refuse VMs another session claimed, before asking for sudo."""
+    from ltvm_pkg import vm_claim
+
+    try:
+        for name in names:
+            vm_claim.check(name, verb)
+    except vm_claim.ClaimError as e:
+        return _error(str(e), use_json)
+    return None
+
+
 def _vm_privileges(
     reason: str,
     use_json: bool,

@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from . import rootless
+from . import rootless, vm_claim
 from .deploy import configure_test_disks
 from .host_setup import is_macos
 from .paths import load_meta_safe
@@ -1384,7 +1384,10 @@ def _require_manageable(vm: VMInfo, verb: str) -> None:
     directories are sticky), so stopping or destroying someone else's VM
     needs root.  Starting it cannot work even then: its QEMU would run
     as this user, who cannot write the owner's disks.
+
+    A VM another session has claimed is refused outright (vm_claim).
     """
+    vm_claim.require(vm.name, verb)
     try:
         owner = vm.info_path.stat().st_uid
     except OSError:
@@ -1522,6 +1525,8 @@ def cmd_destroy(args: argparse.Namespace) -> None:
             _destroy_vm_artifacts(name)
         finally:
             unregister_ssh_name(name)
+        if existed:
+            vm_claim.forget(name)
         # Match cmd_stop's "{name} not found" wording so a typo like
         # `ltvm destroy co1-signle` doesn't silently claim success.
         if existed:
@@ -1541,6 +1546,7 @@ def cmd_llmount(args: argparse.Namespace) -> None:
     except VMNotFound:
         print(f"error: VM '{name}' not found", file=sys.stderr)
         sys.exit(EXIT_NOT_FOUND)
+    vm_claim.require(name, "unmount" if cleanup else "mount")
 
     if not is_running(vm):
         print(f"error: VM '{name}' not running", file=sys.stderr)
@@ -1635,6 +1641,13 @@ def _host_total_mem_mb() -> int:
     return 0
 
 
+def _claim_field(c: dict[str, Any] | None) -> str:
+    """` claimed=<owner>` for `ltvm list`; stale claims are marked."""
+    if not c:
+        return ""
+    return f" claimed={c['owner']}{'' if c['live'] else '(stale)'}"
+
+
 def cmd_list(args: argparse.Namespace) -> None:
     total_vcpus = 0
     total_mem = 0
@@ -1642,6 +1655,7 @@ def cmd_list(args: argparse.Namespace) -> None:
     running_count = 0
     stopped_count = 0
     entries: list[dict[str, Any]] = []
+    claims = vm_claim.all_claims()
 
     for name in VMInfo.all_names():
         try:
@@ -1702,6 +1716,9 @@ def cmd_list(args: argparse.Namespace) -> None:
                 "os_id": vm.os_id,
                 "creator": vm.creator,
                 "owner_id": vm.owner_id,
+                "claim": claims[vm.name].to_json()
+                if vm.name in claims
+                else None,
             }
         )
 
@@ -1757,7 +1774,7 @@ def cmd_list(args: argparse.Namespace) -> None:
                 f"{e['name']:<20} {e['ip']:<18} {e['status']:<8} "
                 f"{os_id:<8} {disks:<14} mem={mem:<12} "
                 f"boot={boot:<10} deploy={deploy:<10} by={creator} "
-                f"owner={owner_id}"
+                f"owner={owner_id}{_claim_field(e.get('claim'))}"
             )
         print("---")
         print(
@@ -2011,6 +2028,7 @@ def _qmp_nmi(qmp_path: Path) -> None:
 
 
 def cmd_nmi(args: argparse.Namespace) -> int:
+    vm_claim.require(args.name, "NMI")
     vm = VMInfo.load(args.name)
     if not is_running(vm):
         return _handler_error(
@@ -2137,6 +2155,7 @@ def _vm_kernel_build_id(vm: VMInfo) -> str | None:
 
 
 def cmd_crash_collect(args: argparse.Namespace) -> int:
+    vm_claim.require(args.name, "collect a crash from")
     vm = VMInfo.load(args.name)
     raw_outdir = getattr(args, "outdir", None)
     outdir = Path(raw_outdir) if raw_outdir else Path.home() / "ltvm-crashes"
@@ -2407,6 +2426,7 @@ def cmd_crash_collect(args: argparse.Namespace) -> int:
 
 
 def cmd_snapshot(args: argparse.Namespace) -> None:
+    vm_claim.require(args.name, "snapshot")
     vm = VMInfo.load(args.name)
 
     # --delete: remove a named snapshot from the overlay.  Kept small
@@ -2481,6 +2501,7 @@ def _parse_snapshot_tags(qemu_img_output: str) -> set[str]:
 
 
 def cmd_restore(args: argparse.Namespace) -> None:
+    vm_claim.require(args.name, "restore")
     vm = VMInfo.load(args.name)
 
     if not args.tag:
@@ -2537,6 +2558,7 @@ def cmd_set(args: argparse.Namespace) -> None:
     if args.mem is not None and args.mem <= 0:
         die(f"--mem must be > 0 (got {args.mem})")
 
+    vm_claim.require(args.name, "change")
     vm = VMInfo.load(args.name)
     if is_running(vm):
         die(f"{vm.name} is running; stop it first (`ltvm stop {vm.name}`)")
@@ -2852,6 +2874,36 @@ def _check_unprivileged_vms(
     return len(rd.problems), 0
 
 
+def _check_claims(fix: bool) -> tuple[int, int]:
+    """The claims directory, and claims whose session has gone.
+
+    A stale claim is not an issue -- the next claim takes it over --
+    but --fix clears them.  Returns (issues, failures).
+    """
+    issues = failures = 0
+    if not vm_claim.claims_dir_ok():
+        print(
+            f"VM claims unavailable: {vm_claim.CLAIMS_DIR} missing or not "
+            f"mode {vm_claim.CLAIMS_DIR_MODE:o}"
+        )
+        issues += 1
+        if fix:
+            try:
+                vm_claim.ensure_claims_dir()
+                print(f"  fixed: created {vm_claim.CLAIMS_DIR}")
+            except (vm_claim.ClaimError, RuntimeError, SudoUnavailable) as e:
+                print(f"  could not create: {e}")
+                failures += 1
+    for name, c in vm_claim.all_claims().items():
+        if c.live():
+            continue
+        print(f"stale claim: {name} ({c.describe()})")
+        if fix:
+            vm_claim.forget(name)
+            print("  fixed: cleared")
+    return issues, failures
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     issues = 0
     # Counts repairs that were attempted and did not work, so --fix
@@ -3113,6 +3165,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for line in _check_export_tools():
         print(line)
         issues += 1
+
+    found, failed = _check_claims(args.fix)
+    issues += found
+    fix_failures += failed
 
     skill_issues, skill_notes, skill_failures = _check_skill_links(args.fix)
     for line in skill_issues:

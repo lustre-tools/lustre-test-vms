@@ -21,6 +21,7 @@ from ltvm_pkg import host_setup
 from ltvm_pkg.cli.util import (
     EXIT_ERROR,
     EXIT_OK,
+    _claim_error,
     _error,
     _output,
     _uses_passthrough,
@@ -88,6 +89,9 @@ def cmd_create(args: argparse.Namespace) -> int:
 
 def cmd_destroy(args: argparse.Namespace) -> int:
     use_json = args.json
+    err = _claim_error(list(args.names), "destroy", use_json)
+    if err is not None:
+        return err
     err = _vm_privileges(
         "ltvm destroy needs root for tap teardown and VM_DIR cleanup",
         use_json,

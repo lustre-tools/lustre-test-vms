@@ -187,6 +187,7 @@ try:
         cmd_build_mofed_kmods,
         cmd_build_shell,
         cmd_build_zfs,
+        cmd_claim,
         cmd_clean,
         cmd_cluster_create,
         cmd_cluster_deploy,
@@ -215,6 +216,7 @@ try:
         cmd_nmi,
         cmd_prune,
         cmd_publish,
+        cmd_release,
         cmd_restore,
         cmd_setup,
         cmd_skills,
@@ -399,6 +401,8 @@ _VM_ALIASES = (
     "start",
     "stop",
     "list",
+    "claim",
+    "release",
     "deploy-lustre",
     "llmount",
     "llumount",
@@ -1406,6 +1410,53 @@ def build_parser() -> argparse.ArgumentParser:
         help="List all VMs",
     )
     sp.set_defaults(func=cmd_list)
+
+    # -- VM claims: which session is using a VM (ltvm_pkg.vm_claim) --
+    sp = sub.add_parser(
+        "claim",
+        parents=[common],
+        help="Claim VMs for this session, or list claims",
+        description=(
+            "Claim VMs so other sessions leave them alone: deploy-lustre, "
+            "llmount, start/stop/destroy, vm snapshot/restore/nmi/set and "
+            "the cluster commands refuse a VM that another live session has "
+            "claimed.  The claimant is --owner, $LTVM_OWNER_ID or the "
+            "Claude Code session, else the user; the claim ends when "
+            "--pid ($LTVM_OWNER_PID, or the Claude Code process) exits, "
+            "after --ttl, or on `ltvm release`.  With no VM, list claims."
+        ),
+    )
+    _claim_names = sp.add_argument("names", nargs="*", help="VM name(s)")
+    _claim_names.completer = complete_vms  # type: ignore[attr-defined]
+    sp.add_argument(
+        "--ttl", help="end the claim after this long (90, 30m, 4h, 2d)"
+    )
+    sp.add_argument(
+        "--tree", help="Lustre tree the VM is used for (shown to others)"
+    )
+    sp.add_argument(
+        "--owner", help="claimant ID (default $LTVM_OWNER_ID or session)"
+    )
+    sp.add_argument("--pid", type=int, help="process whose exit ends the claim")
+    sp.add_argument(
+        "--force", action="store_true", help="take a VM another session claimed"
+    )
+    sp.set_defaults(func=cmd_claim)
+
+    sp = sub.add_parser(
+        "release",
+        parents=[common],
+        help="Release claimed VMs",
+    )
+    _release_names = sp.add_argument("names", nargs="+", help="VM name(s)")
+    _release_names.completer = complete_vms  # type: ignore[attr-defined]
+    sp.add_argument(
+        "--owner", help="claimant ID (default $LTVM_OWNER_ID or session)"
+    )
+    sp.add_argument(
+        "--force", action="store_true", help="break another session's claim"
+    )
+    sp.set_defaults(func=cmd_release)
 
     # -- vm (console-log | crash-collect | nmi | snapshot | restore | set) --
     vm_parser = sub.add_parser(

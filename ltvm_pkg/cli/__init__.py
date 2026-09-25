@@ -37,6 +37,7 @@ from ltvm_pkg.cli.build import (
     cmd_clean,
     cmd_status,
 )
+from ltvm_pkg.cli.claim import cmd_claim, cmd_release
 from ltvm_pkg.cli.clean import cmd_prune
 from ltvm_pkg.cli.util import (
     EXIT_ERROR,
@@ -265,6 +266,8 @@ __all__ = [
     "cmd_vm_set",
     "cmd_vm_start",
     "cmd_vm_stop",
+    "cmd_claim",
+    "cmd_release",
     "configure_fstype",
     "deploy_to_vm",
     "fetch_target",

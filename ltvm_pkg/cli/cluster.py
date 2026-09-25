@@ -174,6 +174,9 @@ def cmd_cluster_start(args: argparse.Namespace) -> int:
         nodes = _node_names(args.names)
     except (ClusterNotFound, RuntimeError) as e:
         return _error(str(e), args.json)
+    from ltvm_pkg import vm_claim
+
+    vm_claim.require_all(nodes, "start")
     from ltvm_pkg.cli.vm import cmd_vm_start
 
     return cmd_vm_start(_qemu_ns(names=nodes, wait=args.wait, json=args.json))
@@ -185,6 +188,9 @@ def cmd_cluster_stop(args: argparse.Namespace) -> int:
         nodes = _node_names(args.names)
     except (ClusterNotFound, RuntimeError) as e:
         return _error(str(e), args.json)
+    from ltvm_pkg import vm_claim
+
+    vm_claim.require_all(nodes, "stop")
     from ltvm_pkg.cli.vm import cmd_vm_stop
 
     return cmd_vm_stop(_qemu_ns(names=nodes, json=args.json))

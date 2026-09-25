@@ -57,7 +57,8 @@ class TestSudoersFragment:
 
     def test_always_sets_env_keep(self, tmp_path: Path) -> None:
         body = self._install(tmp_path, ["/usr/bin"])
-        assert 'env_keep += "LTVM_OWNER_ID"' in body
+        assert 'env_keep += "LTVM_OWNER_ID LTVM_OWNER_PID' in body
+        assert "CLAUDE_CODE_SESSION_ID CLAUDE_PID" in body
 
     def test_visudo_rejection_leaves_no_file(self, tmp_path: Path) -> None:
         """A parse error in /etc/sudoers.d disables sudo entirely."""

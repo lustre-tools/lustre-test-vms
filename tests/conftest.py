@@ -122,6 +122,20 @@ def _isolate_user_state(
     # principle as LTVM_TELEMETRY above: the real install path runs,
     # just under a tmpdir.
     monkeypatch.setenv("LTVM_COMPLETION_ROOT", str(root / "completion"))
+    # VM claims live in the real VM_DIR and key on the session running
+    # the suite -- often an agent's -- so a test deploy would claim the
+    # developer's VMs, or be refused by a claim on them.
+    for var in (
+        "LTVM_OWNER_ID",
+        "LTVM_OWNER_PID",
+        "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_PID",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    claims = root / "claims"
+    claims.mkdir()
+    claims.chmod(0o1777)
+    monkeypatch.setattr("ltvm_pkg.vm_claim.CLAIMS_DIR", claims)
     # The update check has no kill switch and would otherwise `git
     # ls-remote` once per test, so it is patched out.  Telemetry needs
     # no patch: the env above disables it through its own front door,

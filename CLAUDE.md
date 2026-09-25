@@ -466,6 +466,16 @@ resolves once and applies the same owner to every member. Discover it through
 `ltvm list --json`; legacy VMs report `owner_id: null`. See
 [docs/VM_OWNERSHIP.md](docs/VM_OWNERSHIP.md).
 
+**Claims:** `ltvm_pkg/vm_claim.py` records which session is using a VM
+(`ltvm claim`/`release`, files in `VM_DIR/claims/`, mode 1777, rewritten
+in place under flock).  `vm_claim.require()`/`check()` gate deploy,
+llmount, the lifecycle commands (in `_require_manageable`, and in the CLI
+wrappers ahead of `_vm_privileges` so a refusal never prompts for sudo),
+the `vm` actions and the cluster commands; `auto_claim()` claims for a
+session owner on deploy.  Tests: `tests/conftest.py` points `CLAIMS_DIR`
+at a tmpdir and drops the session variables, since the suite often runs
+under an agent.  Contract: docs/VM_OWNERSHIP.md#claims.
+
 **Disks:** `--disk-size` sizes the MDT/OST scratch disks; `--root-size`
 sizes the VM's own OS disk (default 8G, floor 1G, and never smaller than
 the base image it overlays).  The guest's rc.local grows the root

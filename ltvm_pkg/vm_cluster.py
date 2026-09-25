@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+from . import vm_claim
 from .qemu_run import die, is_running, run
 from .vm_net import SSH_OPTS, run_ssh, sshpass_ssh_argv
 from .vm_owner import resolve_owner_id
@@ -790,6 +791,12 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     src = Path(args.lustre_source).expanduser().resolve()
     _validate_lustre_source(src)
     build = str(src)
+    vm_claim.require_all([n.name for n in nodes], "deploy to")
+    try:
+        for n in nodes:
+            vm_claim.auto_claim(n.name, build)
+    except vm_claim.ClaimHeld as e:
+        die(str(e))
 
     # --server-only only affects the llmount.sh invocation, which only
     # runs when --mount is set.  Reject the combination instead of
@@ -1036,6 +1043,10 @@ def _run_llmount(
 
 def cmd_cluster_llmount(args: argparse.Namespace) -> None:
     cluster = ClusterInfo.load(args.name)
+    vm_claim.require_all(
+        [n.name for n in cluster.get_nodes()],
+        "unmount" if getattr(args, "cleanup", False) else "mount",
+    )
     down = [n.name for n in cluster.get_nodes() if _node_state(n.name) != "up"]
     if down:
         die(
@@ -1069,6 +1080,7 @@ def cmd_cluster_destroy(args: argparse.Namespace) -> None:
             # an error, so a cleanup script can run it unconditionally.
             print(f"destroy: cluster {name} not found")
             continue
+        vm_claim.require_all([n.name for n in cluster.get_nodes()], "destroy")
         print(f"=== Destroying cluster '{cluster.name}' ===")
         cmd_destroy(
             argparse.Namespace(names=[n.name for n in cluster.get_nodes()])
@@ -1264,6 +1276,7 @@ def cmd_cluster_exec(args: argparse.Namespace) -> None:
     # "--- node ---" separators.  The human path is unchanged, and
     # still streams.
     results: list[dict[str, Any]] = []
+    vm_claim.require_all([n.name for n in matches], "run commands on")
     for node in matches:
         vm = VMInfo.load(node.name)
         if multi and not use_json:

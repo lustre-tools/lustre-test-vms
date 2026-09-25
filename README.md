@@ -313,6 +313,23 @@ ltvm list --json                    # each VM has owner_id (or null for legacy)
 and `cluster create`. See [VM ownership metadata](docs/VM_OWNERSHIP.md) for the
 precedence, persistence, cluster propagation, and JSON contracts.
 
+### Claiming VMs
+
+Sessions sharing a host claim the VMs they are using, so one does not
+deploy over another's test run:
+
+```bash
+ltvm claim co1-single --ttl 4h      # `ltvm claim` alone lists claims
+ltvm release co1-single
+```
+
+`deploy-lustre`, `llmount`, `start`/`stop`/`destroy`, `vm
+snapshot/restore/nmi/crash-collect/set` and the cluster commands refuse a VM
+that another live session claimed; `ltvm release --force` breaks a claim.
+An agent session's `deploy-lustre` claims an unclaimed VM.  Claims live in
+`/opt/qemu-vms/claims` (mode 1777), which `ltvm install` and `ltvm doctor
+--fix` create.  See [VM ownership metadata](docs/VM_OWNERSHIP.md#claims).
+
 ## Tab completion
 
 `ltvm install` installs tab completion for every shell it finds on the

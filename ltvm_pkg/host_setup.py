@@ -2169,6 +2169,9 @@ def install_scripts(host: HostInfo) -> None:
 
     _setup_shared_vm_dirs()
     _setup_bridge_helper(host)
+    from ltvm_pkg import vm_claim
+
+    vm_claim.ensure_claims_dir()
 
     # Heal existing .info files from installs predating the 0644 default
     # (non-root `ltvm list` would PermissionError otherwise).
@@ -2699,7 +2702,12 @@ def _install_sudoers_fragment(path: Path) -> None:
     current = _current_secure_path()
     missing = [d for d in wanted if d not in current]
 
-    lines = ['Defaults env_keep += "LTVM_OWNER_ID"']
+    # The session identity VM claims use (ltvm_pkg.vm_claim) must survive
+    # `sudo ltvm ...`, or a session's own claim would refuse it.
+    lines = [
+        'Defaults env_keep += "LTVM_OWNER_ID LTVM_OWNER_PID'
+        ' CLAUDE_CODE_SESSION_ID CLAUDE_PID"'
+    ]
     if missing:
         merged = ":".join(current + missing)
         lines.insert(0, f'Defaults secure_path="{merged}"')
@@ -2826,6 +2834,9 @@ def _run_setup_macos(
     if "qemu" in active:
         install_qemu_macos(force=force)
         install_image_tools_macos(force=force)
+        from ltvm_pkg import vm_claim
+
+        vm_claim.ensure_claims_dir()
 
     if "network" in active:
         install_socket_vmnet_macos(force=force)

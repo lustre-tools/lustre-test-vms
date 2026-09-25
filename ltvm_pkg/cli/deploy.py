@@ -46,6 +46,20 @@ def cmd_deploy(args: argparse.Namespace) -> int:
     except VMNotFound as e:
         return _error(str(e), use_json)
 
+    from ltvm_pkg import vm_claim
+
+    try:
+        vm_claim.check(vm.name, "deploy to")
+    except vm_claim.ClaimError as e:
+        return _error(str(e), use_json)
+    tree = getattr(args, "lustre_tree", None)
+    try:
+        vm_claim.auto_claim(
+            vm.name, str(Path(tree).resolve()) if tree else None
+        )
+    except vm_claim.ClaimHeld as e:
+        return _error(str(e), use_json)
+
     # Auto-detect target from VM metadata
     if not target:
         target = vm.os_id or None
