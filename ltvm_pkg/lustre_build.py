@@ -29,6 +29,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import TypedDict
 
+from . import build_timeout
 from .lustre_version import (
     check_configured,
     configure_is_stale,
@@ -1151,19 +1152,17 @@ fi""")
     # Lustre's configure can find).  Bind read-only since we never write.
     from .target_config import TARGETS_DIR
 
+    # Without a limit a hung autoconf or mkdir lock loop blocks the
+    # whole `ltvm build lustre` forever instead of failing cleanly; the
+    # limit must still clear a first full build on a busy host.
+    timeout = build_timeout.seconds(build_timeout.LUSTRE)
     cmd = [
         "podman",
         "run",
         "--rm",
         "--security-opt",
         "label=disable",
-        # 10 minute ceiling: a clean rocky9 build runs in ~5 minutes,
-        # double that catches stuck builds without false-positive killing
-        # slow-but-progressing ones.  Without this, a hung autoconf or
-        # mkdir lock loop blocks the entire `ltvm build lustre` invocation
-        # forever instead of failing cleanly.
-        "--timeout",
-        "600",
+        *build_timeout.podman_args(timeout),
         "-v",
         f"{lustre_tree}:/lustre",
         "-v",
@@ -1210,6 +1209,7 @@ fi""")
     build_start = time.time()
     skew_retried = False
     while True:
+        attempt_start = time.time()
         r = run_podman_with_cleanup(cmd)
         if r.returncode == 0:
             break
@@ -1233,8 +1233,13 @@ fi""")
                 "stepped backwards mid-run; retrying once"
             )
             continue
-        _show_configure_log(lustre_tree)
-        raise RuntimeError(f"Container build failed (rc={r.returncode})")
+        why = build_timeout.explain(timeout, time.time() - attempt_start)
+        if not why:
+            _show_configure_log(lustre_tree)
+        raise RuntimeError(
+            f"Container build failed (rc={r.returncode})"
+            + (f": {why}" if why else "")
+        )
 
     # Chown the lustre tree back to the real user after the build.
     # The container's root mapped to host root in the bind mount, so

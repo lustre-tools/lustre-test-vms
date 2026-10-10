@@ -174,6 +174,26 @@ build all rocky9 finished in 41m 51s
 `LTVM_NO_BELL=1` silences the bell; `LTVM_NOTIFY_COMMAND` (e.g.
 `notify-send ltvm`) is run with the summary as its last argument.
 
+The Lustre, ZFS and MOFED-kmod builds run in a container that podman
+stops at a time limit, so a wedged configure fails rather than hanging:
+an hour for Lustre, 30 minutes for ZFS and MOFED kmods.  A build
+stopped there says so.  A slow or busy host -- such as a Mac whose
+podman machine several builds share -- can raise it for one command, or
+for every user on the host; `0` means no limit, and the variable wins
+over the file:
+
+```bash
+LTVM_BUILD_TIMEOUT=7200 ltvm build lustre rocky9 --lustre-tree ~/lustre-release
+```
+
+```ini
+# /etc/ltvm.conf
+[build]
+timeout = 7200
+```
+
+Kernel and image builds have no limit.
+
 `target` sub-actions:
 
 ```

@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from . import build_timeout
 from .paths import load_meta_safe
 from .podman_run import run_podman_with_cleanup
 
@@ -199,14 +200,14 @@ def build_mofed_kmods(
 
     # Bind-mount the inner script + the kernel build-tree + the output
     # directory.  Run as bash because the inner script uses bash-isms.
+    timeout = build_timeout.seconds(build_timeout.MOFED_KMODS)
     cmd = [
         "podman",
         "run",
         "--rm",
         "--security-opt",
         "label=disable",
-        "--timeout",
-        "1800",  # MOFED kmod rebuild can run 10-15 min
+        *build_timeout.podman_args(timeout),
         "-e",
         f"KVER={kver}",
         "-v",
@@ -231,7 +232,11 @@ def build_mofed_kmods(
                 r.returncode,
             )
         else:
-            raise RuntimeError(f"MOFED kmod build failed (rc={r.returncode})")
+            why = build_timeout.explain(timeout, time.monotonic() - t0)
+            raise RuntimeError(
+                f"MOFED kmod build failed (rc={r.returncode})"
+                + (f": {why}" if why else "")
+            )
 
     rpms = sorted(p.name for p in out_dir.glob("*.rpm"))
     if not rpms:

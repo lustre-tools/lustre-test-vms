@@ -595,6 +595,111 @@ class TestTreeClaim:
         assert claim_at > script.index("distclean")
 
 
+class TestBuildTimeout:
+    """The container's --timeout comes from ltvm_pkg.build_timeout, and
+    a build stopped there says so instead of a bare rc=255."""
+
+    def _build(
+        self, tmp_path: Path, returncode: int = 0, clock_step: float = 0.0
+    ) -> tuple[list[str], Exception | None]:
+        lustre, kernel = TestTreeClaim()._tree(tmp_path)
+        cmds: list[list[str]] = []
+
+        def fake_podman(cmd, *args, **kwargs):
+            cmds.append(list(cmd))
+            return _make_completed(returncode)
+
+        now = [1_000_000.0]
+
+        def fake_time() -> float:
+            now[0] += clock_step
+            return now[0]
+
+        err: Exception | None = None
+        with (
+            patch(
+                "ltvm_pkg.lustre_build.subprocess.run",
+                return_value=_make_completed(0),
+            ),
+            patch(
+                "ltvm_pkg.lustre_build.run_podman_with_cleanup",
+                side_effect=fake_podman,
+            ),
+            patch("ltvm_pkg.lustre_build._container_exists", return_value=True),
+            patch("ltvm_pkg.lustre_build._show_configure_log"),
+            patch("ltvm_pkg.lustre_build._hit_clock_skew", return_value=False),
+            patch("ltvm_pkg.lustre_build.time.time", side_effect=fake_time),
+            patch("ltvm_pkg.target_config.TargetConfig") as mock_tc,
+        ):
+            mock_tc.return_value.resolve_kernel.return_value = "5.14-rhel9.7"
+            try:
+                build_lustre(
+                    lustre,
+                    kernel,
+                    container_tag="ltvm-build-rocky9",
+                    target=TestTreeClaim.TARGET,
+                    force=False,
+                )
+            except Exception as e:
+                err = e
+        assert cmds, "podman run was not called"
+        return cmds[0], err
+
+    @staticmethod
+    def _timeout_arg(cmd: list[str]) -> str | None:
+        if "--timeout" not in cmd:
+            return None
+        return cmd[cmd.index("--timeout") + 1]
+
+    def test_default_is_an_hour(self, tmp_path: Path) -> None:
+        cmd, _ = self._build(tmp_path)
+        assert self._timeout_arg(cmd) == "3600"
+
+    def test_env_overrides(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LTVM_BUILD_TIMEOUT", "5400")
+        cmd, _ = self._build(tmp_path)
+        assert self._timeout_arg(cmd) == "5400"
+
+    def test_site_file_overrides(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        site = tmp_path / "ltvm.conf"
+        site.write_text("[build]\ntimeout = 7200\n")
+        monkeypatch.setenv("LTVM_SITE_CONFIG", str(site))
+        cmd, _ = self._build(tmp_path)
+        assert self._timeout_arg(cmd) == "7200"
+
+    def test_zero_drops_the_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LTVM_BUILD_TIMEOUT", "0")
+        cmd, _ = self._build(tmp_path)
+        assert "--timeout" not in cmd
+        # The image tag still directly precedes the script.
+        assert cmd[-3] == "ltvm-build-rocky9"
+
+    def test_stopped_at_the_limit_says_so(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("LTVM_BUILD_TIMEOUT", "600")
+        # Each clock read is 700s after the last, so the run outlasts
+        # the 600s limit.
+        _, err = self._build(tmp_path, returncode=255, clock_step=700.0)
+        assert isinstance(err, RuntimeError)
+        assert "rc=255" in str(err)
+        assert "stopped at its 600s limit" in str(err)
+        assert "LTVM_BUILD_TIMEOUT" in str(err)
+
+    def test_quick_failure_is_not_blamed_on_the_limit(
+        self, tmp_path: Path
+    ) -> None:
+        _, err = self._build(tmp_path, returncode=2, clock_step=1.0)
+        assert isinstance(err, RuntimeError)
+        assert str(err) == "Container build failed (rc=2)"
+
+
 class TestIncrementalRebuildGuard:
     """When per-kernel staging exists for this kernel, treat it as
     incremental.  When it doesn't exist, build fresh."""

@@ -116,6 +116,8 @@ def _isolate_user_state(
     monkeypatch.setenv("XDG_CACHE_HOME", str(root / "cache"))
     monkeypatch.setenv("LTVM_TELEMETRY", "0")
     monkeypatch.setenv("LTVM_SITE_CONFIG", str(root / "no-such-ltvm.conf"))
+    # The developer's own build time limit would change podman argv.
+    monkeypatch.delenv("LTVM_BUILD_TIMEOUT", raising=False)
     # Tab completion installs into /etc/bash_completion.d and the zsh
     # and fish equivalents, and `ltvm doctor --fix` installs any that
     # are missing -- so without this a doctor test rewrote the

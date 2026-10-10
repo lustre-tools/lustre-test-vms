@@ -968,6 +968,15 @@ Builds inside the target's build container against the
 target's kernel build tree.  Output goes to the Lustre
 tree's `.ltvm-staging/<target>/<arch>/<kernel>[/<variant>]/`.
 
+The container runs under `podman run --timeout`, as the ZFS and
+MOFED-kmod builds do ([ltvm_pkg/build_timeout.py](ltvm_pkg/build_timeout.py)):
+3600s for Lustre, 1800s for the other two.  `LTVM_BUILD_TIMEOUT`,
+then `[build] timeout` in `/etc/ltvm.conf`, override all three, and
+`0` drops the flag.  podman reports a stop only as rc=255, so a build
+that failed after running for the limit names it and both settings
+instead of dumping config.log.  It was 600s for Lustre, which a first
+build overran on a macOS podman machine shared by several builds.
+
 Uncompiled installs -- test scripts, cfg files, man pages,
 headers -- are also kept in step without a rebuild: the build
 records which source each verbatim-installed staged file came

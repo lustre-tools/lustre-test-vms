@@ -45,6 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
+from . import build_timeout
 from .paths import load_meta_safe
 from .podman_run import run_podman_with_cleanup
 
@@ -730,16 +731,15 @@ def _run_build(
     log.info("Building ZFS %s for %s (kernel=%s)...", ver, tc.name, kver)
     t0 = time.monotonic()
 
+    # A wedged configure fails rather than hanging the command.
+    timeout = build_timeout.seconds(build_timeout.ZFS)
     cmd = [
         "podman",
         "run",
         "--rm",
         "--security-opt",
         "label=disable",
-        # A clean ZFS build runs ~3-5 min on a warm container; 30 min
-        # catches a wedged configure without killing a slow arm build.
-        "--timeout",
-        "1800",
+        *build_timeout.podman_args(timeout),
         "-e",
         f"KVER={kver}",
         "-e",
@@ -759,7 +759,11 @@ def _run_build(
     ]
     r = run_podman_with_cleanup(cmd)
     if r.returncode != 0:
-        raise ZfsBuildError(f"ZFS {ver} build failed (rc={r.returncode})")
+        why = build_timeout.explain(timeout, time.monotonic() - t0)
+        raise ZfsBuildError(
+            f"ZFS {ver} build failed (rc={r.returncode})"
+            + (f": {why}" if why else "")
+        )
 
     _chown_to_sudo_user(out_dir)
 
