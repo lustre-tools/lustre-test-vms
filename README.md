@@ -257,6 +257,8 @@ ltvm target clean <target>      Remove built artifacts
 ltvm target delete <target>     Delete artifacts (local; --remote for GitHub release)
 ltvm target validate <target>   Read-only Lustre/kernel compat check
 ltvm target fetch <target>      Download latest release tarballs
+ltvm target archive <target>    Move to cold storage, leaving a symlink
+ltvm target restore <target>    Move it back from cold storage
 ltvm target export <target>     Bake a bootable qcow2/raw, or a Google Cloud
                                 image (--format gce); no ltvm runtime needed
 ltvm target publish <target>    Bundle artifacts and upload to GitHub release
@@ -361,6 +363,75 @@ host wants swap behind it, because merged pages are copied apart again
 as soon as guests write different data to them. The kernel boots with
 KSM off; `w /sys/kernel/mm/ksm/run - - - - 1` in a file under
 `/etc/tmpfiles.d/` turns it on at every boot.
+
+### Shared host: hot and cold artifact storage
+
+On a host several people use, keep one artifacts tree for everybody,
+in two parts: **hot** on fast (SSD) storage for the targets in use --
+the base images VM overlays read as backing files, the kernel build
+trees every Lustre build reads, the kernel ccache -- and **cold** on
+big, slow (HDD) storage for inactive targets and old releases.
+
+```bash
+# both owned by the ltvm group, setgid, with a default ACL so that
+# everything created inside stays writable by the whole group
+sudo install -d -o root -g ltvm -m 2775 /var/cache/ltvm /mnt/data/ltvm
+sudo setfacl -m g:ltvm:rwX -m d:g:ltvm:rwX /var/cache/ltvm /mnt/data/ltvm
+```
+
+```ini
+# /etc/ltvm.conf
+[storage]
+hot = /var/cache/ltvm
+cold = /mnt/data/ltvm
+```
+
+`hot` replaces the default `<repo>/artifacts` for every user;
+`LTVM_ARTIFACTS_DIR` still wins over it, for one user or one command.
+`cold` is optional.  A relative path is ignored with a warning.  `ltvm
+doctor` reports both: where each comes from, whether it exists, is
+writable by you and is group-shared, and its free space.  A cold
+directory that is configured but missing is an issue -- usually an
+unmounted disk, so ltvm never creates it.
+
+Archiving is invisible to everything else:
+
+```bash
+ltvm target archive rocky8              # every arch; or --arch x86_64
+ltvm target restore rocky8
+```
+
+`archive` moves `<hot>/rocky8/<arch>` to the same path under `cold` and
+leaves a symlink in its place, so builds, `create` and existing VMs keep
+finding it (more slowly); `restore` moves it back.  `ltvm build status`
+and `ltvm target list` mark archived targets cold and say where they
+are (`storage` and `cold_path` under `--json`).  A move between filesystems copies to a
+temporary name, checks the copy (names, sizes, nanosecond mtimes, link
+targets), switches over, and only then deletes the original; any failure
+before that -- a full disk, say -- removes the partial copy and leaves
+the original as it was.  Free space and permission to delete the
+original are checked before anything is copied.
+
+Both refuse while a VM uses the target -- its `.info` names an `IMAGE`
+or `KERNEL` there, or its overlay is backed by an image there -- and
+list the VMs.  `--force` goes ahead for **stopped** VMs: on archive they
+keep their paths, which now lead through the symlink; on restore any VM
+that names the cold path (a `create --image` through the symlink) has
+its `.info` rewritten and its overlay rebased (`qemu-img rebase -u`).  A
+**running** VM always blocks the move, `--force` or not: stop it first.
+`target fetch` refuses an archived target (tar would replace the
+symlink); restore it first.  Do not build into a target while it is
+being archived.
+
+Why setgid and group-writable, and not the sticky bit that
+`/opt/qemu-vms` uses: rebuilding a kernel or image, pruning with `ltvm
+clean`, fetching a newer release and archiving all replace or delete
+files another member made, which the sticky bit forbids.  Commands that
+write artifacts (`build all/container/kernel/image/zfs/mofed-kmods`,
+`target build/fetch/clean/delete/archive/restore`, `clean`) leave the group bits out of their umask when the hot or cold
+directory is shared, and run build containers with `--umask 0002` and
+`CCACHE_UMASK=002`, so this holds even without the default ACL.  VM
+commands keep your own umask: an overlay must not be group-writable.
 
 ### Running VMs without sudo
 

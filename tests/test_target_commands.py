@@ -243,6 +243,8 @@ class TestCmdTargetsJsonShape:
             "built",
             "local_release",
             "remote_release",
+            "storage",
+            "cold_path",
         }
         for row in payload:
             assert expected.issubset(row.keys()), (
@@ -635,6 +637,127 @@ class TestCmdTargetsTextOutput:
         out = capsys.readouterr().out
         assert "bogus" in out
         assert "error" in out
+
+
+class TestCmdTargetsColdStorage:
+    """An arch dir `ltvm target archive` moved to cold storage is listed
+    as cold, with where it is, as `build status` lists it: the same
+    ``storage``/``cold_path`` fields (storage.storage_fields) on every
+    JSON row, and a ``[cold]`` block header in the text."""
+
+    @pytest.fixture
+    def cold(
+        self,
+        variant_targets: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> Path:
+        from ltvm_pkg import storage
+
+        cold = variant_targets / "cold"
+        cold.mkdir()
+        conf = variant_targets / "ltvm.conf"
+        conf.write_text(f"[storage]\ncold = {cold}\n")
+        monkeypatch.setenv("LTVM_SITE_CONFIG", str(conf))
+        storage._warned.clear()
+        _seed_image_meta(
+            variant_targets,
+            "rocky9",
+            "5.14-rhel9.7",
+            arch="x86_64",
+            with_lustre="/x",
+            lustre_version="2.17.0",
+        )
+        return cold
+
+    def _list(self, tmp_targets: Path, *, json_out: bool) -> None:
+        with (
+            _patch_cfg_paths(tmp_targets),
+            patch.object(cli, "_gh_api", side_effect=Exception("no net")),
+        ):
+            assert cmd_targets(_ns(json=json_out)) == EXIT_OK
+
+    def _archive(self) -> None:
+        from ltvm_pkg import storage
+
+        with patch.object(storage, "_vm_running", return_value=False):
+            storage.move_target(
+                "rocky9", "x86_64", to_cold=True, say=lambda _: None
+            )
+
+    def test_hot_by_default(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        variant_targets: Path,
+        cold: Path,
+    ) -> None:
+        self._list(variant_targets, json_out=True)
+        rows = json.loads(capsys.readouterr().out)
+        assert rows and all(r["storage"] == "hot" for r in rows)
+        assert all(r["cold_path"] is None for r in rows)
+        self._list(variant_targets, json_out=False)
+        out = capsys.readouterr().out
+        assert "[cold]" not in out and "archived in" not in out
+
+    def test_json_marks_every_row_of_the_archived_arch(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        variant_targets: Path,
+        cold: Path,
+    ) -> None:
+        with _patch_cfg_paths(variant_targets):
+            self._archive()
+        self._list(variant_targets, json_out=True)
+        rows = json.loads(capsys.readouterr().out)
+        where = str(cold / "rocky9" / "x86_64")
+        mine = [r for r in rows if r["arch"] == "x86_64"]
+        assert mine and all(r["storage"] == "cold" for r in mine)
+        assert all(r["cold_path"] == where for r in mine)
+        # Still built and usable: archive leaves a symlink behind.
+        base = next(
+            r
+            for r in mine
+            if r["kernel"] == "5.14-rhel9.7" and r["variant"] == "base"
+        )
+        assert base["built"] is True and base["available"] == "ready"
+
+    def test_text_header_path_and_legend(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        variant_targets: Path,
+        cold: Path,
+    ) -> None:
+        with _patch_cfg_paths(variant_targets):
+            self._archive()
+        self._list(variant_targets, json_out=False)
+        out = capsys.readouterr().out
+        lines = out.splitlines()
+        hdr = next(i for i, ln in enumerate(lines) if ln.startswith("rocky9"))
+        assert lines[hdr].startswith("rocky9 (x86_64) -- ")
+        assert lines[hdr].endswith(" [cold]")
+        assert lines[hdr + 1] == f"  archived in {cold / 'rocky9' / 'x86_64'}"
+        assert "Kernel" in lines[hdr + 2]
+        assert re.search(r"5\.14-rhel9\.7 \(default\)\s+\u2713\s", out)
+        assert "[cold] = archived to cold storage" in out
+        assert "ltvm target restore <target> --arch <arch>" in out
+
+    def test_agrees_with_build_status(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        variant_targets: Path,
+        cold: Path,
+    ) -> None:
+        """Both commands take the fields from storage.storage_fields."""
+        from ltvm_pkg.storage import storage_fields
+
+        with _patch_cfg_paths(variant_targets):
+            self._archive()
+            arch_dir = variant_targets / "artifacts" / "rocky9" / "x86_64"
+            expected = storage_fields(arch_dir)
+        self._list(variant_targets, json_out=True)
+        rows = json.loads(capsys.readouterr().out)
+        row = next(r for r in rows if r["arch"] == "x86_64")
+        assert {k: row[k] for k in expected} == expected
+        assert expected["storage"] == "cold"
 
 
 # ===========================================================================

@@ -163,6 +163,15 @@ def run_podman_with_cleanup(
             # than it on hosts that set less.  Ask for 64k, and never
             # for more than this process can actually pass on.
             injected += ["--ulimit", f"nofile={_nofile_limit()}"]
+        # A container writing into a group-shared artifacts tree must
+        # leave what it makes group-writable (storage.py); podman's
+        # own umask would not.
+        try:
+            from .storage import podman_share_args
+
+            injected += podman_share_args(cmd)
+        except Exception as e:  # noqa: BLE001
+            log.debug("storage sharing check skipped: %s", e)
         if injected:
             final_cmd = [cmd[0], cmd[1], *injected, *cmd[2:]]
 

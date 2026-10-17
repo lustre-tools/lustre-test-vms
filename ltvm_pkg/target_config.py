@@ -43,13 +43,19 @@ TARGETS_DIR = REPO_ROOT / "targets"
 def _resolve_artifacts_dir() -> Path:
     """Resolve the artifacts-cache directory.
 
-    Honors ``LTVM_ARTIFACTS_DIR`` or defaults to ``<repo>/artifacts``.
-    If the legacy ``<repo>/output`` directory exists and the new
-    location does not, it is renamed in place so prior caches are
-    preserved across the rename.
+    ``LTVM_ARTIFACTS_DIR`` (one user or one command), then ``[storage]
+    hot`` in /etc/ltvm.conf (the host), then ``<repo>/artifacts``; see
+    storage.py.  If the legacy ``<repo>/output`` directory exists and
+    the default location does not, it is renamed in place so prior
+    caches are preserved across the rename.
     """
     if "LTVM_ARTIFACTS_DIR" in os.environ:
         return Path(os.environ["LTVM_ARTIFACTS_DIR"])
+    from . import storage
+
+    hot = storage.configured("hot")
+    if hot is not None:
+        return hot
     new = REPO_ROOT / "artifacts"
     legacy = REPO_ROOT / "output"
     if not new.exists() and legacy.is_dir():

@@ -151,6 +151,8 @@ nothing elevates, and it is found without running `brew`.
 - `artifacts/<target>/<arch>/{container,kernels/<kver>,images/<kver>[/<variant>]}/`
   -- gitignored build artifacts with a `meta.json` each.
   ZFS, when built, lands at `kernels/<kver>/zfs/<version>/`.
+  `LTVM_ARTIFACTS_DIR` or `[storage] hot` moves the whole tree
+  (see "Hot and cold storage").
 - `docs/` -- operator notes (getting started, releasing
   prebuilt QEMU, nested virtualization, SoftRoCE setup,
   system test plan, VM ownership, IPv6).
@@ -270,6 +272,61 @@ Kernels are left to `ltvm clean`: an older minor is a choice.
 Every build warns when the artifacts or podman filesystem has
 under 30 GiB free (`cli.build._warn_low_disk`), since a build
 that runs out fails late with nothing naming the cause.
+
+### Hot and cold storage
+
+`target_config.ARTIFACTS_DIR` is `LTVM_ARTIFACTS_DIR`, else `[storage]
+hot` in `/etc/ltvm.conf`, else `<repo>/artifacts`, resolved once at
+import ([ltvm_pkg/storage.py](ltvm_pkg/storage.py), parsed the way
+`[memory]` and `[build]` are: configparser, a bad value warns once and
+is ignored).  `[storage] cold` is read at call time and used only by
+`ltvm target archive`/`restore`; `storage.cold_root()` refuses one that
+does not exist rather than create it, since an unmounted disk's mount
+point is the usual reason.
+
+Archiving keeps every path computation unchanged: `<hot>/<target>/<arch>`
+moves to the same place under cold and becomes a symlink to it.  The
+unit is always an arch dir, never `<hot>/<target>`, so a target with one
+arch archived needs no special case.  Code that walks the tree follows
+the link (`is_dir()`, `glob`), so `ltvm clean`, status, target list and
+doctor see archived targets; what does not follow it was fixed where it mattered:
+`target clean`/`delete` remove the cold tree and the link
+(`storage.archived_links`, links into cold only), and `target fetch`
+refuses an archived target because tar replaces a symlink to a
+directory with a real one.  `build status` and `target list` report it
+as `storage: cold` plus `cold_path` -- per target in status, on every row
+of the arch in target list -- from one helper, `storage.storage_fields`,
+so they cannot disagree; the human output lists it under "Cold" in
+status and tags the block `[cold]` in target list.
+
+`storage.relocate` is the move: same filesystem, rename and link;
+across filesystems, copy to `.<arch>.ltvm-<pid>-copy` beside the
+destination (sparse via SEEK_DATA/SEEK_HOLE, modes and ns mtimes kept,
+since `IMAGE_ID` is `size:mtime_ns`), `_verify_copy`, then rename and
+link, and remove the source last.  A failure before the switch removes
+the partial copy.  `move_target` checks everything before moving
+anything: VM references (`vm_references`: each `.info`'s IMAGE and
+KERNEL and each overlay's backing file, orphan overlays included),
+deletability of the source (`survey`: writable dirs, no foreign entries
+in sticky dirs), free space plus 1 GiB.  Running VMs always refuse;
+stopped ones refuse without `--force`.  `create` records the image via
+`current_image`, which keeps the hot spelling, so references normally go
+through the symlink and survive both directions; only a cold spelling
+(`create --image` resolves symlinks) needs repointing on restore, which
+`--force` does with `_update_fields` and `qemu-img rebase -u -F raw`.
+
+Group sharing: a storage dir is "shared" when setgid, or group-writable
+for a group that is not the user's own (`storage.sharing`).  Then the
+artifact-writing commands (`_ARTIFACT_WRITERS` in `ltvm`) clear the
+umask's group bits (`share_new_files`), `run_podman_with_cleanup` adds
+`--umask 0002 -e CCACHE_UMASK=002` to a `podman run` with a read-write
+bind mount under a shared root (`podman_share_args`), and archive's copy
+gives the group the owner's bits and keeps setgid on directories.  VM
+commands are left alone on purpose: a group-writable overlay would let
+any member write another's VM disk.  The ZFS ownership rules above are
+relative to the kernel dir, so they hold on a group-writable tree.
+Tests: tests/test_storage.py (`_same_fs` patched to False exercises the
+copy path on one filesystem).
 
 ### Kernel build inputs (from Lustre tree)
 

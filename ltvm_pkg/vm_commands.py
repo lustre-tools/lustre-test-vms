@@ -3584,6 +3584,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if disk_info is not None:
         print(disk_info)
 
+    # Hot and cold artifact storage ([storage] in /etc/ltvm.conf).
+    from .storage import doctor_report
+
+    storage_issues, storage_notes = doctor_report()
+    for line in storage_notes:
+        print(line)
+    for line in storage_issues:
+        print(line)
+        issues += 1
+
     _, ssh_dir = _real_user_ssh_dir()
     ssh_cfg = ssh_dir / "config"
     if ssh_cfg.exists():
