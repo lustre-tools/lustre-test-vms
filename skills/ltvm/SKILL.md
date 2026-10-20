@@ -651,6 +651,33 @@ ltvm target publish rocky9 --no-upload    # build the tarballs only
 `ltvm target fetch` finds the latest release for a target and downloads
 it; re-running when the local tree is current finishes in under a second.
 
+## Hot and cold storage
+
+A shared host may split the artifacts in two, in `/etc/ltvm.conf`:
+
+```ini
+[storage]
+hot = /var/cache/ltvm      # SSD: active targets -- images, kernel build trees, ccache
+cold = /mnt/data/ltvm      # HDD: inactive targets, old releases
+```
+
+`hot` is the artifacts directory (`LTVM_ARTIFACTS_DIR` overrides it);
+`ltvm doctor` shows both. Move a target you are done with, and bring it
+back before using it heavily:
+
+```bash
+ltvm target archive rocky8 [--arch x86_64]   # leaves a symlink; paths keep working
+ltvm target restore rocky8
+```
+
+Both refuse while a VM uses the target and name the VMs. A running VM
+always blocks: stop it, or leave the target where it is. `--force`
+moves under stopped VMs, which keep working (a restore repoints any that
+named the cold path); ask before using it on VMs that are not yours.
+`build status` and `target list` mark archived targets as cold (with
+`storage`/`cold_path` in `--json`), and `target fetch` refuses one until
+it is restored.
+
 ## Inside a VM rather than on the host
 
 `deploy-lustre` pushes Lustre into a VM from the host. The `make-*`

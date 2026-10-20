@@ -538,6 +538,65 @@ class TestDoctorDiskUsage:
         assert warnings and "low free disk" in warnings[0]
 
 
+# ── hot and cold storage ──────────────────────────────────
+
+
+class TestDoctorStorage:
+    """Doctor names the hot and cold artifact directories ([storage] in
+    /etc/ltvm.conf) and flags a configured cold one that is missing."""
+
+    def _conf(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str
+    ) -> None:
+        conf = tmp_path / "ltvm.conf"
+        conf.write_text(text)
+        monkeypatch.setenv("LTVM_SITE_CONFIG", str(conf))
+
+    def test_hot_and_cold_reported(
+        self,
+        tmp_vmdir: Path,
+        doctor_env: dict,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        hot, cold = tmp_path / "ssd", tmp_path / "hdd"
+        hot.mkdir()
+        cold.mkdir()
+        cold.chmod(0o2775)
+        monkeypatch.setattr("ltvm_pkg.target_config.ARTIFACTS_DIR", hot)
+        self._conf(
+            tmp_path, monkeypatch, f"[storage]\nhot = {hot}\ncold = {cold}\n"
+        )
+        rc = vm_commands.cmd_doctor(_make_args(fix=False))
+        out = capsys.readouterr().out
+        assert f"storage hot: {hot}" in out
+        assert f"storage cold: {cold}" in out
+        assert "group-shared" in out and "free" in out
+        assert rc == 0
+
+    def test_missing_cold_is_an_issue(
+        self,
+        tmp_vmdir: Path,
+        doctor_env: dict,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        hot = tmp_path / "ssd"
+        hot.mkdir()
+        monkeypatch.setattr("ltvm_pkg.target_config.ARTIFACTS_DIR", hot)
+        self._conf(
+            tmp_path,
+            monkeypatch,
+            f"[storage]\nhot = {hot}\ncold = {tmp_path / 'hdd'}\n",
+        )
+        rc = vm_commands.cmd_doctor(_make_args(fix=False))
+        out = capsys.readouterr().out
+        assert "storage cold:" in out and "mounted" in out
+        assert rc != 0
+
+
 # ── agent skills ──────────────────────────────────────────
 
 

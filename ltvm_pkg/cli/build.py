@@ -1037,16 +1037,34 @@ def cmd_clean(args: argparse.Namespace) -> int:
         # --arch override; defaults to x86_64).
         wipe_paths = [ARTIFACTS_DIR / target / tc.arch]
 
+    from ltvm_pkg.storage import archived_links
+
     wiped: list[dict[str, Any]] = []
     for p in wipe_paths:
-        if p.exists():
+        # An archived arch dir is a symlink into cold storage
+        # (storage.py): remove what it points at too, and the link,
+        # rather than orphan the cold copy or fail on the link.
+        links = archived_links(p)
+        for link, real in links:
+            size = _dir_size_bytes(real)
+            try:
+                podman_rmtree(real)
+                link.unlink()
+            except OSError as e:
+                return _error(f"Failed to remove {real}: {e}", use_json)
+            wiped.append({"path": str(real), "bytes": size, "removed": True})
+        if p.is_symlink():
+            # A link archive did not make: drop the link, not its target.
+            p.unlink()
+            wiped.append({"path": str(p), "bytes": 0, "removed": True})
+        elif p.exists():
             size = _dir_size_bytes(p)
             try:
                 podman_rmtree(p)
             except OSError as e:
                 return _error(f"Failed to remove {p}: {e}", use_json)
             wiped.append({"path": str(p), "bytes": size, "removed": True})
-        else:
+        elif not links:
             wiped.append({"path": str(p), "bytes": 0, "removed": False})
 
     result = {
@@ -1257,6 +1275,8 @@ def cmd_build_shell(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    from ltvm_pkg.storage import storage_fields
+
     use_json = args.json
     targets = _cli_attr("list_targets")()
 
@@ -1352,6 +1372,8 @@ def cmd_status(args: argparse.Namespace) -> int:
             "container": cs,
             "kernel": ks,
             "images": images,
+            # storage "cold": archived by `ltvm target archive`.
+            **storage_fields(tc.output_dir),
         }
 
     if use_json:
@@ -1385,6 +1407,18 @@ def cmd_status(args: argparse.Namespace) -> int:
                         print(line)
                     for line in _why_lines(ims, "image"):
                         print(line)
+        cold_rows = [
+            (name, st["cold_path"])
+            for name, st in all_status.items()
+            if st.get("storage") == "cold"
+        ]
+        if cold_rows:
+            print(
+                f"\nCold (archived; `ltvm target restore <target> --arch "
+                f"{status_arch}` brings one back):"
+            )
+            for name, path in cold_rows:
+                print(f"  {name:<12} {path}")
 
     return EXIT_OK
 

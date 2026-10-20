@@ -673,7 +673,19 @@ def cmd_fetch(args: argparse.Namespace) -> int:
             "target required (e.g. ltvm target fetch rocky9)", use_json
         )
 
+    from ltvm_pkg.storage import archived
     from ltvm_pkg.target_config import ARTIFACTS_DIR
+
+    # tar replaces a symlink to a directory with a real directory when it
+    # extracts one over it, so a fetch into an archived target would land
+    # a partial tree in hot storage and orphan the cold one.
+    cold = archived(ARTIFACTS_DIR / target / arch)
+    if cold is not None and not dry_run:
+        return _error(
+            f"{target}/{arch} is archived in cold storage ({cold})",
+            use_json,
+            hint=f"ltvm target restore {target} --arch {arch}, then fetch",
+        )
 
     # Print a target-description header so the user can see exactly
     # what they're about to pull (OS, arch, kernel, mode, variant)

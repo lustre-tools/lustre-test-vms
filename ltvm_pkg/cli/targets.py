@@ -211,6 +211,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
     # built or published anywhere falls back to the host arch so it still
     # shows one row inviting a local build.
     from ltvm_pkg.cli.util import host_arch
+    from ltvm_pkg.storage import storage_fields
     from ltvm_pkg.target_config import ARTIFACTS_DIR
 
     explicit_arch = getattr(args, "arch", None)
@@ -260,6 +261,9 @@ def cmd_targets(args: argparse.Namespace) -> int:
                 continue
             declared = tc.declared_kernels()
             declared_variants = ["base", *tc.declared_variants()]
+            # storage/cold_path: archived by `ltvm target archive`, as
+            # `build status` reports it.  Per arch dir, on every row.
+            where = storage_fields(tc.output_dir)
             for kname in declared:
                 signature = _cli_attr("_kernel_release_signature")(kname)
                 # Emit one header-style row per kernel with blank Variants;
@@ -283,6 +287,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
                         "built": False,
                         "local_release": "-",
                         "remote_release": "-",
+                        **where,
                     }
                 )
                 for variant in declared_variants:
@@ -373,6 +378,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
                             "local_release": local,
                             "remote_release": remote,
                             "lustre_missing": lustre_missing,
+                            **where,
                         }
                     )
 
@@ -420,6 +426,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
     has_behind = False
     has_unreachable = False
     has_no_lustre = False
+    has_cold = False
 
     def _cells(r: dict[str, Any]) -> tuple[str, str, str]:
         """Local / Remote / State cells for a variant row."""
@@ -569,7 +576,16 @@ def cmd_targets(args: argparse.Namespace) -> int:
             str(meta[k]) for k in ("os_name", "os_version") if meta.get(k)
         )
         os_part = f", {os_bits}" if os_bits else ""
-        print(f"{meta['name']}{marker} ({meta['arch']}) -- {mode_h}{os_part}")
+        cold_tag = ""
+        if meta.get("storage") == "cold":
+            cold_tag = " [cold]"
+            has_cold = True
+        print(
+            f"{meta['name']}{marker} ({meta['arch']}) -- "
+            f"{mode_h}{os_part}{cold_tag}"
+        )
+        if cold_tag:
+            print(f"  archived in {meta['cold_path']}")
         if not blk["kernels"]:
             n = blk.get("hidden_kernels", 0)
             print(
@@ -617,6 +633,11 @@ def cmd_targets(args: argparse.Namespace) -> int:
         print(
             "✓! = local copy differs from latest release -- "
             "`sudo ltvm target fetch --replace <target>` to refresh"
+        )
+    if has_cold:
+        print(
+            "[cold] = archived to cold storage, usable but slower -- "
+            "`ltvm target restore <target> --arch <arch>` brings it back"
         )
     if has_no_lustre:
         print(
@@ -751,6 +772,69 @@ def cmd_target_show(args: argparse.Namespace) -> int:
         if k["zfs_built"]:
             print(f"            zfs:    {', '.join(k['zfs_built'])}")
     return EXIT_OK
+
+
+# ------------------------------------------------------------------
+# Subcommands: target archive / restore (hot and cold storage)
+# ------------------------------------------------------------------
+
+
+def _move_target(args: argparse.Namespace, *, to_cold: bool) -> int:
+    """Move a target's arch dirs between hot and cold storage."""
+    import sys
+
+    from ltvm_pkg import storage
+
+    use_json = args.json
+    verb = "archive" if to_cold else "restore"
+    if not args.target:
+        return _error(
+            f"target required (e.g. ltvm target {verb} rocky8)", use_json
+        )
+    # Progress goes to stderr under --json so stdout stays one document.
+    out = sys.stderr if use_json else sys.stdout
+    try:
+        moves = storage.move_target(
+            args.target,
+            getattr(args, "arch", None),
+            to_cold=to_cold,
+            force=bool(getattr(args, "force", False)),
+            say=lambda line: print(line, file=out, flush=True),
+        )
+    except storage.StorageError as e:
+        return _error(str(e), use_json)
+    if use_json:
+        _output(
+            {
+                "target": args.target,
+                "action": verb,
+                "moved": [
+                    {
+                        "arch": m.arch,
+                        "from": str(m.src),
+                        "to": str(m.dest),
+                        "bytes": m.bytes,
+                        "vms": sorted({r.vm for r in m.refs}),
+                        "repointed": [
+                            {"vm": r.vm, "what": r.what, "path": new}
+                            for r, new in m.repoint
+                        ],
+                        "warning": m.warning,
+                    }
+                    for m in moves
+                ],
+            },
+            use_json,
+        )
+    return EXIT_ERROR if any(m.warning for m in moves) else EXIT_OK
+
+
+def cmd_target_archive(args: argparse.Namespace) -> int:
+    return _move_target(args, to_cold=True)
+
+
+def cmd_target_restore(args: argparse.Namespace) -> int:
+    return _move_target(args, to_cold=False)
 
 
 # ------------------------------------------------------------------

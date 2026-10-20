@@ -229,7 +229,9 @@ try:
         cmd_suite_collect,
         cmd_suite_run,
         cmd_suite_status,
+        cmd_target_archive,
         cmd_target_export,
+        cmd_target_restore,
         cmd_target_show,
         cmd_targets,
         cmd_telemetry,
@@ -898,7 +900,8 @@ def build_parser() -> argparse.ArgumentParser:
     target_parser = sub.add_parser(
         "target",
         parents=[common],
-        help="Target OS management (list/show/clean/validate/fetch/publish)",
+        help="Target OS management "
+        "(list/show/clean/archive/restore/validate/fetch/publish)",
     )
     target_sub = target_parser.add_subparsers(
         dest="target_action", metavar="<action>"
@@ -1034,6 +1037,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="(--remote) Confirm deletion (required for remote)",
     )
     tdp.set_defaults(func=cmd_delete)
+
+    tarp = target_sub.add_parser(
+        "archive",
+        parents=[common],
+        help="Move a target's artifacts to cold storage, leaving a symlink",
+        description="Move <hot>/<target>/<arch> (every arch without "
+        "--arch) to the same path under [storage] cold in /etc/ltvm.conf "
+        "and leave a symlink, so everything that names the old path keeps "
+        "working.  Refused while a VM uses the artifacts; --force goes "
+        "ahead for stopped VMs, never running ones.",
+    )
+    _add_target_arg(tarp, required=True)
+    tarp.add_argument(
+        "--force",
+        action="store_true",
+        help="Archive even though stopped VMs use the artifacts (they "
+        "keep working through the symlink)",
+    )
+    tarp.set_defaults(func=cmd_target_archive)
+
+    trsp = target_sub.add_parser(
+        "restore",
+        parents=[common],
+        help="Move an archived target back from cold storage",
+        description="Move <cold>/<target>/<arch> (every arch without "
+        "--arch) back to the hot artifacts directory, replacing the "
+        "symlink archive left.  Refused while a VM uses the artifacts; "
+        "--force goes ahead for stopped VMs, repointing any that name "
+        "the cold path.",
+    )
+    _add_target_arg(trsp, required=True)
+    trsp.add_argument(
+        "--force",
+        action="store_true",
+        help="Restore even though stopped VMs use the artifacts, "
+        "repointing the .info and overlay of any that name a cold path",
+    )
+    trsp.set_defaults(func=cmd_target_restore)
 
     tvp = target_sub.add_parser(
         "validate",
@@ -2895,6 +2936,32 @@ def parse_cli(
     return args
 
 
+# The commands that write into the artifacts tree, by subcommand
+# action (None: every action).  On a group-shared tree what they make
+# must stay writable by the rest of the group (storage.share_new_files);
+# the others keep the user's umask, since VM overlays in particular must
+# not become group-writable.
+_ARTIFACT_WRITERS: dict[str, frozenset[str] | None] = {
+    "build": frozenset(
+        {"all", "container", "kernel", "image", "zfs", "mofed-kmods"}
+    ),
+    "target": frozenset(
+        {"build", "fetch", "clean", "delete", "archive", "restore"}
+    ),
+    "clean": None,
+}
+
+
+def _writes_artifacts(args: argparse.Namespace) -> bool:
+    if args.command not in _ARTIFACT_WRITERS:
+        return False
+    actions = _ARTIFACT_WRITERS[args.command]
+    if actions is None:
+        return True
+    action = getattr(args, f"{args.command}_action", None)
+    return action in actions
+
+
 def main() -> int:
     parser = build_parser()
     # argcomplete hooks here when invoked via the bash completion shim
@@ -2925,6 +2992,14 @@ def main() -> int:
     rc = _reconcile_target_args(args)
     if rc is not None:
         return rc
+
+    if _writes_artifacts(args):
+        try:
+            from ltvm_pkg import storage
+
+            storage.share_new_files()
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger("ltvm.storage").debug("umask unchanged: %s", e)
 
     # Daily self-update nag (interactive TTYs only, skipped for
     # --json, and skipped entirely for `install` to avoid recursing
