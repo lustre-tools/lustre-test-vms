@@ -220,6 +220,8 @@ ltvm vm         <action> ...    VM inspection / crash / snapshot (see below);
 ltvm cluster    <action> ...    Multi-node cluster management (see below)
 ltvm create     <name>          Create a VM (idempotent; --root-size sets
                                 the OS disk, --disk-size the MDT/OST ones,
+                                --disk-dir/--disk-cache/--disk-prealloc
+                                where and how those are kept,
                                 --kernel-args adds boot parameters,
                                 --wait SECONDS waits for host memory)
 ltvm start|stop|destroy <name>  VM power / removal (start takes --wait)
@@ -455,7 +457,8 @@ ltvm vm exec          <name> CMD  Run a command in the VM (ssh; its exit status)
 ltvm vm nmi           <name>    Inject NMI (panic + kdump)
 ltvm vm snapshot      <name>    Snapshot overlay disk
 ltvm vm restore       <name>    Restore to a snapshot
-ltvm vm set           <name>    Change --vcpus/--mem of a stopped VM
+ltvm vm set           <name>    Change --vcpus/--mem/--numa-nodes/
+                                --disk-cache of a stopped VM
 ```
 
 `vm` also answers for the top-level VM commands -- `create`, `destroy`,

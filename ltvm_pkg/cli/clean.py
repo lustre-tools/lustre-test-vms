@@ -452,6 +452,7 @@ def _idle_vms(idle_days: float) -> list[dict[str, Any]]:
         files = [
             vm.overlay_path,
             *sorted(vm_state.OVERLAYS.glob(f"{name}-disk*.img")),
+            *(vm.disk_paths() if vm.disk_dir else []),
         ]
         last = max(vm.created, vm.last_boot, vm.last_deploy)
         for f in files:

@@ -577,6 +577,9 @@ def _create_one_node(
     kernel: str | None = None,
     variant: str = "base",
     share_disks: bool = False,
+    disk_dir: str = "",
+    disk_cache: str = "",
+    disk_prealloc: str = "",
 ) -> tuple[str, int, str]:
     """Create a single cluster VM via ltvm subprocess.
 
@@ -642,6 +645,14 @@ def _create_one_node(
         cmd += ["--share-disks"]
     if node.failover_for:
         cmd += ["--disks-from", node.failover_for]
+    else:
+        # A partner has no disks of its own, and shares its primary's.
+        if disk_dir:
+            cmd += ["--disk-dir", disk_dir]
+        if disk_cache:
+            cmd += ["--disk-cache", disk_cache]
+        if disk_prealloc:
+            cmd += [f"--disk-prealloc={disk_prealloc}"]
     if kernel_args:
         # One argv word, so a value starting with '-' is not an option.
         cmd += [f"--kernel-args={kernel_args}"]
@@ -829,6 +840,9 @@ def _print_cluster_plan(
     nics: list[str],
     kernel_args: str,
     owner_id: str | None,
+    disk_dir: str = "",
+    disk_cache: str = "",
+    disk_prealloc: str = "",
 ) -> None:
     """Report what `cluster create` would do, for --dry-run.
 
@@ -869,6 +883,12 @@ def _print_cluster_plan(
         print(f"  disk:    {disk_size} each")
     if root_size:
         print(f"  root:    {root_size} each")
+    if disk_dir:
+        print(f"  disks:   in {disk_dir}")
+    if disk_cache:
+        print(f"  cache:   {disk_cache}")
+    if disk_prealloc:
+        print(f"  prealloc: {disk_prealloc}")
     if nics:
         print(f"  nics:    eth0 (mgmt) + {', '.join(nics)}")
     if kernel_args:
@@ -944,7 +964,11 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     cluster_name = args.name
     # Cluster name flows into filesystem paths (SOCKETS/<name>.cluster)
     # so it needs the same character whitelist as VM names.
-    from .vm_commands import _validate_kernel_args, _validate_vm_name
+    from .vm_commands import (
+        _validate_disk_options,
+        _validate_kernel_args,
+        _validate_vm_name,
+    )
 
     _validate_vm_name(cluster_name)
     record = SOCKETS / f"{cluster_name}.cluster"
@@ -1047,6 +1071,18 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     shared = {p.failover_for for p in partners}
     disk_size = getattr(args, "disk_size", None)
     root_size = getattr(args, "root_size", None)
+    disk_cache = getattr(args, "disk_cache", None) or ""
+    if partners and disk_cache not in ("", "none"):
+        die(
+            f"--disk-cache {disk_cache}: a failover pair's disks are "
+            f"always cache=none"
+        )
+    _validate_disk_options(args)
+    disk_opts = {
+        "disk_dir": args.disk_dir,
+        "disk_cache": args.disk_cache,
+        "disk_prealloc": args.disk_prealloc,
+    }
     # Multi-NIC: same list of --nic specs applies to every node in the
     # cluster.  The CLI layer (cli.py::cmd_cluster) collects them into
     # args.nic; older call sites that don't know about --nic land here
@@ -1081,6 +1117,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
             nics=nics,
             kernel_args=kernel_args,
             owner_id=owner_id,
+            **disk_opts,
         )
         return
 
@@ -1125,6 +1162,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                     or (None if node_targets[node.name] else kernel),
                     variant="base" if node_targets[node.name] else variant,
                     share_disks=node.name in shared,
+                    **disk_opts,
                 ): node
                 for node in wave
             }

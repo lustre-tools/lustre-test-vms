@@ -158,6 +158,14 @@ def _nested_kvm_on_apple(cpuinfo: Path = Path("/proc/cpuinfo")) -> bool:
 
 DISK_SIZE_BYTES = 500 * 1024 * 1024  # 500 MiB default
 
+# QEMU cache modes a data disk may take (--disk-cache).  Unset leaves
+# QEMU's default, writeback.
+DISK_CACHE_MODES = ("none", "writeback", "writethrough", "directsync", "unsafe")
+
+# qemu-img preallocation modes for the data disks (--disk-prealloc).
+# Unset makes them sparse, as truncate does.
+DISK_PREALLOC_MODES = ("falloc", "full")
+
 # Root (OS) disk.  The overlay is grown to this at create time and the
 # guest's rc.local resize2fs's the root filesystem into it on every
 # boot, so raising it is all it takes to give a VM more room.
@@ -640,6 +648,14 @@ class VMInfo:
     share_disks: bool = False
     disks_from: str = ""
 
+    # Where the data disks live (--disk-dir), their QEMU cache mode
+    # (--disk-cache) and how they were preallocated (--disk-prealloc).
+    # Empty is the overlays directory, QEMU's default cache and sparse
+    # files, which is what older .info files load as.
+    disk_dir: str = ""
+    disk_cache: str = ""
+    disk_prealloc: str = ""
+
     @property
     def info_path(self) -> Path:
         return SOCKETS / f"{self.name}.info"
@@ -660,8 +676,19 @@ class VMInfo:
     def overlay_path(self) -> Path:
         return OVERLAYS / f"{self.name}.qcow2"
 
+    @property
+    def disk_dir_path(self) -> Path:
+        return Path(self.disk_dir) if self.disk_dir else OVERLAYS
+
     def disk_path(self, n: int) -> Path:
-        return OVERLAYS / f"{self.name}-disk{n}.img"
+        return self.disk_dir_path / f"{self.name}-disk{n}.img"
+
+    def disk_paths(self) -> list[Path]:
+        """This VM's own data disks, vdb onwards."""
+        return [
+            self.disk_path(n)
+            for n in range(1, self.mdt_disks + self.ost_disks + 1)
+        ]
 
     def extra_nics(self) -> list[tuple[int, str, str, str]]:
         """Return ``(index, nic_type, tap_name, mac)`` tuples for extra NICs.
@@ -740,6 +767,9 @@ class VMInfo:
             f"NUMA_NODES={self.numa_nodes}\n"
             f"SHARE_DISKS={int(self.share_disks)}\n"
             f"DISKS_FROM={self.disks_from}\n"
+            f"DISK_DIR={self.disk_dir}\n"
+            f"DISK_CACHE={self.disk_cache}\n"
+            f"DISK_PREALLOC={self.disk_prealloc}\n"
         )
         _atomic_write(self.info_path, text)
 
@@ -925,6 +955,9 @@ class VMInfo:
             numa_nodes=int(vals.get("NUMA_NODES") or 0),
             share_disks=vals.get("SHARE_DISKS", "0") == "1",
             disks_from=vals.get("DISKS_FROM", ""),
+            disk_dir=vals.get("DISK_DIR", ""),
+            disk_cache=vals.get("DISK_CACHE", ""),
+            disk_prealloc=vals.get("DISK_PREALLOC", ""),
         )
 
     @staticmethod

@@ -262,6 +262,10 @@ try:
         SHELLS as SHELL_COMPLETION_SHELLS,
     )
     from ltvm_pkg.vm_cluster import IP_FAMILIES  # noqa: E402
+    from ltvm_pkg.vm_state import (  # noqa: E402
+        DISK_CACHE_MODES,
+        DISK_PREALLOC_MODES,
+    )
 except ModuleNotFoundError as e:  # noqa: E402
     if e.name not in ("yaml", "argcomplete"):
         raise
@@ -345,6 +349,47 @@ _COMPLETERS_BY_OPTION: dict[str, Any] = {
     "--variant": complete_variants,
     "--zfs-version": complete_zfs_versions,
 }
+
+
+def _add_disk_option_args(
+    parser: argparse.ArgumentParser, every_node: bool = False
+) -> None:
+    """--disk-dir, --disk-cache and --disk-prealloc, for create and
+    cluster create."""
+    each = " on every node (failover partners excepted)" if every_node else ""
+    disk_dir = parser.add_argument(
+        "--disk-dir",
+        dest="disk_dir",
+        default=None,
+        metavar="DIR",
+        help="Create the MDT/OST data disks in DIR (absolute, existing) "
+        "instead of the overlays directory, e.g. on another filesystem" + each,
+    )
+    disk_dir.completer = complete_directories  # type: ignore[attr-defined]
+    parser.add_argument(
+        "--disk-cache",
+        dest="disk_cache",
+        choices=DISK_CACHE_MODES,
+        default=None,
+        metavar="MODE",
+        help="QEMU cache= mode for the data disks: "
+        + ", ".join(DISK_CACHE_MODES)
+        + ".  Unset, QEMU uses its own default (writeback); 'none' "
+        "bypasses the host page cache" + each,
+    )
+    parser.add_argument(
+        "--disk-prealloc",
+        dest="disk_prealloc",
+        nargs="?",
+        const="falloc",
+        choices=DISK_PREALLOC_MODES,
+        default=None,
+        metavar="MODE",
+        help="Create the data disks fully allocated rather than sparse: "
+        "falloc (the default; full when the filesystem will not) or "
+        "--disk-prealloc=full to write them out.  The guest's discards "
+        "then leave them allocated" + each,
+    )
 
 
 def _attach_completers(parser: argparse.ArgumentParser) -> None:
@@ -1406,6 +1451,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _vm_disks_from.completer = complete_vms  # type: ignore[attr-defined]
+    _add_disk_option_args(_vm_create_args)
     _vm_create_args.add_argument(
         "--root-size",
         dest="root_size",
@@ -1754,8 +1800,8 @@ def build_parser() -> argparse.ArgumentParser:
     vsetp = vm_sub.add_parser(
         "set",
         parents=[common],
-        help="Change the vCPUs, memory or NUMA nodes of a stopped VM "
-        "(next start)",
+        help="Change the vCPUs, memory, NUMA nodes or data disk cache of "
+        "a stopped VM (next start)",
     )
     _vsetp_name = vsetp.add_argument("name", help="VM name")
     _vsetp_name.completer = complete_vms  # type: ignore[attr-defined]
@@ -1770,6 +1816,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="N",
         help="New simulated NUMA node count (0 for none)",
+    )
+    vsetp.add_argument(
+        "--disk-cache",
+        dest="disk_cache",
+        choices=[*DISK_CACHE_MODES, "default"],
+        default=None,
+        help="New QEMU cache mode for the data disks; 'default' drops "
+        "cache= and leaves QEMU's own (writeback)",
     )
     vsetp.set_defaults(func=cmd_vm_set)
 
@@ -2273,6 +2327,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Root (OS) disk size per node, suffix M or G (e.g. 16G)",
     )
+    _add_disk_option_args(ccp, every_node=True)
     ccp.add_argument(
         "--nic",
         action="append",

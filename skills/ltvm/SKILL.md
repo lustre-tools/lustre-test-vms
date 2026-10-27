@@ -81,6 +81,25 @@ VM's own OS disk (default 8G). Both are fixed at create time, so a VM
 that needs room for a debug build or a vmcore wants `--root-size 20G`
 when it is created, not after.
 
+The MDT/OST disks are sparse files in the VM directory, which QEMU
+opens through the host page cache. To measure a real host device (an
+HDD, say), put them on it and take the cache out:
+
+```bash
+ltvm create co1-hdd --disk-dir /mnt/hdd/ltvm --disk-cache none --disk-prealloc
+```
+
+`--disk-dir` must be an absolute directory that already exists;
+`--disk-cache` is passed to QEMU as `cache=` (none, writeback,
+writethrough, directsync, unsafe; unset is QEMU's writeback);
+`--disk-prealloc` allocates the files up front (falloc, or
+`--disk-prealloc=full` to write them out) and stops the guest's discards
+from punching holes back in them. `cluster create` takes all three for
+every node. `--disk-cache` alone can change later, with `ltvm vm set
+<name> --disk-cache MODE` (or `default`) on the stopped VM. A VM made
+with these needs an ltvm that knows them to start it: an older one looks
+for the disks in the wrong place.
+
 vCPUs and memory can change later without recreating the VM: stop it,
 then `ltvm vm set <name> --vcpus 2 --mem 4096`, and the new size applies
 at the next start. Use it to shrink idle VMs on a crowded host rather

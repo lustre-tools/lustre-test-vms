@@ -12,7 +12,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -48,6 +48,8 @@ from .vm_net import (
 from .vm_owner import resolve_owner_id
 from .vm_state import (
     DEFAULT_TARGET,
+    DISK_CACHE_MODES,
+    DISK_PREALLOC_MODES,
     DISK_SIZE_BYTES,
     EXIT_ERROR,
     EXIT_NOT_FOUND,
@@ -629,7 +631,13 @@ _RESOURCE_FLAGS = {
     "root_size": "--root-size",
     "kernel_args": "--kernel-args",
     "numa_nodes": "--numa-nodes",
+    "disk_dir": "--disk-dir",
+    "disk_cache": "--disk-cache",
+    "disk_prealloc": "--disk-prealloc",
 }
+
+# Flags whose typed spelling differs from the stored one only cosmetically.
+_FLAG_NORMALIZERS = {"disk_dir": os.path.normpath}
 
 # Size flags are typed as "500M" and stored as bytes, so they have to be
 # compared through the parser -- a straight string compare reported
@@ -681,7 +689,7 @@ def _warn_ignored_resource_flags(
                 f"{_RESOURCE_FLAGS[dest]}: requested {requested}, "
                 f"VM has {_size_label(current)}"
             )
-        elif str(current) != str(requested):
+        elif str(current) != str(_FLAG_NORMALIZERS.get(dest, str)(requested)):
             ignored.append(
                 f"{_RESOURCE_FLAGS[dest]}: requested "
                 f"{requested if requested != '' else '(none)'}, "
@@ -833,6 +841,9 @@ def _allocate_and_persist_vm(
             numa_nodes=getattr(args, "numa_nodes", 0) or 0,
             share_disks=bool(getattr(args, "share_disks", False)),
             disks_from=getattr(args, "disks_from", None) or "",
+            disk_dir=getattr(args, "disk_dir", "") or "",
+            disk_cache=getattr(args, "disk_cache", "") or "",
+            disk_prealloc=getattr(args, "disk_prealloc", "") or "",
         )
         problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes)
         if problem:
@@ -870,8 +881,23 @@ def _print_create_report(vm: VMInfo, args: argparse.Namespace) -> None:
                 if vm.disks_from
                 else f"  disks: {vm.mdt_disks} MDT + {vm.ost_disks} OST"
                 + (", shared" if vm.share_disks else "")
+                + _disk_option_desc(
+                    vm.disk_dir, vm.disk_cache, vm.disk_prealloc
+                )
             )
         )
+
+
+def _disk_option_desc(disk_dir: str, cache: str, prealloc: str) -> str:
+    """The disk options in use, as ", in DIR, cache=MODE, ..."."""
+    parts = []
+    if disk_dir:
+        parts.append(f"in {disk_dir}")
+    if cache:
+        parts.append(f"cache={cache}")
+    if prealloc:
+        parts.append(f"preallocated ({prealloc})")
+    return "".join(f", {p}" for p in parts)
 
 
 def _print_create_plan(
@@ -916,6 +942,9 @@ def _print_create_plan(
         "numa_nodes": getattr(args, "numa_nodes", 0) or 0,
         "share_disks": bool(getattr(args, "share_disks", False)),
         "disks_from": getattr(args, "disks_from", None) or "",
+        "disk_dir": getattr(args, "disk_dir", "") or "",
+        "disk_cache": getattr(args, "disk_cache", "") or "",
+        "disk_prealloc": getattr(args, "disk_prealloc", "") or "",
         "owner_id": getattr(args, "owner_id", None),
     }
     if args.json:
@@ -942,6 +971,11 @@ def _print_create_plan(
             f"  disks:   {args.mdt_disks} MDT + {args.ost_disks} OST "
             f"@ {size_mb}M each"
             + (", shared" if getattr(args, "share_disks", False) else "")
+            + _disk_option_desc(
+                getattr(args, "disk_dir", "") or "",
+                getattr(args, "disk_cache", "") or "",
+                getattr(args, "disk_prealloc", "") or "",
+            )
         )
     print(f"  root:    {_size_label(root_size)}")
     # The IP is claimed under a lock by the step this stops short of, so
@@ -1166,6 +1200,57 @@ def _validate_failover_disks(args: argparse.Namespace) -> VMInfo | None:
     return owner
 
 
+def _validate_disk_options(args: argparse.Namespace) -> None:
+    """Check --disk-dir, --disk-cache and --disk-prealloc, normalizing
+    them on *args* ("" when not given).
+
+    The directory must already exist: an unmounted mount point is the
+    usual reason one does not, and creating it would put the disks on
+    the wrong filesystem.  A failover partner has no disks of its own,
+    and a shared disk must be cache=none on both sides.
+    """
+    disk_dir = getattr(args, "disk_dir", None) or ""
+    cache = getattr(args, "disk_cache", None) or ""
+    prealloc = getattr(args, "disk_prealloc", None) or ""
+    if cache and cache not in DISK_CACHE_MODES:
+        die(f"--disk-cache {cache}: not one of {', '.join(DISK_CACHE_MODES)}")
+    if prealloc and prealloc not in DISK_PREALLOC_MODES:
+        die(
+            f"--disk-prealloc {prealloc}: not one of "
+            f"{', '.join(DISK_PREALLOC_MODES)}"
+        )
+    if disk_dir:
+        if not os.path.isabs(disk_dir):
+            die(f"--disk-dir {disk_dir}: must be an absolute path")
+        # QEMU's -drive option parser splits on commas, and the .info
+        # file is one key per line.
+        if "," in disk_dir or any(ord(c) < 0x20 for c in disk_dir):
+            die(f"--disk-dir {disk_dir!r}: no commas or control characters")
+        disk_dir = os.path.normpath(disk_dir)
+        if not os.path.isdir(disk_dir):
+            die(
+                f"--disk-dir {disk_dir}: no such directory (ltvm does not "
+                f"create it; mount or make it first)"
+            )
+    if getattr(args, "disks_from", None):
+        if disk_dir or prealloc:
+            die(
+                "--disks-from attaches the other VM's disks; it takes no "
+                "--disk-dir or --disk-prealloc of its own"
+            )
+    if cache and cache != "none":
+        if getattr(args, "disks_from", None) or getattr(
+            args, "share_disks", False
+        ):
+            die(
+                f"--disk-cache {cache}: shared disks are always cache=none, "
+                f"so that both QEMUs see each other's writes"
+            )
+    args.disk_dir = disk_dir
+    args.disk_cache = cache
+    args.disk_prealloc = prealloc
+
+
 def _check_passthrough_conflicts(bdfs: list[str]) -> None:
     """Refuse a BDF already claimed by another VM.
 
@@ -1268,6 +1353,13 @@ def _create_disks(vm: VMInfo, image: str) -> bool:
             f"fix that with `ltvm doctor --fix` or `chmod a+r {image}`"
         )
     make = _checked if as_user else _sudo_checked
+    # --disk-dir is the user's own directory, written as the user when
+    # they can and through sudo (then chowned back) when not, as the
+    # overlays directory is.
+    disks_as_user = (
+        _user_can_write(vm.disk_dir_path) if vm.disk_dir else as_user
+    )
+    make_disk = _checked if disks_as_user else _sudo_checked
     try:
         make(
             [
@@ -1288,16 +1380,13 @@ def _create_disks(vm: VMInfo, image: str) -> bool:
         # boot (rc.local).
         make([QEMU_IMG, "resize", str(vm.overlay_path), str(vm.root_size)])
 
-        # Create backing disks
-        total = vm.mdt_disks + vm.ost_disks
-        for n in range(1, total + 1):
-            make(
-                ["truncate", "-s", str(vm.disk_size), str(vm.disk_path(n))],
-            )
+        for disk in vm.disk_paths():
+            if vm.disk_prealloc:
+                _create_preallocated_disk(vm, disk, make_disk)
+            else:
+                make_disk(["truncate", "-s", str(vm.disk_size), str(disk)])
     except BaseException:
-        leftovers = [vm.overlay_path] + [
-            vm.disk_path(n) for n in range(1, vm.mdt_disks + vm.ost_disks + 1)
-        ]
+        leftovers = [vm.overlay_path] + vm.disk_paths()
         stuck: list[Path] = []
         for f in leftovers:
             try:
@@ -1311,7 +1400,49 @@ def _create_disks(vm: VMInfo, image: str) -> bool:
                 quiet=True,
             )
         raise
-    return not as_user
+    return not (as_user and disks_as_user)
+
+
+def _create_preallocated_disk(
+    vm: VMInfo, disk: Path, make: Callable[[list[str]], None]
+) -> None:
+    """Create one fully allocated data disk.
+
+    falloc reserves the blocks without writing them.  When the
+    filesystem will not take it, write the zeros instead (full), and
+    record that in the VM.
+    """
+
+    def create(mode: str) -> None:
+        make(
+            [
+                QEMU_IMG,
+                "create",
+                "-q",
+                "-f",
+                "raw",
+                "-o",
+                f"preallocation={mode}",
+                str(disk),
+                str(vm.disk_size),
+            ]
+        )
+
+    if vm.disk_prealloc != "falloc":
+        create(vm.disk_prealloc)
+        return
+    try:
+        create("falloc")
+    except RuntimeError as e:
+        if "No space left" in str(e):
+            raise
+        print(
+            f"{vm.name}: preallocation=falloc failed in {disk.parent} "
+            f"({e}); writing the disks out in full instead",
+            file=sys.stderr,
+        )
+        vm.disk_prealloc = "full"
+        create("full")
 
 
 def _chown_disks_to_sudo_user(vm: VMInfo) -> None:
@@ -1329,9 +1460,7 @@ def _chown_disks_to_sudo_user(vm: VMInfo) -> None:
     if target_user == "root":
         return  # nothing to hand off
 
-    files = [vm.overlay_path] + [
-        vm.disk_path(n) for n in range(1, vm.mdt_disks + vm.ost_disks + 1)
-    ]
+    files = [vm.overlay_path] + vm.disk_paths()
     sudo_run(
         ["chown", f"{target_user}:", *(str(f) for f in files)],
         check=False,
@@ -1466,6 +1595,7 @@ def cmd_create(args: argparse.Namespace) -> None:
 
     extra_nic_types, passthrough_bdfs = _validate_create_bounds(args)
     shared_owner = _validate_failover_disks(args)
+    _validate_disk_options(args)
 
     # Refuse now rather than letting two VMs fight over one host TAP
     # once they are both running (see check_tap_collision).  Read-only,
@@ -1709,6 +1839,14 @@ def _destroy_vm_artifacts(name: str) -> None:
     _validate_vm_name_for_lookup(name)
     overlay = OVERLAYS / f"{name}.qcow2"
     targets = [overlay] + list(OVERLAYS.glob(f"{name}-disk*.img"))
+    # Disks made with --disk-dir are found through the .info file, so
+    # read it before it goes.
+    try:
+        vm = VMInfo.load(name)
+    except (VMNotFound, ValueError, OSError):
+        vm = None
+    if vm is not None and vm.disk_dir:
+        targets += _disk_dir_files(vm.disk_dir_path, name)
     for ext in ("qmp", "pid", "info", "log"):
         targets.append(SOCKETS / f"{name}.{ext}")
     targets.append(SOCKETS / f".{name}.info.lock")
@@ -1725,6 +1863,20 @@ def _destroy_vm_artifacts(name: str) -> None:
             check=False,
             quiet=True,
         )
+
+
+def _disk_dir_files(directory: Path, name: str | None = None) -> list[Path]:
+    """The ltvm data disks (``<vm>-disk<N>.img``) in a --disk-dir.
+
+    Matched exactly, unlike the overlays glob: the directory is the
+    user's and may hold anything else.  *name* limits it to one VM.
+    """
+    pattern = re.compile(rf"{re.escape(name) if name else '.+'}-disk\d+\.img")
+    try:
+        entries = sorted(directory.iterdir())
+    except OSError:
+        return []
+    return [f for f in entries if pattern.fullmatch(f.name) and f.is_file()]
 
 
 def _refuse_orphaned_partners(names: list[str]) -> None:
@@ -2998,17 +3150,33 @@ def cmd_restore(args: argparse.Namespace) -> None:
 
 
 def cmd_set(args: argparse.Namespace) -> None:
-    """Change the vCPU count and/or memory of a stopped VM.
+    """Change the vCPUs, memory, NUMA nodes or disk cache of a stopped VM.
 
-    Both are read from the .info file each time QEMU is launched, so
+    All are read from the .info file each time QEMU is launched, so
     the new values take effect at the next start, and the VM keeps its
     disks and everything installed on them -- unlike destroying and
     recreating it.  The VM must be stopped: a running QEMU would keep
     its old size, and `list` would then report values it isn't using.
     """
     numa = getattr(args, "numa_nodes", None)
-    if args.vcpus is None and args.mem is None and numa is None:
-        die("nothing to set: give --vcpus, --mem and/or --numa-nodes")
+    cache = getattr(args, "disk_cache", None)
+    if (
+        args.vcpus is None
+        and args.mem is None
+        and numa is None
+        and cache is None
+    ):
+        die(
+            "nothing to set: give --vcpus, --mem, --numa-nodes and/or "
+            "--disk-cache"
+        )
+    if cache == "default":
+        cache = ""
+    if cache and cache not in DISK_CACHE_MODES:
+        die(
+            f"--disk-cache {cache}: not one of "
+            f"{', '.join(DISK_CACHE_MODES)} or default"
+        )
     if args.vcpus is not None and args.vcpus <= 0:
         die(f"--vcpus must be > 0 (got {args.vcpus})")
     if args.mem is not None and args.mem <= 0:
@@ -3029,6 +3197,16 @@ def cmd_set(args: argparse.Namespace) -> None:
     if numa is not None and numa != vm.numa_nodes:
         changes.append(f"numa nodes {vm.numa_nodes} -> {numa}")
         vm.numa_nodes = numa
+    if cache is not None and cache != vm.disk_cache:
+        if cache not in ("", "none") and (vm.share_disks or vm.disks_from):
+            die(
+                f"--disk-cache {cache}: {vm.name}'s disks are shared, and "
+                f"shared disks are always cache=none"
+            )
+        changes.append(
+            f"disk cache {vm.disk_cache or 'default'} -> {cache or 'default'}"
+        )
+        vm.disk_cache = cache
     problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes)
     if problem:
         die(problem)
@@ -3338,6 +3516,46 @@ def _check_unprivileged_vms(
     return len(rd.problems), 0
 
 
+def _check_disk_dirs(fix: bool) -> tuple[int, int]:
+    """Data disks a VM names that are not there, and orphans in the
+    --disk-dir directories VMs use.
+
+    An orphan there is reported but never removed: the directory is the
+    user's, and an older ltvm's destroy leaves a VM's disks in it.
+    Returns (issues, failures).
+    """
+    issues = failures = 0
+    dirs: set[Path] = set()
+    names = set(VMInfo.all_names())
+    for name in sorted(names):
+        try:
+            vm = VMInfo.load(name)
+        except (VMNotFound, ValueError):
+            continue
+        if vm.disk_dir:
+            dirs.add(vm.disk_dir_path)
+        disks = vm.disk_paths()
+        if vm.disk_dir and disks and not vm.disk_dir_path.is_dir():
+            print(f"missing disk dir: {name} ({vm.disk_dir}; not mounted?)")
+            issues += 1
+            continue
+        for n, disk in enumerate(disks, start=1):
+            if not disk.exists():
+                print(f"missing data disk: {name} disk{n} ({disk})")
+                issues += 1
+    for directory in sorted(dirs):
+        for disk in _disk_dir_files(directory):
+            if re.sub(r"-disk\d+$", "", disk.stem) in names:
+                continue
+            size = disk.stat().st_size // 1048576
+            print(f"orphan disk: {disk} ({size}M)")
+            issues += 1
+            if fix:
+                print(f"  NOT fixed: outside {OVERLAYS}; rm it by hand")
+                failures += 1
+    return issues, failures
+
+
 def _check_claims(fix: bool) -> tuple[int, int]:
     """The claims directory, and claims whose session has gone.
 
@@ -3501,6 +3719,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             else:
                 print(f"  FAILED to remove: {err}")
                 fix_failures += 1
+
+    found, failed = _check_disk_dirs(args.fix)
+    issues += found
+    fix_failures += failed
 
     # Orphan socket-side files (.pid, .log, .qmp, .info.lock) whose
     # matching .info file is gone.  These accumulate when cmd_destroy

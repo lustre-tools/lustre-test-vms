@@ -757,6 +757,7 @@ ltvm vm snapshot co1-single [tag]     # snapshot the overlay disk
 ltvm vm snapshot co1-single --delete tag
 ltvm vm restore co1-single [tag]      # restore (no tag: list them)
 ltvm vm set co1-single --vcpus 2 --mem 4096   # resize a stopped VM
+ltvm create co1-hdd --disk-dir /mnt/hdd --disk-cache none --disk-prealloc
 ltvm vm crash-collect co1-single --mod-dir $CO/1
 ltvm destroy co1-single
 ```
@@ -805,6 +806,50 @@ filesystem into whatever the overlay is, so the flag is the whole
 mechanism.  Both are fixed at create time -- `ltvm create` against an
 existing VM warns that a differing value was ignored.  `cluster create`
 takes `--root-size` too and applies it to every node.
+
+**Where the data disks live and how QEMU opens them:** three create
+options, for measuring I/O on a real host device.  `cluster create`
+passes all three to every node but a failover partner, which has no
+disks of its own.
+
+- `--disk-dir DIR` (`DISK_DIR`) puts the MDT/OST disks in DIR, which must
+  be absolute, exist (ltvm never makes it: an unmounted mount point is
+  the usual reason it does not) and hold no comma (QEMU's `-drive`
+  parser splits on them).  The root overlay stays in `overlays/`.
+  `VMInfo.disk_path` is the one place the path is made; destroy finds
+  the disks through the `.info` (`_disk_dir_files`, an exact
+  `<vm>-disk<N>.img` match, since the directory is the user's), `ltvm
+  clean` counts them, and doctor reports a VM whose disks or directory
+  are missing and orphans in the directories VMs use, which `--fix`
+  leaves alone.  Written as the user when the user can, else through
+  sudo and chowned back, as `overlays/` is.  Snapshots cover only the
+  overlay, so nothing there changes.
+- `--disk-cache MODE` (`DISK_CACHE`: none, writeback, writethrough,
+  directsync, unsafe) appends `cache=MODE` to each data disk's
+  `-drive`.  Unset adds nothing, so the command line of a VM without it
+  is unchanged and QEMU's default (writeback, through the host page
+  cache) applies.  `ltvm vm set --disk-cache MODE|default` changes it on
+  a stopped VM.  A shared disk (`--share-disks`, `--disks-from`) is
+  always `cache=none`, so any other mode is refused there.  ltvm sets no
+  `aio=`, so QEMU uses its thread pool, which works with every mode;
+  `aio=native` would need none or directsync.  none and directsync open
+  the file `O_DIRECT`, which the filesystem must support (tmpfs did not
+  before 6.6); `discard=unmap,detect-zeroes=unmap` work under any mode.
+- `--disk-prealloc` (`DISK_PREALLOC`) makes the disks with `qemu-img
+  create -f raw -o preallocation=falloc` instead of `truncate`, falling
+  back to `full` (and recording that) when falloc fails for any reason
+  but ENOSPC; `--disk-prealloc=full` asks for full, which writes the
+  zeros so the host has no unwritten extents to convert on the first
+  write.  A preallocated disk is attached `discard=ignore,
+  detect-zeroes=off`: mkfs discards the whole device, and with `unmap`
+  that punched the allocation back out.  Mind the optional argument:
+  `--disk-prealloc rocky9` reads the target as the mode and is refused.
+
+All three keys load as empty from an older `.info`, which is exactly
+the old behaviour.  An older ltvm ignores the keys: it looks for a
+`--disk-dir` VM's disks in `overlays/` and refuses to start it, starts a
+`--disk-cache` VM with QEMU's default cache, and its `vm set` (a full
+`.info` rewrite) drops all three.
 
 **Resizing:** vCPUs and memory are not fixed: `ltvm vm set <name>
 --vcpus N --mem MB` rewrites them in the stopped VM's `.info`, which

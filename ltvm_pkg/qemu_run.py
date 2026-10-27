@@ -439,6 +439,10 @@ def data_disk_args(vm: VMInfo, blk_driver: str = "virtio-blk-pci") -> list[str]:
     writer unless every QEMU that opens it says share-rw=on, so the
     primary (``share_disks``) and the partner both do.  A VM with
     neither gets its own disks exactly as before.
+
+    ``disk_cache`` adds cache=MODE.  Preallocated disks ignore the
+    guest's discards and zero writes, which would otherwise punch holes
+    in them (mkfs discards the whole device).
     """
     if vm.disks_from:
         try:
@@ -453,28 +457,33 @@ def data_disk_args(vm: VMInfo, blk_driver: str = "virtio-blk-pci") -> list[str]:
                 f"'{vm.name}' attaches the disks of '{owner.name}', which "
                 f"was not created with --share-disks"
             )
-        disks = [
-            owner.disk_path(n)
-            for n in range(1, owner.mdt_disks + owner.ost_disks + 1)
-        ]
+        source = owner
         shared = True
     else:
-        disks = [
-            vm.disk_path(n) for n in range(1, vm.mdt_disks + vm.ost_disks + 1)
-        ]
+        source = vm
         shared = vm.share_disks
+    zeroes = (
+        "discard=ignore,detect-zeroes=off"
+        if source.disk_prealloc
+        else "discard=unmap,detect-zeroes=unmap"
+    )
+    cache = SHARED_DISK_CACHE if shared else vm.disk_cache
+    disks = source.disk_paths()
+    if disks and source.disk_dir and not source.disk_dir_path.is_dir():
+        die(
+            f"the data disk directory of '{source.name}', "
+            f"{source.disk_dir}, is not there (not mounted?)"
+        )
     args: list[str] = []
     for n, disk in enumerate(disks, start=1):
         if not disk.exists():
             die(f"disk{n} missing for '{vm.name}': {disk}")
         device = f"{blk_driver},drive=disk{n}"
-        drive = (
-            f"id=disk{n},file={disk},format=raw,if=none,"
-            "discard=unmap,detect-zeroes=unmap"
-        )
+        drive = f"id=disk{n},file={disk},format=raw,if=none,{zeroes}"
         if shared:
             device += ",share-rw=on"
-            drive += f",cache={SHARED_DISK_CACHE}"
+        if cache:
+            drive += f",cache={cache}"
         args += ["-device", device, "-drive", drive]
     return args
 

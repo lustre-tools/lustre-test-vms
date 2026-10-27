@@ -553,6 +553,7 @@ class TestIdleVms:
                 last_boot=last,
                 last_deploy=0,
                 overlay_path=ov,
+                disk_dir="",
                 running=running,
             )
 
