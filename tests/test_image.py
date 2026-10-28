@@ -12,6 +12,7 @@ import pytest
 
 import ltvm_pkg.image_build as ib
 from ltvm_pkg.target_config import TARGETS_DIR
+from tests.host_marks import x86_host  # noqa: F401
 
 
 def _make_target_config(tmp_path: Path, name: str = "rocky9") -> MagicMock:
@@ -1198,9 +1199,12 @@ class TestCrossPatchDockerfile:
 class TestBuildImageCleansUp:
     """A successful image build leaves no -final image or stale files."""
 
+    @pytest.mark.usefixtures("x86_host")
     def test_final_image_and_superseded_go_after_success(
         self, tmp_targets: Path
     ) -> None:
+        """On an aarch64 host the x86_64 target is a cross build, whose
+        native tool prebuild ran a real `podman build`."""
         import ltvm_pkg.image_build as image
         from tests.conftest import _make_config, _make_kernel_outputs
 

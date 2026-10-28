@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import importlib
 import json
 import logging
 import os
@@ -268,8 +269,9 @@ def _local_hash() -> str | None:
     baked file is missing.
     """
     try:
-        from . import _build_info
-
+        # By name: the module is generated and gitignored, and mypy in a
+        # tree without it reports `from . import _build_info` as an error.
+        _build_info = importlib.import_module("ltvm_pkg._build_info")
         h = getattr(_build_info, "BUILD_HASH", None)
         if isinstance(h, str) and h:
             return h

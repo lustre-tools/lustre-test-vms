@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from tests.host_marks import x86_host  # noqa: F401
+
+
+def _exec_loader(loader: importlib.machinery.SourceFileLoader) -> Any:
+    """Run the ltvm script as a module (3.15 removed ``load_module()``)."""
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
 
 
 @pytest.fixture(autouse=True)
@@ -456,7 +468,7 @@ class TestCliWiring:
         loader = importlib.machinery.SourceFileLoader(
             "ltvm_script_export", str(root / "ltvm")
         )
-        mod = loader.load_module()  # type: ignore[deprecated]
+        mod = _exec_loader(loader)
         parser = mod.build_parser()
 
         # Parse a nonsense invocation that nevertheless must succeed
@@ -1226,7 +1238,7 @@ class TestGceCliWiring:
         loader = importlib.machinery.SourceFileLoader(
             "ltvm_script_gce", str(root / "ltvm")
         )
-        mod = loader.load_module()  # type: ignore[deprecated]
+        mod = _exec_loader(loader)
         return mod.build_parser()
 
     def test_format_gce_parses(self) -> None:

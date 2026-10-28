@@ -33,6 +33,7 @@ shared across a target's variants (see lustre_test_vms_v2-9vi).
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import shutil
@@ -104,8 +105,9 @@ def _producer_metadata() -> dict[str, str]:
     # Try an in-tree build-info module first (populated at install time
     # by `sudo ./ltvm install`), then fall back to a git describe.
     try:
-        from . import _build_info
-
+        # By name: the module is generated and gitignored, and mypy in a
+        # tree without it reports `from . import _build_info` as an error.
+        _build_info = importlib.import_module("ltvm_pkg._build_info")
         v = getattr(_build_info, "VERSION", None)
         if v:
             info["ltvm_version"] = str(v)

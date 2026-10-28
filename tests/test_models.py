@@ -1031,6 +1031,9 @@ class TestWaitForSshStretch:
         with (
             patch("ltvm_pkg.vm_net.run_ssh", side_effect=probe),
             patch("ltvm_pkg.vm_net.is_running", return_value=True),
+            # An x86_64 guest is emulated on an aarch64 host, whose wait
+            # is TCG_SSH_WAIT_FACTOR times longer; these are about KVM's.
+            patch("ltvm_pkg.vm_net.emulated", return_value=False),
             patch(
                 "ltvm_pkg.vm_net.time.monotonic", side_effect=clock.monotonic
             ),

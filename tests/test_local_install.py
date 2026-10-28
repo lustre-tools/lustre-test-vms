@@ -7,14 +7,26 @@ Lustre onto that machine's own root filesystem.
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
 import subprocess
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from tests.host_marks import x86_host  # noqa: F401
+
+
+def _exec_loader(loader: importlib.machinery.SourceFileLoader) -> Any:
+    """Run the ltvm script as a module (3.15 removed ``load_module()``)."""
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    assert spec is not None
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
 
 
 @pytest.fixture(autouse=True)
@@ -922,7 +934,7 @@ def _parser():
     loader = importlib.machinery.SourceFileLoader(
         "ltvm_script_make", str(root / "ltvm")
     )
-    mod = loader.load_module()  # type: ignore[deprecated]
+    mod = _exec_loader(loader)
     return mod.build_parser()
 
 
