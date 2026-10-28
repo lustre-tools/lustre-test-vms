@@ -385,6 +385,23 @@ def _container_exists(tag: str) -> bool:
     return r.returncode == 0
 
 
+def configure_builds_modules(cfg: str) -> bool:
+    """Whether a configure command line builds the kernel modules.
+
+    ``--disable-modules`` builds the userland alone (a link check of a
+    utility, say), and then the staging has no .ko to verify.  autoconf
+    takes the last spelling of a flag, so a later ``--enable-modules``
+    wins.
+    """
+    builds = True
+    for word in shlex.split(cfg):
+        if word in ("--disable-modules", "--enable-modules=no"):
+            builds = False
+        elif word in ("--enable-modules", "--enable-modules=yes"):
+            builds = True
+    return builds
+
+
 def configure_stamp_hash(cfg: str, zfs_version: str | None = None) -> str:
     """Identity of a configure run, for the reconfigure stamp.
 
@@ -1504,7 +1521,8 @@ fi""")
     # trap, or a missing DESTDIR component silently skipped).  If we
     # stamp a half-populated staging dir, `ltvm deploy` will happily
     # rsync near-empty trees into the VM and fail mysteriously at
-    # mount time.  Assert the baseline artifacts exist before stamping.
+    # mount time.  Assert the baseline artifacts exist before stamping:
+    # the .ko unless configure was told --disable-modules.
     # RHEL/Rocky DESTDIR installs lay modules under extra/; Debian/Ubuntu
     # puts them directly under net/ and fs/.  Accept either layout.
     ko_probe = list((host_staging / "lib" / "modules").rglob("*.ko"))
@@ -1516,7 +1534,7 @@ fi""")
         if candidate.exists():
             mount_lustre = candidate
             break
-    if not ko_probe:
+    if not ko_probe and configure_builds_modules(cfg):
         raise RuntimeError(
             f"Lustre install verification failed: no .ko files under "
             f"{host_staging}/lib/modules/ -- `make install` may have "
