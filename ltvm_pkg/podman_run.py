@@ -376,7 +376,11 @@ def reclaim_ownership(root: Path) -> None:
     Inside ``podman unshare`` the user is uid 0, those files have their
     container uids, and other users' files are the overflow uid 65534.
     """
-    if sys.platform != "linux" or os.geteuid() == 0:
+    # Read through a local: mypy treats a bare sys.platform test as
+    # fixed for the platform it checks on, and on macOS calls the rest
+    # of this function unreachable.
+    host = sys.platform
+    if host != "linux" or os.geteuid() == 0:
         return
     if not _any_foreign_owned(root):
         return

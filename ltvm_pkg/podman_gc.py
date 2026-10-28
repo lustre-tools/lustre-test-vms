@@ -32,6 +32,9 @@ _FINAL_RE = re.compile(r"-final(-[0-9a-f]{8})?$")
 
 def _podman(*args: str) -> str | None:
     """Run podman; its stdout, or None when it failed or is missing."""
+    from ltvm_pkg.host_setup import hold_podman_usage
+
+    hold_podman_usage()
     try:
         r = subprocess.run(["podman", *args], capture_output=True, text=True)
     except OSError:

@@ -1572,6 +1572,20 @@ suite -- otherwise a test that mocks only the build's own `podman run`,
 or runs clean or doctor, would create and list real volumes on a Mac.  `LTVM_PODMAN_AUTOSTOP=0` keeps the podman machine up after a
 build; its stop and restart are ~12 s of every incremental build.
 
+Parallel builds share the machine through a flock,
+`$TMPDIR/ltvm-podman-<uid>.lock` (`host_setup.hold_podman_usage`):
+every ltvm process takes it shared before its first podman command --
+the preflight that finds or starts the machine included -- and keeps it
+until it exits.  The auto-stop converts its own hold to exclusive
+without waiting and keeps it through `podman machine stop`
+(`podman_idle_lock`), so it stops nothing another ltvm is using, and a
+build starting meanwhile waits and then starts the machine again.  A
+hold taken only after the preflight let one build's stop land between
+another's check and its first podman command ("server probably quit:
+unexpected EOF", "Cannot connect to Podman").  A bare `podman` command
+outside ltvm holds nothing; the `podman ps` guard sees it only while a
+non-ltvm container runs.
+
 ## Release Manifest Schema
 
 Each published release carries `"schema": "ltvm-release/<N>"`

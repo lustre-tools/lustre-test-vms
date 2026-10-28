@@ -42,8 +42,9 @@ from ltvm_pkg.cli.util import (
 from ltvm_pkg.host_setup import (
     PodmanMachineError,
     check_podman_machine_macos,
+    hold_podman_usage,
     is_macos,
-    podman_in_use_elsewhere,
+    podman_idle_lock,
     podman_usage_lock,
     should_stop_podman_machine_macos,
     stop_podman_machine_macos,
@@ -228,13 +229,12 @@ def _podman_machine_autostop() -> Iterator[_AutostopHandle]:
     if not is_macos():
         yield handle
         return
-    # Hold the shared usage lock for the whole build so a concurrent
-    # ltvm invocation's auto-stop can't stop the machine mid-build
-    # (in-flight `podman build`/pulls have no running container for
-    # the podman-ps guard to see).  Released before the stop probe --
-    # flock treats our own second fd as a conflicting owner.
-    with podman_usage_lock():
-        yield handle
+    # Hold the shared usage lock (the preflight normally took it
+    # already) so a concurrent ltvm invocation's auto-stop can't stop
+    # the machine mid-build: in-flight `podman build`/pulls have no
+    # running container for the podman-ps guard to see.
+    hold_podman_usage()
+    yield handle
     if not handle.success:
         return
     # LTVM_PODMAN_AUTOSTOP=0 keeps the machine up between builds: a
@@ -243,10 +243,11 @@ def _podman_machine_autostop() -> Iterator[_AutostopHandle]:
     if os.environ.get("LTVM_PODMAN_AUTOSTOP") == "0":
         return
     try:
-        if podman_in_use_elsewhere():
-            return  # another ltvm build is mid-flight; leave it up
-        if should_stop_podman_machine_macos():
-            stop_podman_machine_macos()
+        # Exclusive through the stop, so no other ltvm can find the
+        # machine running between the check and the stop.
+        with podman_idle_lock() as idle:
+            if idle and should_stop_podman_machine_macos():
+                stop_podman_machine_macos()
     except Exception:
         pass
 

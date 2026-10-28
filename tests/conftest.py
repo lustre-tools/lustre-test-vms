@@ -194,6 +194,29 @@ def _neutralize_podman_preflight() -> object:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_podman_usage_lock(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> object:
+    """Keep the podman usage lock off the real one in /tmp.
+
+    A test that took the real lock would keep a real build's auto-stop
+    from stopping the machine, and one that probed it would see a real
+    build's hold.  Each test starts with no hold, and drops any it took.
+    """
+    import os
+
+    import ltvm_pkg.host_setup as hs
+
+    lock = tmp_path_factory.mktemp("podman-lock") / "podman.lock"
+    hs._usage_fd = None
+    with patch.object(hs, "_podman_lock_path", lambda: lock):
+        yield
+    if hs._usage_fd is not None:
+        os.close(hs._usage_fd)
+        hs._usage_fd = None
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_container_preflight() -> object:
     """Suppress the build-container-exists preflight for unit tests.
 

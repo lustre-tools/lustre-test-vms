@@ -580,51 +580,163 @@ class TestCliContainerPreflight:
         assert rc == EXIT_OK
 
 
+class _OtherProcess:
+    """Another process holding the usage lock, or probing it."""
+
+    _HOLD = (
+        "import fcntl, os, sys\n"
+        "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)\n"
+        "fcntl.flock(fd, fcntl.LOCK_SH)\n"
+        "print('held', flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+    _PROBE = (
+        "import fcntl, os, sys\n"
+        "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)\n"
+        "op = fcntl.LOCK_EX if sys.argv[2] == 'ex' else fcntl.LOCK_SH\n"
+        "try:\n"
+        "    fcntl.flock(fd, op | fcntl.LOCK_NB)\n"
+        "except OSError:\n"
+        "    sys.exit(1)\n"
+    )
+
+    @classmethod
+    def can_lock(cls, lock: Path, mode: str) -> bool:
+        # Popen, not run: a test may have patched subprocess.run.
+        p = subprocess.Popen(
+            [sys.executable, "-c", cls._PROBE, str(lock), mode]
+        )
+        return p.wait(timeout=10) == 0
+
+    def __init__(self, lock: Path) -> None:
+        self.proc = subprocess.Popen(
+            [sys.executable, "-c", self._HOLD, str(lock)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        assert self.proc.stdout is not None
+        assert self.proc.stdout.readline().strip() == "held"
+
+    def release(self) -> None:
+        assert self.proc.stdin is not None
+        self.proc.stdin.close()
+        self.proc.wait(timeout=10)
+
+
 class TestPodmanUsageLock:
     """The advisory lock that keeps the macOS machine auto-stop from
-    yanking the machine out from under a concurrent build (in-flight
-    `podman build`/pulls have no container for the ps guard to see)."""
+    stopping the machine under a concurrent build (in-flight `podman
+    build`/loads/pulls have no container for the ps guard to see)."""
 
-    def test_in_use_reflects_held_lock(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.fixture
+    def lock(self, monkeypatch: pytest.MonkeyPatch) -> Path:
+        import ltvm_pkg.host_setup as hs
+
+        monkeypatch.setattr(hs, "is_macos", lambda: True)
+        return hs._podman_lock_path()
+
+    def test_hold_is_shared_and_kept(self, lock: Path) -> None:
+        import ltvm_pkg.host_setup as hs
+
+        hs.hold_podman_usage()
+        hs.hold_podman_usage()  # idempotent
+        with hs.podman_usage_lock():
+            pass
+        # Still held after the block: until exit, or the auto-stop.
+        assert _OtherProcess.can_lock(lock, "sh")
+        assert not _OtherProcess.can_lock(lock, "ex")
+
+    def test_no_hold_off_macos(
+        self, lock: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import ltvm_pkg.host_setup as hs
 
-        monkeypatch.setattr(
-            hs, "_podman_lock_path", lambda: tmp_path / "podman.lock"
-        )
-        assert hs.podman_in_use_elsewhere() is False
-        with hs.podman_usage_lock():
-            # flock treats a second fd as a distinct owner, so the
-            # probe sees our own shared hold -- exactly the behavior
-            # the auto-stop relies on for other processes.
-            assert hs.podman_in_use_elsewhere() is True
-        assert hs.podman_in_use_elsewhere() is False
+        monkeypatch.setattr(hs, "is_macos", lambda: False)
+        hs.hold_podman_usage()
+        assert hs._usage_fd is None
+
+    def test_idle_lock_refused_while_another_process_holds(
+        self, lock: Path
+    ) -> None:
+        import ltvm_pkg.host_setup as hs
+
+        hs.hold_podman_usage()
+        other = _OtherProcess(lock)
+        try:
+            with hs.podman_idle_lock() as idle:
+                assert idle is False
+        finally:
+            other.release()
+        assert hs._usage_fd is None
+
+    def test_idle_lock_is_exclusive_through_the_block(self, lock: Path) -> None:
+        """A build starting during the stop waits for it, rather than
+        finding the machine running and losing it a moment later."""
+        import ltvm_pkg.host_setup as hs
+
+        hs.hold_podman_usage()
+        with hs.podman_idle_lock() as idle:
+            assert idle is True
+            assert not _OtherProcess.can_lock(lock, "sh")
+        assert hs._usage_fd is None
+        assert _OtherProcess.can_lock(lock, "ex")
+
+    def test_preflight_holds_before_looking_at_the_machine(
+        self, lock: Path
+    ) -> None:
+        """The machine is found running only under the hold, so no
+        other build's auto-stop can stop it between the check and this
+        build's first podman command."""
+        import ltvm_pkg.host_setup as hs
+
+        held: list[bool] = []
+
+        def fake_run(cmd: list[str], **kw: Any) -> MagicMock:
+            held.append(not _OtherProcess.can_lock(lock, "ex"))
+            return MagicMock(
+                returncode=0, stdout='[{"Name": "m", "Running": true}]'
+            )
+
+        with (
+            patch.object(hs.shutil, "which", return_value="/bin/podman"),
+            patch.object(hs.subprocess, "run", side_effect=fake_run),
+        ):
+            hs.check_podman_machine_macos()
+        assert held == [True]
 
 
 class TestAutostopConcurrency:
-    def _run_cm(self, monkeypatch: pytest.MonkeyPatch, *, in_use: bool) -> list:
+    def _run_cm(
+        self, monkeypatch: pytest.MonkeyPatch, *, other_build: bool
+    ) -> list[int]:
+        import ltvm_pkg.host_setup as hs
         from ltvm_pkg.cli import build as bmod
 
         stops: list[int] = []
+        monkeypatch.setattr(hs, "is_macos", lambda: True)
         monkeypatch.setattr(bmod, "is_macos", lambda: True)
-        monkeypatch.setattr(bmod, "podman_in_use_elsewhere", lambda: in_use)
         monkeypatch.setattr(
             bmod, "should_stop_podman_machine_macos", lambda: True
         )
         monkeypatch.setattr(
             bmod, "stop_podman_machine_macos", lambda: stops.append(1)
         )
-        with bmod._podman_machine_autostop() as h:
-            h.success = True
+        other = _OtherProcess(hs._podman_lock_path()) if other_build else None
+        try:
+            with bmod._podman_machine_autostop() as h:
+                h.success = True
+        finally:
+            if other is not None:
+                other.release()
         return stops
 
     def test_stop_skipped_while_other_build_in_flight(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        assert self._run_cm(monkeypatch, in_use=True) == []
+        assert self._run_cm(monkeypatch, other_build=True) == []
 
     def test_stop_fires_when_idle(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        assert self._run_cm(monkeypatch, in_use=False) == [1]
+        assert self._run_cm(monkeypatch, other_build=False) == [1]

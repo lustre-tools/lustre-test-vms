@@ -53,6 +53,8 @@ def check_podman_machine_macos() -> None:
     """
     if not is_macos():
         return
+    # Before the machine is looked at: see hold_podman_usage.
+    hold_podman_usage()
 
     if not shutil.which("podman"):
         raise PodmanMachineError(
@@ -1611,47 +1613,77 @@ def _podman_lock_path() -> Path:
     return Path(tempfile.gettempdir()) / f"ltvm-podman-{os.getuid()}.lock"
 
 
-@contextlib.contextmanager
-def podman_usage_lock() -> Iterator[None]:
-    """Hold a shared advisory lock while ltvm is using podman.
+# This process's shared hold on the usage lock, or None.  Taken by the
+# first podman use and kept until the process exits or the auto-stop
+# turns it exclusive.
+_usage_fd: int | None = None
 
-    The macOS machine auto-stop probes this lock exclusively before
-    stopping.  The `podman ps` guard alone cannot see a concurrent
-    ltvm invocation that is mid-`podman build` or mid-pull -- image
-    builds aren't running containers -- so without the lock, a build
-    finishing in one terminal would stop the machine out from under a
-    build starting in another ("server probably quit: unexpected
-    EOF", exit 125).
+
+def hold_podman_usage() -> None:
+    """Hold the podman usage lock, shared, for the rest of this process.
+
+    The macOS machine auto-stop stops the machine only when it can take
+    this lock exclusively, so every ltvm process using podman holds it
+    from before its first podman command -- the preflight that finds or
+    starts the machine included -- until it exits.  The `podman ps`
+    guard alone cannot see a concurrent ltvm invocation that is
+    mid-`podman build`, mid-load or mid-pull, and a hold taken only
+    after the preflight left a window in which another build's
+    auto-stop stopped the machine this one had just found running
+    ("server probably quit: unexpected EOF", "Cannot connect to
+    Podman").  Waits while an auto-stop is stopping the machine.
+    Idempotent; a no-op off macOS.
     """
-    fd = os.open(_podman_lock_path(), os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_SH)
-        yield
-    finally:
-        with contextlib.suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-
-
-def podman_in_use_elsewhere() -> bool:
-    """True if another process holds the podman usage lock.
-
-    flock treats separate fds as separate owners, so this also
-    reports True from within a ``podman_usage_lock()`` block -- the
-    auto-stop must release its own usage lock before probing.
-    """
+    global _usage_fd
+    if _usage_fd is not None or not is_macos():
+        return
     try:
         fd = os.open(_podman_lock_path(), os.O_CREAT | os.O_RDWR, 0o600)
     except OSError:
-        return False
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+    except OSError:
+        os.close(fd)
+        return
+    _usage_fd = fd
+
+
+@contextlib.contextmanager
+def podman_usage_lock() -> Iterator[None]:
+    """Hold the podman usage lock for (at least) the block."""
+    hold_podman_usage()
+    yield
+
+
+@contextlib.contextmanager
+def podman_idle_lock() -> Iterator[bool]:
+    """Turn this process's hold exclusive, without waiting.
+
+    Yields True when no other process holds the lock: the machine may
+    then be stopped inside the block, and another ltvm's
+    :func:`hold_podman_usage` waits until the block ends, so it finds
+    the machine stopped and starts it again rather than finding it
+    running and losing it a moment later.  Yields False when another
+    process is using podman.  The lock is released when the block ends,
+    either way: a converted flock may already have been dropped.
+    """
+    global _usage_fd
+    fd = _usage_fd
+    _usage_fd = None
+    if fd is None:
+        try:
+            fd = os.open(_podman_lock_path(), os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError:
+            yield False
+            return
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            return True
-        with contextlib.suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        return False
+            yield False
+            return
+        yield True
     finally:
         os.close(fd)
 

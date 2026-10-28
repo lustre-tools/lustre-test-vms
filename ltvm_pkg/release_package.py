@@ -508,6 +508,9 @@ def export_build_container(
     container_dir.mkdir(parents=True, exist_ok=True)
     image_tar = container_dir / "image.tar"
 
+    from ltvm_pkg.host_setup import hold_podman_usage
+
+    hold_podman_usage()
     try:
         check = subprocess.run(
             ["podman", "image", "exists", container_tag],
@@ -1549,6 +1552,9 @@ def fetch_target(
             f"fetched asset set missing container image at {container_image}"
         )
     print(f"    Loading build container from {container_image}")
+    from ltvm_pkg.host_setup import hold_podman_usage
+
+    hold_podman_usage()
     try:
         load = subprocess.run(
             ["podman", "load", "-i", str(container_image)],

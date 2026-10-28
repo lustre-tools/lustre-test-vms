@@ -121,6 +121,9 @@ def ccache_volume_name(container_tag: str) -> str:
 def _podman(
     *args: str, timeout: float | None = None
 ) -> subprocess.CompletedProcess[str]:
+    from ltvm_pkg.host_setup import hold_podman_usage
+
+    hold_podman_usage()
     return subprocess.run(
         ["podman", *args], capture_output=True, text=True, timeout=timeout
     )
