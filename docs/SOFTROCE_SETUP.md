@@ -4,6 +4,15 @@ How to bring up a working RoCEv2 link between two ltvm-managed Rocky 9 VMs
 using the in-kernel `rdma_rxe` software RoCE driver. No HCA required —
 RXE runs RDMA verbs over the regular Ethernet NIC.
 
+For two to eight SoftRoCE data NICs on Linux, use
+`--nic softroce --nic softroce` with `-T shared`
+(`--network-topology shared`) or `-T isolated`
+(`--network-topology isolated`). Shared mode groups the NIs as
+`o2ib0(eth1,eth2)`; isolated mode uses `o2ib0(eth1),o2ib1(eth2)`.
+See [Linux multi-rail labs](MULTIRAIL.md) for the managed bridges, guest
+source routing, and `-L`/`--lnet-network` overrides. The steps below
+describe one RXE link.
+
 ## What this is good for
 
 - Prototyping and correctness-testing kernel RDMA / o2iblnd code changes

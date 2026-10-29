@@ -35,6 +35,12 @@ from .vm_state import (
     qemu_machine_for_arch,
 )
 
+# x86_64 and arm64 Linux both define COMMAND_LINE_SIZE as 2048.
+# Reserve the terminating NUL; the x86 boot header advertises SIZE-1.
+# https://github.com/torvalds/linux/blob/v6.12/arch/x86/include/asm/setup.h
+# https://github.com/torvalds/linux/blob/v6.12/arch/arm64/include/uapi/asm/setup.h
+PROFILE_CMDLINE_MAX_BYTES = 2047
+
 
 def run(
     cmd: list[str] | str, **kwargs: Any
@@ -739,6 +745,13 @@ def launch_qemu(vm: VMInfo, *, wait_seconds: int = 0) -> None:
     waited = False
     while True:
         with _launch_lock():
+            # Another start can finish while this process waits for the lock.
+            started_pid = _pidfile_pid(vm)
+            if is_running(vm) or (
+                started_pid > 0 and _qemu_pid_is(started_pid, vm.name)
+            ):
+                print(f"VM '{vm.name}' is already running", file=sys.stderr)
+                return
             shortfall = _memory_shortfall(vm)
             if shortfall is None:
                 _start_qemu(vm)
@@ -788,6 +801,19 @@ def _start_qemu(vm: VMInfo) -> None:
     # Empty list -> omit the parameter entirely so existing single-NIC
     # VMs' cmdline is byte-identical to the pre-feature path.
     extra_nics = vm.extra_nics()
+    topology = vm.rail_topology
+    if topology is not None:
+        # Profile facts are persisted; a restart must not derive a new fabric.
+        from .rail_host import require_bridges
+        from .vm_commands import _require_profile_image
+
+        topology.validate_for_nics(vm.nics)
+        _require_profile_image(vm.image, topology)
+        if any(token.startswith("fc_") for token in vm.kernel_args.split()):
+            die(
+                "rail profiles reserve fc_* kernel parameters for their saved topology"
+            )
+        require_bridges(topology)
     fc_nics_fragment = ""
     fc_nic_ips_fragment = ""
     fc_nic_prefixes_fragment = ""
@@ -816,8 +842,12 @@ def _start_qemu(vm: VMInfo) -> None:
         # image simply ignores -- and 24 is what it assumes anyway.
         if vm.nic_ips:
             fc_nic_ips_fragment = f" fc_nic_ips={','.join(vm.nic_ips)}"
-            fc_nic_prefixes_fragment = " fc_nic_prefixes=" + ",".join(
-                str(PREFIX_LEN) for _ in vm.nic_ips
+            fc_nic_prefixes_fragment = (
+                " fc_nic_prefixes="
+                + ",".join(str(rail.prefix4) for rail in topology.rails)
+                if topology
+                else " fc_nic_prefixes="
+                + ",".join(str(PREFIX_LEN) for _ in vm.nic_ips)
             )
         # The extras' IPv6 addresses travel in their own pair of
         # parallel arrays, omitted entirely when there are none: a VM
@@ -826,8 +856,12 @@ def _start_qemu(vm: VMInfo) -> None:
         # parameters.
         if vm.nic_ip6s:
             fc_nic_ip6s_fragment = f" fc_nic_ip6s={','.join(vm.nic_ip6s)}"
-            fc_nic_ip6_prefixes_fragment = " fc_nic_ip6_prefixes=" + ",".join(
-                str(PREFIX_LEN6) for _ in vm.nic_ip6s
+            fc_nic_ip6_prefixes_fragment = (
+                " fc_nic_ip6_prefixes="
+                + ",".join(str(rail.prefix6) for rail in topology.rails)
+                if topology
+                else " fc_nic_ip6_prefixes="
+                + ",".join(str(PREFIX_LEN6) for _ in vm.nic_ip6s)
             )
     boot_args = (
         f"console={console} reboot=k panic=1 crashkernel={crashkernel} "
@@ -843,10 +877,24 @@ def _start_qemu(vm: VMInfo) -> None:
     )
     if vm.arch in ("", "x86_64"):
         boot_args += NMI_PANIC_ARGS
+    if topology is not None:
+        boot_args += (
+            f" fc_rail_topology={topology.mode} fc_lnet_nets="
+            + ",".join(rail.lnet_network for rail in topology.rails)
+        )
     # Last, so that a parameter whose last occurrence wins
     # (crashkernel=, panic=) takes the user's value.
     if vm.kernel_args:
         boot_args += f" {vm.kernel_args}"
+    if (
+        topology is not None
+        and len(boot_args.encode()) > PROFILE_CMDLINE_MAX_BYTES
+    ):
+        # A longer string would be silently truncated before guest rail setup reads it.
+        die(
+            f"rail kernel command line is {len(boot_args.encode())} bytes; "
+            f"limit is {PROFILE_CMDLINE_MAX_BYTES}; shorten --kernel-args"
+        )
 
     # Recreate TAP and flush any stale ARP entry for this IP.  Also
     # tear down any extra-NIC TAPs from a previous launch so ``ltvm
@@ -867,9 +915,22 @@ def _start_qemu(vm: VMInfo) -> None:
         if ready.ok:
             helper = ready.helper
             as_user = True
+    if topology is not None and helper is not None:
+        # The helper must authorize every selected data bridge, not only fcbr0.
+        for rail in topology.rails:
+            if not rootless.bridge_allowed(rail.bridge):
+                die(
+                    f"bridge helper does not allow {rail.bridge}; run ltvm install --install"
+                )
     vmnet_socket: str | None = None
     if macos:
         vmnet_socket = str(socket_vmnet_socket_path())
+    elif topology is not None and helper is None:
+        if os.geteuid() != 0:
+            die(
+                "rail profiles need the configured bridge helper; run ltvm install --install"
+            )
+        # Profile TAPs are created inside the launch rollback block below.
     elif helper is None:
         # On Linux the TAP is created with ``user $LOGNAME`` so QEMU can
         # attach to it without root via TUNSETIFF; the ``ip`` calls
@@ -926,7 +987,7 @@ def _start_qemu(vm: VMInfo) -> None:
             # softroce presents to QEMU exactly like tcp (a virtio-net
             # on the bridge); the rxe layer is built inside the guest
             # at boot via setup-nic-softroce.sh.
-            if macos or helper is not None:
+            if macos or helper is not None or topology is not None:
                 continue
             sudo_run(
                 [
@@ -1083,8 +1144,9 @@ def _start_qemu(vm: VMInfo) -> None:
                     f"addr.path={vmnet_socket},server=off"
                 )
             elif helper is not None:
+                bridge = topology.rails[_idx - 1].bridge if topology else BRIDGE
                 _netdev_arg = (
-                    f"bridge,id={_netdev_id},br={BRIDGE},helper={helper}"
+                    f"bridge,id={_netdev_id},br={bridge},helper={helper}"
                 )
             else:
                 _netdev_arg = (
@@ -1116,7 +1178,15 @@ def _start_qemu(vm: VMInfo) -> None:
 
     qemu_args += data_disk_args(vm, blk_driver)
 
+    profile_taps_cleanup = topology is not None and helper is not None
     try:
+        if topology is not None and helper is None:
+            from .rail_host import prepare_taps, remove_taps
+
+            # A crashed root-run QEMU can leave its owned persistent TAPs behind.
+            remove_taps(vm)
+            profile_taps_cleanup = True
+            prepare_taps(vm)
         _prepare_log(vm)
         with open(vm.log_path, "a") as log:
             # QEMU runs as root: it creates its pidfile and QMP socket in
@@ -1190,7 +1260,11 @@ def _start_qemu(vm: VMInfo) -> None:
         # catches SystemExit raised by die() so cleanup runs before
         # the process exits.  macOS has no TAPs -- socket_vmnet owns
         # the L2 fabric and no per-VM host state was created here.
-        if not macos and helper is None:
+        if profile_taps_cleanup:
+            from .rail_host import remove_taps
+
+            remove_taps(vm)
+        elif topology is None and not macos and helper is None:
             for _tap in all_taps:
                 sudo_run(
                     ["ip", "link", "del", _tap],
@@ -1302,6 +1376,11 @@ def kill_qemu(vm: VMInfo) -> None:
     # are no per-VM TAPs -- socket_vmnet multiplexes every guest onto
     # one Unix socket -- so teardown is a no-op there.
     if is_macos():
+        return
+    if vm.rail_topology is not None:
+        from .rail_host import remove_taps
+
+        remove_taps(vm)
         return
     taps = [vm.tap] + [t for (_i, _n, t, _m) in vm.extra_nics()]
     if os.geteuid() != 0 and rootless.readiness().ok:

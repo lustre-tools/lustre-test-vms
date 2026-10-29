@@ -1113,6 +1113,8 @@ class TestArchiveOutgoingVmlinux:
         new.write_bytes(b"x")
         past = time.time() - 10000
         os.utime(old, (past, past))
+        # Distinct mtimes avoid ties on filesystems with a coarse timestamp clock.
+        os.utime(new, (past + 100, past + 100))
 
         self._mk(tmp_path, "cccc")
         with patch.object(kernel_build, "elf_build_id", return_value="cccc"):

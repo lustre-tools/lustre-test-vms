@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Emit /etc/modprobe.d/lnet.conf body from an fc_nics= cmdline value.
 #
-# Consumed by the multi-NIC foundation (-oc8) and softroce backend
-# (-r55).  This script is the source of truth for the emitter logic;
-# ltvm_pkg/lnet_config.py mirrors it for unit testing convenience.
+# Explicit profiles add fc_rail_topology=shared|isolated and one
+# fc_lnet_nets= entry per extra NIC. Repeated IDs group the interfaces.
+# Without those parameters the existing per-type numbering is preserved.
 #
 # Usage:
 #     setup-lnet-config.sh                      # reads /proc/cmdline, stdout
@@ -87,13 +87,69 @@ emit_lnet_conf() {
 	printf 'options lnet networks="%s"\n' "$joined"
 }
 
+cmdline_value() {
+	# Read one bounded kernel argument; duplicate values are not accepted.
+	local cmdline=$1 key=$2 token value="" found=false
+	local -a tokens=()
+	((${#cmdline} <= 131072)) || return 1
+	read -r -a tokens <<< "$cmdline"
+	((${#tokens[@]} <= 1024)) || return 1
+	for token in "${tokens[@]}"; do
+		if [[ $token == "$key="* ]]; then
+			[[ $found == false ]] || return 1
+			value=${token#*=}; found=true
+		fi
+	done
+	printf '%s' "$value"
+}
+
 parse_fc_nics() {
-	# Extract fc_nics= value from a kernel-cmdline-style string on
-	# stdin.  Prints the comma-separated value (or empty).
-	# We deliberately avoid pipefail propagation: grep returning 1
-	# when fc_nics= is absent is not an error.
-	tr ' ' '\n' | awk -F= '/^fc_nics=/ {sub(/^fc_nics=/, ""); \
-		print; exit}'
+	# Preserve the sourceable parser interface used by existing tests.
+	local cmdline
+	IFS= read -r cmdline || [[ -n $cmdline ]]
+	cmdline_value "$cmdline" fc_nics
+}
+
+emit_explicit_lnet_conf() {
+	# Validate and group up to eight tcp or SoftRoCE rails by their LNet ID.
+	local topology=$1 nets=$2 type family net i j seen body="" interfaces
+	shift 2
+	local -a nics=("$@") ids=() groups=()
+	[[ $topology == shared || $topology == isolated ]] || return 1
+	((${#nics[@]} >= 2 && ${#nics[@]} <= 8)) || return 1
+	[[ $nets != ,* && $nets != *, && $nets != *,,* ]] || return 1
+	IFS=, read -r -a ids <<< "$nets"
+	((${#ids[@]} == ${#nics[@]})) || return 1
+	for ((i=0; i<${#nics[@]}; i++)); do
+		type=${nics[$i]}; net=${ids[$i]}
+		case $type in
+			tcp) family=tcp ;;
+			softroce) family=o2ib ;;
+			*) return 1 ;;
+		esac
+		[[ $net =~ ^${family}(0|[1-9][0-9]{0,4})$ ]] || return 1
+		((10#${net#"$family"} <= 65535)) || return 1
+		if [[ $topology == shared && $net != "${ids[0]}" ]]; then
+			# One shared LNet network must contain all local interfaces.
+			return 1
+		fi
+		seen=false
+		for ((j=0; j<${#groups[@]}; j++)); do
+			if [[ ${groups[$j]} == "$net" ]]; then seen=true; fi
+		done
+		if [[ $seen == true && $topology == isolated ]]; then return 1; fi
+		if [[ $seen == false ]]; then groups+=("$net"); fi
+	done
+	for net in "${groups[@]}"; do
+		interfaces=""
+		for ((i=0; i<${#ids[@]}; i++)); do
+			if [[ ${ids[$i]} == "$net" ]]; then
+				interfaces+="${interfaces:+,}eth$((i + 1))"
+			fi
+		done
+		body+="${body:+,}$net($interfaces)"
+	done
+	printf 'options lnet networks="%s"\n' "$body"
 }
 
 main() {
@@ -103,7 +159,7 @@ main() {
 
 	while (( $# > 0 )); do
 		case "$1" in
-		--stdin)
+		-s|--stdin)
 			from_stdin=true
 			shift
 			;;
@@ -124,8 +180,10 @@ main() {
 		cmdline=$(cat /proc/cmdline)
 	fi
 
-	local fc_nics
-	fc_nics=$(printf '%s' "$cmdline" | parse_fc_nics)
+	local fc_nics topology nets
+	fc_nics=$(cmdline_value "$cmdline" fc_nics) || return 1
+	topology=$(cmdline_value "$cmdline" fc_rail_topology) || return 1
+	nets=$(cmdline_value "$cmdline" fc_lnet_nets) || return 1
 
 	# fc_nics on the cmdline carries the *extras* (eth1+) only -- the
 	# mgmt NIC (eth0) is implicit.  Semantics:
@@ -146,7 +204,15 @@ main() {
 	fi
 
 	local body
-	body=$(emit_lnet_conf "${nic_array[@]}")
+	if [[ -n $topology || -n $nets ]]; then
+		# Explicit profiles must fail rather than silently use legacy numbering.
+		body=$(emit_explicit_lnet_conf "$topology" "$nets" "${nic_array[@]:1}") || {
+			echo 'setup-lnet-config: invalid explicit rail profile' >&2
+			return 1
+		}
+	else
+		body=$(emit_lnet_conf "${nic_array[@]}") || return 1
+	fi
 
 	if [[ -n $out_path ]]; then
 		printf '%s\n' "$body" > "$out_path"

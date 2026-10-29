@@ -70,6 +70,19 @@ check "no networks= line" \
 	'' \
 	"$(ifaces_of '# operator notes, nothing to see')"
 
+check "two interfaces in one network" \
+    'eth1 eth2' \
+    "$(ifaces_of 'options lnet networks="tcp0(eth1,eth2)"')"
+check "grouped and separate networks" \
+    'eth1 eth2 eth3' \
+    "$(ifaces_of 'options lnet networks="tcp0(eth1,eth2),o2ib0(eth3)"')"
+if printf '%s' 'options lnet networks="tcp0(eth1,,eth2)"' | lnet_ifaces >/dev/null; then
+    fail=$((fail + 1))
+    printf 'FAIL empty interface was accepted\n'
+else
+    pass=$((pass + 1))
+fi
+
 # --- End-to-end ----------------------------------------------------
 
 tmp=$(mktemp -d)
@@ -141,6 +154,25 @@ if [[ -e $out ]]; then
 else
 	pass=$((pass + 1))
 	printf 'ok   %s\n' "--stdin writes nothing"
+fi
+
+# Direct procfs writes apply every grouped NI and fail clearly in strict mode.
+printf '1\n' > "$tmp/proc/all/rp_filter"
+printf '1\n' > "$tmp/proc/default/rp_filter"
+printf '1\n' > "$tmp/proc/eth0/rp_filter"
+printf '1\n' > "$tmp/proc/eth1/rp_filter"
+printf '%s\n' 'options lnet networks="tcp0(eth0,eth1)"' > "$conf"
+SYSCTL_CONF_DIR="$tmp/sysctl.d" PROC_NET_CONF="$tmp/proc" STRICT_RAILS=true \
+    "$UUT" "$conf" 2>/dev/null
+check "grouped first NI applied" 0 "$(cat "$tmp/proc/eth0/rp_filter")"
+check "grouped second NI applied" 0 "$(cat "$tmp/proc/eth1/rp_filter")"
+rm "$tmp/proc/eth1/rp_filter"
+if SYSCTL_CONF_DIR="$tmp/sysctl.d" PROC_NET_CONF="$tmp/proc" STRICT_RAILS=true \
+    "$UUT" "$conf" >/dev/null 2>&1; then
+    fail=$((fail + 1))
+    printf 'FAIL strict mode accepted a missing interface\n'
+else
+    pass=$((pass + 1))
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

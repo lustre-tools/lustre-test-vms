@@ -118,6 +118,8 @@ log.propagate = False
 
 QEMU_VERSION = "9.2.2"
 QEMU_PREFIX = Path(os.environ.get("LTVM_QEMU_PREFIX", "/opt/qemu"))
+RAIL_UNIT = "ltvm-rail-bridges.service"
+RAIL_UNIT_PATH = Path("/etc/systemd/system") / RAIL_UNIT
 VM_DIR = Path(os.environ.get("LTVM_VM_DIR", "/opt/qemu-vms"))
 DEFAULT_SUBNET = "192.168.100"
 
@@ -2646,21 +2648,45 @@ def _setup_bridge_helper(host: HostInfo) -> None:
             helper.chmod(0o4755)
         log.info("Made %s setuid root", helper)
 
+    from .rail_host import bridge_names
+
     acl = rootless.BRIDGE_ACL
-    if rootless.bridge_allowed(rootless.BRIDGE, acl):
-        return
-    if rootless.bridge_denied(rootless.BRIDGE, acl):
-        log.warning(
-            "%s denies %s: VMs will keep needing sudo", acl, rootless.BRIDGE
-        )
+    allowed: list[str] = []
+    for bridge in (rootless.BRIDGE, *bridge_names()):
+        if rootless.bridge_denied(bridge, acl):
+            # Respect an administrator's explicit deny rather than weakening it.
+            log.warning("%s denies %s", acl, bridge)
+        elif not rootless.bridge_allowed(bridge, acl):
+            allowed.append(bridge)
+    if not allowed:
         return
     acl.parent.mkdir(parents=True, exist_ok=True)
     text = acl.read_text() if acl.exists() else ""
     if text and not text.endswith("\n"):
         text += "\n"
-    acl.write_text(text + f"allow {rootless.BRIDGE}\n")
+    acl.write_text(
+        text
+        + "".join(
+            ("" if bridge == rootless.BRIDGE else "# ltvm data bridge\n")
+            + f"allow {bridge}\n"
+            for bridge in allowed
+        )
+    )
     acl.chmod(0o644)
-    log.info("Allowed %s in %s", rootless.BRIDGE, acl)
+    log.info("Allowed %s in %s", ", ".join(allowed), acl)
+
+
+def install_rail_network() -> None:
+    """Prepare unnumbered data bridges and restore them after a host reboot."""
+    from . import rail_host
+
+    # Reject unsupported runtime paths before making live network changes.
+    service = rail_host.render_service(sys.executable, REPO_ROOT)
+    rail_host.ensure_bridges()
+    _write_if_changed(RAIL_UNIT_PATH, service)
+    _run(["systemctl", "daemon-reload"])
+    # The API already checked the live bridges. Enable also records boot behavior.
+    _run(["systemctl", "enable", "--now", RAIL_UNIT])
 
 
 def install_scripts(host: HostInfo) -> None:
@@ -3476,6 +3502,7 @@ def run_setup(
         install_qemu(host, force=force)
     if "network" in active:
         setup_network(host, subnet=subnet, force=force)
+        install_rail_network()
     if "install" in active:
         install_scripts(host)
     if "ssh" in active:

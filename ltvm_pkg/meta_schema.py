@@ -78,6 +78,7 @@ class ImageMeta(_BaseMeta, total=False):
     packages: Any
     with_lustre: str | None
     lustre_version: str | None
+    rail_topology_version: int
 
 
 _KERNEL_REQUIRED = ("kernel_version", "lustre_target")

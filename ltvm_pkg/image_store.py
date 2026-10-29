@@ -88,13 +88,43 @@ def install_image(src: Path, image_dir: Path) -> Path:
     *src* must be on the same filesystem as *image_dir*.  Returns the
     versioned path.
     """
-    while True:
+    from .rail_image import capability_path, require_capability
+
+    sidecar = capability_path(src)
+    has_capability = os.path.lexists(sidecar)
+    if has_capability:
+        # Validate before any rename so a corrupt archive cannot become current.
+        require_capability(src)
+    for _attempt in range(32):
         dest = image_dir / _versioned_name()
-        if not os.path.lexists(dest):
+        if not os.path.lexists(dest) and not os.path.lexists(
+            capability_path(dest)
+        ):
             break
+    else:
+        raise RuntimeError("could not choose a free versioned image name")
     os.rename(src, dest)
+    if has_capability:
+        # Publish support with the same immutable filename before changing current.
+        try:
+            os.rename(sidecar, capability_path(dest))
+        except BaseException:
+            # Leave the extracted pair available when its marker could not move.
+            os.rename(dest, src)
+            raise
     set_current(image_dir, dest.name)
     return dest
+
+
+def remove_image(image: Path) -> None:
+    """Remove one unreferenced image and its exact per-image capability marker."""
+    from .rail_image import CAPABILITY_SUFFIX
+
+    # Delete beside this filename; a replaced image symlink must not select a target.
+    sidecar = Path(str(image) + CAPABILITY_SUFFIX)
+    image.unlink()
+    # A missing marker is normal for images made before rail profiles existed.
+    sidecar.unlink(missing_ok=True)
 
 
 def image_identity(path: str | Path) -> str:
@@ -184,7 +214,7 @@ def prune_superseded(image_dir: Path) -> int:
             continue
         try:
             size = f.stat().st_size
-            f.unlink()
+            remove_image(f)
         except OSError:
             continue
         freed += size

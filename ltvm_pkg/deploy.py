@@ -127,6 +127,9 @@ def _stream_tree_once(
     tar_argv = ["tar", "cf", "-", "-C", str(tree)]
     if exclude_modules:
         tar_argv.append("--exclude=./lib/modules")
+    if vm.rail_topology is not None:
+        # The profile owns this guest configuration across staging deployments.
+        tar_argv.append("--exclude=./etc/modprobe.d/lnet.conf")
     # Never ship ltvm's own build bookkeeping into the VM's /.
     tar_argv += ["--exclude=./.ltvm-*", "."]
     ssh_argv = sshpass_ssh_argv(

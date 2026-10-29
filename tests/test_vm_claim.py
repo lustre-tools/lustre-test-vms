@@ -279,7 +279,11 @@ class TestCli:
         assert vm_claim.load("vm1") is None
 
 
-def test_doctor_check_creates_dir_and_clears_stale(session, dead_pid, capsys):
+def test_doctor_check_creates_dir_and_clears_stale(
+    session, dead_pid, capsys, monkeypatch
+):
+    """Use the isolated claims parent for its writable-VM-directory check too."""
+    monkeypatch.setattr(vm_claim, "VM_DIR", vm_claim.CLAIMS_DIR.parent)
     vm_claim.CLAIMS_DIR.rmdir()
     # Missing under a VM_DIR we can write: the first claim makes it.
     found, failed = vm_commands._check_claims(fix=False)

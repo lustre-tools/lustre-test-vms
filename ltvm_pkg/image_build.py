@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 from .image_store import current_image, install_image, prune_superseded
 from .paths import load_meta_safe
 from .podman_gc import Superseded, final_image_tag, remove_tag
+from .rail_topology import TOPOLOGY_VERSION
 from .target_config import TARGETS_DIR
 
 if TYPE_CHECKING:
@@ -1228,6 +1229,8 @@ def build_image(
         image_size_mb=round(size_mb, 1),
         packages=pkg_manifest,
         kernel_name=kernel_name,
+        # Older guest boot scripts ignore profile parameters; advertise support.
+        rail_topology_version=TOPOLOGY_VERSION,
     )
 
     if final_tag != tag:
@@ -1446,6 +1449,10 @@ def _export_to_ext4(
         os.chmod(tmpfile, 0o644)
         image_path = install_image(Path(tmpfile), out_dir)
         tmpfile = None
+        # Bind support to this image, including versions retained after later builds.
+        from .rail_image import write_capability
+
+        write_capability(image_path)
 
         return image_path
 

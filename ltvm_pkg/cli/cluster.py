@@ -53,7 +53,8 @@ def _call(fn: Any, ns: argparse.Namespace, use_json: bool) -> int:
         return EXIT_OK
     except SystemExit as e:
         return int(e.code) if e.code is not None else EXIT_ERROR
-    except (ClusterNotFound, RuntimeError) as e:
+    except (ClusterNotFound, OSError, RuntimeError, ValueError) as e:
+        # A child or saved profile can fail after its own cleanup completes.
         return _error(str(e), use_json)
 
 
@@ -89,6 +90,13 @@ def _cluster_privileges(use_json: bool, *, drop: bool) -> int | None:
 def cmd_cluster_create(args: argparse.Namespace) -> int:
     """Create a cluster from node specs."""
     use_json = args.json
+    from ltvm_pkg.vm_cluster import _requested_cluster_topology
+
+    try:
+        # Reject unsupported hosts and malformed profiles before asking for root.
+        _requested_cluster_topology(args)
+    except SystemExit as error:
+        return int(error.code) if error.code is not None else EXIT_ERROR
 
     # A dry run only reads, so it must not demand root: prompting for a
     # password nothing will spend is the surest way to stop people using
@@ -365,7 +373,9 @@ def cmd_cluster_failback(args: argparse.Namespace) -> int:
 def cmd_cluster_exec(args: argparse.Namespace) -> int:
     """Run a command on every node holding a role, or on one node."""
     use_json = args.json
-    if not args.command:
+    remote_command = getattr(args, "remote_command", args.command)
+    if not remote_command:
+        # An empty remainder is valid parser input but cannot run a guest command.
         return _error(
             "cluster exec requires a command to run",
             use_json,
@@ -376,7 +386,7 @@ def cmd_cluster_exec(args: argparse.Namespace) -> int:
         _qemu_ns(
             name=args.name,
             target=args.target,
-            command=list(args.command),
+            command=list(remote_command),
             timeout=args.timeout,
             json=use_json,
         ),
@@ -392,12 +402,13 @@ def cmd_cluster_list(args: argparse.Namespace) -> int:
 def cmd_cluster_ssh(args: argparse.Namespace) -> int:
     """Open an interactive ssh session on one node of a cluster."""
     use_json = args.json
+    remote_command = getattr(args, "remote_command", args.command)
     return _call(
         _handler("cmd_cluster_ssh"),
         _qemu_ns(
             name=args.name,
             target=args.target,
-            command=list(args.command or []),
+            command=list(remote_command or []),
         ),
         use_json,
     )

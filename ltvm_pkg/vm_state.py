@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
 
+from .rail_topology import MAX_TOPOLOGY_BYTES, RailTopology
+
 
 def _atomic_write(
     path: Path,
@@ -656,6 +658,9 @@ class VMInfo:
     disk_cache: str = ""
     disk_prealloc: str = ""
 
+    # Missing on legacy VMs; explicit profiles keep resolved fabric facts.
+    rail_topology: RailTopology | None = None
+
     @property
     def info_path(self) -> Path:
         return SOCKETS / f"{self.name}.info"
@@ -722,6 +727,10 @@ class VMInfo:
             from .vm_owner import validate_owner_id
 
             validate_owner_id(self.owner_id)
+        if self.rail_topology is not None:
+            # Do not write a profile that disagrees with this VM's NICs.
+            self.rail_topology.validate_for_nics(self.nics)
+            self.rail_topology.validate_addresses(self.nic_ips, self.nic_ip6s)
         text = (
             f"NAME={self.name}\n"
             f"IP={self.ip}\n"
@@ -771,6 +780,13 @@ class VMInfo:
             f"DISK_CACHE={self.disk_cache}\n"
             f"DISK_PREALLOC={self.disk_prealloc}\n"
         )
+        if self.rail_topology is not None:
+            topology_json = json.dumps(
+                self.rail_topology.to_dict(), separators=(",", ":")
+            )
+            if len(topology_json.encode()) > MAX_TOPOLOGY_BYTES:
+                raise ValueError("rail topology state exceeds its size limit")
+            text += f"RAIL_TOPOLOGY={topology_json}\n"
         _atomic_write(self.info_path, text)
 
     @property
@@ -958,11 +974,35 @@ class VMInfo:
             disk_dir=vals.get("DISK_DIR", ""),
             disk_cache=vals.get("DISK_CACHE", ""),
             disk_prealloc=vals.get("DISK_PREALLOC", ""),
+            rail_topology=_load_rail_topology(
+                vals.get("RAIL_TOPOLOGY"),
+                nics_list,
+                nic_ips_list,
+                nic_ip6s_list,
+            ),
         )
 
     @staticmethod
     def all_names() -> list[str]:
         return [f.stem for f in sorted(SOCKETS.glob("*.info"))]
+
+
+def _load_rail_topology(
+    raw: str | None, nics: list[str], ipv4s: list[str], ipv6s: list[str]
+) -> RailTopology | None:
+    """Load bounded opt-in state, preserving the absence of legacy metadata."""
+    if raw is None:
+        return None
+    if len(raw.encode()) > MAX_TOPOLOGY_BYTES:
+        # Bound the JSON decoder before it allocates a tree from local state.
+        raise ValueError("rail topology state exceeds its size limit")
+    try:
+        topology = RailTopology.from_dict(json.loads(raw))
+        topology.validate_for_nics(nics)
+        topology.validate_addresses(ipv4s, ipv6s)
+    except (ValueError, TypeError, RecursionError) as error:
+        raise ValueError(f"invalid rail topology state: {error}") from error
+    return topology
 
 
 class VMNotFound(Exception):

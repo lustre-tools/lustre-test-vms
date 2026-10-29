@@ -306,6 +306,7 @@ class TestClusterDeploy:
             ],
         )
         node = MagicMock(
+            rail_topology=None,
             os_id="rocky9",
             arch="x86_64",
             variant="base",

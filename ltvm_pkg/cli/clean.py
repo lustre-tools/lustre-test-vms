@@ -765,6 +765,11 @@ def cmd_prune(args: argparse.Namespace) -> int:
             try:
                 if c.path.is_dir() and not c.path.is_symlink():
                     podman_rmtree(c.path)
+                elif c.kind.startswith("image-file["):
+                    # A versioned support marker belongs to this exact image file.
+                    from ltvm_pkg.image_store import remove_image
+
+                    remove_image(c.path)
                 else:
                     c.path.unlink()
                 removed.append(c)

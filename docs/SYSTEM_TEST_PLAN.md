@@ -4,6 +4,10 @@ End-to-end tests for the ltvm VM tooling. Run after a `build-all` or artifact
 fetch to validate the full stack: artifact build → VM creation → Lustre
 deployment → Lustre operation → crash/kdump.
 
+For reproducible multi-rail acceptance over both topologies and IP
+families, see [Linux multi-rail labs: tests](MULTIRAIL.md#reproduce-the-tests).
+Its required mode fails when the live test environment is unavailable.
+
 **Targets** (in run order): rocky9 → rocky8 → rocky10 → ubuntu2404
 
 **Server support**: rocky9 ✓  rocky8 ✗  rocky10 ✗  ubuntu2404 ✗

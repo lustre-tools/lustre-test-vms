@@ -450,7 +450,7 @@ class TestLnetFromProbe:
 
     def test_nonzero_net_index_is_kept(self) -> None:
         lnet = vm_cluster.lnet_from_probe(_probe("tcp1(eth1)"))
-        assert lnet.nettype == "tcp"
+        assert lnet.nettype == "tcp1"
         assert lnet.mgsnid == "172.16.100.23@tcp1"
 
     def test_no_lnet_conf_is_tcp_on_eth0(self) -> None:
