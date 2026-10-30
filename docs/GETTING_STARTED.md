@@ -264,6 +264,14 @@ ltvm cluster destroy co2
 `cluster create` and `cluster destroy` need `sudo` in front when this
 host cannot run VMs unprivileged; `ltvm doctor` says which applies.
 
+For multiple data rails on Linux, add `--nic tcp --nic tcp` and either
+`-T shared` (`--network-topology shared`) or `-T isolated`
+(`--network-topology isolated`) to `cluster create`. Shared mode groups
+the NICs in `tcp0`; isolated mode uses separate `tcp0` and `tcp1`
+networks. Both support LNet Multi-Rail. See
+[Linux multi-rail labs](MULTIRAIL.md) for host and image requirements,
+source routing, custom LNet IDs, and verification.
+
 VM names must include the checkout number: `co<N>-<role>`.
 
 

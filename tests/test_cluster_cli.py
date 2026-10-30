@@ -1267,7 +1267,7 @@ class TestCmdClusterLlmountBehavior:
                 vm_cluster.VMInfo,
                 "load",
                 side_effect=lambda n: MagicMock(
-                    ip=self._IPS[n], os_id="rocky9"
+                    rail_topology=None, ip=self._IPS[n], os_id="rocky9"
                 ),
             ),
             patch.object(vm_cluster, "run") as run,
@@ -1501,7 +1501,7 @@ class TestCheckMounted:
             patch.object(
                 vm_cluster.VMInfo,
                 "load",
-                side_effect=lambda n: MagicMock(ip=ips[n]),
+                side_effect=lambda n: MagicMock(ip=ips[n], rail_topology=None),
             ),
             patch.object(vm_cluster, "run", side_effect=fake_run),
         ):
@@ -1565,6 +1565,7 @@ class TestCmdClusterDeployMountLimit:
             ],
         )
         node = MagicMock(
+            rail_topology=None,
             os_id="rocky9",
             arch="x86_64",
             variant="base",
@@ -1636,6 +1637,7 @@ class TestCmdClusterDeployBuildsForTheNodes:
             name="co3", nodes=[{"name": "co3-mds", "roles": ["mgs", "mds"]}]
         )
         node = MagicMock(
+            rail_topology=None,
             os_id="rocky9",
             arch="x86_64",
             variant="mofed",
@@ -1692,6 +1694,7 @@ class TestCmdClusterDeployBuildsForTheNodes:
             ],
         )
         srv = MagicMock(
+            rail_topology=None,
             os_id="rocky9",
             arch="aarch64",
             variant="base",
@@ -1699,6 +1702,7 @@ class TestCmdClusterDeployBuildsForTheNodes:
             ip="10.0.0.5",
         )
         cli = MagicMock(
+            rail_topology=None,
             os_id="rocky10-16k",
             arch="aarch64",
             variant="base",
@@ -1761,6 +1765,7 @@ class TestCmdClusterDeployIpFamily:
             os_family = "rhel"
 
         node = MagicMock(
+            rail_topology=None,
             os_id="rocky9",
             arch="x86_64",
             variant="base",
@@ -1831,6 +1836,7 @@ class TestCmdClusterDeployOstCount:
             os_family = "rhel"
 
         node = MagicMock(
+            rail_topology=None,
             os_id="rocky9",
             arch="x86_64",
             variant="base",
@@ -1946,6 +1952,7 @@ class TestCmdClusterDeployFstype:
             str(tree), "rocky9", arch="x86_64", kernel="k", variant="base"
         ).mkdir(parents=True, exist_ok=True)
         node = MagicMock(
+            rail_topology=None,
             os_id="rocky9",
             arch="x86_64",
             variant="base",
@@ -2066,6 +2073,7 @@ class TestCmdClusterDeployUserspaceOnly:
             name="co3", nodes=[{"name": "co3-mds", "roles": ["mgs", "mds"]}]
         )
         node = MagicMock(
+            rail_topology=None,
             os_id="rocky9",
             arch="x86_64",
             variant="base",
@@ -2774,6 +2782,7 @@ class TestCmdClusterDeployServersOrClients:
         def vm(name: str) -> MagicMock:
             client = name.endswith("c1")
             return MagicMock(
+                rail_topology=None,
                 os_id="rocky9" if client else "rocky8",
                 arch="x86_64",
                 variant="base",

@@ -2,8 +2,8 @@
 observation commands.
 
 Each cmd_* here just forwards args to the underlying vm_commands
-function through ``_vm_call``, which normalizes SystemExit and
-VMNotFound into the CLI's (int exit code) protocol. Lifecycle commands
+function through ``_vm_call``, which normalizes expected state and host
+errors into the CLI's (int exit code) protocol. Lifecycle commands
 prime sudo once and their implementation elevates only the individual
 host operations that require it.
 """
@@ -25,7 +25,7 @@ from ltvm_pkg.cli.util import (
 
 
 def _vm_call(fn: Any, ns: argparse.Namespace, use_json: bool) -> int:
-    """Call a vm_commands function, catching SystemExit and VMNotFound.
+    """Call a handler and report expected state or host errors without a traceback.
 
     Honors the return code of the wrapped function so handlers like
     cmd_doctor can signal "issues found" via a non-zero exit.
@@ -37,9 +37,8 @@ def _vm_call(fn: Any, ns: argparse.Namespace, use_json: bool) -> int:
         return rc if isinstance(rc, int) else EXIT_OK
     except SystemExit as e:
         return int(e.code) if e.code is not None else EXIT_ERROR
-    except VMNotFound as e:
-        return _error(str(e), use_json)
-    except FileNotFoundError as e:
+    except (VMNotFound, OSError, RuntimeError, ValueError) as e:
+        # Missing bridges and invalid saved state are operational failures.
         return _error(str(e), use_json)
 
 
@@ -101,10 +100,15 @@ def cmd_crash_collect(args: argparse.Namespace) -> int:
 
 
 def cmd_exec(args: argparse.Namespace) -> int:
+    """Keep the main command key while adapting the guest argv for the handler."""
     use_json = args.json
     from ltvm_pkg.vm_commands import cmd_exec as _exec
 
-    return _vm_call(_exec, args, use_json)
+    handler_args = argparse.Namespace(**vars(args))
+    if hasattr(args, "remote_command"):
+        # The handler's argv field must not overwrite main dispatch or telemetry.
+        handler_args.command = list(args.remote_command)
+    return _vm_call(_exec, handler_args, use_json)
 
 
 def cmd_nmi(args: argparse.Namespace) -> int:

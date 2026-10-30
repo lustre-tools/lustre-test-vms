@@ -752,13 +752,41 @@ def _iptables_rules(subnet: str) -> list[list[str]]:
 
 
 def _linux_services(s: Survey) -> str | None:
+    """Remove installed network services after their guest TAPs are gone."""
     done: list[str] = []
-    for unit in (host_setup.LTVM_DNSMASQ_UNIT, BRIDGE_UNIT):
+    for unit in (
+        host_setup.LTVM_DNSMASQ_UNIT,
+        host_setup.RAIL_UNIT,
+        BRIDGE_UNIT,
+    ):
         if host_setup._systemctl_ok("cat", unit):
             # Stopping qemu-bridge runs its ExecStop, which deletes fcbr0.
             _quiet(["systemctl", "disable", "--now", unit])
             done.append(unit)
-    if _rm(host_setup.LTVM_DNSMASQ_UNIT_PATH, BRIDGE_UNIT_PATH):
+    if host_setup.RAIL_UNIT_PATH.exists():
+        # A failed service stop must not leave owned data bridges behind silently.
+        from .rail_host import remove_bridges
+
+        if os.geteuid() == 0:
+            remove_bridges()
+        else:
+            # Elevate this API adapter because uninstall itself runs as the user.
+            sudo_run(
+                [
+                    "env",
+                    f"PYTHONPATH={host_setup.REPO_ROOT}",
+                    sys.executable,
+                    "-m",
+                    "ltvm_pkg.rail_host",
+                    "stop",
+                ],
+                quiet=True,
+            )
+    if _rm(
+        host_setup.LTVM_DNSMASQ_UNIT_PATH,
+        host_setup.RAIL_UNIT_PATH,
+        BRIDGE_UNIT_PATH,
+    ):
         _quiet(["systemctl", "daemon-reload"])
     if which("ip") and not _quiet(["ip", "link", "show", "fcbr0"]).returncode:
         _quiet(["ip", "link", "del", "fcbr0"])
@@ -826,15 +854,35 @@ def _linux_bridge_acl() -> str | None:
         text = acl.read_text()
     except OSError:
         return None
-    ours = f"allow {rootless.BRIDGE}"
-    kept = [ln for ln in text.splitlines() if ln.strip() != ours]
+    from .rail_host import bridge_names
+
+    ours = {f"allow {name}" for name in bridge_names()}
+    lines = text.splitlines()
+    kept: list[str] = []
+    for index, line in enumerate(lines):
+        if line.strip() == f"allow {rootless.BRIDGE}":
+            continue
+        if (
+            line == "# ltvm data bridge"
+            and index + 1 < len(lines)
+            and lines[index + 1].strip() in ours
+        ):
+            continue
+        if (
+            index
+            and lines[index - 1] == "# ltvm data bridge"
+            and line.strip() in ours
+        ):
+            # Preexisting administrator entries have no ownership marker.
+            continue
+        kept.append(line)
     if len(kept) == len(text.splitlines()):
         return None
     if any(ln.strip() for ln in kept):
         atomic_write(acl, "\n".join(kept) + "\n", 0o644)
     else:
         _rm(acl)
-    return f"{ours} in {acl}"
+    return f"ltvm bridge rules in {acl}"
 
 
 def _linux_selinux() -> str | None:

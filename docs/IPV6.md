@@ -4,6 +4,11 @@ Every extra (`--nic`) NIC holds an IPv4 address and an IPv6 address.
 The management NIC (`eth0`) holds IPv4 only. A cluster's NIDs use one
 family at a time, and `cluster deploy --ip-family` picks it.
 
+Linux VMs with two to eight data NICs can also select a
+[shared or isolated multi-rail profile](MULTIRAIL.md). The profile
+configures source policy routing for both IP families and keeps `eth0`
+outside LNet.
+
 ## Run a cluster on IPv6
 
 IPv6 needs tcp on an extra NIC:
@@ -45,7 +50,8 @@ first. `FORCE_LARGE_NID=true` makes the test framework use `--large`.
 
 ## How ltvm derives the addresses
 
-The default prefix is `fd17:2016:1000:f100::/64`. The interface ID
+Without an explicit multi-rail profile, the default prefix is
+`fd17:2016:1000:f100::/64`. The interface ID
 holds the four IPv4 octets. Each octet is `f` and then the octet in
 three decimal digits:
 
@@ -58,6 +64,13 @@ width: 39 characters with no `::`. The resulting 43-character NID tests
 the string sizes that a short address does not reach. Set another
 prefix with `$LTVM_EXTRA_SUBNET6` or `VM_DIR/extra-subnet6`. ltvm
 refuses a prefix that breaks the `0x1000` rule.
+
+Explicit profiles use fixed prefixes instead: shared mode uses
+`fd17:2016:2000:1000::/64`, and isolated rails 1 through 8 use
+`fd17:2016:2000:1001::/64` through `fd17:2016:2000:1008::/64`.
+They keep the same full-width interface ID encoding. Legacy prefix
+overrides do not change these profiles. See the
+[multi-rail fabric table](MULTIRAIL.md#fixed-fabrics-and-ownership).
 
 `eth0` has no IPv6 address, on purpose. `test-framework.sh` makes NIDs
 from the output of `hostname -I`. An IPv6 address on `eth0` could then
@@ -76,20 +89,34 @@ character for character. An IPv4 NID means that LNet did not take the
 IPv6 address. A compressed IPv6 NID means that the prefix breaks the
 width rule.
 
-## Known limit: no mount over an IPv6 NID
+## Upstream IPv6 limits
 
-LNet runs over IPv6, but Lustre master cannot mount over it yet
-(LU-18041). The limit is 40 for `UUID_MAX`, so an `obd_uuid` holds a
-NID of 39 characters at most. The MDT mount fails with `-EINVAL`:
+LNet IPv6 support does not by itself prove filesystem mount or LNet
+self-test support in a particular Lustre build. Test these separately.
+
+Lustre builds affected by LU-18041 reject long IPv6 NIDs during mount.
+The limit is 40 for `UUID_MAX`, so an `obd_uuid` holds a NID of 39
+characters at most. ltvm's full-width IPv6 NIDs exceed that limit. The
+MDT mount fails with `-EINVAL` and this diagnostic:
 
 ```
 LustreError: (ldlm_lib.c:369:client_obd_setup()) target UUID must be 40 characters or less
 ```
 
-Gerrit change 65491 shortens the string, and it has not landed. Until
-then, `cluster llmount` fails on an IPv6 cluster. The filesystem suites
-fail too. An LNet suite runs if auster skips its own format and mount:
+This error means that the build cannot mount this IPv6 topology.
+Changing to IPv4 does not validate IPv6 filesystem I/O. An LNet suite
+can still run when auster skips its own format and mount:
 
 ```bash
 ssh co6-cli 'cd /usr/lib64/lustre/tests && ./auster -N -v sanity-lnet'
 ```
+
+Some `lst` builds use the older 64-bit NID format and reject IPv6 NIDs
+with `Invalid nid:`. The group command can then delete its empty group
+and return zero. Check the diagnostic output and actual group members.
+In that case, `lctl ping` and LNet discovery can
+check IPv6 reachability, but they cannot prove IPv6 payload balancing.
+The [multi-rail live tests](MULTIRAIL.md#reproduce-the-tests) keep
+topology, filesystem payload, and self-test checks separate. They
+recognize only these specific upstream errors as expected failures;
+other setup, mount, and payload errors fail the test.

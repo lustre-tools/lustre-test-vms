@@ -334,9 +334,13 @@ def _install_fetched_images(staging: Path, output_base: Path) -> None:
     a file an existing VM overlay may be backed by.
     """
     from .image_store import LEGACY, install_image
+    from .rail_image import CAPABILITY_SUFFIX
 
     for src in sorted(staging.rglob("*")):
         if not src.is_file() or src.is_symlink():
+            continue
+        if src.name == LEGACY + CAPABILITY_SUFFIX:
+            # install_image moves this marker beside its versioned image filename.
             continue
         rel = src.relative_to(staging)
         dest_dir = output_base / rel.parent
@@ -823,6 +827,12 @@ def package_target(
             f"`ltvm build image` finish successfully?{hint}"
         )
     image_ext4 = current
+    from .rail_image import capability_path, require_capability
+
+    image_capability = capability_path(image_ext4)
+    if os.path.lexists(image_capability):
+        # Do not publish a corrupt or future capability token as supported.
+        require_capability(image_ext4)
 
     # Read version for naming.
     kmeta = load_meta_safe(kernel_dir / "meta.json")
@@ -931,6 +941,11 @@ def package_target(
         link_dir.mkdir(parents=True)
         (link_dir / "base.ext4").symlink_to(image_ext4.resolve())
         image_members = [str(image_rel / "base.ext4")]
+        if image_capability.exists():
+            # The archive name is stable; fetch pairs it with a fresh image name.
+            capability_name = "base.ext4" + image_capability.suffix
+            (link_dir / capability_name).symlink_to(image_capability)
+            image_members.append(str(image_rel / capability_name))
         image_meta = paths["image_dir"] / "meta.json"
         if image_meta.exists():
             (link_dir / "meta.json").symlink_to(image_meta.resolve())

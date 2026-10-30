@@ -590,6 +590,8 @@ class TestSharedRegistration:
         ssh.mkdir()
         with (
             patch.object(vm_net, "HOSTS_FILE", etc_hosts),
+            # The lock must be isolated even when register takes the shared-host path.
+            patch.object(vm_net, "_HOSTS_LOCK_PATH", tmp_path / ".hosts.lock"),
             patch.object(
                 vm_net, "_real_user_ssh_dir", return_value=("alice", ssh)
             ),
@@ -890,7 +892,11 @@ class TestInstall:
                 str(HELPER),
             ]
         )
-        assert acl.read_text() == "allow fcbr0\n"
+        from ltvm_pkg.rail_host import bridge_names
+
+        assert acl.read_text() == "allow fcbr0\n" + "".join(
+            f"# ltvm data bridge\nallow {name}\n" for name in bridge_names()
+        )
 
     def test_acl_with_a_deny_is_not_touched(self, tmp_path: Path) -> None:
         acl = tmp_path / "bridge.conf"

@@ -19,6 +19,7 @@ from typing import Any
 
 from . import vm_claim
 from .qemu_run import die, is_running, run
+from .rail_topology import RailTopology
 from .vm_net import (
     SSH_KEEPALIVE_OPTS,
     SSH_OPTS,
@@ -223,8 +224,8 @@ def lnet_from_probe(output: str, ip_family: str = "ipv4") -> ClusterLnet:
         raise ValueError(f"cannot parse lnet.conf networks={networks!r}")
     nettype, index, ifaces = m.group(1), m.group(2), m.group(3) or "eth0"
     iface = ifaces.split(",")[0].strip()
-    # Every generated config names the net without its index, and
-    # "tcp" and "tcp0" are the same net to Lustre.
+    # The framework uses NETTYPE to construct NIDs, so retain nonzero IDs.
+    # The zero network has the canonical Lustre spelling tcp or o2ib.
     net = nettype if index in ("", "0") else f"{nettype}{index}"
     ipv6 = ip_family == "ipv6"
     if ipv6 and nettype != "tcp":
@@ -244,7 +245,7 @@ def lnet_from_probe(output: str, ip_family: str = "ipv4") -> ClusterLnet:
         ):
             ip = fields[3].split("/")[0]
             return ClusterLnet(
-                nettype=nettype, mgsnid=f"{ip}@{net}", force_large_nid=ipv6
+                nettype=net, mgsnid=f"{ip}@{net}", force_large_nid=ipv6
             )
     family = "global IPv6" if ipv6 else "IPv4"
     raise ValueError(f"no {family} address on {iface}, which carries {net}")
@@ -252,7 +253,13 @@ def lnet_from_probe(output: str, ip_family: str = "ipv4") -> ClusterLnet:
 
 def _probe_node_lnet(node: ClusterNode, ip_family: str) -> ClusterLnet:
     """Ask *node* which net and address its NID is on."""
-    r = run_ssh(node.ip, LNET_PROBE, timeout=30)
+    try:
+        r = run_ssh(node.ip, LNET_PROBE, timeout=30)
+    except subprocess.TimeoutExpired as error:
+        # An unreachable guest is an operational error before deploy can write.
+        die(
+            f"cannot read the LNet config of {node.name}: timed out after {error.timeout}s"
+        )
     if r.returncode != 0:
         die(
             f"cannot read the LNet config of {node.name}: "
@@ -580,6 +587,8 @@ def _create_one_node(
     disk_dir: str = "",
     disk_cache: str = "",
     disk_prealloc: str = "",
+    network_topology: str | None = None,
+    lnet_networks: list[str] | None = None,
 ) -> tuple[str, int, str]:
     """Create a single cluster VM via ltvm subprocess.
 
@@ -641,6 +650,11 @@ def _create_one_node(
     cmd += ["--ost-disks", str(node.ost_disks)]
     for nic in nics or []:
         cmd += ["--nic", nic]
+    if network_topology is not None:
+        # Every child receives the exact profile selected by the cluster parent.
+        cmd += ["--network-topology", network_topology]
+    for network in lnet_networks or []:
+        cmd += ["--lnet-network", network]
     if share_disks:
         cmd += ["--share-disks"]
     if node.failover_for:
@@ -843,12 +857,30 @@ def _print_cluster_plan(
     disk_dir: str = "",
     disk_cache: str = "",
     disk_prealloc: str = "",
+    rail_topology: RailTopology | None = None,
+    use_json: bool = False,
 ) -> None:
     """Report what `cluster create` would do, for --dry-run.
 
     Per-node IPs are not shown: each node's `ltvm create` claims one
     under a lock, so there is no honest answer without claiming them.
     """
+    if use_json:
+        # A dry run exposes resolved fabrics without claiming any addresses.
+        print(
+            json.dumps(
+                {
+                    "action": "would-create",
+                    "name": cluster_name,
+                    "nodes": [dataclasses.asdict(node) for node in node_specs],
+                    "nics": list(nics),
+                    "rail_topology": rail_topology.to_dict()
+                    if rail_topology
+                    else None,
+                }
+            )
+        )
+        return
     print(
         f"Would create cluster '{cluster_name}' with {len(node_specs)} nodes:"
     )
@@ -891,6 +923,13 @@ def _print_cluster_plan(
         print(f"  prealloc: {disk_prealloc}")
     if nics:
         print(f"  nics:    eth0 (mgmt) + {', '.join(nics)}")
+    if rail_topology is not None:
+        print(f"  network: {rail_topology.mode}")
+        for index, rail in enumerate(rail_topology.rails, start=1):
+            print(
+                f"    eth{index}: {rail.bridge} {rail.subnet4}/{rail.prefix4} "
+                f"{rail.subnet6}/{rail.prefix6} {rail.lnet_network}"
+            )
     if kernel_args:
         print(f"  cmdline: + {kernel_args}")
     print(f"  owner:   {owner_id}")
@@ -960,6 +999,58 @@ def _require_cluster_memory(
     die("\n".join(lines))
 
 
+def _requested_cluster_topology(
+    args: argparse.Namespace,
+) -> RailTopology | None:
+    """Reject unsupported profile and server-HA combinations before any mutation."""
+    from .cluster_rail_config import PROFILE_FAILOVER_ERROR
+    from .vm_commands import _requested_rail_topology
+
+    topology = _requested_rail_topology(args)
+    if topology is not None and getattr(args, "failover", None):
+        # The framework's failnode resolver cannot map independent profile NIDs.
+        die(PROFILE_FAILOVER_ERROR)
+    return topology
+
+
+def _validate_profile_nodes(vms: list[VMInfo], ip_family: str) -> None:
+    """Check each opted-in guest against its saved rail and NID configuration."""
+    from .cluster_rail_config import validate_profile_probe
+
+    for vm in vms:
+        if vm.rail_topology is None:
+            # Legacy nodes retain their existing probe and fallback behavior.
+            continue
+        try:
+            result = run_ssh(vm.ip, LNET_PROBE, timeout=30)
+        except subprocess.TimeoutExpired as error:
+            # A timed-out management probe cannot prove that data rails are ready.
+            die(
+                f"cannot read the LNet config of {vm.name}: timed out after {error.timeout}s"
+            )
+        if result.returncode != 0:
+            die(
+                f"cannot read the LNet config of {vm.name}: "
+                f"{(result.stderr or result.stdout).strip()}"
+            )
+        try:
+            validate_profile_probe(vm, result.stdout, ip_family)
+        except ValueError as error:
+            die(f"{vm.name}: {error}")
+
+
+def _require_profile_failover_supported(
+    cluster: ClusterInfo, vms: list[VMInfo]
+) -> None:
+    """Refuse saved profile server-HA state before a lifecycle operation."""
+    from .cluster_rail_config import require_no_profile_failover
+
+    try:
+        require_no_profile_failover(vms, bool(cluster.failover_partners()))
+    except ValueError as error:
+        die(str(error))
+
+
 def cmd_cluster_create(args: argparse.Namespace) -> None:
     cluster_name = args.name
     # Cluster name flows into filesystem paths (SOCKETS/<name>.cluster)
@@ -970,6 +1061,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
         _validate_vm_name,
     )
 
+    topology = _requested_cluster_topology(args)
     _validate_vm_name(cluster_name)
     record = SOCKETS / f"{cluster_name}.cluster"
     if record.exists():
@@ -1117,6 +1209,8 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
             nics=nics,
             kernel_args=kernel_args,
             owner_id=owner_id,
+            rail_topology=topology,
+            use_json=bool(getattr(args, "json", False)),
             **disk_opts,
         )
         return
@@ -1162,6 +1256,8 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                     or (None if node_targets[node.name] else kernel),
                     variant="base" if node_targets[node.name] else variant,
                     share_disks=node.name in shared,
+                    network_topology=getattr(args, "network_topology", None),
+                    lnet_networks=getattr(args, "lnet_networks", None),
                     **disk_opts,
                 ): node
                 for node in wave
@@ -1732,7 +1828,6 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     # Before the build: a cluster whose MGS cannot name its NID is an
     # error to report now, not after every node is deployed.
     ip_family = getattr(args, "ip_family", None) or cluster.ip_family or "ipv4"
-    lnet = probe_mgs_lnet(cluster, ip_family)
 
     # Group the nodes by what their Lustre build depends on, from each
     # VM's own metadata: a cluster may mix targets (e.g. 4 KiB-page
@@ -1741,11 +1836,13 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
     # defaults.
     groups: dict[tuple[str, str | None, str, str], list[str]] = {}
     node_families: dict[str, str] = {}
+    node_vms: list[VMInfo] = []
     for n in nodes:
         try:
             vm = VMInfo.load(n.name)
         except VMNotFound as e:
             die(f"cluster {cluster.name!r}: cannot load node: {e}")
+        node_vms.append(vm)
         target = vm.os_id or DEFAULT_TARGET
         # Let ValueError from TargetConfig propagate up with a clear
         # error.  Previously a broad `except (..., ValueError, ...): pass`
@@ -1767,6 +1864,10 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
         key = (target, kernel_name, vm.arch or "x86_64", vm.variant)
         if n.name in deploying:
             groups.setdefault(key, []).append(n.name)
+    # Validate every profile, including nodes kept by a partial deployment.
+    _require_profile_failover_supported(cluster, node_vms)
+    _validate_profile_nodes(node_vms, ip_family)
+    lnet = probe_mgs_lnet(cluster, ip_family)
     os_family = _cluster_os_family(node_families)
 
     print(f"=== Deploying to cluster '{cluster.name}' ===")
@@ -2315,6 +2416,11 @@ def cmd_cluster_llmount(args: argparse.Namespace) -> None:
         )
     from .vm_commands import _os_family_for_vm
 
+    if not args.cleanup:
+        # Cleanup must remain available after a deliberate rail or LNet fault.
+        node_vms = [VMInfo.load(node.name) for node in cluster.get_nodes()]
+        _require_profile_failover_supported(cluster, node_vms)
+        _validate_profile_nodes(node_vms, cluster.ip_family or "ipv4")
     mgs_vm = VMInfo.load(cluster.mgs_node().name)
     os_family = _os_family_for_vm(mgs_vm, "libdir")
     if not args.cleanup:
@@ -2631,12 +2737,22 @@ def cmd_cluster_krb5(args: argparse.Namespace) -> None:
 
 
 def cmd_cluster_failover(args: argparse.Namespace) -> None:
+    """Reject unsupported saved profiles before faulting a server."""
     from .cluster_failover import cmd_cluster_failover as failover
 
+    cluster = ClusterInfo.load(args.name)
+    _require_profile_failover_supported(
+        cluster, [VMInfo.load(node.name) for node in cluster.get_nodes()]
+    )
     failover(args)
 
 
 def cmd_cluster_failback(args: argparse.Namespace) -> None:
+    """Reject unsupported saved profiles before starting or moving a server."""
     from .cluster_failover import cmd_cluster_failback as failback
 
+    cluster = ClusterInfo.load(args.name)
+    _require_profile_failover_supported(
+        cluster, [VMInfo.load(node.name) for node in cluster.get_nodes()]
+    )
     failback(args)

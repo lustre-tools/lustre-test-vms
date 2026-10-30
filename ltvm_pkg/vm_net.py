@@ -308,7 +308,9 @@ def _net_of(ip: str) -> str:
     return ip.rsplit(".", 1)[0]
 
 
-def _used_ips_by_net(exclude_name: str) -> dict[str, set[str]]:
+def _used_ips_by_net(
+    exclude_name: str, *, strict: bool = False
+) -> dict[str, set[str]]:
     """Return the in-use addresses of every VM, bucketed by their /24.
 
     Scans both the primary mgmt IP (``VMInfo.ip``) and any per-extra-NIC
@@ -328,17 +330,25 @@ def _used_ips_by_net(exclude_name: str) -> dict[str, set[str]]:
         except VMNotFound:
             continue
         except ValueError as e:
-            # VMInfo.load deliberately fails loud on a corrupt int
-            # field (see TestVMInfoLoadCorruption) -- but that must
-            # stay scoped to the damaged VM.  This walk feeds every
-            # `ltvm create`, so letting it out would mean one
-            # truncated .info file makes IP allocation, and therefore
-            # VM creation, impossible host-wide.  Skip the casualty
-            # and keep its address out of the free pool by warning.
+            if strict:
+                # A running VM may still own valid sources in a damaged profile record.
+                die(
+                    f"cannot allocate profile addresses: VM {n!r} has corrupt state; "
+                    f"repair its state before creating another profile VM: {e}"
+                )
+            # Preserve legacy allocation's warning-and-skip behavior.
+            # Explicit profiles refuse unknown address ownership above.
             log.warning(
                 "skipping corrupt VM state for %r during IP scan: %s", n, e
             )
             continue
+        except OSError as error:
+            if strict:
+                # Unreadable state is unknown address ownership, never a free pool.
+                die(
+                    f"cannot allocate profile addresses: cannot read VM {n!r}: {error}"
+                )
+            raise
         for ip in [vm.ip, *vm.nic_ips]:
             if ip:
                 used.setdefault(_net_of(ip), set()).add(ip)
@@ -385,6 +395,7 @@ def alloc_ip(
     name: str,
     count: int = 1,
     explicit_ip: str | None = None,
+    subnets: list[str] | None = None,
 ) -> Iterator[list[str]]:
     """Context manager that allocates *count* unique IPs for *name* under
     an exclusive lock held until the ``with`` block exits.
@@ -402,6 +413,10 @@ def alloc_ip(
     ``explicit_ip`` (optional) pins the mgmt IP; extras are still
     auto-allocated.  Pass None to auto-allocate all IPs.
 
+    ``subnets`` supplies one validated /24 prefix per NIC for explicit
+    profiles. Such requests refuse corrupt or unreadable VM records,
+    because those records may still describe running address owners.
+
     Usage::
 
         with alloc_ip(name, count=1 + len(extras)) as ips:
@@ -410,8 +425,22 @@ def alloc_ip(
     """
     if count < 1:
         raise ValueError(f"alloc_ip count must be >= 1, got {count}")
+    if subnets is not None:
+        # Explicit profiles use at most eight data /24s plus management.
+        from .rail_topology import MAX_RAILS
+
+        if len(subnets) != count or count > MAX_RAILS + 1:
+            raise ValueError("explicit subnet count must match 1..9 NICs")
+        import ipaddress
+
+        for subnet in subnets:
+            ipaddress.IPv4Network(f"{subnet}.0/24")
     with _ip_alloc_lock():
-        used = _used_ips_by_net(name)
+        used = (
+            _used_ips_by_net(name, strict=True)
+            if subnets is not None
+            else _used_ips_by_net(name)
+        )
         ips: list[str] = []
         if explicit_ip:
             _validate_explicit_ip(explicit_ip)
@@ -428,7 +457,9 @@ def alloc_ip(
             int(hashlib.md5(name.encode()).hexdigest()[:4], 16) % 244
         ) + 10
         for idx in range(len(ips), count):
-            subnet = subnet_for_nic(idx)
+            subnet = (
+                subnets[idx] if subnets is not None else subnet_for_nic(idx)
+            )
             taken = used.setdefault(subnet, set())
             # Wider scan window than 244 deltas is pointless -- the /24
             # only has 244 usable host addresses -- but we walk the full

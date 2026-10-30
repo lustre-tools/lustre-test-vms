@@ -10,22 +10,55 @@
 ROOT_DEV=$(findmnt -no SOURCE / 2>/dev/null || echo /dev/vda)
 resize2fs "$ROOT_DEV" 2>/dev/null || true
 
-FC_IP=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_ip= | cut -d= -f2)
-FC_GW=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_gw= | cut -d= -f2)
-FC_NAME=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_name= | cut -d= -f2)
-FC_NICS=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_nics= | cut -d= -f2)
-FC_NIC_IPS=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_nic_ips= | cut -d= -f2)
-FC_NIC_PREFIXES=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_nic_prefixes= \
-    | cut -d= -f2)
-FC_NIC_IP6S=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_nic_ip6s= \
-    | cut -d= -f2)
-FC_NIC_IP6_PREFIXES=$(cat /proc/cmdline | tr ' ' '\n' \
-    | grep ^fc_nic_ip6_prefixes= | cut -d= -f2)
+# Read kernel arguments once through procfs; no command output is needed.
+FC_IP="" FC_GW="" FC_NAME="" FC_NICS="" FC_NIC_IPS="" FC_NIC_PREFIXES=""
+FC_NIC_IP6S="" FC_NIC_IP6_PREFIXES="" FC_RAIL_TOPOLOGY="" FC_LNET_NETS=""
+FC_CMDLINE=$(</proc/cmdline)
+if ((${#FC_CMDLINE} > 131072)); then
+    echo 'rc.local: kernel arguments exceed the supported size' >&2
+    exit 1
+fi
+read -r -a _cmdline_tokens <<< "$FC_CMDLINE"
+if ((${#_cmdline_tokens[@]} > 1024)); then
+    echo 'rc.local: too many kernel arguments' >&2
+    exit 1
+fi
+for _token in "${_cmdline_tokens[@]}"; do
+    case $_token in
+        fc_ip=*) FC_IP=${_token#*=} ;;
+        fc_gw=*) FC_GW=${_token#*=} ;;
+        fc_name=*) FC_NAME=${_token#*=} ;;
+        fc_nics=*) FC_NICS=${_token#*=} ;;
+        fc_nic_ips=*) FC_NIC_IPS=${_token#*=} ;;
+        fc_nic_prefixes=*) FC_NIC_PREFIXES=${_token#*=} ;;
+        fc_nic_ip6s=*) FC_NIC_IP6S=${_token#*=} ;;
+        fc_nic_ip6_prefixes=*) FC_NIC_IP6_PREFIXES=${_token#*=} ;;
+        fc_rail_topology=*) FC_RAIL_TOPOLOGY=${_token#*=} ;;
+        fc_lnet_nets=*) FC_LNET_NETS=${_token#*=} ;;
+    esac
+done
+
+EXPLICIT_RAILS=false
+if [[ -n $FC_RAIL_TOPOLOGY || -n $FC_LNET_NETS ]]; then
+    # Explicit profiles require complete setup; warnings would hide a broken rail.
+    EXPLICIT_RAILS=true
+    if [[ ! -r /usr/local/sbin/setup-rail-routing.sh ]]; then
+        echo 'rc.local: explicit rails require setup-rail-routing.sh' >&2
+        exit 1
+    fi
+    # The image builder installs this shared helper at the guest path.
+    # shellcheck disable=SC1091
+    source /usr/local/sbin/setup-rail-routing.sh
+    rail_validate_profile "$FC_RAIL_TOPOLOGY" "$FC_NICS" "$FC_LNET_NETS" \
+        "$FC_NIC_IPS" "$FC_NIC_PREFIXES" "$FC_NIC_IP6S" \
+        "$FC_NIC_IP6_PREFIXES" || exit 1
+    rail_configure_globals || exit 1
+fi
 
 if [ -n "${FC_IP}" ]; then
-    ip addr add ${FC_IP}/24 dev eth0 2>/dev/null
+    ip addr add "${FC_IP}/24" dev eth0 2>/dev/null
     ip link set eth0 up
-    ip route add default via ${FC_GW:-192.168.100.1} 2>/dev/null
+    ip route add default via "${FC_GW:-192.168.100.1}" 2>/dev/null
     # DNS via the host bridge (which runs dnsmasq); fall back to a
     # public resolver.  Use FC_GW so a non-default --subnet works.
     echo "nameserver ${FC_GW:-192.168.100.1}" > /etc/resolv.conf
@@ -132,8 +165,11 @@ if [ -n "${FC_NICS}" ]; then
     # sends everything to one rail.  Answer only for addresses owned by
     # the receiving interface, and source ARP from that interface's own
     # address.
-    sysctl -qw net.ipv4.conf.all.arp_ignore=1 2>/dev/null || true
-    sysctl -qw net.ipv4.conf.all.arp_announce=2 2>/dev/null || true
+    if [[ $EXPLICIT_RAILS == false ]]; then
+        # Legacy guests keep their existing best-effort sysctl setup.
+        sysctl -qw net.ipv4.conf.all.arp_ignore=1 2>/dev/null || true
+        sysctl -qw net.ipv4.conf.all.arp_announce=2 2>/dev/null || true
+    fi
     idx=1
     IFS=',' read -ra _nic_entries <<< "${FC_NICS}"
     # Parallel array of per-extra-NIC IPs (fc_nic_ips=), indexed 0-based
@@ -166,7 +202,13 @@ if [ -n "${FC_NICS}" ]; then
         nic_prefix="${_nic_prefixes[$((idx - 1))]:-24}"
         nic_ip6="${_nic_ip6s[$((idx - 1))]:-}"
         nic_ip6_prefix="${_nic_ip6_prefixes[$((idx - 1))]:-64}"
-        if ip link show "${ifname}" >/dev/null 2>&1; then
+        if [[ $EXPLICIT_RAILS == true ]]; then
+            rail_configure_nic "$ifname" "$nic_ip" "$nic_prefix" \
+                "$nic_ip6" "$nic_ip6_prefix" "$idx" || {
+                echo "rc.local: required rail setup failed for $ifname" >&2
+                exit 1
+            }
+        elif ip link show "${ifname}" >/dev/null 2>&1; then
             ip link set "${ifname}" up 2>/dev/null || true
             if [ -n "${nic_ip}" ]; then
                 # The extra NICs share one network, separate from
@@ -201,13 +243,14 @@ if [ -n "${FC_NICS}" ]; then
         fi
         hook="/usr/local/sbin/setup-nic-${nic_type}.sh"
         if [ -x "${hook}" ]; then
-            "${hook}" "${ifname}" "${nic_arg}" || \
-                echo "rc.local: warning: ${hook} exited non-zero for" \
-                     "${ifname}" >&2
-        else
-            # No hook present for this type.  That's fine for plain
-            # 'tcp' NICs (no extra setup needed).
-            :
+            if ! "${hook}" "${ifname}" "${nic_arg}"; then
+                echo "rc.local: NIC hook failed for $ifname: $hook" >&2
+                [[ $EXPLICIT_RAILS == false ]] || exit 1
+            fi
+        elif [[ $EXPLICIT_RAILS == true && $nic_type != tcp ]]; then
+            # SoftRoCE needs its device hook before LNet can use the interface.
+            echo "rc.local: required NIC hook is missing: $hook" >&2
+            exit 1
         fi
         idx=$((idx + 1))
     done
@@ -222,7 +265,18 @@ fi
 # Do NOT overwrite an operator- or deploy-lustre-authored lnet.conf;
 # only write when it's missing.  deploy-lustre writes lustre.conf in
 # a separate file, so the two coexist.
-if [ -x /usr/local/sbin/setup-lnet-config.sh ] && \
+if [[ $EXPLICIT_RAILS == true ]]; then
+    # Preserve operator configuration, but do not accept a different topology.
+    lnet_body=$(/usr/local/sbin/setup-lnet-config.sh) || exit 1
+    if [[ -s /etc/modprobe.d/lnet.conf ]]; then
+        if [[ $(</etc/modprobe.d/lnet.conf) != "$lnet_body" ]]; then
+            echo 'rc.local: existing lnet.conf differs from the requested rails' >&2
+            exit 1
+        fi
+    else
+        printf '%s\n' "$lnet_body" > /etc/modprobe.d/lnet.conf || exit 1
+    fi
+elif [ -x /usr/local/sbin/setup-lnet-config.sh ] && \
    [ ! -s /etc/modprobe.d/lnet.conf ]; then
     /usr/local/sbin/setup-lnet-config.sh /etc/modprobe.d/lnet.conf \
         2>/dev/null || true
@@ -251,6 +305,12 @@ fi
 # too, if they authored one -- it only ever relaxes rp_filter for
 # interfaces LNet was told to use.
 if [ -x /usr/local/sbin/setup-lnet-rp-filter.sh ]; then
-    /usr/local/sbin/setup-lnet-rp-filter.sh /etc/modprobe.d/lnet.conf || \
-        echo "rc.local: warning: lnet rp_filter setup exited non-zero" >&2
+    if ! STRICT_RAILS="$EXPLICIT_RAILS" \
+        /usr/local/sbin/setup-lnet-rp-filter.sh /etc/modprobe.d/lnet.conf; then
+        echo 'rc.local: lnet rp_filter setup failed' >&2
+        [[ $EXPLICIT_RAILS == false ]] || exit 1
+    fi
+elif [[ $EXPLICIT_RAILS == true ]]; then
+    echo 'rc.local: required setup-lnet-rp-filter.sh is missing' >&2
+    exit 1
 fi

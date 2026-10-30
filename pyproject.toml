@@ -8,6 +8,7 @@ requires-python = ">=3.10"
 dependencies = [
     "pyyaml>=6.0",
     "argcomplete>=3.0",
+    "pyroute2>=0.9.7; sys_platform == 'linux'",
 ]
 
 [dependency-groups]
@@ -75,3 +76,8 @@ disallow_untyped_defs = true
 disallow_incomplete_defs = true
 check_untyped_defs = true
 strict_equality = true
+
+# pyroute2 builds netlink messages dynamically; keep its untyped API at rail_host.
+[[tool.mypy.overrides]]
+module = ["pyroute2", "pyroute2.*"]
+ignore_missing_imports = true

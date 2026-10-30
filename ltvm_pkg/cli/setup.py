@@ -65,6 +65,13 @@ def _vm_call(*a: Any, **kw: Any) -> int:
 
 def cmd_create(args: argparse.Namespace) -> int:
     use_json = args.json
+    from ltvm_pkg.vm_commands import _requested_rail_topology
+
+    try:
+        # Invalid profiles must fail before privilege priming can prompt.
+        _requested_rail_topology(args)
+    except SystemExit as error:
+        return int(error.code) if error.code is not None else 1
     # A dry run only reads, so priming sudo would prompt for a password
     # that nothing is going to spend -- the one thing guaranteed to stop
     # people using --dry-run.

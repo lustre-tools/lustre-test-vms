@@ -1,0 +1,6 @@
+	ACTIVE	BUSY	DOWN	UNKNOWN	TOTAL
+Group [ source ]
+No nodes found [ source ]
+Group [ (null) ]
+	12345-192.0.2.10@o2ib: Active
+Total 1 nodes [ (null) ]

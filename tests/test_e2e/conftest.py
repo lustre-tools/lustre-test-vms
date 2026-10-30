@@ -147,7 +147,10 @@ def pytest_collection_modifyitems(
     scoped = [
         it
         for it in items
-        if here in Path(it.fspath).parents or Path(it.fspath).parent == here
+        if (here in Path(it.fspath).parents or Path(it.fspath).parent == here)
+        # The multi-rail suite owns strict preflight: required runs must fail
+        # rather than inherit this older suite's environment-wide skip.
+        and Path(it.fspath).name != "test_08_multirail.py"
     ]
     if not scoped:
         return
@@ -425,6 +428,13 @@ def pytest_runtest_makereport(
         return
     if report.passed:
         return
+
+    lab = item.funcargs.get("multirail_lab")
+    if report.failed and lab is not None:
+        # Capture live state before module teardown restores links and deletes VMs.
+        from tests.test_e2e.multirail_diagnostics import capture_failure
+
+        capture_failure(lab, item.nodeid, str(report.longrepr))
 
     vms = _TEST_VMS.get(item.nodeid, [])
     if not vms:

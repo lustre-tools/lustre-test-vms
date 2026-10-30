@@ -38,6 +38,21 @@ ltvm build lustre rocky9 --lustre-tree ~/lustre-release   # incremental, fast
 ltvm deploy-lustre co1-single --lustre-tree ~/lustre-release --mount
 ```
 
+## Linux multi-rail labs
+
+Two to eight extra TCP or SoftRoCE NICs can use a managed network profile.
+`shared` puts the NICs on one subnet and groups them in one LNet network.
+`isolated` gives each NIC its own subnet and LNet network. Both support
+LNet Multi-Rail; the management NIC stays separate.
+
+```bash
+ltvm create co1-mr rocky9 --nic tcp --nic tcp --network-topology isolated
+```
+
+Prepare the host bridges and use a current guest image before creating a
+profile VM. See [Linux multi-rail labs](docs/MULTIRAIL.md) for setup,
+`-T`/`--network-topology`, `-L`/`--lnet-network`, IPv6 limits, and tests.
+
 ## Running on macOS (Apple Silicon)
 
 ltvm runs on an Apple Silicon Mac, building/running aarch64 artifacts in

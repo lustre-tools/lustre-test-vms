@@ -59,6 +59,21 @@ def complete_clusters(
     return ClusterInfo.all_names()
 
 
+def complete_lnet_networks(
+    prefix: str = "",
+    parsed_args: argparse.Namespace | None = None,
+    **kwargs: Any,
+) -> list[str]:
+    """Offer the small set of default rail IDs without reading host state."""
+    from .rail_topology import MAX_RAILS
+
+    return [
+        f"{kind}{index}"
+        for kind in ("tcp", "o2ib")
+        for index in range(MAX_RAILS)
+    ]
+
+
 @_safe
 def complete_suite_targets(
     prefix: str = "",

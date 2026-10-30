@@ -30,6 +30,8 @@ from .qemu_run import (
     numa_problem,
     run,
 )
+from .rail_image import require_capability
+from .rail_topology import RailTopology, resolve_topology
 from .vm_net import (
     HOSTS_FILE,
     _real_user_ssh_dir,
@@ -73,6 +75,7 @@ from .vm_state import (
     lustre_libdir,
     nic_ip6,
     resolve_os_artifacts,
+    subnet_for_nic,
 )
 
 
@@ -608,8 +611,8 @@ def _validate_kernel_args(raw: str | None) -> str:
     if len(args) > KERNEL_ARGS_MAX:
         die(
             f"--kernel-args is {len(args)} characters; the limit is "
-            f"{KERNEL_ARGS_MAX}, which keeps the whole command line "
-            f"inside the kernel's 2048 bytes"
+            f"{KERNEL_ARGS_MAX}; the complete profile command line "
+            f"also has a 2047-byte limit"
         )
     for word in args.split():
         key = word.split("=", 1)[0]
@@ -720,6 +723,7 @@ def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
     if not info_path.exists():
         return False
     vm = VMInfo.load(name)
+    _check_existing_topology(vm, args)
     _warn_ignored_resource_flags(vm, args)
     if is_running(vm):
         wait_for_ssh(vm.ip, SSH_TIMEOUT)
@@ -732,6 +736,7 @@ def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
                         "name": name,
                         "status": "already running",
                         "owner_id": vm.owner_id,
+                        **_rail_report(vm),
                     }
                 )
             )
@@ -749,12 +754,59 @@ def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
                     "name": name,
                     "status": "running",
                     "owner_id": vm.owner_id,
+                    **_rail_report(vm),
                 }
             )
         )
     else:
         print(f"{name}: started")
     return True
+
+
+def _requested_rail_topology(args: argparse.Namespace) -> RailTopology | None:
+    """Validate all explicit profile options before state or artifact access."""
+    mode = getattr(args, "network_topology", None)
+    networks = getattr(args, "lnet_networks", None)
+    if mode is not None and sys.platform != "linux":
+        # The managed bridge profiles require Linux networking on the host.
+        die("--network-topology requires a Linux host")
+    nics = list(getattr(args, "nic", None) or [])
+    try:
+        topology = resolve_topology(nics, mode, networks)
+        if topology is not None:
+            # Reject reserved guest parameters before privilege or artifact work.
+            _validate_kernel_args(getattr(args, "kernel_args", None))
+            management = f"{subnet_for_nic(0)}.0"
+            if any(rail.subnet4 == management for rail in topology.rails):
+                # Management and the data fabrics must not have overlapping routes.
+                raise ValueError("rail subnet overlaps the management subnet")
+        return topology
+    except ValueError as error:
+        die(str(error))
+
+
+def _check_existing_topology(vm: VMInfo, args: argparse.Namespace) -> None:
+    """Reject topology changes instead of silently converging an old VM."""
+    requested = getattr(args, "rail_topology", None)
+    if requested is None:
+        return
+    if vm.rail_topology != requested or vm.nics != list(args.nic):
+        # Topology changes need a deliberate recreate; starting must use stored facts.
+        die(f"{vm.name}: network topology differs; destroy and recreate the VM")
+
+
+def _require_profile_image(image: str, topology: RailTopology | None) -> None:
+    """Require explicit guest support before a profile can allocate VM state."""
+    if topology is None:
+        return
+    try:
+        require_capability(Path(image))
+    except ValueError:
+        # The selected immutable image must carry its own guest-support marker.
+        die(
+            "old image cannot use network profiles; rebuild the image with "
+            "`ltvm build image <target> --force` and keep its .rail-topology sidecar"
+        )
 
 
 def _image_id(image: str) -> str:
@@ -793,10 +845,18 @@ def _allocate_and_persist_vm(
     # addresses.  The lock is held until vm.save() commits the .info
     # file, at which point the IPs are visible to peers.
     total_ips = 1 + len(extra_nic_types)
+    topology: RailTopology | None = getattr(args, "rail_topology", None)
+    allocation: dict[str, Any] = {}
+    if topology is not None:
+        # Keep legacy calls unchanged, but bind each explicit NIC to its fabric.
+        allocation["subnets"] = [subnet_for_nic(0)] + [
+            rail.subnet4.rsplit(".", 1)[0] for rail in topology.rails
+        ]
     with alloc_ip(
         name,
         count=total_ips,
         explicit_ip=getattr(args, "ip", None) or None,
+        **allocation,
     ) as ips:
         ip = ips[0]
         nic_ips = ips[1:]
@@ -834,7 +894,11 @@ def _allocate_and_persist_vm(
             nic_ips=list(nic_ips),
             # Derived from the IPv4 addresses, so uniqueness is
             # inherited rather than re-proved by a second allocator.
-            nic_ip6s=[nic_ip6(v4) for v4 in nic_ips],
+            nic_ip6s=[
+                topology.rails[index].ipv6_for(v4) if topology else nic_ip6(v4)
+                for index, v4 in enumerate(nic_ips)
+            ],
+            rail_topology=topology,
             # passthrough_drivers is filled in below, inside the launch
             # umbrella, after we've actually bound each BDF to vfio-pci.
             passthrough_drivers={},
@@ -868,6 +932,7 @@ def _print_create_report(vm: VMInfo, args: argparse.Namespace) -> None:
                     "name": vm.name,
                     "status": "running",
                     "owner_id": vm.owner_id,
+                    **_rail_report(vm),
                 }
             )
         )
@@ -887,6 +952,17 @@ def _print_create_report(vm: VMInfo, args: argparse.Namespace) -> None:
                 )
             )
         )
+
+
+def _rail_report(vm: VMInfo) -> dict[str, Any]:
+    """Expose both address families only for explicit profiles in JSON output."""
+    if vm.rail_topology is None:
+        return {}
+    return {
+        "rail_topology": vm.rail_topology.to_dict(),
+        "nic_ips": list(vm.nic_ips),
+        "nic_ip6s": list(vm.nic_ip6s),
+    }
 
 
 def _disk_option_desc(disk_dir: str, cache: str, prealloc: str) -> str:
@@ -948,6 +1024,10 @@ def _print_create_plan(
         "disk_prealloc": getattr(args, "disk_prealloc", "") or "",
         "owner_id": getattr(args, "owner_id", None),
     }
+    topology = getattr(args, "rail_topology", None)
+    if topology is not None:
+        # Allocated addresses remain unknown in a dry run; fabrics are fixed.
+        plan["rail_topology"] = topology.to_dict()
     if args.json:
         print(json.dumps(plan))
         return
@@ -985,6 +1065,13 @@ def _print_create_plan(
     print(f"  tap/mac: {tap} / {mac}")
     if extra_nic_types:
         print(f"  nics:    eth0 (mgmt) + {', '.join(extra_nic_types)}")
+    if topology is not None:
+        print(f"  network: {topology.mode}")
+        for index, rail in enumerate(topology.rails, start=1):
+            print(
+                f"    eth{index}: {rail.bridge} {rail.subnet4}/{rail.prefix4} "
+                f"{rail.subnet6}/{rail.prefix6} {rail.lnet_network}"
+            )
     if getattr(args, "kernel_args", ""):
         print(f"  cmdline: + {args.kernel_args}")
     print(f"  owner:   {getattr(args, 'owner_id', None)}")
@@ -1563,6 +1650,7 @@ def _rollback_launch_failure(vm: VMInfo) -> None:
 def cmd_create(args: argparse.Namespace) -> None:
     name = args.name
     _validate_vm_name(name)
+    args.rail_topology = _requested_rail_topology(args)
 
     # Resolve once in the invoking create process.  This is creation metadata,
     # not an authorization check: an idempotent create of an existing VM keeps
@@ -1578,6 +1666,9 @@ def cmd_create(args: argparse.Namespace) -> None:
     dry_run = getattr(args, "dry_run", False)
     info_path = SOCKETS / f"{name}.info"
     exists = info_path.exists()
+    if exists and dry_run:
+        # Dry-run must also refuse an explicit change to an existing topology.
+        _check_existing_topology(VMInfo.load(name), args)
 
     # Say what is about to happen before the first thing that can
     # block.  An existing running VM goes straight into a silent wait
@@ -1610,6 +1701,7 @@ def cmd_create(args: argparse.Namespace) -> None:
     os_arts, image, kernel, kver, os_target, variant = _resolve_os_and_kernel(
         args, extra_nic_types
     )
+    _require_profile_image(image, args.rail_topology)
     base_name = Path(image).name
     os_id = os_target
 
@@ -2168,6 +2260,7 @@ def cmd_list(args: argparse.Namespace) -> None:
                 "claim": claims[vm.name].to_json()
                 if vm.name in claims
                 else None,
+                **_rail_report(vm),
             }
         )
 

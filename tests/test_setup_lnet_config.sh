@@ -134,6 +134,41 @@ check "cli: fc_nics=passthrough (mgmt SSH-only)" \
 	'options lnet networks="o2ib0(@ib-of-eth1))"' \
 	"$(run_cli 'fc_nics=passthrough')"
 
+# --- Explicit rail profiles ----------------------------------------
+
+check "shared tcp profile groups local interfaces" \
+    'options lnet networks="tcp0(eth1,eth2)"' \
+    "$(run_cli 'fc_nics=tcp,tcp fc_lnet_nets=tcp0,tcp0 fc_rail_topology=shared')"
+check "shared SoftRoCE profile groups local interfaces" \
+    'options lnet networks="o2ib0(eth1,eth2)"' \
+    "$(run_cli 'fc_nics=softroce,softroce fc_lnet_nets=o2ib0,o2ib0 fc_rail_topology=shared')"
+check "isolated profile keeps distinct networks" \
+    'options lnet networks="tcp2(eth1),tcp9(eth2)"' \
+    "$(run_cli 'fc_nics=tcp,tcp fc_lnet_nets=tcp2,tcp9 fc_rail_topology=isolated')"
+check "stdin has short form" \
+    'options lnet networks="tcp0(eth0)"' \
+    "$(printf '%s' quiet | "$UUT" -s)"
+
+# Reject a partial, mixed, oversized, or malformed topology instead of guessing.
+for invalid in \
+    'fc_nics=tcp,tcp fc_lnet_nets=tcp0,tcp0' \
+    'fc_nics=tcp,tcp fc_rail_topology=shared' \
+    'fc_nics=tcp,tcp fc_lnet_nets=tcp0,tcp1 fc_rail_topology=shared' \
+    'fc_nics=tcp,tcp fc_lnet_nets=tcp0,tcp0 fc_rail_topology=isolated' \
+    'fc_nics=tcp,tcp fc_lnet_nets=o2ib0,o2ib0 fc_rail_topology=shared' \
+    'fc_nics=tcp,tcp fc_lnet_nets=tcp0,tcp0, fc_rail_topology=shared' \
+    'fc_nics=tcp fc_lnet_nets=tcp0 fc_rail_topology=shared' \
+    'fc_nics=tcp,tcp fc_lnet_nets=tcp65536,tcp65536 fc_rail_topology=shared' \
+    'fc_nics=tcp,tcp fc_lnet_nets=tcp0,tcp0 fc_rail_topology=shared fc_rail_topology=isolated' \
+    'fc_nics=tcp,tcp,tcp,tcp,tcp,tcp,tcp,tcp,tcp fc_lnet_nets=tcp0,tcp0,tcp0,tcp0,tcp0,tcp0,tcp0,tcp0,tcp0 fc_rail_topology=shared'; do
+    if run_cli "$invalid" >/dev/null 2>&1; then
+        fail=$((fail + 1))
+        printf 'FAIL invalid profile was accepted: %s\n' "$invalid"
+    else
+        pass=$((pass + 1))
+    fi
+done
+
 # --- Write-to-file mode --------------------------------------------
 
 tmp=$(mktemp)

@@ -250,6 +250,7 @@ try:
         complete_directories,
         complete_fetch_filter,
         complete_kernels,
+        complete_lnet_networks,
         complete_mofed_versions,
         complete_snapshot_tags,
         complete_suite_targets,
@@ -343,12 +344,33 @@ _COMPLETERS_BY_OPTION: dict[str, Any] = {
     "--build": complete_directories,
     "--kernel": complete_kernels,
     "--lustre-tree": complete_directories,
+    "--lnet-network": complete_lnet_networks,
     "--mod-dir": complete_directories,
     "--mofed-version": complete_mofed_versions,
     "--outdir": complete_directories,
     "--variant": complete_variants,
     "--zfs-version": complete_zfs_versions,
 }
+
+
+def _add_rail_options(parser: argparse.ArgumentParser) -> None:
+    """Expose profile and LNet grouping options identically for VMs and clusters."""
+    parser.add_argument(
+        "-T",
+        "--network-topology",
+        choices=("shared", "isolated"),
+        default=None,
+        help="Linux data rails: shared subnet or isolated fabrics; needs 2..8 extra NICs",
+    )
+    parser.add_argument(
+        "-L",
+        "--lnet-network",
+        dest="lnet_networks",
+        action="append",
+        default=None,
+        metavar="NET",
+        help="LNet ID per extra NIC, repeated in NIC order (for example tcp0)",
+    )
 
 
 def _add_disk_option_args(
@@ -1482,6 +1504,7 @@ def build_parser() -> argparse.ArgumentParser:
             "needs a host IOMMU)."
         ),
     )
+    _add_rail_options(_vm_create_args)
     _vm_create_args.add_argument(
         "--numa-nodes",
         dest="numa_nodes",
@@ -1739,7 +1762,7 @@ def build_parser() -> argparse.ArgumentParser:
     # REMAINDER keeps the command's own flags verbatim, as in `cluster
     # exec`: ltvm's flags have to precede the VM name.
     vxp.add_argument(
-        "command",
+        "remote_command",
         nargs=argparse.REMAINDER,
         metavar="COMMAND...",
         help="Command to run; everything after the VM name is passed "
@@ -2336,6 +2359,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Extra NIC applied to every node; repeat for multiple. "
         "Same types as `ltvm create --nic`.",
     )
+    _add_rail_options(ccp)
     ccp.add_argument(
         "--numa-nodes",
         dest="numa_nodes",
@@ -2698,7 +2722,7 @@ def build_parser() -> argparse.ArgumentParser:
     # The cost is that ltvm's own flags have to precede the role, the
     # same bargain ssh and sudo make.
     cep.add_argument(
-        "command",
+        "remote_command",
         nargs=argparse.REMAINDER,
         metavar="COMMAND...",
         help="Command to run; everything after the role is passed "
@@ -2723,8 +2747,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _cssh_target.completer = complete_cluster_members  # type: ignore[attr-defined]
     cssh.add_argument(
-        "command",
+        "remote_command",
         nargs=argparse.REMAINDER,
+        metavar="COMMAND...",
         help="Optional command to run instead of an interactive shell",
     )
     cssh.set_defaults(func=cmd_cluster_ssh)

@@ -37,13 +37,15 @@
 # Env:
 #     SYSCTL_CONF_DIR    override for /etc/sysctl.d (tests)
 #     PROC_NET_CONF      override for /proc/sys/net/ipv4/conf (tests)
-#     APPLY              set to 'no' to skip the live `sysctl -w` pass
+#     APPLY              set to 'no' to skip live procfs writes
+#     STRICT_RAILS       set to 'true' to require every configured netdev
 
 set -euo pipefail
 
-PROG=$(basename "$0")
+PROG=${0##*/}
 
 log() {
+	# Report a setup result to the console and the guest system log.
 	printf '%s: %s\n' "$PROG" "$*" >&2
 	if command -v logger >/dev/null 2>&1; then
 		logger -t "$PROG" -- "$*" || true
@@ -51,31 +53,59 @@ log() {
 }
 
 lnet_ifaces() {
-	# Read an lnet.conf body on stdin, print one interface name per
-	# line in the order they appear.
-	#
-	# The emitter writes:
-	#     options lnet networks="tcp0(eth0),o2ib0(eth1)"
-	# so the names we want are exactly the parenthesised tokens.
-	#
-	# Entries that are not netdevs are deliberately included here and
-	# filtered by the caller against PROC_NET_CONF -- that drops both
-	# real ibdev names (mlx5_0, resolved from a 'passthrough' NIC) and
-	# any '@ib-of-ethN' placeholder the resolver could not resolve.
-	# rp_filter is an IPv4 routing knob and simply does not exist for
-	# an IB device, so there is nothing to set in either case.
-	sed -n 's/.*networks="\([^"]*\)".*/\1/p' |
-		tr ',' '\n' |
-		sed -n 's/.*(\([^)]*\)).*/\1/p'
+	# Parse complete network groups before splitting their interface lists.
+	# The legacy passthrough marker has an extra closing parenthesis.
+	local body rest group iface suffix parsed="" entry
+	local -a interfaces=()
+	IFS= read -r -d '' -n 65537 body || true
+	((${#body} <= 65536)) || return 1
+	[[ $body == *networks=* ]] || return 0
+	[[ $body =~ networks=\"([^\"]*)\" ]] || return 1
+	rest=${BASH_REMATCH[1]}
+	for ((entry=0; entry<64; entry++)); do
+		[[ -n $rest ]] || { printf '%s' "$parsed"; return 0; }
+		[[ $rest =~ ^[a-z][a-z0-9]*\(([^\(\)]*)\) ]] || return 1
+		group=${BASH_REMATCH[1]}; suffix=${rest:${#BASH_REMATCH[0]}}
+		[[ -n $group && $group != ,* && $group != *, && $group != *,,* ]] || return 1
+		IFS=, read -r -a interfaces <<< "$group"
+		((${#interfaces[@]} <= 64)) || return 1
+		for iface in "${interfaces[@]}"; do
+			[[ $iface =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.:-]{0,63}$ || \
+			   $iface =~ ^@ib-of-eth[0-9]+$ ]] || return 1
+			parsed+="$iface"$'\n'
+		done
+		if [[ $group == @ib-of-eth* && $suffix == \)* ]]; then
+			# Keep compatibility with unresolved passthrough placeholders.
+			suffix=${suffix:1}
+		fi
+		if [[ -z $suffix ]]; then
+			rest=""
+		elif [[ $suffix == ,* && $suffix != , ]]; then
+			rest=${suffix:1}
+		else
+			return 1
+		fi
+	done
+	[[ -z $rest ]] || return 1
+	printf '%s' "$parsed"
+}
+
+apply_rp_filter() {
+	# Write procfs directly, with checked failure for an explicit rail profile.
+	local path=$1
+	if [[ -f $path ]] && printf '0\n' > "$path"; then return 0; fi
+	log "cannot disable rp_filter at $path"
+	[[ ${STRICT_RAILS:-false} != true ]]
 }
 
 main() {
+	# Persist and apply the receive-path settings for all configured interfaces.
 	local conf=""
 	local from_stdin=false
 
 	while (($# > 0)); do
 		case "$1" in
-		--stdin)
+		-s | --stdin)
 			from_stdin=true
 			shift
 			;;
@@ -105,21 +135,27 @@ main() {
 		# deploy-lustre has run.
 		return 0
 	fi
-	body=$(cat "$conf")
+	body=$(<"$conf")
 
 	local sysctl_dir=${SYSCTL_CONF_DIR:-/etc/sysctl.d}
 	local proc_conf=${PROC_NET_CONF:-/proc/sys/net/ipv4/conf}
 	local out=$sysctl_dir/99-lustre-lnet-rp-filter.conf
 
-	# Keep only names that have an rp_filter knob (i.e. real netdevs).
+	# Parse before writing so malformed configuration never gets a partial result.
+	local parsed
+	parsed=$(printf '%s\n' "$body" | lnet_ifaces) || {
+		log 'invalid LNet interface configuration'; return 1
+	}
 	local -a ifaces=()
 	local i
 	while IFS= read -r i; do
 		[[ -n $i ]] || continue
 		if [[ -e $proc_conf/$i/rp_filter ]]; then
 			ifaces+=("$i")
+		elif [[ ${STRICT_RAILS:-false} == true ]]; then
+			log "required interface has no rp_filter setting: $i"; return 1
 		fi
-	done < <(printf '%s\n' "$body" | lnet_ifaces)
+	done <<< "$parsed"
 
 	mkdir -p "$sysctl_dir"
 	{
@@ -134,15 +170,13 @@ main() {
 		done
 	} >"$out"
 
-	# The drop-in alone only takes effect on the next boot (or a
-	# `sysctl --system`), and rc.local runs after the interfaces are
-	# already up -- so apply it live as well.
-	if [[ ${APPLY:-yes} != no ]] && command -v sysctl >/dev/null 2>&1; then
-		sysctl -q -w net.ipv4.conf.all.rp_filter=0 2>/dev/null || true
-		sysctl -q -w net.ipv4.conf.default.rp_filter=0 2>/dev/null || true
+	# Apply the same settings now because rc.local runs after link creation.
+	if [[ ${APPLY:-yes} != no ]]; then
+		apply_rp_filter "$proc_conf/all/rp_filter" || return 1
+		apply_rp_filter "$proc_conf/default/rp_filter" || return 1
 		for i in "${ifaces[@]:-}"; do
 			[[ -n $i ]] || continue
-			sysctl -q -w "net.ipv4.conf.$i.rp_filter=0" 2>/dev/null || true
+			apply_rp_filter "$proc_conf/$i/rp_filter" || return 1
 		done
 	fi
 
