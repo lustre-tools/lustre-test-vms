@@ -303,6 +303,8 @@ def archived_links(path: Path) -> list[tuple[Path, Path]]:
     *path* is ``<hot>/<target>/<arch>`` or ``<hot>/<target>``.  Only
     links into the cold directory count: a link somewhere else was not
     made by archive, and deleting what it points at is not ltvm's call.
+    A directory this user cannot read, such as lost+found when hot is
+    a filesystem of its own, holds nothing archive made.
     """
     try:
         cold = os.path.realpath(cold_root())
@@ -311,7 +313,10 @@ def archived_links(path: Path) -> list[tuple[Path, Path]]:
     if path.is_symlink():
         candidates = [path]
     elif path.is_dir():
-        candidates = sorted(p for p in path.iterdir() if p.is_symlink())
+        try:
+            candidates = sorted(p for p in path.iterdir() if p.is_symlink())
+        except OSError:
+            return []
     else:
         return []
     out = []

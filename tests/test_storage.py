@@ -721,6 +721,23 @@ class TestDoctorReport:
         assert "group-shared" in cold and "setgid" in cold
         assert "1 arch dir(s) archived" in cold
 
+    def test_unreadable_dir_in_hot_is_skipped(self, tiers: dict) -> None:
+        """hot on a filesystem of its own has a lost+found only root
+        can read."""
+        if os.geteuid() == 0:
+            pytest.skip("root can read anything")
+        tiers["cold"].chmod(0o2775)
+        storage.move_target("rocky8", None, to_cold=True)
+        lost = tiers["hot"] / "lost+found"
+        lost.mkdir(mode=0o000)
+        try:
+            issues, notes = storage.doctor_report()
+        finally:
+            lost.chmod(0o755)
+        assert issues == []
+        cold = next(n for n in notes if n.startswith("storage cold:"))
+        assert "1 arch dir(s) archived" in cold
+
     def test_missing_cold_is_an_issue(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
