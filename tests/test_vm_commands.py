@@ -2020,6 +2020,47 @@ class TestCmdExec:
         assert ssh.call_args.kwargs["stream"] is None
         out = json.loads(capsys.readouterr().out)
         assert out["stdout"] == "hi\n" and out["rc"] == 0
+        assert "hint" not in out
+
+    def test_connection_lost_mid_command_points_at_the_crash(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A guest LBUG dropped ssh with no message, and the run took it
+        for a command that ended (fb-bb006d40e8a0)."""
+        _seed_vm_files(tmp_vmdir, "x-lbug")
+        r = MagicMock(
+            returncode=255,
+            stdout="",
+            stderr="Connection to 192.0.2.9 closed by remote host.\n",
+        )
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.run_ssh", return_value=r),
+        ):
+            rc = vm_commands.cmd_exec(self._args("x-lbug", ["dd ..."]))
+            args = self._args("x-lbug", ["dd ..."])
+            args.json = True
+            vm_commands.cmd_exec(args)
+        assert rc == 255
+        captured = capsys.readouterr()
+        assert "ltvm vm crash-collect x-lbug" in captured.err
+        assert "ltvm vm console-log x-lbug" in json.loads(captured.out)["hint"]
+
+    def test_never_connected_gets_no_crash_hint(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _seed_vm_files(tmp_vmdir, "x-boot")
+        r = MagicMock(
+            returncode=255,
+            stdout="",
+            stderr="ssh: connect to host 192.0.2.9 port 22: Connection refused\n",
+        )
+        with (
+            patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+            patch("ltvm_pkg.vm_commands.run_ssh", return_value=r),
+        ):
+            vm_commands.cmd_exec(self._args("x-boot", ["true"]))
+        assert "crash-collect" not in capsys.readouterr().err
 
 
 # ── cmd_nmi ──────────────────────────────────────────────

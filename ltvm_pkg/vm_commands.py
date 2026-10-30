@@ -40,6 +40,7 @@ from .vm_net import (
     register_ssh_name,
     run_ssh,
     ssh_client_config_error,
+    ssh_never_connected,
     sshpass_scp_argv,
     tap_for_name,
     unregister_ssh_name,
@@ -2588,6 +2589,7 @@ def cmd_exec(args: argparse.Namespace) -> int:
         return _handler_error(
             args, f"timeout after {args.timeout}s", EXIT_TIMEOUT
         )
+    hint = _connection_lost_hint(args.name, r.returncode, r.stderr)
     if use_json:
         print(
             json.dumps(
@@ -2598,11 +2600,31 @@ def cmd_exec(args: argparse.Namespace) -> int:
                     "timed_out": False,
                     "stdout": r.stdout or "",
                     "stderr": r.stderr or "",
+                    **({"hint": hint} if hint else {}),
                 },
                 indent=2,
             )
         )
+    elif hint:
+        print(hint, file=sys.stderr)
     return r.returncode
+
+
+def _connection_lost_hint(
+    name: str, returncode: int, stderr: str | None
+) -> str:
+    """What to look at when ssh lost a guest mid-command, or "".
+
+    A guest that panics (an LBUG) drops the connection with nothing but
+    ssh's 255, which read as a command that ended silently.
+    """
+    if returncode != 255 or ssh_never_connected(returncode, stderr):
+        return ""
+    return (
+        f"ssh lost the connection to {name} mid-command; if the guest "
+        f"crashed, `ltvm vm console-log {name}` shows the panic and "
+        f"`ltvm vm crash-collect {name}` collects the vmcore"
+    )
 
 
 def cmd_nmi(args: argparse.Namespace) -> int:

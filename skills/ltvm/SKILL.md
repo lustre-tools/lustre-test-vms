@@ -647,6 +647,10 @@ ltvm vm crash-collect co1-single --mod-dir <build>
 ltvm vm crash-collect co1-single --trigger --mod-dir <build>
 ```
 
+A command whose ssh drops mid-run (`vm exec` exits 255) may mean the
+guest panicked: `vm exec` says so and names `console-log` and
+`crash-collect` for it.
+
 `crash-collect` resolves the matching vmlinux itself and verifies its ELF
 build-id against the running kernel, exiting non-zero when it cannot find
 one. Pass the `.ko` directory of the build that **crashed** -- a
