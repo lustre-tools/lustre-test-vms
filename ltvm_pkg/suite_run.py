@@ -221,6 +221,7 @@ def probe_script(run_id: str | None) -> str:
 printf 'node\\t%s\\t%s\\t%s\\n' "$(date +%s)" "$(cut -d. -f1 /proc/uptime)" \\
 	"$(cat {BOOT_ID} 2>/dev/null)"
 cd {SUITE_ROOT} 2>/dev/null || exit 0
+[[ -f power ]] && awk '{{print "power\t" $1 "\t" $2}}' power
 for id in {ids}; do
 	[[ -d $id ]] || continue
 	rc=$(cat "$id/done" 2>/dev/null)
@@ -250,10 +251,15 @@ def _int(text: str) -> int | None:
 def parse_probe(text: str) -> tuple[int | None, int | None, list[dict]]:
     now = uptime = None
     runs: list[dict] = []
+    power: list[tuple[int, str]] = []
     for line in text.splitlines():
         f = line.split("\t")
         if f[0] == "node" and len(f) >= 3:
             now, uptime = _int(f[1]), _int(f[2])
+        elif f[0] == "power" and len(f) >= 3:
+            when = _int(f[1])
+            if when is not None:
+                power.append((when, f[2].strip()))
         elif f[0] == "run" and len(f) >= 6:
             runs.append(
                 {
@@ -269,6 +275,11 @@ def parse_probe(text: str) -> tuple[int | None, int | None, list[dict]]:
                     ),
                 }
             )
+    for run in runs:
+        started = run["started"]
+        run["powered"] = {
+            n for when, n in power if started is not None and when >= started
+        }
     return now, uptime, runs
 
 
@@ -318,9 +329,10 @@ def classify(
     """running / done / died for one probed run.
 
     A node whose boot_id differs from the one the run recorded at its
-    start rebooted while the run was going: nothing in a suite reboots
-    a VM, so it crashed.  Not reported for a finished run, which a
-    later restart does not concern.
+    start rebooted while the run was going.  A suite reboots a VM only
+    through ltvm-power, which logs it, so any other reboot is a crash.
+    Not reported for a finished run, which a later restart does not
+    concern.
 
     A run from before boot_ids were recorded falls back to comparing
     each node's uptime with the run's age.  That age is the guest's own
@@ -344,6 +356,8 @@ def classify(
         ]
     elif state != "done" and age is not None:
         rebooted = [n for n, u in uptimes.items() if u is not None and u < age]
+    powered = run.get("powered") or set()
+    rebooted = [n for n in rebooted if n not in powered]
     return RunStatus(
         run_id=run["id"],
         state=state,

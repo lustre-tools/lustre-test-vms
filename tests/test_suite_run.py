@@ -392,6 +392,29 @@ class TestClassify:
         assert s.rebooted == ["co2-oss"]
         assert s.unreachable == ["co2-mds"]
 
+    def test_a_power_cycle_from_the_suite_is_not_a_crash(self) -> None:
+        run = _run(alive=True) | {
+            "boots": {"co2-mds": "a", "co2-oss": "b"},
+            "powered": {"co2-mds"},
+        }
+        s = suite_run.classify(
+            run,
+            2000,
+            {"co2-mds": 120, "co2-oss": 120},
+            {"co2-mds": "x", "co2-oss": "y"},
+        )
+        assert s.rebooted == ["co2-oss"]
+
+    def test_power_lines_count_from_the_start_of_the_run(self) -> None:
+        out = (
+            "node\t2000\t9000\tid\n"
+            "power\t900\tco2-oss\n"
+            "power\t1500\tco2-mds\n"
+            "run\tsanity-a\t\t1\t1000\t\n"
+        )
+        runs = suite_run.parse_probe(out)[2]
+        assert runs[0]["powered"] == {"co2-mds"}
+
     def test_a_reboot_after_the_run_finished_is_not_a_crash(self) -> None:
         s = suite_run.classify(_run(rc="1"), 2000, {"co1": 300})
         assert (s.state, s.rc, s.rebooted) == ("done", 1, [])
@@ -411,6 +434,7 @@ class TestClassify:
             "started": 1000,
             "current": "== sanity test 42a: x ===",
             "boots": {},
+            "powered": set(),
         }
         assert runs[1]["rc"] == "0" and not runs[1]["alive"]
 

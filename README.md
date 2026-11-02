@@ -391,7 +391,9 @@ a data disk that shows none before a `zpool import`.
 A cluster can run `FAILURE_MODE=HARD`. Its `local.sh` sets `POWER_DOWN` and
 `POWER_UP` to `/usr/sbin/ltvm-power`. `off` crashes the node with kdump
 unloaded, and the kernel reboots it after `LTVM_POWER_OFF_SECS` (30 by
-default). `on` waits for ssh:
+default). `on` waits for ssh. `off` logs the node in `/root/ltvm-suite/power`
+on the node that drives the suite, so `suite status` does not report that
+reboot as a crash:
 
 ```bash
 ltvm suite run co2 replay-single --only '0a 0b' --env FAILURE_MODE=HARD --wait

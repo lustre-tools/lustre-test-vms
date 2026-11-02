@@ -9,15 +9,21 @@
 # reboots it after LTVM_POWER_OFF_SECS: a fence that reboots the node.
 # The time must be longer than the 10 s in which shutdown_node_hard
 # expects the node to stop answering ping.  "on" waits for ssh.
+#
+# "off" logs NODE on the node that runs it, which drives the suite, so
+# `ltvm suite status` can tell this reboot from a crash.
 set -u
 
 action=${1:-}
 node=${2:-}
 off_secs=${LTVM_POWER_OFF_SECS:-30}
+power_log=/root/ltvm-suite/power
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no)
 
 case $action in
 off)
+	mkdir -p "$(dirname "$power_log")"
+	echo "$(date +%s) $node" >> "$power_log"
 	# The crash runs in the background, so ssh returns before the
 	# node stops.
 	ssh "${ssh_opts[@]}" "$node" "kexec -p -u 2>/dev/null
