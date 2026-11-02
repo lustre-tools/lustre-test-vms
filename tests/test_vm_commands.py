@@ -1946,7 +1946,7 @@ class TestCmdStart:
 class TestCmdExec:
     def _args(self, name: str, command: list[str], **kw: Any) -> Any:
         return argparse.Namespace(
-            name=name, command=command, timeout=7, json=False, **kw
+            name=name, exec_command=command, timeout=7, json=False, **kw
         )
 
     def test_no_command_is_an_error(

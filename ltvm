@@ -1758,9 +1758,10 @@ def build_parser() -> argparse.ArgumentParser:
         "before the VM name -- everything after it is the command.",
     )
     # REMAINDER keeps the command's own flags verbatim, as in `cluster
-    # exec`: ltvm's flags have to precede the VM name.
+    # exec`: ltvm's flags have to precede the VM name.  The dest must
+    # not be `command`, which the top-level subparsers own.
     vxp.add_argument(
-        "command",
+        "exec_command",
         nargs=argparse.REMAINDER,
         metavar="COMMAND...",
         help="Command to run; everything after the VM name is passed "
@@ -2717,9 +2718,10 @@ def build_parser() -> argparse.ArgumentParser:
     # REMAINDER so the command keeps its own flags verbatim: `cluster
     # exec co2 oss lctl dl -t` must not have -t parsed as one of ours.
     # The cost is that ltvm's own flags have to precede the role, the
-    # same bargain ssh and sudo make.
+    # same bargain ssh and sudo make.  The dest must not be `command`,
+    # which the top-level subparsers own.
     cep.add_argument(
-        "command",
+        "exec_command",
         nargs=argparse.REMAINDER,
         metavar="COMMAND...",
         help="Command to run; everything after the role is passed "
@@ -2743,9 +2745,11 @@ def build_parser() -> argparse.ArgumentParser:
         "target", help="Role (first node holding it) or a node name"
     )
     _cssh_target.completer = complete_cluster_members  # type: ignore[attr-defined]
+    # Not `command`: that dest belongs to the top-level subparsers.
     cssh.add_argument(
-        "command",
+        "exec_command",
         nargs=argparse.REMAINDER,
+        metavar="COMMAND...",
         help="Optional command to run instead of an interactive shell",
     )
     cssh.set_defaults(func=cmd_cluster_ssh)
