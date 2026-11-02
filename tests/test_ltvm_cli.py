@@ -2280,3 +2280,52 @@ class TestWaitFlag:
                 p.parse_args(["create", "co1-x", "--wait", bad])
         err = capsys.readouterr().err
         assert "not a whole number of seconds: 'soon'" in err
+
+
+class TestNoUpdate:
+    """--no-update and LTVM_NO_UPDATE skip the self-update check."""
+
+    def test_taken_before_and_after_the_subcommand(self) -> None:
+        p = ltvm.build_parser()
+        assert p.parse_args(["--no-update", "list"]).no_update is True
+        assert p.parse_args(["list", "--no-update"]).no_update is True
+        assert p.parse_args(["build", "status", "--no-update"]).no_update
+        assert not hasattr(p.parse_args(["list"]), "no_update")
+
+    def _checks(
+        self, argv: list[str], monkeypatch: pytest.MonkeyPatch, env: str = ""
+    ) -> int:
+        import ltvm_pkg.telemetry as tel
+        import ltvm_pkg.update_check as uc
+
+        if env:
+            monkeypatch.setenv("LTVM_NO_UPDATE", env)
+        else:
+            monkeypatch.delenv("LTVM_NO_UPDATE", raising=False)
+        p = ltvm.build_parser()
+        p._subparsers._group_actions[0].choices["list"].set_defaults(
+            func=lambda a: 0
+        )
+        calls: list[dict[str, Any]] = []
+        with (
+            patch.object(ltvm, "build_parser", return_value=p),
+            patch.object(sys, "argv", ["ltvm", *argv]),
+            patch.object(
+                uc, "maybe_check_for_updates", lambda **kw: calls.append(kw)
+            ),
+            patch.object(tel, "record", lambda a, rc: None),
+            patch.object(tel, "maybe_send", lambda: None),
+        ):
+            assert ltvm.main() == 0
+        return len(calls)
+
+    def test_checked_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert self._checks(["list"], monkeypatch) == 1
+
+    def test_flag_skips_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert self._checks(["--no-update", "list"], monkeypatch) == 0
+        assert self._checks(["list", "--no-update"], monkeypatch) == 0
+
+    def test_env_skips_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert self._checks(["list"], monkeypatch, env="1") == 0
+        assert self._checks(["list"], monkeypatch, env="0") == 1

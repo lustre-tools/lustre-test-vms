@@ -63,6 +63,15 @@ version into `ltvm_pkg/_build_info.py` (gitignored), as `ltvm update`
 does after a pull, so `ltvm --version` does not run git on every
 invocation.
 
+The self-update check ([ltvm_pkg/update_check.py](ltvm_pkg/update_check.py))
+runs before every command but `install`, `uninstall` and `completion`.
+In auto mode an interactive run pulls, reinstalls and exits without
+running the command, so `--no-update` or `LTVM_NO_UPDATE=1` skips the
+check for one run (`_update_check_disabled` in `ltvm`).  The flag is on
+the top-level parser and in `common`, with `default=SUPPRESS`: a
+subparser's False default would otherwise overwrite the top-level True,
+so `ltvm --no-update list` and `ltvm list --no-update` both work.
+
 ## Agent Skills
 
 `skills/ltvm/` is the skill that teaches an agent to use this

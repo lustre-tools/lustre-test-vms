@@ -213,6 +213,9 @@ Top-level:
 ltvm install                    One-time host setup (sudo)
 ltvm uninstall                  Undo install (no sudo; asks first)
 ltvm update                     git fast-forward ltvm itself
+                                (any command: --no-update, or
+                                LTVM_NO_UPDATE=1, skips the self-update
+                                check, auto mode included)
 ltvm build      <action> ...    Build artifacts (see below)
 ltvm target     <action> ...    Target OS management (see below)
 ltvm vm         <action> ...    VM inspection / crash / snapshot (see below);
