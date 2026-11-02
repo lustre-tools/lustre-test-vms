@@ -532,6 +532,25 @@ def _wait_seconds(value: str) -> int:
     return seconds
 
 
+# --no-update is taken before the subcommand and after it.  SUPPRESS,
+# not a False default: a subparser's default would overwrite the
+# top-level parser's True in the shared namespace.
+_NO_UPDATE_ARGS = ("--no-update",)
+_NO_UPDATE_KWARGS: dict[str, Any] = {
+    "action": "store_true",
+    "default": argparse.SUPPRESS,
+    "help": "Skip the self-update check for this run, even in auto mode "
+    "(or set LTVM_NO_UPDATE=1)",
+}
+
+
+def _update_check_disabled(args: argparse.Namespace) -> bool:
+    """True when --no-update or LTVM_NO_UPDATE turns the check off."""
+    if getattr(args, "no_update", False):
+        return True
+    return os.environ.get("LTVM_NO_UPDATE", "") not in ("", "0")
+
+
 def build_parser() -> argparse.ArgumentParser:
     # Common flags accepted by all subcommands
     common = argparse.ArgumentParser(add_help=False)
@@ -544,6 +563,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose logging"
     )
+    common.add_argument(*_NO_UPDATE_ARGS, **_NO_UPDATE_KWARGS)
     common.add_argument(
         "--arch",
         default=None,
@@ -644,6 +664,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="version",
         version=f"%(prog)s {LTVM_VERSION}",
     )
+    p.add_argument(*_NO_UPDATE_ARGS, **_NO_UPDATE_KWARGS)
 
     sub = p.add_subparsers(dest="command")
 
@@ -3108,7 +3129,16 @@ def main() -> int:
     # it runs once per new terminal.  A nag there would print into every
     # shell the user opens, and the check's state file would be written
     # by however many shells start at once.
-    if args.command not in ("install", "uninstall", "completion"):
+    #
+    # --no-update or LTVM_NO_UPDATE skips it for one run: auto mode
+    # otherwise pulls and reinstalls before the user's command, then
+    # exits so it can be re-run, which a run that must happen now (or
+    # must not change ltvm under other sessions) cannot afford.
+    if args.command not in (
+        "install",
+        "uninstall",
+        "completion",
+    ) and not _update_check_disabled(args):
         try:
             from ltvm_pkg.update_check import maybe_check_for_updates
 

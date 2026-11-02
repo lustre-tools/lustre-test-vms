@@ -243,6 +243,11 @@ The notice repeats at most once a day while an update is pending, so
 seeing it once in a session is the expected behaviour -- not a signal
 that a previous update attempt failed.
 
+In auto-update mode an interactive run pulls and reinstalls first, then
+exits without running the command.  `--no-update` (before or after the
+subcommand) or `LTVM_NO_UPDATE=1` skips the check for that run, so the
+command runs now on the ltvm already installed.
+
 ## Telemetry notice
 
 On its first run ltvm prints a short notice to stderr saying it sends
