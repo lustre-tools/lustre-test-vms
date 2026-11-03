@@ -2750,7 +2750,9 @@ def build_parser() -> argparse.ArgumentParser:
         "exec_command",
         nargs=argparse.REMAINDER,
         metavar="COMMAND...",
-        help="Optional command to run instead of an interactive shell",
+        help="Optional command to run instead of an interactive shell; "
+        "everything after the target is passed through untouched, so "
+        "ltvm's own flags have to precede the target",
     )
     cssh.set_defaults(func=cmd_cluster_ssh)
 

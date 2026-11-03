@@ -2349,12 +2349,21 @@ class TestSubcommandDestIsNotShadowed:
             for sub in action.choices.values():
                 yield from TestSubcommandDestIsNotShadowed._parsers(sub)
 
-    def test_no_argument_anywhere_claims_the_dest(self) -> None:
-        offenders = [
-            (parser.prog, action.option_strings or action.metavar)
-            for parser in self._parsers(ltvm.build_parser())
+    def test_no_argument_anywhere_claims_a_subparsers_dest(self) -> None:
+        """Covers `command`, `vm_action`, `cluster_action` and the rest."""
+        parsers = list(self._parsers(ltvm.build_parser()))
+        owned = {
+            action.dest
+            for parser in parsers
             for action in parser._actions
-            if action.dest == "command"
+            if isinstance(action, argparse._SubParsersAction)
+        }
+        assert {"command", "vm_action", "cluster_action"} <= owned
+        offenders = [
+            (parser.prog, action.dest)
+            for parser in parsers
+            for action in parser._actions
+            if action.dest in owned
             and not isinstance(action, argparse._SubParsersAction)
         ]
         assert offenders == []
