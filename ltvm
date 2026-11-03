@@ -1502,7 +1502,8 @@ def build_parser() -> argparse.ArgumentParser:
             "(bind a PCI device to vfio-pci and hand it to the guest; "
             "needs a host IOMMU).  Options follow the ':' as "
             "comma-separated key=value pairs; passthrough's BDF may "
-            "omit its 'bdf=' key."
+            "omit its 'bdf=' key.  node=N (tcp, softroce) puts the NIC "
+            "on guest NUMA node N of --numa-nodes, e.g. --nic tcp:node=1."
         ),
     )
     _vm_create_args.add_argument(

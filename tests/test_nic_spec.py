@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from ltvm_pkg import vm_cluster
-from ltvm_pkg.nic_spec import NicSpec, NicSpecError, load_stored
+from ltvm_pkg.nic_spec import NicSpec, NicSpecError, load_stored, numa_problem
 from ltvm_pkg.vm_cluster import ClusterNode
 from ltvm_pkg.vm_state import VMInfo
 from tests.test_failover_pair import vm_dirs  # noqa: F401
@@ -41,6 +41,10 @@ class TestParse:
             ("tcp:", "nothing after ':'"),
             ("tcp:foo", "not key=value"),
             ("tcp:color=red", "unknown key 'color'"),
+            ("tcp:node=-1", "expected a NUMA node number"),
+            ("tcp:node=x", "expected a NUMA node number"),
+            ("tcp:node=1,node=2", "node given twice"),
+            ("passthrough:0000:85:00.1,node=1", "unknown key 'node'"),
             ("tcp:bdf=0000:85:00.1", "unknown key 'bdf' for type 'tcp'"),
             ("passthrough", "requires a PCIe BDF"),
             ("passthrough:not-a-bdf", "not a valid PCIe BDF"),
@@ -58,10 +62,15 @@ class TestParse:
         with pytest.raises(NicSpecError, match=r"keys for 'passthrough': bdf"):
             NicSpec.parse("passthrough:0000:85:00.1,x=1")
 
+    def test_node(self) -> None:
+        assert NicSpec.parse("tcp:node=2") == NicSpec("tcp", node=2)
+        assert NicSpec.parse("softroce:NODE=0") == NicSpec("softroce", node=0)
+
 
 class TestCanonical:
     @pytest.mark.parametrize(
-        "raw", ["tcp", "softroce", "passthrough:0000:85:00.1"]
+        "raw",
+        ["tcp", "softroce", "passthrough:0000:85:00.1", "tcp:node=0"],
     )
     def test_round_trip(self, raw: str) -> None:
         """str() is what .info stores, and parse() reads it back."""
@@ -78,10 +87,27 @@ class TestCanonical:
     def test_cmdline_entry(self) -> None:
         """fc_nics= keeps the TYPE[;ARG] form the guest has always read."""
         assert NicSpec("tcp").cmdline_entry() == "tcp"
+        assert NicSpec("tcp", node=1).cmdline_entry() == "tcp"
         assert (
             NicSpec("passthrough", bdf="0000:85:00.1").cmdline_entry()
             == "passthrough;0000;85;00.1"
         )
+
+
+class TestNumaProblem:
+    def test_fits(self) -> None:
+        nics = [NicSpec("tcp", node=0), NicSpec("tcp"), NicSpec("tcp", node=1)]
+        assert numa_problem(nics, 2) is None
+        assert numa_problem([NicSpec("tcp")], 0) is None
+
+    def test_needs_numa(self) -> None:
+        assert "needs --numa-nodes 2" in (
+            numa_problem([NicSpec("tcp", node=0)], 0) or ""
+        )
+
+    def test_node_out_of_range(self) -> None:
+        msg = numa_problem([NicSpec("tcp"), NicSpec("tcp", node=2)], 2) or ""
+        assert "eth2" in msg and "0-1" in msg
 
 
 class TestLoadStored:
@@ -147,3 +173,18 @@ class TestClusterCreate:
                 self._args(["TCP", "passthrough:bdf=0000:85:00.1"])
             )
         assert seen == [["tcp", "passthrough:0000:85:00.1"]] * 2
+
+    def test_node_beyond_numa_nodes_fails_before_any_node(
+        self,
+        vm_dirs: Any,  # noqa: F811
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        args = self._args(["tcp:node=2"])
+        args.numa_nodes = 2
+        with (
+            patch.object(vm_cluster, "_create_one_node") as create,
+            pytest.raises(SystemExit),
+        ):
+            vm_cluster.cmd_cluster_create(args)
+        create.assert_not_called()
+        assert "node 2 does not exist" in capsys.readouterr().err

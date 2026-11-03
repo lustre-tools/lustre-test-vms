@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from ltvm_pkg import qemu_run, vm_commands
+from ltvm_pkg.nic_spec import NicSpec
 from ltvm_pkg.vm_state import VMInfo
 from tests.test_qemu_run import (  # noqa: F401
     _force_linux_host,
@@ -94,6 +96,74 @@ def test_launch_passes_the_layout(tmp_vmdir: Path) -> None:  # noqa: F811
     assert joined.count("-numa node,") == 4
 
 
+def test_launch_passes_nic_nodes(tmp_vmdir: Path) -> None:  # noqa: F811
+    vm = _make_vm(tmp_vmdir)
+    vm.vcpus = 4
+    vm.numa_nodes = 2
+    vm.nics = [NicSpec("tcp", node=1), NicSpec("tcp"), NicSpec("tcp", node=0)]
+    vm.nic_ips = ["172.16.0.2", "172.16.0.3", "172.16.0.4"]
+    h = _LaunchHarness()
+    _run_launch(vm, h)
+    append = (h.qemu_argv or [])[(h.qemu_argv or []).index("-append") + 1]
+    assert " fc_nics=tcp,tcp,tcp " in append
+    assert " fc_nic_numa=1,,0" in append
+
+
+def test_launch_without_nic_nodes_has_no_fc_nic_numa(
+    tmp_vmdir: Path,  # noqa: F811
+) -> None:
+    vm = _make_vm(tmp_vmdir)
+    vm.nics = [NicSpec("tcp")]
+    h = _LaunchHarness()
+    _run_launch(vm, h)
+    assert "fc_nic_numa" not in " ".join(h.qemu_argv or [])
+
+
+def test_nic_node_survives_save(tmp_vmdir: Path) -> None:  # noqa: F811
+    vm = _make_vm(tmp_vmdir)
+    vm.numa_nodes = 2
+    vm.nics = [NicSpec("tcp", node=1)]
+    vm.save()
+    assert "NICS=tcp:node=1\n" in vm.info_path.read_text()
+    assert VMInfo.load(vm.name).nics == [NicSpec("tcp", node=1)]
+
+
+class TestCheckNicNuma:
+    def _check(self, tmp_vmdir: Path, stdout: str) -> None:  # noqa: F811
+        vm = _make_vm(tmp_vmdir)
+        vm.nics = [NicSpec("tcp", node=1), NicSpec("tcp")]
+        r = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
+        with patch.object(vm_commands, "run_ssh", return_value=r) as ssh:
+            vm_commands._check_nic_numa(vm)
+        assert "eth1" in ssh.call_args.args[1]
+        assert "eth2" not in ssh.call_args.args[1]
+
+    def test_applied_is_quiet(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._check(tmp_vmdir, "eth1 1\n")
+        assert capsys.readouterr().err == ""
+
+    def test_old_image_warns(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._check(tmp_vmdir, "eth1 -1\n")
+        err = capsys.readouterr().err
+        assert "eth1: node -1, wanted 1" in err
+        assert "ltvm build image" in err
+
+    def test_no_node_no_ssh(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        vm = _make_vm(tmp_vmdir)
+        vm.nics = [NicSpec("tcp")]
+        with patch.object(vm_commands, "run_ssh") as ssh:
+            vm_commands._check_nic_numa(vm)
+        ssh.assert_not_called()
+
+
 class TestVmSet:
     def _set(self, tmp_vmdir: Path, **kw: object) -> VMInfo:  # noqa: F811
         vm = _make_vm(tmp_vmdir)
@@ -111,6 +181,28 @@ class TestVmSet:
     def test_refuses_an_uneven_split(self, tmp_vmdir: Path) -> None:  # noqa: F811
         with pytest.raises(SystemExit):
             self._set(tmp_vmdir, numa_nodes=3)
+
+    def test_refuses_fewer_nodes_than_a_nic_uses(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        vm = _make_vm(tmp_vmdir)
+        vm.vcpus = 4
+        vm.mem = 4096
+        vm.numa_nodes = 4
+        vm.nics = [NicSpec("tcp", node=3)]
+        vm.save()
+        ns = argparse.Namespace(
+            name=vm.name, vcpus=None, mem=None, numa_nodes=2
+        )
+        with (
+            patch.object(vm_commands, "is_running", return_value=False),
+            pytest.raises(SystemExit),
+        ):
+            vm_commands.cmd_set(ns)
+        assert "node 3 does not exist" in capsys.readouterr().err
+        assert VMInfo.load(vm.name).numa_nodes == 4
 
 
 def test_create_flag_parses() -> None:

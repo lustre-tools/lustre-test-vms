@@ -157,6 +157,7 @@ def _create_env(
         patch("ltvm_pkg.vm_commands.launch_qemu") as m_launch,
         patch("ltvm_pkg.vm_commands.provision_vm_ssh") as m_prov,
         patch("ltvm_pkg.vm_commands._seed_kdump_boot") as m_seed,
+        patch("ltvm_pkg.vm_commands._check_nic_numa") as m_numa,
         patch(
             "ltvm_pkg.vm_commands.load_meta_safe",
             return_value=(
@@ -170,6 +171,7 @@ def _create_env(
             "launch": m_launch,
             "provision": m_prov,
             "seed": m_seed,
+            "check_nic_numa": m_numa,
             "alloc_ip": m_alloc,
             "arts": arts,
         }
@@ -394,6 +396,37 @@ class TestCreateNicValidation:
         m_alloc.assert_not_called()
         m_run.assert_not_called()
         assert not (tmp_vmdir / "sockets" / "co1-bad-nic.info").exists()
+
+    def test_nic_node_without_numa_dies_before_allocation(
+        self, tmp_vmdir: Path
+    ) -> None:
+        arts = _make_arts(tmp_vmdir)
+        with (
+            patch(
+                "ltvm_pkg.vm_commands.resolve_os_artifacts", return_value=arts
+            ),
+            patch("ltvm_pkg.vm_commands.alloc_ip") as m_alloc,
+            pytest.raises(SystemExit),
+        ):
+            vm_commands.cmd_create(
+                _create_args(name="co1-nic-node", nic=["tcp:node=1"])
+            )
+        m_alloc.assert_not_called()
+
+    def test_nic_node_persisted_on_vminfo(self, tmp_vmdir: Path) -> None:
+        with _create_env(tmp_vmdir) as env:
+            vm_commands.cmd_create(
+                _create_args(
+                    name="co1-nic-node",
+                    vcpus=4,
+                    mem=4096,
+                    numa_nodes=2,
+                    nic=["tcp:node=1"],
+                )
+            )
+        vm = VMInfo.load("co1-nic-node")
+        assert vm.nics == [NicSpec("tcp", node=1)]
+        env["check_nic_numa"].assert_called_once()
 
     def test_tcp_nic_persisted_on_vminfo(self, tmp_vmdir: Path) -> None:
         with _create_env(tmp_vmdir):

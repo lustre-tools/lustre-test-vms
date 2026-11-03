@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from . import vm_claim
+from .nic_spec import numa_problem as nic_numa_problem
 from .qemu_run import die, is_running, run
 from .vm_net import (
     SSH_KEEPALIVE_OPTS,
@@ -1087,12 +1088,14 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     # with the attr unset, in which case we pass an empty list through.
     # Parsed here so a bad spec fails once, before any node exists, and
     # each node gets the canonical spelling.
-    nics: list[str] = [
-        str(n) for n in parse_nics(list(getattr(args, "nic", None) or []))
-    ]
+    nic_specs = parse_nics(list(getattr(args, "nic", None) or []))
+    nics = [str(n) for n in nic_specs]
     kernel_args = _validate_kernel_args(getattr(args, "kernel_args", None))
     wait_seconds: int = getattr(args, "wait", 0)
     numa_nodes: int = getattr(args, "numa_nodes", 0) or 0
+    problem = nic_numa_problem(nic_specs, numa_nodes)
+    if problem:
+        die(problem)
     try:
         owner_id = resolve_owner_id(getattr(args, "owner_id", None))
     except ValueError as e:

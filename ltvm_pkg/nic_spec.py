@@ -35,6 +35,9 @@ class NicSpec:
     type: str
     # PCI address of the host device a passthrough NIC hands to the guest.
     bdf: str = ""
+    # Guest NUMA node the NIC's PCI device reports (node=N), or None for
+    # the default: no node (-1), as every virtio NIC on ltvm's PCI root.
+    node: int | None = None
 
     @classmethod
     def parse(cls, raw: str) -> NicSpec:
@@ -118,6 +121,14 @@ def _bdf(value: str) -> str:
     return value
 
 
+def _node(value: str) -> int:
+    if not value.isdigit():
+        raise NicSpecError(
+            f"--nic node={value!r}: expected a NUMA node number (0, 1, ...)"
+        )
+    return int(value)
+
+
 @dataclass(frozen=True)
 class _Key:
     field: str
@@ -129,6 +140,9 @@ class _Key:
 # str() writes the keys in.
 _KEYS: dict[str, _Key] = {
     "bdf": _Key("bdf", ("passthrough",), _bdf),
+    # Not passthrough: the guest sets the node of the NIC it finds as
+    # ethN, and a passed-through device need not appear as ethN.
+    "node": _Key("node", ("tcp", "softroce"), _node),
 }
 
 # The key a type's first item may give without "key=".
@@ -158,3 +172,21 @@ def load_stored(raw: str) -> NicSpec:
         if nic_type in NIC_TYPES and nic_type != "passthrough":
             return NicSpec(type=nic_type)
         raise
+
+
+def numa_problem(nics: list[NicSpec], numa_nodes: int) -> str | None:
+    """Why a NIC's node= does not fit *numa_nodes*, or None if all do."""
+    for idx, nic in enumerate(nics, start=1):
+        if nic.node is None:
+            continue
+        if numa_nodes < 2:
+            return (
+                f"--nic {nic} (eth{idx}) needs --numa-nodes 2 or more "
+                f"(the VM has {numa_nodes})"
+            )
+        if nic.node >= numa_nodes:
+            return (
+                f"--nic {nic} (eth{idx}): node {nic.node} does not exist; "
+                f"the VM's {numa_nodes} NUMA nodes are 0-{numa_nodes - 1}"
+            )
+    return None

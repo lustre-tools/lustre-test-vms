@@ -791,6 +791,7 @@ def _start_qemu(vm: VMInfo) -> None:
     fc_nic_prefixes_fragment = ""
     fc_nic_ip6s_fragment = ""
     fc_nic_ip6_prefixes_fragment = ""
+    fc_nic_numa_fragment = ""
     if extra_nics:
         # Each entry is TYPE[;BDF] (NicSpec.cmdline_entry); rc.local
         # turns the BDF's ';' back into ':'.
@@ -824,6 +825,16 @@ def _start_qemu(vm: VMInfo) -> None:
             fc_nic_ip6_prefixes_fragment = " fc_nic_ip6_prefixes=" + ",".join(
                 str(PREFIX_LEN6) for _ in vm.nic_ip6s
             )
+        # NUMA node per extra NIC (--nic ...,node=N), empty for none.
+        # rc.local sets each node through sysfs and rebinds the driver
+        # before it gives the NIC its address; see the comment there.
+        # Omitted when no NIC has a node, so the cmdline of every other
+        # VM is unchanged; an older image ignores it.
+        if any(nic.node is not None for (_i, nic, _t, _m) in extra_nics):
+            fc_nic_numa_fragment = " fc_nic_numa=" + ",".join(
+                "" if nic.node is None else str(nic.node)
+                for (_i, nic, _t, _m) in extra_nics
+            )
     boot_args = (
         f"console={console} reboot=k panic=1 crashkernel={crashkernel} "
         f"net.ifnames=0 biosdevname=0 "
@@ -835,6 +846,7 @@ def _start_qemu(vm: VMInfo) -> None:
         f"{fc_nic_prefixes_fragment}"
         f"{fc_nic_ip6s_fragment}"
         f"{fc_nic_ip6_prefixes_fragment}"
+        f"{fc_nic_numa_fragment}"
     )
     if vm.arch in ("", "x86_64"):
         boot_args += NMI_PANIC_ARGS

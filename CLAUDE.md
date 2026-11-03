@@ -941,6 +941,31 @@ ignores it rather than misreading `fc_nics`.  `cluster create` parses
 the specs before it makes any node and hands each node the canonical
 spelling.
 
+**NIC NUMA node:** `--nic tcp:node=N` (also softroce; not passthrough,
+whose device need not be ethN) gives the NIC's PCI device guest NUMA
+node N.  `nic_spec.numa_problem` refuses a node outside `--numa-nodes`
+at create, cluster create and `vm set` (a smaller `--numa-nodes`).  The
+host passes `fc_nic_numa=` (one entry per extra NIC, empty for none,
+omitted when no NIC has a node) and rc.local, before any extra NIC gets
+an address, writes the node to `/sys/bus/pci/devices/<bdf>/numa_node`,
+unbinds and rebinds the driver (the new netdev takes the device's node,
+which is what LNet's `dev cpt` reads), then `udevadm settle`s.  The
+kernel logs "[Firmware Bug]: Overriding NUMA node" and sets taint W.
+An address added while NetworkManager was still taking over a rebound
+NIC went missing once, hence rebind-all-then-settle.  Create and start
+read the nodes back over ssh (`_check_nic_numa`) and warn when an image
+built before `fc_nic_numa` ignored them.
+
+Why not `pxb-pcie,numa_node=N`, the QEMU way: tried 2026-11-03 on
+aarch64 HVF.  ltvm boots aarch64 with a device tree, and a DT kernel
+sees the pxb host bridges as plain endpoints and never scans the buses
+behind them, so the NICs vanish.  With UEFI (`-bios
+edk2-aarch64-code.fd`) the guest boots ACPI and does see the right
+`numa_node`, but that changes the boot path of every aarch64 VM, and
+the pxb buses enumerate before bus 0, so eth0 is no longer the mgmt
+NIC.  x86 q35 boots ACPI through SeaBIOS and pxb may work there; it is
+untested, so both arches use the guest path.
+
 **Kernel arguments:** `--kernel-args 'slub_debug=FZPU page_owner=on'`
 is stored in the `.info` file as `KERNEL_ARGS` and appended after
 ltvm's own parameters on every boot, so a parameter whose last

@@ -21,6 +21,7 @@ from . import rootless, vm_claim
 from .deploy import configure_test_disks, premount_cleanup_script
 from .host_setup import is_macos
 from .nic_spec import NicSpec, NicSpecError
+from .nic_spec import numa_problem as nic_numa_problem
 from .paths import load_meta_safe
 from .priv import SudoUnavailable, chmod_regular, sudo_prime, sudo_run
 from .qemu_run import (
@@ -135,6 +136,7 @@ def _with_vm_stopped(
                 else:
                     provision_vm_ssh(vm, SSH_TIMEOUT)
                 _seed_kdump_boot(vm)
+                _check_nic_numa(vm)
                 print(f"started {vm.name}")
             except SystemExit as e:
                 if get_error is not None:
@@ -207,6 +209,50 @@ def _set_nmi_panic(vm: VMInfo) -> None:
     except Exception as e:  # noqa: BLE001 - best-effort step
         print(
             f"warning: could not set the NMI panic sysctls on '{vm.name}': {e}",
+            file=sys.stderr,
+        )
+
+
+def _check_nic_numa(vm: VMInfo) -> None:
+    """Warn when a NIC booted without the NUMA node its --nic asked for.
+
+    The guest's rc.local sets the node (fc_nic_numa=), and an image built
+    before that ignores the parameter, so the NIC stays on no node with
+    nothing else to show for it.  Best effort, like _seed_kdump_boot.
+    """
+    wanted = {
+        idx: nic.node
+        for idx, nic, _tap, _mac in vm.extra_nics()
+        if nic.node is not None
+    }
+    if not wanted:
+        return
+    probe = "; ".join(
+        f"echo eth{idx} $(cat /sys/class/net/eth{idx}/device/../numa_node "
+        f"2>/dev/null || echo missing)"
+        for idx in wanted
+    )
+    try:
+        r = run_ssh(vm.ip, probe, timeout=KDUMP_PROBE_TIMEOUT)
+    except Exception as e:  # noqa: BLE001 - best-effort check
+        print(
+            f"warning: could not check NIC NUMA nodes on '{vm.name}': {e}",
+            file=sys.stderr,
+        )
+        return
+    got = dict(
+        line.split(None, 1) for line in r.stdout.splitlines() if " " in line
+    )
+    wrong = [
+        f"eth{idx}: node {got.get(f'eth{idx}', 'unknown')}, wanted {node}"
+        for idx, node in wanted.items()
+        if got.get(f"eth{idx}", "").strip() != str(node)
+    ]
+    if wrong:
+        print(
+            f"warning: {vm.name}: NIC NUMA nodes not applied "
+            f"({'; '.join(wrong)}).  An image built before fc_nic_numa "
+            f"ignores --nic node=; rebuild it with `ltvm build image`.",
             file=sys.stderr,
         )
 
@@ -674,6 +720,7 @@ def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
     launch_qemu(vm, wait_seconds=getattr(args, "wait", 0))
     provision_vm_ssh(vm, SSH_TIMEOUT)
     _seed_kdump_boot(vm)
+    _check_nic_numa(vm)
     if args.json:
         print(
             json.dumps(
@@ -1047,6 +1094,11 @@ def _validate_create_bounds(
     # created; --nic adds NICs on top of it.  Invalid specs die() now
     # so we don't half-create the VM.
     extra_nic_types = parse_nics(getattr(args, "nic", None) or [])
+    problem = nic_numa_problem(
+        extra_nic_types, getattr(args, "numa_nodes", 0) or 0
+    )
+    if problem:
+        die(problem)
 
     # Passthrough NICs: pre-flight checks (no side effects) so a bad
     # spec or a missing IOMMU fails before we touch VM state on disk.
@@ -1425,6 +1477,7 @@ def _launch_and_wait(
     launch_qemu(vm, wait_seconds=wait_seconds)
     provision_vm_ssh(vm, SSH_TIMEOUT)
     _seed_kdump_boot(vm)
+    _check_nic_numa(vm)
 
 
 def _rollback_launch_failure(vm: VMInfo) -> None:
@@ -1687,6 +1740,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         # was interrupted (so cmd_start recovers a half-set-up VM).
         provision_vm_ssh(vm, SSH_TIMEOUT, register_before_wait=True)
         _seed_kdump_boot(vm)
+        _check_nic_numa(vm)
         print(f"started {name}")
 
 
@@ -3161,7 +3215,9 @@ def cmd_set(args: argparse.Namespace) -> None:
             f"disk cache {vm.disk_cache or 'default'} -> {cache or 'default'}"
         )
         vm.disk_cache = cache
-    problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes)
+    problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes) or (
+        nic_numa_problem(vm.nics, vm.numa_nodes)
+    )
     if problem:
         die(problem)
     if not changes:
