@@ -37,6 +37,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ltvm_pkg import vm_commands
+from ltvm_pkg.nic_spec import NicSpec
 from ltvm_pkg.vm_state import DISK_SIZE_BYTES, ROOT_SIZE_BYTES, VMInfo
 
 # ────────────────────────────────────────────────────────
@@ -398,7 +399,7 @@ class TestCreateNicValidation:
         with _create_env(tmp_vmdir):
             vm_commands.cmd_create(_create_args(name="co1-tcp", nic=["tcp"]))
         vm = VMInfo.load("co1-tcp")
-        assert vm.nics == ["tcp"]
+        assert vm.nics == [NicSpec.parse("tcp")]
 
     def test_passthrough_without_iommu_dies(self, tmp_vmdir: Path) -> None:
         """passthrough NIC requires host IOMMU; missing IOMMU dies

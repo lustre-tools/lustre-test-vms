@@ -926,6 +926,21 @@ memory in 2 MB units, the last node taking the remainder so the backends
 sum to `-m`.  For Lustre CPT testing; works under KVM and HVF, x86_64 and
 aarch64.
 
+**Extra NICs:** `--nic TYPE[:key=value,...]` (`create`, `cluster
+create`) is parsed once, by `nic_spec.NicSpec.parse`, into a frozen
+`NicSpec`; `VMInfo.nics` holds those, and `NICS=` in the `.info` file
+holds their `str()`, which parses back to the same spec.  A key is one
+`_KEYS` entry (field, NIC types that take it, converter); an unknown
+key, a key the type does not take, or one given twice is refused.  A
+type may name a positional key: `passthrough:0000:85:00.1` is
+`passthrough:bdf=0000:85:00.1`, and `str()` writes the positional form,
+so an older ltvm still reads the `.info`.  The guest's `fc_nics=` keeps
+its old `TYPE[;BDF]` entries (`NicSpec.cmdline_entry`); a key the guest
+needs goes in a parallel `fc_*` parameter of its own, so an older image
+ignores it rather than misreading `fc_nics`.  `cluster create` parses
+the specs before it makes any node and hands each node the canonical
+spelling.
+
 **Kernel arguments:** `--kernel-args 'slub_debug=FZPU page_owner=on'`
 is stored in the `.info` file as `KERNEL_ARGS` and appended after
 ltvm's own parameters on every boot, so a parameter whose last

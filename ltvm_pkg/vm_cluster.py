@@ -592,11 +592,8 @@ def _create_one_node(
     instead of being silently overridden by a hardcoded constant in the
     cluster CLI parser.
 
-    `nics` is an optional list of `--nic` spec strings that get applied
-    uniformly to every node.  Validation of each spec (including the
-    reserved-type rejection for softroce/passthrough) happens inside
-    the child `ltvm create`, so bad specs surface per-node with the
-    follow-up-issue hint the single-node path prints.
+    `nics` is an optional list of canonical `--nic` spec strings that get
+    applied uniformly to every node; cmd_cluster_create has parsed them.
     """
     mgs_disk = 1 if (node.is_mgs and not node.is_mds) else 0
     # No `sudo` prefix when already root: cluster create requires root, so
@@ -968,6 +965,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
         _validate_disk_options,
         _validate_kernel_args,
         _validate_vm_name,
+        parse_nics,
     )
 
     _validate_vm_name(cluster_name)
@@ -1087,7 +1085,11 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     # cluster.  The CLI layer (cli.py::cmd_cluster) collects them into
     # args.nic; older call sites that don't know about --nic land here
     # with the attr unset, in which case we pass an empty list through.
-    nics: list[str] = list(getattr(args, "nic", None) or [])
+    # Parsed here so a bad spec fails once, before any node exists, and
+    # each node gets the canonical spelling.
+    nics: list[str] = [
+        str(n) for n in parse_nics(list(getattr(args, "nic", None) or []))
+    ]
     kernel_args = _validate_kernel_args(getattr(args, "kernel_args", None))
     wait_seconds: int = getattr(args, "wait", 0)
     numa_nodes: int = getattr(args, "numa_nodes", 0) or 0

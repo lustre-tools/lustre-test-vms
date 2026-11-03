@@ -15,6 +15,7 @@ import pytest
 from ltvm_pkg import host_setup, priv, qemu_run, rootless, vm_commands, vm_net
 from ltvm_pkg.cli import cluster as cli_cluster
 from ltvm_pkg.cli import util as cli_util
+from ltvm_pkg.nic_spec import NicSpec
 from ltvm_pkg.vm_state import MARKER
 from tests.test_qemu_run import _LaunchHarness, _make_vm, _run_launch
 
@@ -467,7 +468,7 @@ class TestHelperLaunch:
 
     def test_extra_nics_use_the_helper_too(self, tmp_vmdir: Path) -> None:
         vm = _make_vm(tmp_vmdir, name="co1-two")
-        vm.nics = ["tcp", "softroce"]
+        vm.nics = [NicSpec.parse("tcp"), NicSpec.parse("softroce")]
         h = self._launch(vm, _ready())
         assert h.qemu_args is not None
         joined = " ".join(h.qemu_args)
@@ -483,7 +484,7 @@ class TestHelperLaunch:
 
     def test_passthrough_keeps_the_root_path(self, tmp_vmdir: Path) -> None:
         vm = _make_vm(tmp_vmdir, name="co1-pt")
-        vm.nics = ["passthrough:0000:00:02.0"]
+        vm.nics = [NicSpec.parse("passthrough:0000:00:02.0")]
         h = self._launch(vm, _ready())
         assert h.qemu_args is not None
         assert h.qemu_args[0] == "sudo"

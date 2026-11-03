@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ltvm_pkg import qemu_run
+from ltvm_pkg.nic_spec import NicSpec
 from ltvm_pkg.qemu_run import NMI_PANIC_ARGS
 from ltvm_pkg.vm_state import VMInfo
 
@@ -335,7 +336,7 @@ class TestLaunchQemuCommand:
         guest.  MAC and ifname are distinct per NIC.
         """
         vm = _make_vm(tmp_vmdir, name="co1-two")
-        vm.nics = ["tcp", "tcp"]
+        vm.nics = [NicSpec.parse("tcp"), NicSpec.parse("tcp")]
         h = _LaunchHarness()
         _run_launch(vm, h)
         joined = " ".join(h.qemu_args)
@@ -351,7 +352,7 @@ class TestLaunchQemuCommand:
     def test_extra_nic_taps_created(self, tmp_vmdir: Path) -> None:
         """Pre-launch: each extra NIC gets an ip-tuntap-add + master + up."""
         vm = _make_vm(tmp_vmdir, name="co1-two")
-        vm.nics = ["tcp", "tcp"]
+        vm.nics = [NicSpec.parse("tcp"), NicSpec.parse("tcp")]
         h = _LaunchHarness()
         _run_launch(vm, h)
         # Collect the set of TAP names that were created
@@ -365,7 +366,7 @@ class TestLaunchQemuCommand:
     def test_fc_nics_cmdline_single_extra(self, tmp_vmdir: Path) -> None:
         """--nic tcp threads through to fc_nics=tcp on the kernel cmdline."""
         vm = _make_vm(tmp_vmdir)
-        vm.nics = ["tcp"]
+        vm.nics = [NicSpec.parse("tcp")]
         h = _LaunchHarness()
         _run_launch(vm, h)
         append = h.qemu_args[h.qemu_args.index("-append") + 1]
@@ -374,7 +375,7 @@ class TestLaunchQemuCommand:
     def test_fc_nics_cmdline_two_extras(self, tmp_vmdir: Path) -> None:
         """Two --nic tcp yields fc_nics=tcp,tcp in order."""
         vm = _make_vm(tmp_vmdir)
-        vm.nics = ["tcp", "tcp"]
+        vm.nics = [NicSpec.parse("tcp"), NicSpec.parse("tcp")]
         h = _LaunchHarness()
         _run_launch(vm, h)
         append = h.qemu_args[h.qemu_args.index("-append") + 1]
@@ -384,7 +385,7 @@ class TestLaunchQemuCommand:
         """After ltvm's own, so crashkernel= and the like take the
         user's value."""
         vm = _make_vm(tmp_vmdir)
-        vm.nics = ["tcp"]
+        vm.nics = [NicSpec.parse("tcp")]
         vm.kernel_args = "crashkernel=1G kasan_multi_shot"
         h = _LaunchHarness()
         _run_launch(vm, h)
@@ -417,7 +418,7 @@ class TestLaunchQemuCommand:
         fc_nic_prefixes appends its own '/24'; a '/24' already in the
         value would make its `ip addr add` fail silently."""
         vm = _make_vm(tmp_vmdir)
-        vm.nics = ["softroce", "softroce"]
+        vm.nics = [NicSpec.parse("softroce"), NicSpec.parse("softroce")]
         vm.nic_ips = ["172.16.100.33", "172.16.100.34"]
         h = _LaunchHarness()
         _run_launch(vm, h)
@@ -430,7 +431,7 @@ class TestLaunchQemuCommand:
     ) -> None:
         """The prefix length travels in its own index-matched array."""
         vm = _make_vm(tmp_vmdir)
-        vm.nics = ["tcp", "tcp"]
+        vm.nics = [NicSpec.parse("tcp"), NicSpec.parse("tcp")]
         vm.nic_ips = ["172.16.100.33", "172.16.100.34"]
         h = _LaunchHarness()
         _run_launch(vm, h)
@@ -443,7 +444,7 @@ class TestLaunchQemuCommand:
         """The extras' IPv6 addresses ride their own parallel array,
         at their full 39-character width."""
         vm = _make_vm(tmp_vmdir)
-        vm.nics = ["softroce", "softroce"]
+        vm.nics = [NicSpec.parse("softroce"), NicSpec.parse("softroce")]
         vm.nic_ips = ["172.16.100.33", "172.16.100.34"]
         vm.nic_ip6s = [
             "fd17:2016:1000:f100:f172:f016:f100:f033",
@@ -462,7 +463,7 @@ class TestLaunchQemuCommand:
         """A VM created before the extras carried IPv6 gets neither
         parameter, so its cmdline is unchanged."""
         vm = _make_vm(tmp_vmdir)
-        vm.nics = ["tcp"]
+        vm.nics = [NicSpec.parse("tcp")]
         vm.nic_ips = ["172.16.100.33"]
         vm.nic_ip6s = []
         h = _LaunchHarness()
@@ -477,7 +478,11 @@ class TestLaunchQemuCommand:
         """Three extra NICs add about 40 characters each; the whole
         cmdline must stay well inside COMMAND_LINE_SIZE (2048)."""
         vm = _make_vm(tmp_vmdir)
-        vm.nics = ["softroce", "softroce", "softroce"]
+        vm.nics = [
+            NicSpec.parse("softroce"),
+            NicSpec.parse("softroce"),
+            NicSpec.parse("softroce"),
+        ]
         vm.nic_ips = [
             "172.16.100.233",
             "172.16.100.234",
@@ -497,7 +502,7 @@ class TestLaunchQemuCommand:
         """An old .info with NICS but no NIC_IPS emits neither array,
         so rc.local just brings the interfaces up as it always did."""
         vm = _make_vm(tmp_vmdir)
-        vm.nics = ["tcp"]
+        vm.nics = [NicSpec.parse("tcp")]
         vm.nic_ips = []
         h = _LaunchHarness()
         _run_launch(vm, h)
@@ -789,7 +794,7 @@ class TestLaunchQemuMacos:
     def test_no_ip_commands_run(self, tmp_vmdir: Path) -> None:
         """macOS has no TAP/bridge; launch must not shell out to `ip`."""
         vm = _make_vm(tmp_vmdir, name="co1-two")
-        vm.nics = ["tcp", "tcp"]
+        vm.nics = [NicSpec.parse("tcp"), NicSpec.parse("tcp")]
         h = _LaunchHarness()
         self._launch_macos(vm, h)
         ip_calls = [c for c in h.run_calls if c and c[0] == "ip"]
@@ -800,7 +805,7 @@ class TestLaunchQemuMacos:
         the same socket_vmnet Unix socket (shared L2 fabric).
         """
         vm = _make_vm(tmp_vmdir, name="co1-two")
-        vm.nics = ["tcp", "tcp"]
+        vm.nics = [NicSpec.parse("tcp"), NicSpec.parse("tcp")]
         h = _LaunchHarness()
         self._launch_macos(vm, h)
         joined = " ".join(h.qemu_args or [])
@@ -1506,7 +1511,7 @@ class TestPidfileFallback:
         """
         vm = _make_vm(tmp_vmdir, name="co1-two")
         vm.pid = 0  # skip the signalling path; we only care about TAP teardown
-        vm.nics = ["tcp", "tcp"]
+        vm.nics = [NicSpec.parse("tcp"), NicSpec.parse("tcp")]
 
         run_calls: list[list[str]] = []
 
