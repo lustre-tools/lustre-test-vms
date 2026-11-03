@@ -2329,3 +2329,64 @@ class TestNoUpdate:
     def test_env_skips_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
         assert self._checks(["list"], monkeypatch, env="1") == 0
         assert self._checks(["list"], monkeypatch, env="0") == 1
+
+
+class TestSubcommandDestIsNotShadowed:
+    """A pass-through positional must not take the subparsers' dest.
+
+    `vm exec`, `cluster exec` and `cluster ssh` each carry the user's
+    command as a REMAINDER positional.  Named `command`, argparse wrote
+    the argv over the subcommand name the top-level subparsers put
+    there, and `_writes_artifacts` looked a list up in a dict.
+    """
+
+    @staticmethod
+    def _parsers(p: argparse.ArgumentParser) -> Iterator[Any]:
+        yield p
+        for action in p._actions:
+            if not isinstance(action, argparse._SubParsersAction):
+                continue
+            for sub in action.choices.values():
+                yield from TestSubcommandDestIsNotShadowed._parsers(sub)
+
+    def test_no_argument_anywhere_claims_a_subparsers_dest(self) -> None:
+        """Covers `command`, `vm_action`, `cluster_action` and the rest."""
+        parsers = list(self._parsers(ltvm.build_parser()))
+        owned = {
+            action.dest
+            for parser in parsers
+            for action in parser._actions
+            if isinstance(action, argparse._SubParsersAction)
+        }
+        assert {"command", "vm_action", "cluster_action"} <= owned
+        offenders = [
+            (parser.prog, action.dest)
+            for parser in parsers
+            for action in parser._actions
+            if action.dest in owned
+            and not isinstance(action, argparse._SubParsersAction)
+        ]
+        assert offenders == []
+
+    @pytest.mark.parametrize(
+        ("argv", "subcommand", "expected"),
+        [
+            (["vm", "exec", "co1-x", "uname", "-r"], "vm", ["uname", "-r"]),
+            (["vm", "exec", "co1-x"], "vm", []),
+            (
+                ["cluster", "exec", "co2", "oss", "lctl", "dl", "-t"],
+                "cluster",
+                ["lctl", "dl", "-t"],
+            ),
+            (["cluster", "ssh", "co2", "mds"], "cluster", []),
+            (["cluster", "ssh", "co2", "mds", "uptime"], "cluster", ["uptime"]),
+        ],
+    )
+    def test_the_argv_arrives_beside_the_subcommand_name(
+        self, argv: list[str], subcommand: str, expected: list[str]
+    ) -> None:
+        args = ltvm.build_parser().parse_args(argv)
+        assert args.command == subcommand
+        assert args.exec_command == expected
+        # The crash: a dict lookup on whatever `command` holds.
+        assert ltvm._writes_artifacts(args) is False

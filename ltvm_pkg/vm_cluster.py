@@ -2494,6 +2494,12 @@ def cmd_cluster_status(args: argparse.Namespace) -> None:
 
 
 def cmd_cluster_ssh(args: argparse.Namespace) -> None:
+    """Open an ssh session on one node of a cluster.
+
+    Takes the namespace `cli/cluster.py` builds with `_qemu_ns`, where
+    `command` is the argv.  It is not the argparse namespace: there the
+    argv is `exec_command` and `command` is the subcommand name.
+    """
     cluster = ClusterInfo.load(args.name)
     target = args.target
     nodes = cluster.get_nodes()
@@ -2523,6 +2529,12 @@ def cmd_cluster_ssh(args: argparse.Namespace) -> None:
 
 
 def cmd_cluster_exec(args: argparse.Namespace) -> None:
+    """Run a command on every node holding a role, or on one node.
+
+    Takes the namespace `cli/cluster.py` builds with `_qemu_ns`, where
+    `command` is the argv.  It is not the argparse namespace: there the
+    argv is `exec_command` and `command` is the subcommand name.
+    """
     cluster = ClusterInfo.load(args.name)
     target = args.target
     nodes = cluster.get_nodes()

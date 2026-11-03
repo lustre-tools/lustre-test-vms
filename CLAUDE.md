@@ -1245,13 +1245,21 @@ does the rest: `--failnode` (MMP on) and the move on `fail <facet>`.
   `freeze` on a Linux host is UNRUN.
 
 Each action is a real subparser, so `ltvm cluster <action> --help`
-works and every action's flags validate and tab-complete.  Two
+works and every action's flags validate and tab-complete.  Three
 consequences worth knowing:
 
 - **`cluster exec` takes its command as a REMAINDER**, so everything
   after the role is passed through untouched (`lctl dl -t` keeps its
   `-t`).  The price is that ltvm's own flags must come *before* the
   role: `cluster exec co2 --timeout 30 oss uptime`, not after it.
+- **A pass-through positional's dest is `exec_command`, never
+  `command`**, which the top-level subparsers own.  Named `command`,
+  argparse wrote the user's argv over the subcommand name, and `vm
+  exec`, `cluster exec` and `cluster ssh <node> <cmd>` all died in
+  `_writes_artifacts` with "cannot use 'list' as a dict key" while
+  `cluster ssh <node>` printed the top-level usage.  A test walks the
+  parser tree so nothing else can claim it
+  (tests/test_ltvm_cli.py::TestSubcommandDestIsNotShadowed).
 - **`create`'s specs are one `nargs="+"` positional** -- they have to
   be, or argparse would assign a bare positional TARGET the first spec.
   argparse matches positionals in contiguous runs, so an option between

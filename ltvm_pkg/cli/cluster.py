@@ -365,7 +365,7 @@ def cmd_cluster_failback(args: argparse.Namespace) -> int:
 def cmd_cluster_exec(args: argparse.Namespace) -> int:
     """Run a command on every node holding a role, or on one node."""
     use_json = args.json
-    if not args.command:
+    if not args.exec_command:
         return _error(
             "cluster exec requires a command to run",
             use_json,
@@ -376,7 +376,7 @@ def cmd_cluster_exec(args: argparse.Namespace) -> int:
         _qemu_ns(
             name=args.name,
             target=args.target,
-            command=list(args.command),
+            command=list(args.exec_command),
             timeout=args.timeout,
             json=use_json,
         ),
@@ -397,7 +397,7 @@ def cmd_cluster_ssh(args: argparse.Namespace) -> int:
         _qemu_ns(
             name=args.name,
             target=args.target,
-            command=list(args.command or []),
+            command=list(args.exec_command or []),
         ),
         use_json,
     )

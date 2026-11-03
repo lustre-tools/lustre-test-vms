@@ -2547,7 +2547,7 @@ def qmp_execute(
 
 
 def cmd_exec(args: argparse.Namespace) -> int:
-    if not args.command:
+    if not args.exec_command:
         return _handler_error(args, "vm exec requires a command to run")
     vm_claim.require(args.name, "run commands on")
     vm = VMInfo.load(args.name)
@@ -2557,10 +2557,10 @@ def cmd_exec(args: argparse.Namespace) -> int:
         )
     # One argument is a command line the user already quoted; several
     # are an argv, which has to survive the remote shell's re-parse.
-    if len(args.command) == 1:
-        command = args.command[0]
+    if len(args.exec_command) == 1:
+        command = args.exec_command[0]
     else:
-        command = shlex.join(args.command)
+        command = shlex.join(args.exec_command)
     use_json = bool(getattr(args, "json", False))
     try:
         # Text mode streams, so a long command shows progress as it runs.
