@@ -138,6 +138,19 @@ ltvm create co1-numa --vcpus 4 --mem 4096 --numa-nodes 4
 ssh co1-numa numactl -H
 ```
 
+The distances between nodes default to QEMU's 10 local, 20 remote.
+`--numa-dist` sets a real table (rows split by `;`, may be asymmetric),
+and `--numa-dist-file` reads one from saved `numactl -H` output, so a
+customer's machine pastes straight in. `vm set` changes it later, and
+`--numa-dist default` goes back to 10/20:
+
+```bash
+ltvm create co1-numa --vcpus 4 --mem 4096 --numa-nodes 2 \
+    --numa-dist '10,21;21,10'
+ltvm create co1-six --vcpus 6 --mem 6144 --numa-nodes 6 \
+    --numa-dist-file customer-numactl.txt
+```
+
 An extra NIC can sit on one of those nodes, so LNet sees device NUMA
 locality (`dev cpt` in `lnetctl net show -v`) the way it does on a
 multi-socket server. `node=N` goes after the NIC type; it needs an image
