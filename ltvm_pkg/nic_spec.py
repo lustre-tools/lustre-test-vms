@@ -16,6 +16,7 @@ which keeps the spelling ltvm has always accepted, and the one older
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, fields
@@ -38,12 +39,19 @@ class NicSpec:
     # Guest NUMA node the NIC's PCI device reports (node=N), or None for
     # the default: no node (-1), as every virtio NIC on ltvm's PCI root.
     node: int | None = None
+    # Empty values keep the existing automatic LNet names and subnets.
+    net: str = ""
+    subnet: str = ""
+    subnet6: str = ""
 
     @classmethod
     def parse(cls, raw: str) -> NicSpec:
         """Parse ``TYPE[:key=value,...]``; raise NicSpecError if invalid."""
         if not raw or not raw.strip():
             raise NicSpecError("--nic value is empty")
+        # A NIC has a fixed set of short keys; bound parser work before split.
+        if len(raw) > 512:
+            raise NicSpecError("--nic value is longer than 512 characters")
         type_part, sep, rest = raw.partition(":")
         nic_type = type_part.strip().lower()
         if nic_type not in NIC_TYPES:
@@ -80,7 +88,14 @@ class NicSpec:
                 "--nic passthrough requires a PCIe BDF arg, "
                 "e.g. --nic passthrough:0000:85:00.1"
             )
-        return cls(type=nic_type, **values)  # type: ignore[arg-type]
+        spec = cls(type=nic_type, **values)  # type: ignore[arg-type]
+        expected = "tcp" if nic_type == "tcp" else "o2ib"
+        # The LND must agree with the NIC provider used by the guest.
+        if spec.net and not spec.net.startswith(expected):
+            raise NicSpecError(
+                f"--nic {raw}: net must use {expected} for type {nic_type}"
+            )
+        return spec
 
     def __str__(self) -> str:
         """The canonical spelling, which parse() reads back unchanged."""
@@ -113,6 +128,7 @@ _BDF_RE = re.compile(
 
 
 def _bdf(value: str) -> str:
+    """Check the existing PCI BDF spelling before it reaches sysfs."""
     if not _BDF_RE.match(value):
         raise NicSpecError(
             f"--nic passthrough arg {value!r} is not a valid PCIe BDF "
@@ -122,11 +138,71 @@ def _bdf(value: str) -> str:
 
 
 def _node(value: str) -> int:
+    """Read a bounded decimal NUMA node; topology checks run at create."""
     if not value.isdigit():
         raise NicSpecError(
             f"--nic node={value!r}: expected a NUMA node number (0, 1, ...)"
         )
     return int(value)
+
+
+def _net(value: str) -> str:
+    """Accept one canonical TCP or o2ib network name with a 16-bit ID."""
+    match = re.fullmatch(r"(tcp|o2ib)(0|[1-9][0-9]{0,4})", value)
+    if match is None or int(match[2]) > 65535:
+        raise NicSpecError(
+            f"--nic net={value!r}: expected tcp0..tcp65535 or o2ib0..o2ib65535"
+        )
+    return value
+
+
+def _subnet(value: str, version: int) -> str:
+    """Check a strict unicast CIDR and leave its canonical spelling."""
+    # Scope IDs belong to link-local addresses, not reusable data subnets.
+    if "%" in value:
+        raise NicSpecError(
+            f"--nic subnet={value!r}: scope IDs are not supported"
+        )
+    try:
+        network = ipaddress.ip_network(value, strict=True)
+    except ValueError as exc:
+        raise NicSpecError(f"--nic subnet={value!r}: {exc}") from None
+    if network.version != version:
+        raise NicSpecError(f"--nic subnet={value!r}: expected IPv{version}")
+    # Ordinary data subnets need at least two distinct host addresses.
+    maximum = 30 if version == 4 else 126
+    if network.prefixlen > maximum:
+        raise NicSpecError(
+            f"--nic subnet={value!r}: IPv{version} prefix must be /{maximum} or shorter"
+        )
+    forbidden = (
+        (
+            "0.0.0.0/8",
+            "127.0.0.0/8",
+            "169.254.0.0/16",
+            "224.0.0.0/4",
+            "240.0.0.0/4",
+        )
+        if version == 4
+        else ("::/128", "::1/128", "fe80::/10", "ff00::/8")
+    )
+    if any(
+        network.overlaps(ipaddress.ip_network(block)) for block in forbidden
+    ):
+        raise NicSpecError(
+            f"--nic subnet={value!r}: expected a unicast network"
+        )
+    return str(network)
+
+
+def _subnet4(value: str) -> str:
+    """Read a data NIC's IPv4 subnet."""
+    return _subnet(value, 4)
+
+
+def _subnet6(value: str) -> str:
+    """Read a data NIC's IPv6 subnet."""
+    return _subnet(value, 6)
 
 
 @dataclass(frozen=True)
@@ -143,6 +219,9 @@ _KEYS: dict[str, _Key] = {
     # Not passthrough: the guest sets the node of the NIC it finds as
     # ethN, and a passed-through device need not appear as ethN.
     "node": _Key("node", ("tcp", "softroce"), _node),
+    "net": _Key("net", ("tcp", "softroce"), _net),
+    "subnet": _Key("subnet", ("tcp", "softroce"), _subnet4),
+    "subnet6": _Key("subnet6", ("tcp", "softroce"), _subnet6),
 }
 
 # The key a type's first item may give without "key=".
@@ -152,6 +231,7 @@ _DEFAULTS = {f.name: f.default for f in fields(NicSpec)}
 
 
 def _keys_hint(nic_type: str) -> str:
+    """List only the keys accepted by this NIC type."""
     keys = [key for key, k in _KEYS.items() if nic_type in k.types]
     if not keys:
         return f" (type {nic_type!r} takes no keys)"
@@ -169,7 +249,13 @@ def load_stored(raw: str) -> NicSpec:
         return NicSpec.parse(raw)
     except NicSpecError:
         nic_type = raw.partition(":")[0].strip().lower()
-        if nic_type in NIC_TYPES and nic_type != "passthrough":
+        # Only the old positional junk spelling is compatible. A broken
+        # keyed spec must not silently discard its stored network layout.
+        if (
+            nic_type in NIC_TYPES
+            and nic_type != "passthrough"
+            and "=" not in raw
+        ):
             return NicSpec(type=nic_type)
         raise
 

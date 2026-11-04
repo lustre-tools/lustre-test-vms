@@ -1490,6 +1490,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _vm_create_variant.completer = complete_variants  # type: ignore[attr-defined]
     _vm_create_args.add_argument(
+        "-N",
         "--nic",
         action="append",
         default=None,
@@ -1503,7 +1504,9 @@ def build_parser() -> argparse.ArgumentParser:
             "needs a host IOMMU).  Options follow the ':' as "
             "comma-separated key=value pairs; passthrough's BDF may "
             "omit its 'bdf=' key.  node=N (tcp, softroce) puts the NIC "
-            "on guest NUMA node N of --numa-nodes, e.g. --nic tcp:node=1."
+            "on guest NUMA node N of --numa-nodes. net= groups NICs on "
+            "one LNet network; subnet= and subnet6= choose their IPv4 "
+            "and IPv6 data networks (tcp, softroce only)."
         ),
     )
     _vm_create_args.add_argument(
@@ -2354,6 +2357,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_disk_option_args(ccp, every_node=True)
     ccp.add_argument(
+        "-N",
         "--nic",
         action="append",
         default=None,

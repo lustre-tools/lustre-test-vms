@@ -4,10 +4,9 @@
 #
 # Why this is needed:
 #
-# rc.local puts every extra NIC (--nic) on the *same* /24 as the mgmt
-# NIC -- there's one subnet and one default route, no source-based
-# routing from the OS side.  With two or more interfaces on a shared
-# subnet, a reply can legitimately arrive on an interface that isn't
+# Extra NICs can share one subnet, separate from the management NIC.
+# rc.local sets source routes for each extra NIC. A reply can still
+# arrive on an interface that isn't
 # the one the kernel's reverse-path lookup would pick for that source
 # address.  Under the RHEL/Rocky default of rp_filter=1 (strict, per
 # RFC 3704) the kernel silently drops those packets.
@@ -32,7 +31,7 @@
 #     setup-lnet-rp-filter.sh                      # /etc/modprobe.d/lnet.conf
 #     setup-lnet-rp-filter.sh /path/to/lnet.conf
 #     echo 'options lnet networks="tcp0(eth0)"' | \
-#         setup-lnet-rp-filter.sh --stdin          # parse only, no writes
+#         setup-lnet-rp-filter.sh --stdin          # parse only; -s also works
 #
 # Env:
 #     SYSCTL_CONF_DIR    override for /etc/sysctl.d (tests)
@@ -65,8 +64,18 @@ lnet_ifaces() {
 	# rp_filter is an IPv4 routing knob and simply does not exist for
 	# an IB device, so there is nothing to set in either case.
 	sed -n 's/.*networks="\([^"]*\)".*/\1/p' |
-		tr ',' '\n' |
-		sed -n 's/.*(\([^)]*\)).*/\1/p'
+		awk -F '[()]' '{
+			# Split network groups first, then interfaces inside each group.
+			for (i = 2; i <= NF; i += 2) {
+				# CPT lists can contain commas that do not separate interfaces.
+				gsub(/\[[^][]*\]/, "", $i)
+				n = split($i, names, ",")
+				for (j = 1; j <= n; j++) {
+					gsub(/^[[:space:]]+|[[:space:]]+$/, "", names[j])
+					if (names[j] != "") print names[j]
+				}
+			}
+		}'
 }
 
 main() {
@@ -75,7 +84,7 @@ main() {
 
 	while (($# > 0)); do
 		case "$1" in
-		--stdin)
+		-s | --stdin)
 			from_stdin=true
 			shift
 			;;

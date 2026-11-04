@@ -150,10 +150,32 @@ class TestClusterCreate:
         create.assert_not_called()
         assert "unknown key 'bogus'" in capsys.readouterr().err
 
+    @pytest.mark.parametrize(
+        "raw, expected",
+        [
+            (
+                ["TCP", "passthrough:bdf=0000:85:00.1"],
+                ["tcp", "passthrough:0000:85:00.1"],
+            ),
+            (
+                [
+                    "TCP:net=tcp0,subnet=192.0.2.0/24,subnet6=2001:db8:1::/64",
+                    "tcp:net=tcp0,subnet=198.51.100.0/24,subnet6=2001:db8:2::/64",
+                ],
+                [
+                    "tcp:net=tcp0,subnet=192.0.2.0/24,subnet6=2001:db8:1::/64",
+                    "tcp:net=tcp0,subnet=198.51.100.0/24,subnet6=2001:db8:2::/64",
+                ],
+            ),
+        ],
+    )
     def test_nodes_get_the_canonical_spelling(
         self,
         vm_dirs: Any,  # noqa: F811
+        raw: list[str],
+        expected: list[str],
     ) -> None:
+        """Every node receives all NIC options in their canonical spelling."""
         seen: list[list[str]] = []
 
         def fake_create(node: ClusterNode, *a: Any, **kw: Any) -> Any:
@@ -169,10 +191,42 @@ class TestClusterCreate:
                 vm_cluster, "_distribute_cluster_hosts", return_value=[]
             ),
         ):
+            vm_cluster.cmd_cluster_create(self._args(raw))
+        assert seen == [expected] * 2
+
+    @pytest.mark.parametrize(
+        "subnets",
+        [
+            ("203.0.113.0/24", "192.0.2.0/24"),
+            ("192.0.2.0/24", "192.0.2.0/25"),
+        ],
+    )
+    @pytest.mark.usefixtures("vm_dirs")
+    def test_subnet_conflict_fails_before_any_node(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        subnets: tuple[str, str],
+    ) -> None:
+        """A layout error must not create a partial cluster."""
+        with (
+            patch(
+                "ltvm_pkg.nic_allocation._data_defaults",
+                return_value=(
+                    "203.0.113.0/24",
+                    "192.0.2.0/24",
+                    "2001:db8::/64",
+                ),
+            ),
+            patch.object(vm_cluster, "_create_one_node") as create,
+            pytest.raises(SystemExit),
+        ):
             vm_cluster.cmd_cluster_create(
-                self._args(["TCP", "passthrough:bdf=0000:85:00.1"])
+                self._args(
+                    [f"tcp:net=tcp0,subnet={network}" for network in subnets]
+                )
             )
-        assert seen == [["tcp", "passthrough:0000:85:00.1"]] * 2
+        create.assert_not_called()
+        assert "overlap" in capsys.readouterr().err
 
     def test_node_beyond_numa_nodes_fails_before_any_node(
         self,

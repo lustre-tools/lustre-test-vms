@@ -45,6 +45,27 @@ def _load_ltvm() -> Any:
 ltvm = _load_ltvm()
 
 
+@pytest.mark.parametrize("option", ["-N", "--nic"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["create", "co1-client"],
+        ["vm", "create", "co1-client"],
+        ["cluster", "create", "co1", "mgs+mds:co1-mds:1", "oss:co1-oss:1"],
+    ],
+)
+def test_nic_option_aliases(option: str, command: list[str]) -> None:
+    """Both NIC option forms preserve every per-NIC value at the CLI boundary."""
+    specs = [
+        "tcp:net=tcp0,subnet=192.0.2.0/24",
+        "tcp:net=tcp0,subnet=198.51.100.0/24",
+    ]
+    args = ltvm.build_parser().parse_args(
+        [*command, option, specs[0], option, specs[1]]
+    )
+    assert args.nic == specs
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

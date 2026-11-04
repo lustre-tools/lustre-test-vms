@@ -1,153 +1,205 @@
 #!/usr/bin/env bash
-# Emit /etc/modprobe.d/lnet.conf body from an fc_nics= cmdline value.
+# Emit /etc/modprobe.d/lnet.conf from the guest kernel command line.
+# fc_nics= lists extra NIC types, in eth1, eth2, ... order. Without
+# extras, eth0 is tcp0. With extras, eth0 is for management only.
+# fc_nic_nets= optionally names the LNet network of each extra NIC.
+# Equal explicit names group interfaces on one LNet network. Empty
+# entries get separate automatic names, skipping explicit names.
 #
-# Consumed by the multi-NIC foundation (-oc8) and softroce backend
-# (-r55).  This script is the source of truth for the emitter logic;
-# ltvm_pkg/lnet_config.py mirrors it for unit testing convenience.
-#
-# Usage:
-#     setup-lnet-config.sh                      # reads /proc/cmdline, stdout
-#     setup-lnet-config.sh /path/to/lnet.conf   # writes to path
-#     echo "fc_nics=tcp,softroce" | \
-#         setup-lnet-config.sh --stdin          # reads cmdline from stdin
-#
-# fc_nics= is a comma-separated list of NIC types.  The first element
-# is always the mgmt NIC type: 'tcp' (mgmt doubles as tcp0) or 'none'
-# (mgmt is SSH-only, excluded from LNet -- set when the user passed
-# --nic, so LNet is exactly the --nic list).  Subsequent elements
-# apply to eth1, eth2, ...
-#
-# Net-name assignment:
-#   none        -> (skipped; keeps eth slot for later entries)
-#   tcp         -> tcpK(ethI)              I = eth index (slot), K =
-#                                          tcp index (per-type counter)
-#   softroce    -> o2ibK(ethI)             K = o2ib index, I = eth
-#                                          index.  Lustre's ko2iblnd
-#                                          takes a NETDEV name here and
-#                                          finds the rxe ibdev via
-#                                          rdma_cm -- the rxe link
-#                                          itself is not a netdev and
-#                                          cannot appear in lnet.conf.
-#   passthrough -> o2ibK(@ib-of-ethI))     K = o2ib index, I = eth
-#                                          index; '@' marker replaced
-#                                          at runtime by -5a0.
+# Usage: setup-lnet-config.sh [-s|--stdin] [output-path]
 set -euo pipefail
 
-emit_lnet_conf() {
-	# Args: NIC type strings, one per positional argument.  Position I
-	# corresponds to ethI.  'none' skips the slot (mgmt SSH-only).
-	# Writes the full lnet.conf body (one line + trailing newline) to
-	# stdout.
-	local -a nics=("$@")
-	local -a parts=()
-	local i
-	local nic
-	local o2ib_idx=0
-	local tcp_idx=0
+config_error() {
+	# Report an invalid boot parameter before any config file is written.
+	printf 'setup-lnet-config: %s\n' "$1" >&2
+	return 1
+}
 
+nic_transport() {
+	# Return the LNet transport for a NIC type; retain passthrough args.
+	case "${1%%;*}" in
+	tcp) printf 'tcp\n' ;;
+	softroce|passthrough) printf 'o2ib\n' ;;
+	none) printf '\n' ;;
+	*) config_error "unknown NIC type '${1%%;*}'" ;;
+	esac
+}
+
+explicit_networks() {
+	# Validate the parallel extra-NIC names and print one name per slot.
+	# A dash marks an automatic name, including the implicit eth0 slot.
+	local csv=$1
+	shift
+	local -a nics=("$@") names=()
+	local i name transport number
+
+	# A 64 KiB command line holds at most 16,384 shortest NIC entries.
+	(( ${#nics[@]} > 0 && ${#nics[@]} <= 16385 )) ||
+		{ config_error 'too many NIC entries'; return 1; }
+	(( ${#csv} <= 128 )) ||
+		{ config_error 'fc_nic_nets is too long'; return 1; }
+	if [[ -n $csv ]]; then
+		# Only the new explicit layout has the eight-extra-NIC limit.
+		(( ${#nics[@]} <= 9 )) ||
+			{ config_error 'expected at most eight explicit extra NICs'; return 1; }
+		# The sentinel retains a trailing empty CSV entry in Bash read.
+		IFS=',' read -r -a names <<<"${csv},end"
+		(( ${#names[@]} == ${#nics[@]} )) ||
+			{ config_error 'fc_nic_nets count does not match fc_nics'; return 1; }
+		unset 'names[${#names[@]} - 1]'
+	fi
 	for ((i=0; i < ${#nics[@]}; i++)); do
-		nic=${nics[$i]}
-		case "$nic" in
-		none)
-			# Placeholder: keep eth slot (ethI) reserved but
-			# don't emit an LNet entry.  Used for mgmt (eth0)
-			# when --nic is set so it's SSH-only.
-			;;
-		tcp)
-			parts+=("tcp${tcp_idx}(eth${i})")
-			tcp_idx=$((tcp_idx + 1))
-			;;
-		softroce)
-			parts+=("o2ib${o2ib_idx}(eth${i})")
-			o2ib_idx=$((o2ib_idx + 1))
-			;;
-		passthrough)
-			parts+=("o2ib${o2ib_idx}(@ib-of-eth${i}))")
-			o2ib_idx=$((o2ib_idx + 1))
-			;;
-		*)
-			echo "setup-lnet-config: unknown NIC type '$nic'" >&2
-			return 1
-			;;
-		esac
+		transport=$(nic_transport "${nics[$i]}") || return 1
+		name=''
+		(( i == 0 )) || name=${names[$((i - 1))]:-}
+		if [[ -n $name ]]; then
+			# Only software NICs take net=; passthrough keeps its resolver.
+			[[ ${nics[$i]} == tcp || ${nics[$i]} == softroce ]] ||
+				{ config_error 'explicit network needs tcp or softroce'; return 1; }
+			[[ $name =~ ^${transport}(0|[1-9][0-9]{0,4})$ ]] ||
+				{ config_error "invalid LNet network '$name'"; return 1; }
+			number=${name#"$transport"}
+			(( 10#$number <= 65535 )) ||
+				{ config_error "LNet network number is too large: '$name'"; return 1; }
+		fi
+		printf '%s\n' "${name:--}"
 	done
+}
 
-	local joined=""
-	local first=true
-	local p
-	for p in "${parts[@]}"; do
-		if [[ $first == true ]]; then
-			joined=$p
-			first=false
+assign_networks() {
+	# Reserve explicit names before choosing unused automatic names.
+	local csv=$1 validated name transport candidate
+	shift
+	local -a nics=("$@") names=()
+	local -A used=() next_number=([tcp]=0 [o2ib]=0)
+	local i number scan
+
+	validated=$(explicit_networks "$csv" "${nics[@]}") || return 1
+	mapfile -t names <<<"$validated" || return 1
+	for name in "${names[@]}"; do
+		[[ $name == - ]] || used[$name]=1
+	done
+	for ((i=0; i < ${#nics[@]}; i++)); do
+		name=${names[$i]}
+		transport=$(nic_transport "${nics[$i]}") || return 1
+		if [[ -n $transport && $name == - ]]; then
+			# Each transport's index advances; earlier names are not rescanned.
+			number=${next_number[$transport]}
+			for ((scan=0; scan < ${#nics[@]}; scan++, number++)); do
+				candidate=${transport}${number}
+				if [[ ! ${used[$candidate]+set} ]]; then
+					name=$candidate
+					used[$name]=1
+					next_number[$transport]=$((number + 1))
+					break
+				fi
+			done
+			[[ $name != - ]] ||
+				{ config_error 'no free LNet network number'; return 1; }
+		fi
+		printf '%s\n' "$name"
+	done
+}
+
+emit_lnet_conf_nets() {
+	# Group validated names in NIC order and write one complete config.
+	local csv=$1 assigned name iface joined
+	shift
+	local -a nics=("$@") names=() order=() parts=()
+	local -A interfaces=()
+	local i
+
+	assigned=$(assign_networks "$csv" "${nics[@]}") || return 1
+	mapfile -t names <<<"$assigned" || return 1
+	for ((i=0; i < ${#nics[@]}; i++)); do
+		name=${names[$i]}
+		[[ $name != - ]] || continue
+		iface=eth${i}
+		if [[ ${nics[$i]%%;*} == passthrough ]]; then
+			# Keep the marker expected by setup-lnet-passthrough-resolve.sh.
+			iface=@ib-of-eth${i}')'
+		fi
+		if [[ ${interfaces[$name]+set} ]]; then
+			interfaces[$name]+=",${iface}"
 		else
-			joined="${joined},${p}"
+			order+=("$name")
+			interfaces[$name]=$iface
 		fi
 	done
-
+	for name in "${order[@]}"; do
+		parts+=("${name}(${interfaces[$name]})")
+	done
+	joined=$(IFS=','; printf '%s' "${parts[*]}")
 	printf 'options lnet networks="%s"\n' "$joined"
 }
 
-parse_fc_nics() {
-	# Extract fc_nics= value from a kernel-cmdline-style string on
-	# stdin.  Prints the comma-separated value (or empty).
-	# We deliberately avoid pipefail propagation: grep returning 1
-	# when fc_nics= is absent is not an error.
-	tr ' ' '\n' | awk -F= '/^fc_nics=/ {sub(/^fc_nics=/, ""); \
-		print; exit}'
+emit_lnet_conf() {
+	# Keep the existing sourceable API for callers without explicit names.
+	emit_lnet_conf_nets '' "$@"
+}
+
+cmdline_parameter() {
+	# Return key=value or empty if absent; reject duplicate parameters.
+	local key=$1 cmdline=$2 item value='' found=false
+	local -a words=()
+	IFS=$' \t' read -r -a words <<<"${cmdline//$'\n'/ }"
+	for item in "${words[@]}"; do
+		if [[ $item == "$key="* ]]; then
+			[[ $found == false ]] ||
+				{ config_error "duplicate $key parameter"; return 1; }
+			value=$item
+			found=true
+		fi
+	done
+	printf '%s' "$value"
 }
 
 main() {
-	local cmdline
-	local out_path=""
-	local from_stdin=false
-
+	# Validate all inputs before opening the optional output file.
+	local out_path='' from_stdin=false cmdline fc_nics fc_nic_nets body nets
+	local -a nic_array=(tcp) extras=()
+	(( $# <= 3 )) ||
+		{ config_error 'too many arguments'; return 1; }
 	while (( $# > 0 )); do
 		case "$1" in
-		--stdin)
-			from_stdin=true
-			shift
-			;;
+		-s|--stdin) from_stdin=true ;;
 		-h|--help)
-			sed -n '2,20p' "$0"
-			return 0
-			;;
+			printf 'Usage: %s [-s|--stdin] [output-path]\n' "$0" || return 1
+			return 0 ;;
+		-*) config_error "unknown option '$1'"; return 1 ;;
 		*)
-			out_path=$1
-			shift
-			;;
+			[[ -z $out_path ]] ||
+				{ config_error 'expected one output path'; return 1; }
+			out_path=$1 ;;
 		esac
+		shift
 	done
-
 	if [[ $from_stdin == true ]]; then
-		cmdline=$(cat)
+		# EOF is expected; NUL or an overlong input makes read succeed.
+		if IFS= read -r -d '' -n 65537 cmdline; then
+			config_error 'command line is too long or contains NUL'; return 1
+		fi
 	else
-		cmdline=$(cat /proc/cmdline)
+		IFS= read -r cmdline < /proc/cmdline || return 1
 	fi
-
-	local fc_nics
-	fc_nics=$(printf '%s' "$cmdline" | parse_fc_nics)
-
-	# fc_nics on the cmdline carries the *extras* (eth1+) only -- the
-	# mgmt NIC (eth0) is implicit.  Semantics:
-	#   - No --nic flag (empty fc_nics)  => mgmt doubles as tcp0
-	#     (status quo).  Prepend 'tcp' so mgmt appears in LNet.
-	#   - Any --nic flag (non-empty fc_nics)  => mgmt is SSH-only
-	#     and must drop out of LNet.  Prepend 'none' so the eth0
-	#     slot is reserved (positional eth indices preserved) but
-	#     no LNet entry is emitted for it.
-	local -a nic_array
-	if [[ -z $fc_nics ]]; then
-		nic_array=(tcp)
-	else
-		nic_array=(none)
-		local -a _extras
-		IFS=',' read -r -a _extras <<<"$fc_nics"
-		nic_array+=("${_extras[@]}")
+	(( ${#cmdline} <= 65536 )) ||
+		{ config_error 'command line is too long'; return 1; }
+	fc_nics=$(cmdline_parameter fc_nics "$cmdline") || return 1
+	fc_nics=${fc_nics#*=}
+	nets=$(cmdline_parameter fc_nic_nets "$cmdline") || return 1
+	fc_nic_nets=${nets#*=}
+	if [[ -n $fc_nics ]]; then
+		# Append a sentinel so a trailing empty NIC remains an error.
+		IFS=',' read -r -a extras <<<"${fc_nics},end"
+		unset 'extras[${#extras[@]} - 1]'
+		nic_array=(none "${extras[@]}")
+		if [[ -n $nets && -z $fc_nic_nets && ${#extras[@]} != 1 ]]; then
+			config_error 'fc_nic_nets count does not match fc_nics'; return 1
+		fi
+	elif [[ -n $nets ]]; then
+		config_error 'fc_nic_nets requires extra NICs'; return 1
 	fi
-
-	local body
-	body=$(emit_lnet_conf "${nic_array[@]}")
-
+	body=$(emit_lnet_conf_nets "$fc_nic_nets" "${nic_array[@]}") || return 1
 	if [[ -n $out_path ]]; then
 		printf '%s\n' "$body" > "$out_path"
 	else
@@ -155,7 +207,7 @@ main() {
 	fi
 }
 
-# Only invoke main when run as a script (not when sourced).
+# Sourcing exposes the emitter without reading the caller's boot parameters.
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
 	main "$@"
 fi
