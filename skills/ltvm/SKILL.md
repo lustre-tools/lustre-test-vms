@@ -138,6 +138,21 @@ ltvm create co1-numa --vcpus 4 --mem 4096 --numa-nodes 4
 ssh co1-numa numactl -H
 ```
 
+An extra NIC can sit on one of those nodes, so LNet sees device NUMA
+locality (`dev cpt` in `lnetctl net show -v`) the way it does on a
+multi-socket server. `node=N` goes after the NIC type; it needs an image
+built after the option was added, and `create` warns when the node did
+not take:
+
+```bash
+ltvm create co1-numa --vcpus 4 --mem 4096 --numa-nodes 2 \
+    --nic tcp:node=0 --nic tcp:node=1
+ssh co1-numa cat /sys/class/net/eth1/device/../numa_node
+```
+
+The guest kernel logs "[Firmware Bug]: Overriding NUMA node" and is
+tainted (W) when the node is set; that is expected.
+
 `--kernel-args` adds kernel boot parameters, also fixed at create time.
 The target kernels have no KASAN, but they build in SLUB debugging (and
 the Rocky ones page owner tracking), off until booted with them:

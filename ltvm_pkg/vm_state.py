@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
 
+from .nic_spec import NicSpec, load_stored
+
 
 def _atomic_write(
     path: Path,
@@ -602,13 +604,13 @@ class VMInfo:
     # compatibility with .info files written before ownership was introduced.
     owner_id: str | None = None
     variant: str = "base"  # target variant (e.g. mofed); "base" is the default
-    # Extra NICs beyond the mgmt NIC (eth0), in order.  Each element is
-    # a type string from the CLI: 'tcp', 'softroce', or 'passthrough:<BDF>'.
+    # Extra NICs beyond the mgmt NIC (eth0), in order, as parsed from
+    # --nic (see nic_spec.NicSpec).
     # The management NIC is *not* included here -- this list describes
     # additional NICs that will be wired as eth1, eth2, ... in the guest.
     # Backward compat: older .info files (pre-nic field) load as an empty
     # list, so existing single-NIC VMs behave exactly as before.
-    nics: list[str] = field(default_factory=list)
+    nics: list[NicSpec] = field(default_factory=list)
 
     # Per-extra-NIC IPs.  Index i in nic_ips is the IP for the
     # corresponding entry in nics (i.e. eth{i+1} in the guest).  Always
@@ -690,8 +692,8 @@ class VMInfo:
             for n in range(1, self.mdt_disks + self.ost_disks + 1)
         ]
 
-    def extra_nics(self) -> list[tuple[int, str, str, str]]:
-        """Return ``(index, nic_type, tap_name, mac)`` tuples for extra NICs.
+    def extra_nics(self) -> list[tuple[int, NicSpec, str, str]]:
+        """Return ``(index, nic, tap_name, mac)`` tuples for extra NICs.
 
         The mgmt NIC (index 0, eth0, type 'tcp', stored in ``self.tap`` /
         ``self.mac``) is *not* included -- that one is wired by the
@@ -707,11 +709,11 @@ class VMInfo:
         return [
             (
                 idx,
-                nic_type,
+                nic,
                 extra_tap_for_name(self.name, idx),
                 extra_mac_for_name(self.name, idx),
             )
-            for idx, nic_type in enumerate(self.nics, start=1)
+            for idx, nic in enumerate(self.nics, start=1)
         ]
 
     def save(self) -> None:
@@ -749,10 +751,9 @@ class VMInfo:
             f"OWNER_ID={self.owner_id or ''}\n"
             f"VARIANT={self.variant}\n"
             # NICs are joined with '|' -- a spec like
-            # 'passthrough:0000:00:02.0' contains colons, so ',' or ':'
-            # would ambiguate.  '|' is not a valid character in any
-            # accepted NIC type or PCIe BDF.
-            f"NICS={'|'.join(self.nics)}\n"
+            # 'passthrough:0000:00:02.0,node=1' holds both ':' and ',',
+            # and '|' is in no NIC spec.
+            f"NICS={'|'.join(str(n) for n in self.nics)}\n"
             # Per-extra-NIC IPs, same index order as NICS.  '|' stays
             # unambiguous because IPs don't contain it.
             f"NIC_IPS={'|'.join(self.nic_ips)}\n"
@@ -903,7 +904,7 @@ class VMInfo:
         # also parses as the empty list -- "".split("|") returns [""]
         # which we must filter out.
         nics_raw = vals.get("NICS", "")
-        nics_list = [s for s in nics_raw.split("|") if s]
+        nics_list = [load_stored(s) for s in nics_raw.split("|") if s]
 
         nic_ips_raw = vals.get("NIC_IPS", "")
         nic_ips_list = [s for s in nic_ips_raw.split("|") if s]

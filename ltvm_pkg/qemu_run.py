@@ -650,9 +650,7 @@ def _guest_cgroup(vm: VMInfo) -> str | None:
     service -- does not bound it, and the user manager's app.slice does.
     ``None`` means the caller's cgroup, as for a root QEMU.
     """
-    if os.geteuid() == 0 or any(
-        n.split(":", 1)[0] == "passthrough" for n in vm.nics
-    ):
+    if os.geteuid() == 0 or any(n.type == "passthrough" for n in vm.nics):
         return None
     if not _guest_scope(vm) or not rootless.readiness().ok:
         return None
@@ -793,14 +791,12 @@ def _start_qemu(vm: VMInfo) -> None:
     fc_nic_prefixes_fragment = ""
     fc_nic_ip6s_fragment = ""
     fc_nic_ip6_prefixes_fragment = ""
+    fc_nic_numa_fragment = ""
     if extra_nics:
-        # Replace the ':' in 'passthrough:0000:00:02.0' with ';' on the
-        # cmdline so the CSV separator stays unambiguous.  rc.local
-        # reverses this when parsing.  'tcp' has no arg, so it's
-        # unaffected.
+        # Each entry is TYPE[;BDF] (NicSpec.cmdline_entry); rc.local
+        # turns the BDF's ';' back into ':'.
         cmdline_types = [
-            nic_type.replace(":", ";")
-            for (_idx, nic_type, _tap, _mac) in extra_nics
+            nic.cmdline_entry() for (_idx, nic, _tap, _mac) in extra_nics
         ]
         fc_nics_fragment = f" fc_nics={','.join(cmdline_types)}"
         # Extra-NIC IPs.  Same index order as fc_nics; i.e. the Nth
@@ -829,6 +825,16 @@ def _start_qemu(vm: VMInfo) -> None:
             fc_nic_ip6_prefixes_fragment = " fc_nic_ip6_prefixes=" + ",".join(
                 str(PREFIX_LEN6) for _ in vm.nic_ip6s
             )
+        # NUMA node per extra NIC (--nic ...,node=N), empty for none.
+        # rc.local sets each node through sysfs and rebinds the driver
+        # before it gives the NIC its address; see the comment there.
+        # Omitted when no NIC has a node, so the cmdline of every other
+        # VM is unchanged; an older image ignores it.
+        if any(nic.node is not None for (_i, nic, _t, _m) in extra_nics):
+            fc_nic_numa_fragment = " fc_nic_numa=" + ",".join(
+                "" if nic.node is None else str(nic.node)
+                for (_i, nic, _t, _m) in extra_nics
+            )
     boot_args = (
         f"console={console} reboot=k panic=1 crashkernel={crashkernel} "
         f"net.ifnames=0 biosdevname=0 "
@@ -840,6 +846,7 @@ def _start_qemu(vm: VMInfo) -> None:
         f"{fc_nic_prefixes_fragment}"
         f"{fc_nic_ip6s_fragment}"
         f"{fc_nic_ip6_prefixes_fragment}"
+        f"{fc_nic_numa_fragment}"
     )
     if vm.arch in ("", "x86_64"):
         boot_args += NMI_PANIC_ARGS
@@ -855,7 +862,7 @@ def _start_qemu(vm: VMInfo) -> None:
     # multiplexes every guest onto one Unix socket managed by launchd.
     all_taps = [vm.tap] + [t for (_i, _n, t, _m) in extra_nics]
     macos = is_macos()
-    has_passthrough = any(n.split(":", 1)[0] == "passthrough" for n in vm.nics)
+    has_passthrough = any(n.type == "passthrough" for n in vm.nics)
     # On a shared host QEMU runs as the user.  On Linux each NIC's tap
     # is created by the bridge helper and goes away with QEMU; on macOS
     # QEMU connects to socket_vmnet's socket itself.  Passthrough still
@@ -917,11 +924,8 @@ def _start_qemu(vm: VMInfo) -> None:
     # vfio-pci with no TAP for passthrough).  Keep the construction
     # shape as a per-type dispatch so those follow-ups slot in without
     # reworking this loop.
-    for _idx, _nic_type, _tap, _mac in extra_nics:
-        # Strip the ':arg' suffix for dispatch -- 'passthrough:BDF'
-        # still needs a TAP-less path; the BDF is only read in the
-        # later qemu-args loop.
-        _base_type = _nic_type.split(":", 1)[0]
+    for _idx, _nic, _tap, _mac in extra_nics:
+        _base_type = _nic.type
         if _base_type in ("tcp", "softroce"):
             # softroce presents to QEMU exactly like tcp (a virtio-net
             # on the bridge); the rxe layer is built inside the guest
@@ -961,7 +965,7 @@ def _start_qemu(vm: VMInfo) -> None:
         else:
             die(
                 f"internal error: launch_qemu saw unknown NIC type "
-                f"{_nic_type!r} on VM {vm.name!r}"
+                f"{str(_nic)!r} on VM {vm.name!r}"
             )
 
     if not vm.kernel:
@@ -1071,8 +1075,8 @@ def _start_qemu(vm: VMInfo) -> None:
         # commit cost on the common case.
         qemu_args += ["-mem-prealloc"]
 
-    for _idx, _nic_type, _tap, _mac in extra_nics:
-        _base_type = _nic_type.split(":", 1)[0]
+    for _idx, _nic, _tap, _mac in extra_nics:
+        _base_type = _nic.type
         _netdev_id = f"net{_idx}"
         if _base_type in ("tcp", "softroce"):
             # softroce's QEMU surface is identical to tcp; see the
@@ -1097,8 +1101,7 @@ def _start_qemu(vm: VMInfo) -> None:
                 f"{net_driver},netdev={_netdev_id},mac={_mac}",
             ]
         elif _base_type == "passthrough":
-            # Parse the BDF out of 'passthrough:<BDF>'.
-            _bdf = _nic_type.split(":", 1)[1]
+            _bdf = _nic.bdf
             # pcie-root-port gives the vfio'd device a dedicated slot;
             # q35 and aarch64 virt both expose a PCIe root complex.
             # Chassis numbers must be unique per root port.
@@ -1111,7 +1114,7 @@ def _start_qemu(vm: VMInfo) -> None:
         else:
             die(
                 f"internal error: launch_qemu saw unknown NIC type "
-                f"{_nic_type!r} on VM {vm.name!r}"
+                f"{str(_nic)!r} on VM {vm.name!r}"
             )
 
     qemu_args += data_disk_args(vm, blk_driver)

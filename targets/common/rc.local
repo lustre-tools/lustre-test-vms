@@ -21,6 +21,8 @@ FC_NIC_IP6S=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_nic_ip6s= \
     | cut -d= -f2)
 FC_NIC_IP6_PREFIXES=$(cat /proc/cmdline | tr ' ' '\n' \
     | grep ^fc_nic_ip6_prefixes= | cut -d= -f2)
+FC_NIC_NUMA=$(cat /proc/cmdline | tr ' ' '\n' | grep ^fc_nic_numa= \
+    | cut -d= -f2)
 
 if [ -n "${FC_IP}" ]; then
     ip addr add ${FC_IP}/24 dev eth0 2>/dev/null
@@ -111,6 +113,50 @@ setup_nic_policy_route6() {
     ip -6 rule add from "${addr}" lookup "${table}" 2>/dev/null || true
 }
 
+# set_nic_numa_node <ifname> <node>
+#
+# Give the PCI device behind <ifname> NUMA node <node> (--nic ...,node=N).
+# ltvm boots with a device tree on aarch64 and puts every NIC on the
+# root PCI bus, so the guest kernel has no node for any of them (-1).
+# Write the node through sysfs, then unbind and rebind the driver: the
+# new netdev takes its node from the device when it is made, and LNet
+# reads that node to pick the NI's CPT.  The kernel logs "[Firmware
+# Bug]: Overriding NUMA node" and sets the firmware-workaround taint
+# (W) when the node is written.
+#
+# The interface comes back with the same ethN name (net.ifnames=0: it
+# takes the lowest free name, which is its own) but no address, so this
+# runs before the address setup below.
+set_nic_numa_node() {
+    local ifname=$1 node=$2 dev pci bdf drv i
+
+    dev=$(readlink -f "/sys/class/net/${ifname}/device") || return 0
+    # virtio-net's netdev hangs off virtioN, a child of the PCI function.
+    if [ -e "${dev}/numa_node" ]; then
+        pci=${dev}
+    else
+        pci=$(dirname "${dev}")
+    fi
+    if [ ! -w "${pci}/numa_node" ] || [ ! -e "${pci}/driver" ]; then
+        echo "rc.local: warning: cannot set NUMA node of ${ifname}" >&2
+        return 0
+    fi
+    bdf=$(basename "${pci}")
+    drv=$(basename "$(readlink -f "${pci}/driver")")
+    if ! echo "${node}" > "${pci}/numa_node"; then
+        echo "rc.local: warning: node ${node} refused for ${ifname}" >&2
+        return 0
+    fi
+    echo "${bdf}" > "/sys/bus/pci/drivers/${drv}/unbind" 2>/dev/null
+    echo "${bdf}" > "/sys/bus/pci/drivers/${drv}/bind" 2>/dev/null
+    for i in $(seq 1 50); do
+        [ -e "/sys/class/net/${ifname}" ] && return 0
+        sleep 0.1
+    done
+    echo "rc.local: warning: ${ifname} did not come back after" \
+         "rebinding ${bdf} to ${drv}" >&2
+}
+
 # fc_nics is a comma-separated list of NIC *types* in the order they
 # were added on the ltvm command line.  The first entry maps to eth1,
 # the second to eth2, etc. -- the mgmt NIC (eth0) is not represented
@@ -151,6 +197,21 @@ if [ -n "${FC_NICS}" ]; then
     # IPv4-only extras, exactly as before.
     IFS=',' read -ra _nic_ip6s <<< "${FC_NIC_IP6S:-}"
     IFS=',' read -ra _nic_ip6_prefixes <<< "${FC_NIC_IP6_PREFIXES:-}"
+    # NUMA node per extra NIC (fc_nic_numa=), empty for none.  Absent
+    # unless some --nic has node=.  All rebinds go first, and udev must
+    # finish with the new netdevs before any address is added: an
+    # address added while NetworkManager was still taking over a
+    # rebound NIC was seen to go missing.
+    IFS=',' read -ra _nic_numa <<< "${FC_NIC_NUMA:-}"
+    if [ -n "${FC_NIC_NUMA}" ]; then
+        for i in "${!_nic_numa[@]}"; do
+            if [ -n "${_nic_numa[$i]}" ] && \
+               [ -e "/sys/class/net/eth$((i + 1))" ]; then
+                set_nic_numa_node "eth$((i + 1))" "${_nic_numa[$i]}"
+            fi
+        done
+        udevadm settle --timeout=10 2>/dev/null || true
+    fi
     for entry in "${_nic_entries[@]}"; do
         # Split type[;arg] -- ';' is the cmdline-safe arg separator.
         nic_type="${entry%%;*}"

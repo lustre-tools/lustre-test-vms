@@ -521,7 +521,7 @@ def _uses_passthrough(names: list[str]) -> bool:
             nics = VMInfo.load(name).nics
         except Exception:
             continue
-        if any(n.split(":", 1)[0] == "passthrough" for n in nics):
+        if any(n.type == "passthrough" for n in nics):
             return True
     return False
 

@@ -20,6 +20,8 @@ from typing import Any
 from . import rootless, vm_claim
 from .deploy import configure_test_disks, premount_cleanup_script
 from .host_setup import is_macos
+from .nic_spec import NicSpec, NicSpecError
+from .nic_spec import numa_problem as nic_numa_problem
 from .paths import load_meta_safe
 from .priv import SudoUnavailable, chmod_regular, sudo_prime, sudo_run
 from .qemu_run import (
@@ -134,6 +136,7 @@ def _with_vm_stopped(
                 else:
                     provision_vm_ssh(vm, SSH_TIMEOUT)
                 _seed_kdump_boot(vm)
+                _check_nic_numa(vm)
                 print(f"started {vm.name}")
             except SystemExit as e:
                 if get_error is not None:
@@ -206,6 +209,50 @@ def _set_nmi_panic(vm: VMInfo) -> None:
     except Exception as e:  # noqa: BLE001 - best-effort step
         print(
             f"warning: could not set the NMI panic sysctls on '{vm.name}': {e}",
+            file=sys.stderr,
+        )
+
+
+def _check_nic_numa(vm: VMInfo) -> None:
+    """Warn when a NIC booted without the NUMA node its --nic asked for.
+
+    The guest's rc.local sets the node (fc_nic_numa=), and an image built
+    before that ignores the parameter, so the NIC stays on no node with
+    nothing else to show for it.  Best effort, like _seed_kdump_boot.
+    """
+    wanted = {
+        idx: nic.node
+        for idx, nic, _tap, _mac in vm.extra_nics()
+        if nic.node is not None
+    }
+    if not wanted:
+        return
+    probe = "; ".join(
+        f"echo eth{idx} $(cat /sys/class/net/eth{idx}/device/../numa_node "
+        f"2>/dev/null || echo missing)"
+        for idx in wanted
+    )
+    try:
+        r = run_ssh(vm.ip, probe, timeout=KDUMP_PROBE_TIMEOUT)
+    except Exception as e:  # noqa: BLE001 - best-effort check
+        print(
+            f"warning: could not check NIC NUMA nodes on '{vm.name}': {e}",
+            file=sys.stderr,
+        )
+        return
+    got = dict(
+        line.split(None, 1) for line in r.stdout.splitlines() if " " in line
+    )
+    wrong = [
+        f"eth{idx}: node {got.get(f'eth{idx}', 'unknown')}, wanted {node}"
+        for idx, node in wanted.items()
+        if got.get(f"eth{idx}", "").strip() != str(node)
+    ]
+    if wrong:
+        print(
+            f"warning: {vm.name}: NIC NUMA nodes not applied "
+            f"({'; '.join(wrong)}).  An image built before fc_nic_numa "
+            f"ignores --nic node=; rebuild it with `ltvm build image`.",
             file=sys.stderr,
         )
 
@@ -463,84 +510,16 @@ def _check_root_size_fits(root_size: int, image: str) -> None:
 _VM_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
-# Accepted --nic types.  `tcp` is fully wired in this feature; the
-# `softroce` and `passthrough` types are recognised syntactically so
-# follow-up issues (lustre_test_vms_v2-r55, -5a0) don't have to re-plumb
-# the CLI parser, but they are rejected at validation time with a
-# pointer at the tracking issue.  Downstream code (launch_qemu,
-# rc.local, etc.) must only see `tcp` values from this list until those
-# issues land.
-_NIC_TYPES_IMPLEMENTED = ("tcp", "softroce", "passthrough")
-_NIC_TYPES_RESERVED: dict[str, str] = {}
-_NIC_TYPES_ALL = _NIC_TYPES_IMPLEMENTED + tuple(_NIC_TYPES_RESERVED)
+def parse_nics(raw_nics: list[str]) -> list[NicSpec]:
+    """Parse every ``--nic`` value, or die naming the first bad one.
 
-
-def parse_nic_spec(raw: str) -> tuple[str, str]:
-    """Parse ``--nic <type>[:<arg>]`` into ``(type, arg)``.
-
-    Raises ``SystemExit`` (via ``die()``) for unknown types.  Does NOT
-    reject the reserved types (softroce / passthrough) -- callers that
-    only support implemented types must reject them themselves so the
-    error can cite where the work will land (see ``validate_nic_spec``).
-
-    Returning ``(type, arg)`` keeps the reserved arg available for
-    future backends -- passthrough needs the BDF string, softroce may
-    take a device hint later.  ``arg`` is the empty string when no
-    ``:<arg>`` was given.
+    Syntax only (``nic_spec.NicSpec.parse``); whether a passthrough
+    device exists is checked in ``_validate_create_bounds``.
     """
-    if not raw:
-        die("--nic value is empty")
-    parts = raw.split(":", 1)
-    nic_type = parts[0].strip().lower()
-    nic_arg = parts[1] if len(parts) > 1 else ""
-    if nic_type not in _NIC_TYPES_ALL:
-        valid = ", ".join(_NIC_TYPES_ALL)
-        die(f"unknown --nic type {nic_type!r}: valid types are: {valid}")
-    return nic_type, nic_arg
-
-
-_BDF_RE = re.compile(
-    r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F]$"
-)
-
-
-def validate_nic_spec(raw: str) -> str:
-    """Validate a ``--nic`` spec and return the normalised type string.
-
-    Reserved types raise ``SystemExit`` with a pointer at the tracking
-    issue.  Implemented types round-trip through the canonical form
-    (lowercased, arg preserved for types that need it).  The returned
-    string is what gets stored in ``VMInfo.nics`` and threaded onto the
-    kernel cmdline as ``fc_nics=<csv>``.
-
-    ``passthrough`` requires a PCIe BDF arg (``domain:bus:device.function``,
-    e.g. ``0000:85:00.1``).  We syntax-check the BDF here; whether the
-    device actually exists / is bindable is checked at create time in
-    ``cmd_create`` so errors surface before VM state is written.
-    """
-    nic_type, nic_arg = parse_nic_spec(raw)
-    if nic_type in _NIC_TYPES_RESERVED:
-        issue = _NIC_TYPES_RESERVED[nic_type]
-        die(
-            f"--nic {nic_type!r} is not supported yet; that backend "
-            f"lands in {issue}. For this issue use --nic tcp."
-        )
-    if nic_type == "passthrough":
-        if not nic_arg:
-            die(
-                "--nic passthrough requires a PCIe BDF arg, "
-                "e.g. --nic passthrough:0000:85:00.1"
-            )
-        if not _BDF_RE.match(nic_arg):
-            die(
-                f"--nic passthrough arg {nic_arg!r} is not a valid "
-                f"PCIe BDF (expected domain:bus:device.function like "
-                f"0000:85:00.1)"
-            )
-    # Implemented types: fold back to canonical storage form.
-    if nic_arg:
-        return f"{nic_type}:{nic_arg}"
-    return nic_type
+    try:
+        return [NicSpec.parse(raw) for raw in raw_nics]
+    except NicSpecError as e:
+        die(str(e))
 
 
 def _validate_vm_name(name: str) -> None:
@@ -741,6 +720,7 @@ def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
     launch_qemu(vm, wait_seconds=getattr(args, "wait", 0))
     provision_vm_ssh(vm, SSH_TIMEOUT)
     _seed_kdump_boot(vm)
+    _check_nic_numa(vm)
     if args.json:
         print(
             json.dumps(
@@ -778,7 +758,7 @@ def _allocate_and_persist_vm(
     os_id: str,
     base_name: str,
     variant: str,
-    extra_nic_types: list[str],
+    extra_nic_types: list[NicSpec],
     disk_size: int,
     root_size: int,
 ) -> VMInfo:
@@ -912,7 +892,7 @@ def _print_create_plan(
     kver: str,
     os_target: str,
     variant: str,
-    extra_nic_types: list[str],
+    extra_nic_types: list[NicSpec],
     disk_size: int,
     root_size: int,
 ) -> None:
@@ -938,7 +918,7 @@ def _print_create_plan(
         "ip": getattr(args, "ip", None),
         "tap": tap,
         "mac": mac,
-        "extra_nics": list(extra_nic_types),
+        "extra_nics": [str(n) for n in extra_nic_types],
         "kernel_args": getattr(args, "kernel_args", ""),
         "numa_nodes": getattr(args, "numa_nodes", 0) or 0,
         "share_disks": bool(getattr(args, "share_disks", False)),
@@ -984,7 +964,10 @@ def _print_create_plan(
     print(f"  ip:      {getattr(args, 'ip', None) or 'next free (auto)'}")
     print(f"  tap/mac: {tap} / {mac}")
     if extra_nic_types:
-        print(f"  nics:    eth0 (mgmt) + {', '.join(extra_nic_types)}")
+        print(
+            f"  nics:    eth0 (mgmt) + "
+            f"{', '.join(str(n) for n in extra_nic_types)}"
+        )
     if getattr(args, "kernel_args", ""):
         print(f"  cmdline: + {args.kernel_args}")
     print(f"  owner:   {getattr(args, 'owner_id', None)}")
@@ -1005,7 +988,7 @@ def os_arch_of(image: str) -> str | None:
 
 
 def _resolve_os_and_kernel(
-    args: argparse.Namespace, extra_nic_types: list[str] | None = None
+    args: argparse.Namespace, extra_nic_types: list[NicSpec] | None = None
 ) -> tuple:
     """Resolve the OS target + kernel + image for create, and read
     the kernel version from meta.json.  Mutates args.mem to the
@@ -1056,7 +1039,9 @@ def _resolve_os_and_kernel(
             else "no data disks"
         )
         nic_desc = (
-            f" nics={','.join(extra_nic_types)}" if extra_nic_types else ""
+            f" nics={','.join(str(n) for n in extra_nic_types)}"
+            if extra_nic_types
+            else ""
         )
         image_meta = load_meta_safe(Path(os_arts.image).parent / "meta.json")
         lver = (image_meta or {}).get("lustre_version")
@@ -1081,7 +1066,7 @@ def _resolve_os_and_kernel(
 
 def _validate_create_bounds(
     args: argparse.Namespace,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[NicSpec], list[str]]:
     """Validate bounds/specs that must die() before any on-disk VM
     state is touched.  Returns (extra_nic_types, passthrough_bdfs).
     """
@@ -1107,20 +1092,19 @@ def _validate_create_bounds(
 
     # Parse + validate any extra NICs.  The mgmt NIC (eth0) is always
     # created; --nic adds NICs on top of it.  Invalid specs die() now
-    # so we don't half-create the VM.  validate_nic_spec rejects
-    # softroce/passthrough with a pointer at the follow-up issues.
-    raw_nics = getattr(args, "nic", None) or []
-    extra_nic_types = [validate_nic_spec(n) for n in raw_nics]
+    # so we don't half-create the VM.
+    extra_nic_types = parse_nics(getattr(args, "nic", None) or [])
+    problem = nic_numa_problem(
+        extra_nic_types, getattr(args, "numa_nodes", 0) or 0
+    )
+    if problem:
+        die(problem)
 
     # Passthrough NICs: pre-flight checks (no side effects) so a bad
     # spec or a missing IOMMU fails before we touch VM state on disk.
     # The actual vfio bind happens later in the launch block, inside
     # the rollback umbrella so a failed create rebinds the device.
-    passthrough_bdfs = [
-        spec.split(":", 1)[1]
-        for spec in extra_nic_types
-        if spec.startswith("passthrough:")
-    ]
+    passthrough_bdfs = [n.bdf for n in extra_nic_types if n.bdf]
     if passthrough_bdfs:
         from ltvm_pkg import vfio as _vfio
 
@@ -1493,6 +1477,7 @@ def _launch_and_wait(
     launch_qemu(vm, wait_seconds=wait_seconds)
     provision_vm_ssh(vm, SSH_TIMEOUT)
     _seed_kdump_boot(vm)
+    _check_nic_numa(vm)
 
 
 def _rollback_launch_failure(vm: VMInfo) -> None:
@@ -1755,6 +1740,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         # was interrupted (so cmd_start recovers a half-set-up VM).
         provision_vm_ssh(vm, SSH_TIMEOUT, register_before_wait=True)
         _seed_kdump_boot(vm)
+        _check_nic_numa(vm)
         print(f"started {name}")
 
 
@@ -3229,7 +3215,9 @@ def cmd_set(args: argparse.Namespace) -> None:
             f"disk cache {vm.disk_cache or 'default'} -> {cache or 'default'}"
         )
         vm.disk_cache = cache
-    problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes)
+    problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes) or (
+        nic_numa_problem(vm.nics, vm.numa_nodes)
+    )
     if problem:
         die(problem)
     if not changes:
@@ -3865,7 +3853,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 if not is_running(vm):
                     continue
                 live_taps.add(vm.tap)
-                for _idx, _nic_type, _tap, _mac in vm.extra_nics():
+                for _idx, _nic, _tap, _mac in vm.extra_nics():
                     live_taps.add(_tap)
             for line in r.stdout.splitlines():
                 m = re.search(r":\s*(tap-\S+?)[@:]", line)

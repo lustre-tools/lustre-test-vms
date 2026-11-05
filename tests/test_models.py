@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from ltvm_pkg.nic_spec import NicSpec
 from ltvm_pkg.vm_state import ROOT_SIZE_BYTES, VMInfo, VMNotFound
 
 
@@ -162,11 +163,11 @@ class TestVMInfoNicsField:
         vm = VMInfo(
             name="twonic",
             ip="192.168.100.51",
-            nics=["tcp", "tcp"],
+            nics=[NicSpec.parse("tcp"), NicSpec.parse("tcp")],
         )
         vm.save()
         loaded = VMInfo.load("twonic")
-        assert loaded.nics == ["tcp", "tcp"]
+        assert loaded.nics == [NicSpec.parse("tcp"), NicSpec.parse("tcp")]
 
     def test_nics_with_colon_arg_round_trip(self, tmp_sockets: Path) -> None:
         """NICs whose storage string has ':' (e.g. passthrough) survive.
@@ -180,11 +181,17 @@ class TestVMInfoNicsField:
         vm = VMInfo(
             name="vfio",
             ip="192.168.100.52",
-            nics=["tcp", "passthrough:0000:00:02.0"],
+            nics=[
+                NicSpec.parse("tcp"),
+                NicSpec.parse("passthrough:0000:00:02.0"),
+            ],
         )
         vm.save()
         loaded = VMInfo.load("vfio")
-        assert loaded.nics == ["tcp", "passthrough:0000:00:02.0"]
+        assert loaded.nics == [
+            NicSpec.parse("tcp"),
+            NicSpec.parse("passthrough:0000:00:02.0"),
+        ]
 
     def test_legacy_info_file_without_nics_line(
         self, tmp_sockets: Path
@@ -231,14 +238,14 @@ class TestVMInfoNicsField:
         vm = VMInfo(
             name="co1-two",
             ip="192.168.100.93",
-            nics=["tcp", "tcp"],
+            nics=[NicSpec.parse("tcp"), NicSpec.parse("tcp")],
         )
         entries = vm.extra_nics()
         assert len(entries) == 2
         (i1, t1, tap1, mac1), (i2, t2, tap2, mac2) = entries
         # Index, type
-        assert (i1, t1) == (1, "tcp")
-        assert (i2, t2) == (2, "tcp")
+        assert (i1, t1) == (1, NicSpec("tcp"))
+        assert (i2, t2) == (2, NicSpec("tcp"))
         # Deterministic TAP names tied to the VM name
         assert tap1.startswith("tap-")
         assert tap1.endswith("-1")
@@ -295,7 +302,7 @@ class TestVMInfoNicIp6sField:
         vm = VMInfo(
             name="rails6",
             ip="192.168.100.60",
-            nics=["softroce", "softroce"],
+            nics=[NicSpec.parse("softroce"), NicSpec.parse("softroce")],
             nic_ips=["172.16.100.60", "172.16.100.61"],
             nic_ip6s=[
                 "fd17:2016:1000:f100:f172:f016:f100:f060",
@@ -453,7 +460,7 @@ class TestVMInfoNicIpsField:
         vm = VMInfo(
             name="rails",
             ip="192.168.100.60",
-            nics=["softroce", "softroce"],
+            nics=[NicSpec.parse("softroce"), NicSpec.parse("softroce")],
             nic_ips=["172.16.100.60", "172.16.100.61"],
         )
         vm.save()
@@ -487,7 +494,7 @@ class TestVMInfoNicIpsField:
             "NICS=tcp\n"
         )
         vm = VMInfo.load("old")
-        assert vm.nics == ["tcp"]
+        assert vm.nics == [NicSpec.parse("tcp")]
         assert vm.nic_ips == []
 
     def test_legacy_info_file_with_mgmt_subnet_nic_ips(

@@ -1493,14 +1493,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--nic",
         action="append",
         default=None,
-        metavar="TYPE[:ARG]",
+        metavar="TYPE[:KEY=VALUE,...]",
         help=(
             "Add an extra NIC beyond the mgmt NIC (eth0).  Repeat for "
             "multiple.  Types: 'tcp' (plain virtio-net), 'softroce' "
             "(virtio-net with rdma_rxe brought up on it at boot, for "
             "o2iblnd without RDMA hardware), and 'passthrough:<BDF>' "
             "(bind a PCI device to vfio-pci and hand it to the guest; "
-            "needs a host IOMMU)."
+            "needs a host IOMMU).  Options follow the ':' as "
+            "comma-separated key=value pairs; passthrough's BDF may "
+            "omit its 'bdf=' key.  node=N (tcp, softroce) puts the NIC "
+            "on guest NUMA node N of --numa-nodes, e.g. --nic tcp:node=1."
         ),
     )
     _vm_create_args.add_argument(
@@ -2354,9 +2357,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--nic",
         action="append",
         default=None,
-        metavar="TYPE[:ARG]",
+        metavar="TYPE[:KEY=VALUE,...]",
         help="Extra NIC applied to every node; repeat for multiple. "
-        "Same types as `ltvm create --nic`.",
+        "Same syntax as `ltvm create --nic`.",
     )
     ccp.add_argument(
         "--numa-nodes",
