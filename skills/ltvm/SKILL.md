@@ -190,6 +190,19 @@ auto-tunes `conns_per_peer` to 4 as on a real 100G node rather than the
 `--eth0-speed MBPS` change it; `0` or `none` advertises nothing, which
 is what upstream CI's VMs do (sanity-lnet test_291 expects that).
 
+`--nic` also sets each extra NIC's LNet network and subnets. `net=`
+groups NICs on one LNet network, and `subnet=` and `subnet6=` pick their
+IP networks. All NICs stay on the one bridge, so the rails are not
+isolated at L2. `cluster create` gives every node the same list. `net=`
+needs an image built after the option was added, and `create` fails when
+the layout did not take:
+
+```bash
+ltvm create co1-rails --nic tcp:net=tcp0,subnet=192.0.2.0/24 \
+    --nic tcp:net=tcp0,subnet=198.51.100.0/24
+ssh co1-rails cat /etc/modprobe.d/lnet.conf   # tcp0(eth1,eth2)
+```
+
 `--kernel-args` adds kernel boot parameters, also fixed at create time.
 The target kernels have no KASAN, but they build in SLUB debugging (and
 the Rocky ones page owner tracking), off until booted with them:

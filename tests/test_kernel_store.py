@@ -275,7 +275,7 @@ class TestCreateRecordsIt:
 
         @contextmanager
         def fake_alloc(
-            name: str, count: int = 1, explicit_ip: Any = None
+            name: str, count: int = 1, explicit_ip: Any = None, nics: Any = ()
         ) -> Iterator[list[str]]:
             yield ["192.168.100.5"]
 

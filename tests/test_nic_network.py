@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import ipaddress
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
-from ltvm_pkg import nic_allocation, vm_net, vm_state
+from ltvm_pkg import vm_net, vm_state
 from ltvm_pkg.nic_network import (
     MAX_POOL_ADDRESSES,
     network_problem,
@@ -26,11 +28,20 @@ def address_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(vm_state, "SUBNET", "198.51.100")
     monkeypatch.setattr(vm_state, "EXTRA_SUBNET", "192.0.2")
     monkeypatch.setattr(vm_state, "EXTRA_SUBNET6", "2001:db8:10:1")
-    monkeypatch.setattr(nic_allocation, "EXTRA_SUBNET6", "2001:db8:10:1")
+    monkeypatch.setattr(vm_net, "EXTRA_SUBNET6", "2001:db8:10:1")
     monkeypatch.setattr(vm_state, "VM_DIR", tmp_path)
     monkeypatch.setattr(vm_state, "SOCKETS", sockets)
     monkeypatch.setattr(vm_net, "_IP_LOCK_PATH", tmp_path / ".ip-alloc.lock")
     return sockets
+
+
+@contextmanager
+def _alloc(
+    name: str, nics: list[NicSpec], explicit_ip: str | None = None
+) -> Iterator[tuple[list[str], list[str]]]:
+    """Allocate both families the way create does, under one lock."""
+    with vm_net.alloc_ip(name, 1 + len(nics), explicit_ip, nics) as ips:
+        yield ips, vm_net.nic_ip6s(name, nics, ips[1:])
 
 
 @pytest.mark.parametrize(
@@ -132,7 +143,7 @@ def test_implicit_addresses_keep_old_values(address_state: Path) -> None:
     """Extended allocation preserves old IPv4 and derived IPv6 defaults."""
     with vm_net.alloc_ip("same", count=3) as old:
         expected = old.copy()
-    with vm_net.alloc_vm_addresses("same", [NicSpec("tcp")] * 2) as (ips, ip6s):
+    with _alloc("same", [NicSpec("tcp")] * 2) as (ips, ip6s):
         assert ips == expected
         assert ip6s == [vm_state.nic_ip6(ip) for ip in ips[1:]]
 
@@ -147,7 +158,7 @@ def test_explicit_addresses_are_saved_and_reload(address_state: Path) -> None:
             "tcp:net=tcp0,subnet=203.0.113.128/25,subnet6=2001:db8:2::/64"
         ),
     ]
-    with vm_net.alloc_vm_addresses("one", nics, "198.51.100.100") as (
+    with _alloc("one", nics, "198.51.100.100") as (
         ips,
         ip6s,
     ):
@@ -164,19 +175,24 @@ def test_explicit_addresses_are_saved_and_reload(address_state: Path) -> None:
         )
 
 
-def test_small_pool_exhaustion_releases_lock(address_state: Path) -> None:
+def test_small_pool_exhaustion_releases_lock(
+    address_state: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Failed reservation saves nothing and a later allocation can proceed."""
     nic = NicSpec.parse("tcp:subnet=203.0.113.0/30,subnet6=2001:db8:1::/126")
-    with pytest.raises(ValueError, match="no free IP addresses"):
-        with vm_net.alloc_vm_addresses("full", [nic] * 3):
+    with pytest.raises(SystemExit):
+        with _alloc("full", [nic] * 3):
             pytest.fail("three data NICs cannot fit two IPv4 host addresses")
+    assert "no free IP addresses" in capsys.readouterr().err
     assert not list(address_state.iterdir())
-    with vm_net.alloc_vm_addresses("later", [nic] * 2) as (ips, ip6s):
+    with _alloc("later", [nic] * 2) as (ips, ip6s):
         assert len(set(ips[1:])) == len(set(ip6s)) == 2
         assert set(ips[1:]) == {"203.0.113.1", "203.0.113.2"}
 
 
-def test_peer_overlapping_subnet_is_rejected(address_state: Path) -> None:
+def test_peer_overlapping_subnet_is_rejected(
+    address_state: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Existing allocations participate in the subnet overlap check."""
     VMInfo(
         name="peer",
@@ -184,11 +200,27 @@ def test_peer_overlapping_subnet_is_rejected(address_state: Path) -> None:
         nics=[NicSpec.parse("tcp:subnet=203.0.113.0/24")],
         nic_ips=["203.0.113.11"],
     ).save()
-    with pytest.raises(ValueError, match="overlap"):
-        with vm_net.alloc_vm_addresses(
-            "new", [NicSpec.parse("tcp:subnet=203.0.113.0/25")]
-        ):
+    with pytest.raises(SystemExit):
+        with _alloc("new", [NicSpec.parse("tcp:subnet=203.0.113.0/25")]):
             pytest.fail("overlap must fail before yielding")
+    assert "overlap" in capsys.readouterr().err
+
+
+def test_corrupt_peer_stops_only_subnet_creates(address_state: Path) -> None:
+    """A damaged peer stops a subnet create, not a plain create."""
+    VMInfo(
+        name="peer",
+        ip="198.51.100.10",
+        nics=[NicSpec("tcp")],
+        nic_ips=["192.0.2.11"],
+        nic_ip6s=["fd17:2016:1"],
+    ).save()
+    with _alloc("plain", [NicSpec("tcp")]) as (ips, ip6s):
+        assert ip6s == [vm_state.nic_ip6(ips[1])]
+    nic = NicSpec.parse("tcp:subnet6=2001:db8:1::/64")
+    with pytest.raises(SystemExit):
+        with _alloc("explicit", [nic]):
+            pytest.fail("a subnet create must not ignore a corrupt peer")
 
 
 def test_parallel_creates_reserve_both_families(address_state: Path) -> None:
@@ -200,7 +232,7 @@ def test_parallel_creates_reserve_both_families(address_state: Path) -> None:
     def create(index: int) -> tuple[list[str], list[str]]:
         """Persist the reservation before another creator can proceed."""
         name = f"parallel-{index}"
-        with vm_net.alloc_vm_addresses(name, [nic, nic]) as (ips, ip6s):
+        with _alloc(name, [nic, nic]) as (ips, ip6s):
             VMInfo(
                 name=name,
                 ip=ips[0],
