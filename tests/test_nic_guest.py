@@ -82,10 +82,7 @@ def test_grouped_network_allows_operator_options(body: str) -> None:
         nic_guest.check_layout(vm)
     ssh.assert_called_once_with(
         "203.0.113.50",
-        "ltvm_conf_bytes=$(stat -Lc %s -- /etc/modprobe.d/lnet.conf) && "
-        'if [ "$ltvm_conf_bytes" -le 65536 ]; then '
-        "head -c 65537 -- /etc/modprobe.d/lnet.conf; "
-        "else printf 'LNet configuration exceeds 64 KiB\\n' >&2; exit 1; fi",
+        "cat /etc/modprobe.d/lnet.conf",
         timeout=30,
         retry_connect=False,
     )
@@ -146,8 +143,7 @@ def test_requested_dual_stack_addresses_and_prefixes(distinct: bool) -> None:
     assert ssh.call_args_list == [
         call(
             vm.ip,
-            "bash -o pipefail -c "
-            f"'ip -j address show dev eth{index} | head -c 65537'",
+            f"ip -j address show dev eth{index}",
             timeout=30,
             retry_connect=False,
         )
@@ -209,11 +205,11 @@ def test_missing_saved_address_fails_with_checked_error(family: int) -> None:
 
 
 @pytest.mark.parametrize("spec", ["tcp:net=tcp0", "tcp:subnet=192.0.2.0/27"])
-@pytest.mark.parametrize("status,body", [(255, ""), (0, "x" * 65537)])
-def test_unreadable_or_oversized_guest_state_fails(
+@pytest.mark.parametrize("status,body", [(255, ""), (0, "x")])
+def test_unreadable_guest_state_fails(
     spec: str, status: int, body: str
 ) -> None:
-    """Transport failure and a truncated oversized read cannot pass checks."""
+    """Transport failure and garbage output cannot pass checks."""
     with (
         patch.object(nic_guest, "run_ssh", return_value=_reply(body, status)),
         pytest.raises(ValueError),

@@ -514,8 +514,8 @@ def nic_ip6(ipv4: str) -> str:
     64, versus 19 for the longest IPv4 NID.
 
     The encoding is injective in the whole IPv4 address, so uniqueness
-    is inherited from the IPv4 allocator -- there is deliberately no
-    second allocator and no second uniqueness rule.
+    is inherited from the IPv4 allocator.  Only a NIC with subnet6= has
+    another address (vm_net.nic_ip6s).
     """
     octets = ipv4.split(".")
     if len(octets) != 4:
@@ -527,7 +527,7 @@ def subnet_for_nic(idx: int) -> str:
     """Return the /24 prefix NIC *idx* is addressed from.
 
     Index 0 is the mgmt NIC (eth0); 1..N are the extras (eth1..ethN),
-    which all share EXTRA_SUBNET.
+    which share EXTRA_SUBNET unless --nic gives subnet=.
     """
     if idx == 0:
         return SUBNET

@@ -210,12 +210,8 @@ class TestClusterCreate:
         """A layout error must not create a partial cluster."""
         with (
             patch(
-                "ltvm_pkg.nic_allocation._data_defaults",
-                return_value=(
-                    "203.0.113.0/24",
-                    "192.0.2.0/24",
-                    "2001:db8::/64",
-                ),
+                "ltvm_pkg.vm_net.subnet_for_nic",
+                side_effect=lambda idx: "192.0.2" if idx else "203.0.113",
             ),
             patch.object(vm_cluster, "_create_one_node") as create,
             pytest.raises(SystemExit),

@@ -12,23 +12,17 @@ from ipaddress import ip_network
 from .vm_net import run_ssh
 from .vm_state import VMInfo
 
-_MAX_CONFIG = 65536
-_CONFIG_READ = (
-    "ltvm_conf_bytes=$(stat -Lc %s -- /etc/modprobe.d/lnet.conf) && "
-    f'if [ "$ltvm_conf_bytes" -le {_MAX_CONFIG} ]; then '
-    f"head -c {_MAX_CONFIG + 1} -- /etc/modprobe.d/lnet.conf; "
-    "else printf 'LNet configuration exceeds 64 KiB\\n' >&2; exit 1; fi"
-)
+LAYOUT_WAIT = 30
+_CONFIG_READ = "cat /etc/modprobe.d/lnet.conf"
 _NETWORK = re.compile(
     r"(tcp(?:\d+)?|o2ib(?:\d+)?)\s*\(([^()]*)\)\s*(?:\[[^\[\]]*\])?"
 )
 
 
-def _read(vm: VMInfo, command: str, deadline: float | None = None) -> str:
-    """Use the existing SSH transport; no remote file API is available."""
+def _read(vm: VMInfo, command: str, deadline: float | None) -> str:
+    """Run one guest command; all commands share one startup deadline."""
     timeout = 30
     if deadline is not None:
-        # Every request shares one monotonic startup deadline.
         remaining = deadline - time.monotonic()
         if remaining < 1:
             raise TimeoutError(f"{vm.name}: timed out waiting for NIC setup")
@@ -39,14 +33,7 @@ def _read(vm: VMInfo, command: str, deadline: float | None = None) -> str:
         raise ValueError(
             f"cannot read NIC configuration on {vm.name}: {result.stderr.strip()}"
         )
-    body = result.stdout
-    if not isinstance(body, str):
-        raise ValueError(
-            f"cannot read NIC configuration on {vm.name}: no text output"
-        )
-    if len(body.encode("utf-8")) > _MAX_CONFIG:
-        raise ValueError(f"NIC configuration on {vm.name} exceeds 64 KiB")
-    return body
+    return str(result.stdout)
 
 
 def _interfaces(value: str) -> set[str]:
@@ -99,9 +86,7 @@ def _check_networks(vm: VMInfo, deadline: float | None = None) -> None:
             wanted.setdefault(nic.net, set()).add(f"eth{index}")
     if not wanted:
         return
-    # stat follows symlinks and checks bytes before text capture can fold CRLF.
-    body = _read(vm, _CONFIG_READ, deadline)
-    got = _members(body)
+    got = _members(_read(vm, _CONFIG_READ, deadline))
     for net, interfaces in wanted.items():
         if got.get(net) != interfaces:
             raise ValueError(
@@ -116,37 +101,19 @@ def _check_addresses(vm: VMInfo, deadline: float | None = None) -> None:
     for index, nic in enumerate(vm.nics):
         if not (nic.subnet or nic.subnet6):
             continue
-        # iproute2 reads netlink state that procfs/sysfs do not expose.
-        probe = (
-            f"ip -j address show dev eth{index + 1} | head -c {_MAX_CONFIG + 1}"
+        entries = json.loads(
+            _read(vm, f"ip -j address show dev eth{index + 1}", deadline)
         )
-        # Keep JSON reads bounded and preserve an iproute2 failure status.
-        command = "bash -o pipefail -c " + shlex.quote(probe)
-        body = _read(vm, command, deadline)
-        entries = json.loads(body)
-        if (
-            not isinstance(entries, list)
-            or len(entries) != 1
-            or not isinstance(entries[0], dict)
-            or not isinstance(entries[0].get("addr_info"), list)
-            or not all(
-                isinstance(item, dict) for item in entries[0]["addr_info"]
-            )
-        ):
-            raise ValueError(f"{vm.name}: cannot read eth{index + 1} addresses")
-        if not all(
-            isinstance(item.get("local"), str)
-            and type(item.get("prefixlen")) is int
-            for item in entries[0]["addr_info"]
-        ):
-            # Reject malformed tool output before building a hashable set.
+        try:
+            actual = {
+                (item.get("local"), item.get("prefixlen"))
+                for entry in entries
+                for item in entry.get("addr_info", [])
+            }
+        except (AttributeError, TypeError):
             raise ValueError(
-                f"{vm.name}: invalid eth{index + 1} address record"
-            )
-        actual = {
-            (entry.get("local"), entry.get("prefixlen"))
-            for entry in entries[0].get("addr_info", [])
-        }
+                f"{vm.name}: cannot read eth{index + 1} addresses"
+            ) from None
         for subnet, addresses in (
             (nic.subnet, vm.nic_ips),
             (nic.subnet6, vm.nic_ip6s),
@@ -171,24 +138,21 @@ def check_layout(vm: VMInfo, *, deadline: float | None = None) -> None:
     _check_addresses(vm, deadline)
 
 
-def wait_for_layout(vm: VMInfo, timeout: int = 30) -> None:
+def wait_for_layout(vm: VMInfo, timeout: int = LAYOUT_WAIT) -> None:
     """Wait for data setup after SSH is ready; never accept a partial layout."""
-    if type(timeout) is not int or not 1 <= timeout <= 30:
-        raise ValueError("NIC setup timeout must be 1..30 seconds")
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
-    for attempt in range(61):
+    while True:
         try:
             check_layout(vm, deadline=deadline)
             return
         except (OSError, ValueError, subprocess.TimeoutExpired) as error:
             if isinstance(error, TimeoutError) and last_error is not None:
-                # Keep the useful state error when the shared time budget ends.
+                # Keep the useful state error when the time budget ends.
                 raise last_error from None
             last_error = error
             remaining = deadline - time.monotonic()
-            if remaining <= 1 or attempt == 60:
+            if remaining <= 1:
                 raise
             # Boot helpers can still be assigning addresses after SSH starts.
             time.sleep(min(0.5, remaining))
-    raise TimeoutError(f"{vm.name}: timed out waiting for NIC setup")

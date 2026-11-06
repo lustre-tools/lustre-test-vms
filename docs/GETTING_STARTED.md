@@ -312,6 +312,8 @@ Use this ltvm version or newer to start VMs saved with these options.
 Use an image with the updated LNet setup helper for `net=`.
 Rebuild the image or fetch a release that includes that helper.
 An older helper cannot group interfaces on a named LNet network.
+`create` and `start` fail when the guest did not apply `net=` or a
+subnet.
 
 
 ## Advanced Flow: Interactive Container Shell
