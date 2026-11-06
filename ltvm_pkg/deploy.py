@@ -19,6 +19,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import vm_claim
 from .paths import read_modinfo_field
 from .vm_net import (
     SSH_CONNECT_RETRY_DELAYS,
@@ -282,18 +283,19 @@ def deploy_to_vm(
     Raises RuntimeError on failure.
     """
     try:
-        _deploy_to_vm(
-            vm,
-            staging,
-            os_family=os_family,
-            userspace_only=userspace_only,
-            ram_osts=ram_osts,
-            ram_ost_size_gb=ram_ost_size_gb,
-            ram_mdt=ram_mdt,
-            zfs_staging=zfs_staging,
-            fstype=fstype,
-            ost_count=ost_count,
-        )
+        with vm_claim.deploy_lock(vm.name):
+            _deploy_to_vm(
+                vm,
+                staging,
+                os_family=os_family,
+                userspace_only=userspace_only,
+                ram_osts=ram_osts,
+                ram_ost_size_gb=ram_ost_size_gb,
+                ram_mdt=ram_mdt,
+                zfs_staging=zfs_staging,
+                fstype=fstype,
+                ost_count=ost_count,
+            )
     except subprocess.TimeoutExpired as e:
         raise RuntimeError(
             f"deploy to {vm.name}: {e}; {timeout_hint()}"
