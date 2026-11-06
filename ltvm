@@ -551,6 +551,33 @@ def _update_check_disabled(args: argparse.Namespace) -> bool:
     return os.environ.get("LTVM_NO_UPDATE", "") not in ("", "0")
 
 
+def _add_numa_dist_args(p: argparse.ArgumentParser, where: str) -> None:
+    """--numa-dist and --numa-dist-file, one or the other."""
+    g = p.add_mutually_exclusive_group()
+    g.add_argument(
+        "--numa-dist",
+        dest="numa_dist",
+        default=None,
+        metavar="MATRIX",
+        help=(
+            f"NUMA distance table {where}, rows split by ';' and values "
+            "by ',', e.g. '10,15,17;15,10,15;17,15,10': N x N for "
+            "--numa-nodes N, 10 on the diagonal, 11-255 elsewhere, may "
+            "be asymmetric.  Default: QEMU's 10 local, 20 remote."
+        ),
+    )
+    g.add_argument(
+        "--numa-dist-file",
+        dest="numa_dist_file",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Read the distance table from FILE, which holds the output "
+            "of `numactl -H` (or only its 'node distances:' block)."
+        ),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     # Common flags accepted by all subcommands
     common = argparse.ArgumentParser(add_help=False)
@@ -1519,6 +1546,7 @@ def build_parser() -> argparse.ArgumentParser:
             "changes it on a stopped VM."
         ),
     )
+    _add_numa_dist_args(_vm_create_args, "for --numa-nodes")
     _vm_create_args.add_argument(
         "--kernel-args",
         dest="kernel_args",
@@ -1825,7 +1853,7 @@ def build_parser() -> argparse.ArgumentParser:
     vsetp = vm_sub.add_parser(
         "set",
         parents=[common],
-        help="Change the vCPUs, memory, NUMA nodes or data disk cache of "
+        help="Change the vCPUs, memory, NUMA layout or data disk cache of "
         "a stopped VM (next start)",
     )
     _vsetp_name = vsetp.add_argument("name", help="VM name")
@@ -1842,6 +1870,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="New simulated NUMA node count (0 for none)",
     )
+    _add_numa_dist_args(vsetp, "('default' for QEMU's)")
     vsetp.add_argument(
         "--disk-cache",
         dest="disk_cache",
@@ -2370,6 +2399,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Simulated NUMA nodes on every node, as "
         "`ltvm create --numa-nodes`",
     )
+    _add_numa_dist_args(ccp, "for every node")
     ccp.add_argument(
         "--kernel-args",
         dest="kernel_args",

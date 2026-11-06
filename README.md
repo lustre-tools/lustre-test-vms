@@ -464,7 +464,7 @@ ltvm vm nmi           <name>    Inject NMI (panic + kdump)
 ltvm vm snapshot      <name>    Snapshot overlay disk
 ltvm vm restore       <name>    Restore to a snapshot
 ltvm vm set           <name>    Change --vcpus/--mem/--numa-nodes/
-                                --disk-cache of a stopped VM
+                                --numa-dist/--disk-cache of a stopped VM
 ```
 
 `vm` also answers for the top-level VM commands -- `create`, `destroy`,

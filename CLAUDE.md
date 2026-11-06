@@ -926,6 +926,23 @@ memory in 2 MB units, the last node taking the remainder so the backends
 sum to `-m`.  For Lustre CPT testing; works under KVM and HVF, x86_64 and
 aarch64.
 
+`--numa-dist MATRIX` or `--numa-dist-file FILE` (same three commands;
+`vm set --numa-dist default` drops it) is the distance table, `NUMA_DIST`
+in the `.info` in `numa_dist.format_matrix` form (`10,15;15,10`), and
+`smp_args` adds one `-numa dist,src=S,dst=D,val=V` for every
+off-diagonal entry.  All of them, because QEMU fills in only the reverse
+of a missing pair, which is wrong for an asymmetric table, and real ones
+are asymmetric.  The file is `numactl -H` output, or only its `node
+distances:` block (`numa_dist.parse_numactl`).  `numa_dist.problem`
+refuses a table that is not N x N, a diagonal other than 10, and an
+off-diagonal value outside 11-255: QEMU takes 10 there, but the guest
+kernel then drops the whole table and uses 10/20.  `vm set` with a new
+`--numa-nodes` refuses a stored table that no longer fits.  `cluster
+create` reads the file once and passes `--numa-dist=<table>` to each
+node.  VM-proven 2026-11-03 on aarch64 HVF: the six-node asymmetric
+table in `tests/fixtures/numa/numactl-6node.txt` comes back exactly from
+the guest's `numactl -H`.
+
 **Extra NICs:** `--nic TYPE[:key=value,...]` (`create`, `cluster
 create`) is parsed once, by `nic_spec.NicSpec.parse`, into a frozen
 `NicSpec`; `VMInfo.nics` holds those, and `NICS=` in the `.info` file
