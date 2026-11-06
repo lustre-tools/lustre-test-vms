@@ -267,6 +267,55 @@ host cannot run VMs unprivileged; `ltvm doctor` says which applies.
 VM names must include the checkout number: `co<N>-<role>`.
 
 
+## Advanced Flow: LNet NIC Layouts
+
+Use `-N/--nic` to set each data NIC's LNet network and IP subnets.
+The management NIC stays separate from LNet. Data NICs share
+the host's `fcbr0` bridge. Source routes keep traffic from a data
+NIC's address on that interface.
+
+For two NIs on one LNet network and one subnet:
+
+```bash
+ltvm create co1-client \
+    -N tcp:net=tcp0,subnet=192.0.2.0/24 \
+    --nic tcp:net=tcp0,subnet=192.0.2.0/24
+```
+
+For two NIs on one LNet network and distinct subnets:
+
+```bash
+ltvm create co1-client \
+    --nic tcp:net=tcp0,subnet=192.0.2.0/24 \
+    --nic tcp:net=tcp0,subnet=198.51.100.0/24
+```
+
+Both examples write `tcp0(eth1,eth2)` to `lnet.conf`.
+Choose different `net=` values to create separate LNet networks.
+For SoftRoCE, use `softroce:net=o2ib0,...`.
+
+`subnet6=2001:db8:1::/64` sets an IPv6 subnet on a data NIC.
+IPv4 remains configured. IPv6 needs a guest kernel and Lustre
+build that support it. TCP cluster deployment selects IPv6 NIDs
+with `--ip-family ipv6`.
+
+Identical subnets are allowed for multi-homed nodes. Distinct
+subnets must not overlap each other or the management subnet.
+Without `net=`, `subnet=` or `subnet6=`, existing defaults apply.
+`cluster create` accepts the same NIC values for every node.
+
+Explicit layouts support up to eight extra NICs. A configured subnet
+uses at most its first 65,534 host addresses. IPv4 network and broadcast
+addresses and the IPv6 subnet-router anycast address are excluded.
+Use this ltvm version or newer to start VMs saved with these options.
+
+Use an image with the updated LNet setup helper for `net=`.
+Rebuild the image or fetch a release that includes that helper.
+An older helper cannot group interfaces on a named LNet network.
+`create` and `start` fail when the guest did not apply `net=` or a
+subnet.
+
+
 ## Advanced Flow: Interactive Container Shell
 
 For debugging build issues:

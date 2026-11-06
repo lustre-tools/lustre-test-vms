@@ -60,8 +60,8 @@ ipv4_network() {
 
 # setup_nic_policy_route <ifname> <addr> <prefixlen> <idx>
 #
-# The extra NICs share one subnet, so the main table holds one
-# scope-link route per interface for the same prefix and the kernel
+# By default the extra NICs share one subnet, so the main table holds
+# one scope-link route per interface for the same prefix and the kernel
 # uses whichever came first for everything.  Give each interface its
 # own table, selected by source address, so a socket bound to this
 # NIC's address egresses on this NIC -- which is what LNet does for
@@ -95,7 +95,7 @@ setup_nic_policy_route() {
 
 # setup_nic_policy_route6 <ifname> <addr> <prefixlen> <idx>
 #
-# Same problem as the IPv4 twin: the extra NICs share one prefix on one
+# Same problem as the IPv4 twin: extra NICs can share one prefix on one
 # L2 domain, so the main table holds one connected route per interface
 # and the kernel uses whichever came first.  A per-interface table
 # selected by source address keeps an NI's traffic on its own rail.
@@ -171,9 +171,9 @@ set_nic_numa_node() {
 #
 if [ -n "${FC_NICS}" ]; then
     # Every NIC of every VM shares ONE L2 broadcast domain (the fcbr0
-    # bridge on Linux, a single socket_vmnet hub on macOS), and the
-    # extra NICs additionally share one subnet.  Both make ARP flux the
-    # default: an ARP request for eth2's address also reaches eth1, and
+    # bridge on Linux, a single socket_vmnet hub on macOS), and by
+    # default the extra NICs also share one subnet.  Both make ARP flux
+    # the default: an ARP request for eth2's address also reaches eth1, and
     # with arp_ignore=0 eth1 answers it with its own MAC, so the peer
     # sends everything to one rail.  Answer only for addresses owned by
     # the receiving interface, and source ARP from that interface's own
@@ -230,8 +230,8 @@ if [ -n "${FC_NICS}" ]; then
         if ip link show "${ifname}" >/dev/null 2>&1; then
             ip link set "${ifname}" up 2>/dev/null || true
             if [ -n "${nic_ip}" ]; then
-                # The extra NICs share one network, separate from
-                # mgmt, because LNet multi-rail wants several NIs on
+                # By default the extra NICs share one network,
+                # separate from mgmt, because LNet multi-rail wants several NIs on
                 # one LNet network.  No gateway: off-network traffic
                 # still leaves by the mgmt default route.
                 ip addr add "${nic_ip}/${nic_prefix}" dev "${ifname}" \

@@ -54,6 +54,18 @@ check "mixed tcp + o2ib" \
 	'eth0 eth1' \
 	"$(ifaces_of 'options lnet networks="tcp0(eth0),o2ib0(eth1)"')"
 
+check "grouped interfaces on one network" \
+	'eth1 eth2' \
+	"$(ifaces_of 'options lnet networks="tcp0(eth1,eth2)"')"
+
+check "CPT lists and whitespace preserve grouped interfaces" \
+	'eth1 eth2' \
+	"$(ifaces_of 'options lnet networks="tcp0(eth1[0,1], eth2[2])[0-2]"')"
+
+check "several grouped networks" \
+	'eth1 eth2 eth3 eth4' \
+	"$(ifaces_of 'options lnet networks="tcp0(eth1,eth2),o2ib0(eth3,eth4)"')"
+
 check "mgmt SSH-only (no eth0 entry)" \
 	'eth1 eth2' \
 	"$(ifaces_of 'options lnet networks="tcp0(eth1),o2ib0(eth2)"')"
@@ -75,6 +87,12 @@ check "no networks= line" \
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
+# Optional logging must not write to the host's real syslog during a unit test.
+mkdir "$tmp/bin"
+printf '#!/bin/sh\n# Keep optional test logging local.\nexit 0\n' > "$tmp/bin/logger"
+chmod 755 "$tmp/bin/logger"
+export PATH="$tmp/bin:$PATH"
+
 # Fake /proc/sys/net/ipv4/conf: eth0 and eth1 are netdevs, mlx5_0 is
 # not (an ibdev has no rp_filter knob).
 mkdir -p "$tmp/proc/eth0" "$tmp/proc/eth1" "$tmp/proc/all" "$tmp/proc/default"
@@ -91,7 +109,7 @@ run_uut() {
 conf="$tmp/lnet.conf"
 out="$tmp/sysctl.d/99-lustre-lnet-rp-filter.conf"
 
-printf '%s\n' 'options lnet networks="tcp0(eth0),tcp1(eth1)"' >"$conf"
+printf '%s\n' 'options lnet networks="tcp0(eth0,eth1)"' >"$conf"
 run_uut "$conf"
 check "e2e: both rails get a per-iface knob" \
 	'net.ipv4.conf.all.rp_filter = 0
@@ -135,6 +153,9 @@ fi
 got=$(printf '%s\n' 'options lnet networks="tcp0(eth0),tcp1(eth1)"' |
 	SYSCTL_CONF_DIR="$tmp/sysctl.d" "$UUT" --stdin | tr '\n' ' ' | sed 's/ $//')
 check "cli: --stdin prints the iface list" 'eth0 eth1' "$got"
+got=$(printf '%s\n' 'options lnet networks="tcp0(eth0,eth1)"' |
+	SYSCTL_CONF_DIR="$tmp/sysctl.d" "$UUT" -s | tr '\n' ' ' | sed 's/ $//')
+check "cli: -s prints grouped interfaces" 'eth0 eth1' "$got"
 if [[ -e $out ]]; then
 	fail=$((fail + 1))
 	printf 'FAIL %s\n' "--stdin should not write a drop-in"

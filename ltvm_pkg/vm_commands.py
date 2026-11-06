@@ -20,6 +20,7 @@ from typing import Any
 from . import rootless, vm_claim
 from .deploy import configure_test_disks, premount_cleanup_script
 from .host_setup import is_macos
+from .nic_guest import wait_for_layout as guest_nic_layout
 from .nic_spec import NicSpec, NicSpecError
 from .nic_spec import numa_problem as nic_numa_problem
 from .paths import load_meta_safe
@@ -38,6 +39,8 @@ from .vm_net import (
     alloc_ip,
     check_tap_collision,
     mac_for_name,
+    nic_ip6s,
+    nic_network_problem,
     provision_vm_ssh,
     register_ssh_name,
     run_ssh,
@@ -73,7 +76,6 @@ from .vm_state import (
     VMNotFound,
     drop_orphan_clusters,
     lustre_libdir,
-    nic_ip6,
     resolve_os_artifacts,
 )
 
@@ -94,6 +96,15 @@ def _handler_error(
     else:
         print(f"error: {msg}", file=sys.stderr)
     return code
+
+
+def check_layout(vm: VMInfo) -> None:
+    """Report a requested guest-layout failure once at the CLI boundary."""
+    try:
+        guest_nic_layout(vm)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        # Creation's existing rollback removes only the failed new VM.
+        die(str(exc))
 
 
 @contextmanager
@@ -135,6 +146,7 @@ def _with_vm_stopped(
                     provision_vm_ssh(vm, SSH_TIMEOUT, register_before_wait=True)
                 else:
                     provision_vm_ssh(vm, SSH_TIMEOUT)
+                check_layout(vm)
                 _seed_kdump_boot(vm)
                 _check_nic_numa(vm)
                 print(f"started {vm.name}")
@@ -702,6 +714,7 @@ def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
     _warn_ignored_resource_flags(vm, args)
     if is_running(vm):
         wait_for_ssh(vm.ip, SSH_TIMEOUT)
+        check_layout(vm)
         register_ssh_name(vm.name, vm.ip)
         if args.json:
             print(
@@ -719,6 +732,7 @@ def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
         return True
     launch_qemu(vm, wait_seconds=getattr(args, "wait", 0))
     provision_vm_ssh(vm, SSH_TIMEOUT)
+    check_layout(vm)
     _seed_kdump_boot(vm)
     _check_nic_numa(vm)
     if args.json:
@@ -772,11 +786,11 @@ def _allocate_and_persist_vm(
     # lock so that concurrent creates cannot race and claim the same
     # addresses.  The lock is held until vm.save() commits the .info
     # file, at which point the IPs are visible to peers.
-    total_ips = 1 + len(extra_nic_types)
     with alloc_ip(
         name,
-        count=total_ips,
+        count=1 + len(extra_nic_types),
         explicit_ip=getattr(args, "ip", None) or None,
+        nics=extra_nic_types,
     ) as ips:
         ip = ips[0]
         nic_ips = ips[1:]
@@ -812,9 +826,7 @@ def _allocate_and_persist_vm(
             variant=variant,
             nics=list(extra_nic_types),
             nic_ips=list(nic_ips),
-            # Derived from the IPv4 addresses, so uniqueness is
-            # inherited rather than re-proved by a second allocator.
-            nic_ip6s=[nic_ip6(v4) for v4 in nic_ips],
+            nic_ip6s=nic_ip6s(name, extra_nic_types, nic_ips),
             # passthrough_drivers is filled in below, inside the launch
             # umbrella, after we've actually bound each BDF to vfio-pci.
             passthrough_drivers={},
@@ -1094,6 +1106,10 @@ def _validate_create_bounds(
     # created; --nic adds NICs on top of it.  Invalid specs die() now
     # so we don't half-create the VM.
     extra_nic_types = parse_nics(getattr(args, "nic", None) or [])
+    # Subnet conflicts must fail before artifacts or VM state are written.
+    network_issue = nic_network_problem(extra_nic_types)
+    if network_issue:
+        die(network_issue)
     problem = nic_numa_problem(
         extra_nic_types, getattr(args, "numa_nodes", 0) or 0
     )
@@ -1476,6 +1492,7 @@ def _launch_and_wait(
         vm.save()
     launch_qemu(vm, wait_seconds=wait_seconds)
     provision_vm_ssh(vm, SSH_TIMEOUT)
+    check_layout(vm)
     _seed_kdump_boot(vm)
     _check_nic_numa(vm)
 
@@ -1739,6 +1756,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         # cheap on re-start, but necessary for fresh VMs whose create
         # was interrupted (so cmd_start recovers a half-set-up VM).
         provision_vm_ssh(vm, SSH_TIMEOUT, register_before_wait=True)
+        check_layout(vm)
         _seed_kdump_boot(vm)
         _check_nic_numa(vm)
         print(f"started {name}")

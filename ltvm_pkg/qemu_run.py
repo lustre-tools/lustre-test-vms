@@ -22,13 +22,12 @@ from typing import Any, NoReturn
 
 from . import rootless, site_config, vm_state
 from .host_setup import is_macos, socket_vmnet_socket_path
+from .nic_cmdline import network_names, prefixes
 from .priv import ensure_dir, ensure_lock_file, invoking_user, sudo_run
 from .vm_state import (
     BRIDGE,
     EXIT_ERROR,
     GATEWAY,
-    PREFIX_LEN,
-    PREFIX_LEN6,
     VMInfo,
     VMNotFound,
     qemu_binary_for_arch,
@@ -812,9 +811,7 @@ def _start_qemu(vm: VMInfo) -> None:
         # image simply ignores -- and 24 is what it assumes anyway.
         if vm.nic_ips:
             fc_nic_ips_fragment = f" fc_nic_ips={','.join(vm.nic_ips)}"
-            fc_nic_prefixes_fragment = " fc_nic_prefixes=" + ",".join(
-                str(PREFIX_LEN) for _ in vm.nic_ips
-            )
+            fc_nic_prefixes_fragment = " fc_nic_prefixes=" + prefixes(vm)
         # The extras' IPv6 addresses travel in their own pair of
         # parallel arrays, omitted entirely when there are none: a VM
         # created before extras carried IPv6 keeps a byte-identical
@@ -822,8 +819,8 @@ def _start_qemu(vm: VMInfo) -> None:
         # parameters.
         if vm.nic_ip6s:
             fc_nic_ip6s_fragment = f" fc_nic_ip6s={','.join(vm.nic_ip6s)}"
-            fc_nic_ip6_prefixes_fragment = " fc_nic_ip6_prefixes=" + ",".join(
-                str(PREFIX_LEN6) for _ in vm.nic_ip6s
+            fc_nic_ip6_prefixes_fragment = " fc_nic_ip6_prefixes=" + prefixes(
+                vm, ipv6=True
             )
         # NUMA node per extra NIC (--nic ...,node=N), empty for none.
         # rc.local sets each node through sysfs and rebinds the driver
@@ -847,6 +844,7 @@ def _start_qemu(vm: VMInfo) -> None:
         f"{fc_nic_ip6s_fragment}"
         f"{fc_nic_ip6_prefixes_fragment}"
         f"{fc_nic_numa_fragment}"
+        f"{network_names(vm)}"
     )
     if vm.arch in ("", "x86_64"):
         boot_args += NMI_PANIC_ARGS
@@ -854,6 +852,18 @@ def _start_qemu(vm: VMInfo) -> None:
     # (crashkernel=, panic=) takes the user's value.
     if vm.kernel_args:
         boot_args += f" {vm.kernel_args}"
+
+    # Linux reserves one byte of COMMAND_LINE_SIZE for the final NUL.
+    # Check the complete UTF-8 request before changing TAPs or starting QEMU.
+    try:
+        boot_size = len(boot_args.encode("utf-8"))
+    except UnicodeEncodeError:
+        die("guest kernel command line is not valid UTF-8")
+    if boot_size >= 2048:
+        die(
+            f"guest kernel command line is {boot_size} bytes; "
+            "the limit is 2047 bytes"
+        )
 
     # Recreate TAP and flush any stale ARP entry for this IP.  Also
     # tear down any extra-NIC TAPs from a previous launch so ``ltvm

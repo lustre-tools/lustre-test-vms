@@ -4,29 +4,39 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import ipaddress
 import logging
 import os
 import signal
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import IO
 
 from . import rootless
+from .nic_network import (
+    data_networks,
+    network_problem,
+    overlap_problem,
+    select_address,
+)
+from .nic_spec import NicSpec
 from .priv import atomic_write as _priv_atomic_write
 from .priv import ensure_dir as _ensure_dir
 from .priv import ensure_lock_file as _ensure_lock_file
 from .priv import sudo_ready, sudo_run
 from .qemu_run import die, is_running, run
 from .vm_state import (
+    EXTRA_SUBNET6,
     MARKER,
     ROOT_PASSWORD,
     VM_DIR,
     VMInfo,
     VMNotFound,
+    nic_ip6,
     qemu_machine_for_arch,
     subnet_for_nic,
 )
@@ -308,6 +318,30 @@ def _net_of(ip: str) -> str:
     return ip.rsplit(".", 1)[0]
 
 
+def _peer_vms(exclude_name: str, strict: bool = False) -> Iterator[VMInfo]:
+    """Every readable VM except *exclude_name*; *strict* dies on a corrupt one."""
+    for n in VMInfo.all_names():
+        if n == exclude_name:
+            continue
+        try:
+            yield VMInfo.load(n)
+        except VMNotFound:
+            continue
+        except ValueError as e:
+            if strict:
+                die(str(e))
+            # VMInfo.load deliberately fails loud on a corrupt int
+            # field (see TestVMInfoLoadCorruption) -- but that must
+            # stay scoped to the damaged VM.  This walk feeds every
+            # `ltvm create`, so letting it out would mean one
+            # truncated .info file makes IP allocation, and therefore
+            # VM creation, impossible host-wide.  Skip the casualty
+            # and keep its address out of the free pool by warning.
+            log.warning(
+                "skipping corrupt VM state for %r during IP scan: %s", n, e
+            )
+
+
 def _used_ips_by_net(exclude_name: str) -> dict[str, set[str]]:
     """Return the in-use addresses of every VM, bucketed by their /24.
 
@@ -320,25 +354,7 @@ def _used_ips_by_net(exclude_name: str) -> dict[str, set[str]]:
     really are.
     """
     used: dict[str, set[str]] = {}
-    for n in VMInfo.all_names():
-        if n == exclude_name:
-            continue
-        try:
-            vm = VMInfo.load(n)
-        except VMNotFound:
-            continue
-        except ValueError as e:
-            # VMInfo.load deliberately fails loud on a corrupt int
-            # field (see TestVMInfoLoadCorruption) -- but that must
-            # stay scoped to the damaged VM.  This walk feeds every
-            # `ltvm create`, so letting it out would mean one
-            # truncated .info file makes IP allocation, and therefore
-            # VM creation, impossible host-wide.  Skip the casualty
-            # and keep its address out of the free pool by warning.
-            log.warning(
-                "skipping corrupt VM state for %r during IP scan: %s", n, e
-            )
-            continue
+    for vm in _peer_vms(exclude_name):
         for ip in [vm.ip, *vm.nic_ips]:
             if ip:
                 used.setdefault(_net_of(ip), set()).add(ip)
@@ -361,8 +377,6 @@ def _validate_explicit_ip(ip: str) -> None:
     ``ltvm create foo --ip banana`` produced a VM that never got an
     address and an /etc/hosts line that resolved a name to garbage.
     """
-    import ipaddress
-
     try:
         addr = ipaddress.IPv4Address(ip)
     except ipaddress.AddressValueError:
@@ -380,11 +394,80 @@ def _validate_explicit_ip(ip: str) -> None:
         die(f"--ip {ip} is a network/broadcast address")
 
 
+def _default_networks() -> tuple[str, str]:
+    """The extra NICs' default IPv4 and IPv6 networks."""
+    return f"{subnet_for_nic(1)}.0/24", f"{EXTRA_SUBNET6}::/64"
+
+
+def nic_network_problem(nics: Sequence[NicSpec]) -> str | None:
+    """Report a --nic layout conflict before anything is created."""
+    if not nics:
+        return None
+    return network_problem(
+        nics, f"{subnet_for_nic(0)}.0/24", *_default_networks()
+    )
+
+
+def _peer_subnet_problem(name: str, nics: Sequence[NicSpec]) -> str | None:
+    """Report a subnet of *nics* that overlaps another VM's subnet."""
+    if not any(n.subnet or n.subnet6 for n in nics):
+        return None
+    default4, default6 = _default_networks()
+    nets4, nets6 = data_networks(nics, default4, default6)
+    peers = [nic for vm in _peer_vms(name, strict=True) for nic in vm.nics]
+    stored4 = [n.subnet for n in peers if n.subnet]
+    stored6 = [n.subnet6 for n in peers if n.subnet6]
+    return overlap_problem(
+        [ipaddress.ip_network(s) for s in [default4, *stored4]] + nets4
+    ) or overlap_problem(
+        [ipaddress.ip_network(s) for s in [default6, *stored6]] + nets6
+    )
+
+
+def _from_subnet(name: str, subnet: str, used: set[str]) -> str:
+    """A free address of *subnet*, or die with the reason."""
+    try:
+        return select_address(name, ipaddress.ip_network(subnet), used)
+    except ValueError as e:
+        die(str(e))
+
+
+def nic_ip6s(
+    name: str, nics: Sequence[NicSpec], nic_ips: list[str]
+) -> list[str]:
+    """The extra NICs' IPv6 addresses.  Call under alloc_ip()'s lock.
+
+    A NIC without subnet6= pairs its IPv4 address (nic_ip6).
+    """
+    if not any(nic.subnet or nic.subnet6 for nic in nics):
+        return [nic_ip6(ip) for ip in nic_ips]
+    try:
+        used = {
+            str(ipaddress.IPv6Address(ip))
+            for vm in _peer_vms(name, strict=True)
+            for ip in vm.nic_ip6s
+            if ip
+        }
+    except ValueError as e:
+        die(str(e))
+    addresses = []
+    for nic, ip in zip(nics, nic_ips):
+        address = (
+            _from_subnet(name, nic.subnet6, used)
+            if nic.subnet6
+            else nic_ip6(ip)
+        )
+        used.add(address)
+        addresses.append(address)
+    return addresses
+
+
 @contextmanager
 def alloc_ip(
     name: str,
     count: int = 1,
     explicit_ip: str | None = None,
+    nics: Sequence[NicSpec] = (),
 ) -> Iterator[list[str]]:
     """Context manager that allocates *count* unique IPs for *name* under
     an exclusive lock held until the ``with`` block exits.
@@ -402,6 +485,10 @@ def alloc_ip(
     ``explicit_ip`` (optional) pins the mgmt IP; extras are still
     auto-allocated.  Pass None to auto-allocate all IPs.
 
+    ``nics`` (optional) lists the extras: one with subnet= gets its
+    address from that subnet instead, and the subnets must fit those of
+    the other VMs.
+
     Usage::
 
         with alloc_ip(name, count=1 + len(extras)) as ips:
@@ -411,6 +498,9 @@ def alloc_ip(
     if count < 1:
         raise ValueError(f"alloc_ip count must be >= 1, got {count}")
     with _ip_alloc_lock():
+        problem = _peer_subnet_problem(name, nics)
+        if problem:
+            die(problem)
         used = _used_ips_by_net(name)
         ips: list[str] = []
         if explicit_ip:
@@ -428,6 +518,12 @@ def alloc_ip(
             int(hashlib.md5(name.encode()).hexdigest()[:4], 16) % 244
         ) + 10
         for idx in range(len(ips), count):
+            if 0 < idx <= len(nics) and nics[idx - 1].subnet:
+                flat: set[str] = set().union(*used.values())
+                ip = _from_subnet(name, nics[idx - 1].subnet, flat)
+                ips.append(ip)
+                used.setdefault(_net_of(ip), set()).add(ip)
+                continue
             subnet = subnet_for_nic(idx)
             taken = used.setdefault(subnet, set())
             # Wider scan window than 244 deltas is pointless -- the /24
