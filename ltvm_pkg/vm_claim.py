@@ -306,6 +306,64 @@ def _locked(vm: str, *, create: bool) -> Iterator[int | None]:
         os.close(fd)
 
 
+def deploy_lock_path(vm: str) -> Path:
+    """The lock that serializes deploys into *vm*.
+
+    Beside its claim, in the one directory every user can create files
+    in on both host layouts.  The leading dot keeps it out of
+    all_claims(), which only reads names a VM could have.
+    """
+    return _path(vm).with_name(f".{vm}.deploy")
+
+
+@contextlib.contextmanager
+def deploy_lock(vm: str) -> Iterator[None]:
+    """Hold *vm*'s deploy lock, waiting for another deploy to finish.
+
+    Claims keep other sessions off a VM, but two deploys from one
+    session (two scripts, or a retry started before the first run
+    ended) pass that check, and both then stream a staging into the
+    same root: two tars write the same files ("Cannot open: File
+    exists") and two ldconfigs race on /etc/ld.so.cache~.  The second
+    deploy waits instead and then deploys over the first.  The holder
+    writes its pid into the file, so the wait can name it.  Without a
+    usable claims directory the deploy goes ahead unlocked, as before.
+    """
+    try:
+        fd = _open(deploy_lock_path(vm), True)
+    except (OSError, ClaimError):
+        yield
+        return
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            yield
+            return
+        with contextlib.suppress(OSError):
+            if os.fstat(fd).st_uid == os.geteuid():
+                os.fchmod(fd, 0o666)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.lseek(fd, 0, os.SEEK_SET)
+            holder = os.read(fd, 32).decode(errors="replace").strip()
+            who = f" (pid {holder})" if holder.isdigit() else ""
+            print(
+                f"  waiting for another deploy to {vm}{who} to finish...",
+                file=sys.stderr,
+                flush=True,
+            )
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        with contextlib.suppress(OSError):
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, f"{os.getpid()}\n".encode(), 0)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def _read(fd: int, vm: str) -> Claim | None:
     os.lseek(fd, 0, os.SEEK_SET)
     chunks = []
