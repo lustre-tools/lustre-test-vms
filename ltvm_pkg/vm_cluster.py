@@ -1738,6 +1738,11 @@ def cmd_cluster_deploy(args: argparse.Namespace) -> None:
             f"{'server' if server_only else 'client-only'} nodes to deploy to"
         )
     deploying = {n.name for n in deploy_nodes}
+    # Before the build, not after it: deploy_to_vm would refuse these.
+    try:
+        vm_claim.require_no_deploy(sorted(deploying))
+    except vm_claim.DeployInProgress as e:
+        die(str(e))
 
     # Before the build: a cluster whose MGS cannot name its NID is an
     # error to report now, not after every node is deployed.

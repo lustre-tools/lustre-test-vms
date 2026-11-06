@@ -306,6 +306,96 @@ def _locked(vm: str, *, create: bool) -> Iterator[int | None]:
         os.close(fd)
 
 
+def deploy_lock_path(vm: str) -> Path:
+    """The lock that serializes deploys into *vm*.
+
+    Beside its claim, in the one directory every user can create files
+    in on both host layouts.  The leading dot keeps it out of
+    all_claims(), which only reads names a VM could have.
+    """
+    return _path(vm).with_name(f".{vm}.deploy")
+
+
+class DeployInProgress(ClaimError):
+    """Another deploy into the VM is running."""
+
+
+def _deploy_busy(vm: str, holder: str) -> DeployInProgress:
+    who = f" (pid {holder})" if holder.isdigit() else ""
+    return DeployInProgress(
+        f"another deploy to {vm} is running{who}; let it finish (or "
+        f"stop it), then deploy again"
+    )
+
+
+def _holder(fd: int) -> str:
+    os.lseek(fd, 0, os.SEEK_SET)
+    return os.read(fd, 32).decode(errors="replace").strip()
+
+
+@contextlib.contextmanager
+def deploy_lock(vm: str) -> Iterator[None]:
+    """Hold *vm*'s deploy lock, or refuse while another deploy has it.
+
+    Claims keep other sessions off a VM, but two deploys from one
+    session (two scripts, or a retry started before the first run
+    ended) pass that check, and both then stream a staging into the
+    same root: two tars write the same files ("Cannot open: File
+    exists") and two ldconfigs race on /etc/ld.so.cache~.  Waiting for
+    the first would only start the second the moment the first finished,
+    over whatever the first was there to do, so the second fails at once
+    with DeployInProgress instead.  The holder writes its pid into the
+    file, so the refusal can name it.  Without a usable claims directory
+    the deploy goes ahead unlocked, as before.
+    """
+    try:
+        fd = _open(deploy_lock_path(vm), True)
+    except (OSError, ClaimError):
+        yield
+        return
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            yield
+            return
+        with contextlib.suppress(OSError):
+            if os.fstat(fd).st_uid == os.geteuid():
+                os.fchmod(fd, 0o666)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise _deploy_busy(vm, _holder(fd)) from None
+        with contextlib.suppress(OSError):
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, f"{os.getpid()}\n".encode(), 0)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def require_no_deploy(vms: list[str]) -> None:
+    """Refuse up front when a deploy into any of *vms* is running.
+
+    deploy_lock() is what keeps two deploys apart; this only spares the
+    second one its Lustre build before deploy_lock() refuses it.
+    """
+    for vm in vms:
+        try:
+            fd = _open(deploy_lock_path(vm), False)
+        except (OSError, ClaimError):
+            continue
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise _deploy_busy(vm, _holder(fd)) from None
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
 def _read(fd: int, vm: str) -> Claim | None:
     os.lseek(fd, 0, os.SEEK_SET)
     chunks = []

@@ -209,6 +209,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 
     try:
         vm_claim.check(vm.name, "deploy to")
+        vm_claim.require_no_deploy([vm.name])
     except vm_claim.ClaimError as e:
         return _error(str(e), use_json)
     tree = getattr(args, "lustre_tree", None)

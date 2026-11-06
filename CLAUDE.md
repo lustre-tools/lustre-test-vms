@@ -804,7 +804,18 @@ in place under flock).  `vm_claim.require()`/`check()` gate deploy,
 llmount, the lifecycle commands (in `_require_manageable`, and in the CLI
 wrappers ahead of `_vm_privileges` so a refusal never prompts for sudo),
 the `vm` actions and the cluster commands; `auto_claim()` claims for a
-session owner on deploy.  Tests: `tests/conftest.py` points `CLAIMS_DIR`
+session owner on deploy.  Claims do not stop two deploys from one
+session, so `deploy_to_vm` also holds `vm_claim.deploy_lock(vm)`, a
+flock on `claims/.<vm>.deploy` naming the holder's pid.  A second
+deploy into the VM fails at once with `DeployInProgress` naming that
+pid, rather than waiting: a deploy that starts the moment the first
+ends lands over whatever the first was there to do.
+`require_no_deploy` makes the same check before the build, for
+deploy-lustre and for a cluster deploy's own nodes (so `--server-only`
+and `--client-only` still run side by side).  Two at once had two tars
+writing the same files ("Cannot open: File exists") and two ldconfigs
+racing on `/etc/ld.so.cache~`, each run failing on the nodes the other
+finished first.  Tests: `tests/conftest.py` points `CLAIMS_DIR`
 at a tmpdir and drops the session variables, since the suite often runs
 under an agent.  Contract: docs/VM_OWNERSHIP.md#claims.
 
