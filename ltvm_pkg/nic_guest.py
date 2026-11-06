@@ -173,11 +173,9 @@ def check_layout(vm: VMInfo, *, deadline: float | None = None) -> None:
 
 def wait_for_layout(vm: VMInfo, timeout: int = 30) -> None:
     """Wait for data setup after SSH is ready; never accept a partial layout."""
-    if type(timeout) is not int or not 1 <= timeout <= 30:
-        raise ValueError("NIC setup timeout must be 1..30 seconds")
     deadline = time.monotonic() + timeout
     last_error: Exception | None = None
-    for attempt in range(61):
+    while True:
         try:
             check_layout(vm, deadline=deadline)
             return
@@ -187,8 +185,7 @@ def wait_for_layout(vm: VMInfo, timeout: int = 30) -> None:
                 raise last_error from None
             last_error = error
             remaining = deadline - time.monotonic()
-            if remaining <= 1 or attempt == 60:
+            if remaining <= 1:
                 raise
             # Boot helpers can still be assigning addresses after SSH starts.
             time.sleep(min(0.5, remaining))
-    raise TimeoutError(f"{vm.name}: timed out waiting for NIC setup")

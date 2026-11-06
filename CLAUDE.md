@@ -992,6 +992,21 @@ NIC went missing once, hence rebind-all-then-settle.  Create and start
 read the nodes back over ssh (`_check_nic_numa`) and warn when an image
 built before `fc_nic_numa` ignored them.
 
+**NIC networks:** `--nic tcp:net=tcp0,subnet=CIDR,subnet6=CIDR` (also
+softroce) sets the NIC's LNet network and IP networks.  Empty values
+keep the defaults: an automatic `tcpN`/`o2ibN` name and the shared extra
+subnet.  `nic_spec` checks each value, and `nic_network.network_problem`
+checks the layout before create or cluster create writes state.
+`alloc_ip(..., nics=)` takes a `subnet=` address from the first 65,534
+hosts of the subnet and refuses a subnet that overlaps another VM's;
+`vm_net.nic_ip6s` does the same for `subnet6=`.  The host passes
+`fc_nic_nets=` (omitted when no NIC has `net=`) and the real prefixes in
+`fc_nic_prefixes=`, and `setup-lnet-config.sh` groups the NICs of one
+name: `tcp0(eth1,eth2)`.  It trusts the names, because ltvm validated
+them.  rc.local's policy routes work for any prefix, and every NIC stays
+on the one bridge.  `nic_guest.wait_for_layout` reads the result back over
+ssh for up to 30 seconds, and create and start fail if it is wrong.
+
 Why not `pxb-pcie,numa_node=N`, the QEMU way: tried 2026-11-03 on
 aarch64 HVF.  ltvm boots aarch64 with a device tree, and a DT kernel
 sees the pxb host bridges as plain endpoints and never scans the buses

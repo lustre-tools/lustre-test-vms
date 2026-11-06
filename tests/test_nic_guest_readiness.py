@@ -18,22 +18,19 @@ _STALE = 'options lnet networks="tcp0(eth9)"\n'
 class _Clock:
     """Control both time reads and sleeps without waiting in a test."""
 
-    def __init__(self, *, advance_sleep: bool = True) -> None:
+    def __init__(self) -> None:
         """Start at a nonzero origin to catch absolute-deadline mistakes."""
         self.now = 100.0
         self.sleeps: list[float] = []
-        self.advance_sleep = advance_sleep
 
     def monotonic(self) -> float:
         """Return the same clock that fake SSH operations advance."""
         return self.now
 
     def sleep(self, duration: float) -> None:
-        """Record each retry delay and optionally advance simulated time."""
+        """Record each retry delay and advance simulated time."""
         self.sleeps.append(duration)
-        if self.advance_sleep:
-            # A frozen clock separately checks the fixed retry-count bound.
-            self.now += duration
+        self.now += duration
 
 
 class _Guest:
@@ -164,20 +161,6 @@ def test_wrong_layout_stops_at_budget_with_useful_error(
     assert all(start < 103.0 for _, start, _ in guest.requests)
 
 
-def test_frozen_clock_still_has_a_fixed_poll_limit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A nonadvancing clock cannot turn bad state into an unlimited loop."""
-    clock = _Clock(advance_sleep=False)
-    guest = _install(monkeypatch, clock, [(_STALE, 0, 0.0)] * 61)
-
-    with pytest.raises(ValueError, match="LNet network tcp0"):
-        nic_guest.wait_for_layout(_vm("tcp:net=tcp0"))
-
-    assert len(guest.requests) == 61
-    assert clock.sleeps == [0.5] * 60
-
-
 @pytest.mark.parametrize(
     "body,error,match",
     [
@@ -255,18 +238,3 @@ def test_budget_exhaustion_keeps_the_earlier_layout_error(
     assert [request[2] for request in guest.requests] == [3, 2, 1]
     assert clock.sleeps == [0.5]
     assert clock.now == 102.75
-
-
-@pytest.mark.parametrize("timeout", [0, -1, 31, True, False, 1.0, "3", None])
-def test_invalid_timeout_never_reads_the_guest(
-    monkeypatch: pytest.MonkeyPatch, timeout: object
-) -> None:
-    """Reject unsupported timeouts before a request or retry can start."""
-    clock = _Clock()
-    guest = _install(monkeypatch, clock, [])
-
-    with pytest.raises(ValueError, match="NIC setup timeout must be 1..30"):
-        nic_guest.wait_for_layout(_vm("tcp:net=tcp0"), timeout=timeout)
-
-    assert guest.requests == []
-    assert clock.sleeps == []

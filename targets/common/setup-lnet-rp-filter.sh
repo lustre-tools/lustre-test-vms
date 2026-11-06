@@ -4,9 +4,8 @@
 #
 # Why this is needed:
 #
-# Extra NICs can share one subnet, separate from the management NIC.
-# rc.local sets source routes for each extra NIC. A reply can still
-# arrive on an interface that isn't
+# Extra NICs can share one subnet, and rc.local sets source routes for
+# each of them.  A reply can still arrive on an interface that isn't
 # the one the kernel's reverse-path lookup would pick for that source
 # address.  Under the RHEL/Rocky default of rp_filter=1 (strict, per
 # RFC 3704) the kernel silently drops those packets.
