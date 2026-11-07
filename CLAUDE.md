@@ -395,8 +395,13 @@ Two layers of config go on top of the base config:
   select, a symbol it lacks) is listed in the build log and in the
   kernel's meta.json as `config_overlay_missed`, and the build goes on.
   It holds what every kernel should have but no single target needs to
-  boot: InfiniBand for ko2iblnd, and the hardware a headless microvm
-  never has (DRM, sound, media, wireless, staging) turned off.
+  boot: InfiniBand for ko2iblnd, BPF with BTF for bpftrace and drgn,
+  the multi-gen LRU on at boot (as RHEL and Debian ship it), the
+  function and syscall tracers, hung task and lockup reports, THP,
+  netem, the debug and fault-injection facilities, and the hardware a
+  headless microvm never has (DRM, sound, media, wireless, staging)
+  turned off.  The deb-built kernels that start from defconfig get
+  the tooling from here; a distro config already has it.
 - **The forced fragment** is `kernel-config.fragment`, the per-arch
   `kernel-config-<arch>.fragment`, then the target's `kernels.config`.
   Its values are forced in before and after `olddefconfig`.  A symbol a
