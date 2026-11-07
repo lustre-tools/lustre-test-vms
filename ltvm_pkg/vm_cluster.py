@@ -23,6 +23,7 @@ from .qemu_run import die, is_running, run
 from .vm_net import (
     SSH_KEEPALIVE_OPTS,
     SSH_OPTS,
+    nic_network_problem,
     run_ssh,
     ssh_wait_budget,
     ssh_wait_cap,
@@ -1089,6 +1090,10 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     # Parsed here so a bad spec fails once, before any node exists, and
     # each node gets the canonical spelling.
     nic_specs = parse_nics(list(getattr(args, "nic", None) or []))
+    # Validate one common layout before any cluster node can be created.
+    network_issue = nic_network_problem(nic_specs)
+    if network_issue:
+        die(network_issue)
     nics = [str(n) for n in nic_specs]
     kernel_args = _validate_kernel_args(getattr(args, "kernel_args", None))
     wait_seconds: int = getattr(args, "wait", 0)

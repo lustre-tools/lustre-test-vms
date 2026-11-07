@@ -438,6 +438,90 @@ class TestLaunchQemuCommand:
         append = h.qemu_args[h.qemu_args.index("-append") + 1]
         assert "fc_nic_prefixes=24,24" in append
 
+    @pytest.mark.parametrize("distinct", [False, True])
+    def test_explicit_nic_options_have_complete_boot_arrays(
+        self, tmp_vmdir: Path, distinct: bool
+    ) -> None:
+        """QEMU receives every explicit value once in the saved NIC order."""
+        vm = _make_vm(tmp_vmdir)
+        second4 = "198.51.100.0/28" if distinct else "192.0.2.0/27"
+        second6 = "2001:db8:2::/112" if distinct else "2001:db8:1::/120"
+        vm.nics = [
+            NicSpec.parse(
+                "tcp:net=tcp7,subnet=192.0.2.0/27,subnet6=2001:db8:1::/120"
+            ),
+            NicSpec.parse(f"tcp:net=tcp7,subnet={second4},subnet6={second6}"),
+        ]
+        vm.nic_ips = [
+            "192.0.2.10",
+            "198.51.100.11" if distinct else "192.0.2.11",
+        ]
+        vm.nic_ip6s = [
+            "2001:db8:1::10",
+            "2001:db8:2::11" if distinct else "2001:db8:1::11",
+        ]
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        fields = [word for word in append.split() if word.startswith("fc_")]
+        assert fields == [
+            f"fc_ip={vm.ip}",
+            f"fc_gw={qemu_run.GATEWAY}",
+            f"fc_name={vm.name}",
+            "fc_nics=tcp,tcp",
+            f"fc_nic_ips={','.join(vm.nic_ips)}",
+            "fc_nic_prefixes=" + ("27,28" if distinct else "27,27"),
+            f"fc_nic_ip6s={','.join(vm.nic_ip6s)}",
+            "fc_nic_ip6_prefixes=" + ("120,112" if distinct else "120,120"),
+            "fc_nic_nets=tcp7,tcp7",
+        ]
+
+    def test_explicit_nic_names_preserve_automatic_slots(
+        self, tmp_vmdir: Path
+    ) -> None:
+        """Empty name slots reach the guest without shifting a later NIC."""
+        vm = _make_vm(tmp_vmdir)
+        vm.nics = [
+            NicSpec.parse(spec) for spec in ("tcp", "tcp:net=tcp7", "softroce")
+        ]
+        vm.nic_ips = ["192.0.2.10", "192.0.2.11", "192.0.2.12"]
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        fields = [word for word in append.split() if word.startswith("fc_")]
+        assert fields == [
+            f"fc_ip={vm.ip}",
+            f"fc_gw={qemu_run.GATEWAY}",
+            f"fc_name={vm.name}",
+            "fc_nics=tcp,tcp,softroce",
+            "fc_nic_ips=192.0.2.10,192.0.2.11,192.0.2.12",
+            "fc_nic_prefixes=24,24,24",
+            "fc_nic_nets=,tcp7,",
+        ]
+
+    def test_default_nics_keep_complete_boot_arrays(
+        self, tmp_vmdir: Path
+    ) -> None:
+        """The existing layout retains its fields without a new name parameter."""
+        vm = _make_vm(tmp_vmdir)
+        vm.nics = [NicSpec.parse("tcp"), NicSpec.parse("softroce")]
+        vm.nic_ips = ["192.0.2.10", "192.0.2.11"]
+        vm.nic_ip6s = ["2001:db8:1::10", "2001:db8:1::11"]
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        fields = [word for word in append.split() if word.startswith("fc_")]
+        assert fields == [
+            f"fc_ip={vm.ip}",
+            f"fc_gw={qemu_run.GATEWAY}",
+            f"fc_name={vm.name}",
+            "fc_nics=tcp,softroce",
+            "fc_nic_ips=192.0.2.10,192.0.2.11",
+            "fc_nic_prefixes=24,24",
+            "fc_nic_ip6s=2001:db8:1::10,2001:db8:1::11",
+            "fc_nic_ip6_prefixes=64,64",
+        ]
+
     def test_fc_nic_ip6s_carries_the_full_addresses(
         self, tmp_vmdir: Path
     ) -> None:
@@ -497,6 +581,70 @@ class TestLaunchQemuCommand:
         _run_launch(vm, h)
         append = h.qemu_args[h.qemu_args.index("-append") + 1]
         assert len(append) < 2048
+
+    @pytest.mark.parametrize("size", [2047, 2048])
+    @pytest.mark.parametrize("multibyte", [False, True])
+    def test_complete_cmdline_byte_boundary(
+        self,
+        tmp_vmdir: Path,
+        capsys: pytest.CaptureFixture[str],
+        size: int,
+        multibyte: bool,
+    ) -> None:
+        """Eight full-width IPv6 NIs leave only the real remaining byte budget."""
+        vm = _make_vm(tmp_vmdir, name="v" * 63)
+        vm.tap = "tap-limit"
+        vm.nics = [NicSpec.parse("softroce:net=o2ib65535")] * 8
+        vm.nic_ips = [f"203.0.113.{100 + index}" for index in range(8)]
+        vm.nic_ip6s = [
+            f"2001:0db8:1234:1234:f203:f000:f113:f{100 + index:03d}"
+            for index in range(8)
+        ]
+        before = _LaunchHarness()
+        _run_launch(vm, before)
+        assert before.qemu_args is not None
+        base = before.qemu_args[before.qemu_args.index("-append") + 1]
+        remaining = size - len(base.encode("utf-8")) - len(" debug=")
+        assert remaining > 0
+        # UTF-8 width, rather than Python character count, sets the limit.
+        payload = (
+            "ä" * (remaining // 2) + "a" * (remaining % 2)
+            if multibyte
+            else "a" * remaining
+        )
+        vm.kernel_args = "debug=" + payload
+        assert len(vm.kernel_args) <= 1024
+        after = _LaunchHarness()
+        if size == 2047:
+            _run_launch(vm, after)
+            assert after.qemu_args is not None
+            complete = after.qemu_args[after.qemu_args.index("-append") + 1]
+            assert complete == base + " " + vm.kernel_args
+            assert len(complete.encode("utf-8")) == 2047
+        else:
+            # A rejected complete request must not delete TAPs or run QEMU.
+            with pytest.raises(SystemExit):
+                _run_launch(vm, after)
+            assert after.run_calls == []
+            assert after.qemu_args is None
+            assert (
+                "2048 bytes; the limit is 2047 bytes" in capsys.readouterr().err
+            )
+
+    def test_invalid_utf8_cmdline_has_checked_failure(
+        self,
+        tmp_vmdir: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """A stored or CLI surrogate must fail before any host network command."""
+        vm = _make_vm(tmp_vmdir)
+        vm.kernel_args = "debug=\udcff"
+        harness = _LaunchHarness()
+        with pytest.raises(SystemExit):
+            _run_launch(vm, harness)
+        assert harness.run_calls == []
+        assert harness.qemu_args is None
+        assert "not valid UTF-8" in capsys.readouterr().err
 
     def test_no_prefixes_without_nic_ips(self, tmp_vmdir: Path) -> None:
         """An old .info with NICS but no NIC_IPS emits neither array,

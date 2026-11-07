@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import IO
 
 from . import rootless
+from .nic_allocation import alloc_vm_addresses as alloc_vm_addresses
+from .nic_allocation import nic_network_problem as nic_network_problem
 from .priv import atomic_write as _priv_atomic_write
 from .priv import ensure_dir as _ensure_dir
 from .priv import ensure_lock_file as _ensure_lock_file
