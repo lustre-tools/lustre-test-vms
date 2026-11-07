@@ -610,6 +610,17 @@ def _needs_reconfigure(
             return True
     else:
         return True  # no stamp = never built for this target
+    # The release string survives a rebuild of the same kernel with
+    # another config, but configure's probes (FS_VERITY decides whether
+    # ldiskfs builds verity.c) read the config.
+    kconfig = _hash_file(Path(build_tree) / ".config")
+    stamp_kconfig = lustre_tree / f".ltvm-kconfig-{suffix}"
+    if kconfig and (
+        not stamp_kconfig.exists()
+        or stamp_kconfig.read_text().strip() != kconfig
+    ):
+        print("  Kernel config changed, reconfiguring")
+        return True
     if stamp_server.exists():
         prev_server = stamp_server.read_text().strip()
         if prev_server != str(enable_server):
@@ -1685,6 +1696,9 @@ fi""")
     # forces a fresh autogen+configure pass.
     suffix = _stamp_suffix(target, arch)
     (lustre_tree / f".ltvm-kernel-{suffix}").write_text(kver + "\n")
+    kconfig = _hash_file(build_tree / ".config")
+    if kconfig:
+        (lustre_tree / f".ltvm-kconfig-{suffix}").write_text(kconfig + "\n")
     (lustre_tree / f".ltvm-server-{suffix}").write_text(
         str(enable_server) + "\n"
     )

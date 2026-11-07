@@ -192,6 +192,70 @@ class TestKernelChanged:
         assert _kernel_changed(lustre_tree, build_tree, target="rocky9")
 
 
+# ── lustre_build._needs_reconfigure: kernel config ──────────────────────────
+
+
+class TestReconfigureOnKernelConfig:
+    """A kernel rebuilt with another config keeps its release string, but
+    configure probes the config (FS_VERITY decides whether ldiskfs builds
+    verity.c), so the tree must reconfigure."""
+
+    def _configured_tree(self, tmp_path: Path, config: str) -> tuple:
+        lustre_tree = tmp_path / "lustre"
+        build_tree = tmp_path / "build"
+        lustre_tree.mkdir()
+        release = build_tree / "include" / "config" / "kernel.release"
+        release.parent.mkdir(parents=True)
+        release.write_text("6.12.107-lustre\n")
+        (build_tree / ".config").write_text(config)
+        for name in ("configure", "config.status"):
+            (lustre_tree / name).write_text("")
+        suffix = "debian13-x86_64"
+        (lustre_tree / f".ltvm-kernel-{suffix}").write_text("6.12.107-lustre\n")
+        (lustre_tree / f".ltvm-server-{suffix}").write_text("True\n")
+        return lustre_tree, build_tree
+
+    def _stamp_config(self, lustre_tree: Path, build_tree: Path) -> None:
+        from ltvm_pkg.lustre_build import _hash_file
+
+        (lustre_tree / ".ltvm-kconfig-debian13-x86_64").write_text(
+            _hash_file(build_tree / ".config") + "\n"
+        )
+
+    def test_same_config_does_not_reconfigure(self, tmp_path: Path) -> None:
+        from ltvm_pkg.lustre_build import _needs_reconfigure
+
+        lustre_tree, build_tree = self._configured_tree(
+            tmp_path, "CONFIG_FS_VERITY=y\n"
+        )
+        self._stamp_config(lustre_tree, build_tree)
+        assert not _needs_reconfigure(
+            lustre_tree, build_tree, False, target="debian13"
+        )
+
+    def test_changed_config_reconfigures(self, tmp_path: Path) -> None:
+        from ltvm_pkg.lustre_build import _needs_reconfigure
+
+        lustre_tree, build_tree = self._configured_tree(
+            tmp_path, "# CONFIG_FS_VERITY is not set\n"
+        )
+        self._stamp_config(lustre_tree, build_tree)
+        (build_tree / ".config").write_text("CONFIG_FS_VERITY=y\n")
+        assert _needs_reconfigure(
+            lustre_tree, build_tree, False, target="debian13"
+        )
+
+    def test_no_config_stamp_reconfigures(self, tmp_path: Path) -> None:
+        from ltvm_pkg.lustre_build import _needs_reconfigure
+
+        lustre_tree, build_tree = self._configured_tree(
+            tmp_path, "CONFIG_FS_VERITY=y\n"
+        )
+        assert _needs_reconfigure(
+            lustre_tree, build_tree, False, target="debian13"
+        )
+
+
 # ── lustre_build.staging_path layout ─────────────────────────────────────────
 
 
