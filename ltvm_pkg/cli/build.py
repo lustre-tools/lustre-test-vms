@@ -45,7 +45,9 @@ from ltvm_pkg.host_setup import (
     hold_podman_usage,
     is_macos,
     podman_idle_lock,
+    podman_idle_stop_delay,
     podman_usage_lock,
+    schedule_idle_stop,
     should_stop_podman_machine_macos,
     stop_podman_machine_macos,
 )
@@ -217,7 +219,11 @@ class _AutostopHandle:
 
 @contextlib.contextmanager
 def _podman_machine_autostop() -> Iterator[_AutostopHandle]:
-    """On macOS, stop the podman machine after a successful block if idle.
+    """On macOS, stop the podman machine once idle after a successful block.
+
+    By default the stop comes LTVM_PODMAN_IDLE_STOP seconds (1800) after
+    the last ltvm used podman, from a detached waiter; 0 stops it here,
+    as soon as no other ltvm holds the usage lock.
 
     The caller gets an :class:`_AutostopHandle` and must set
     ``handle.success = True`` before returning an OK exit code.  On any
@@ -243,6 +249,11 @@ def _podman_machine_autostop() -> Iterator[_AutostopHandle]:
     if os.environ.get("LTVM_PODMAN_AUTOSTOP") == "0":
         return
     try:
+        # After LTVM_PODMAN_IDLE_STOP seconds unused (default 30 min),
+        # not now: the next build is usually minutes away.
+        if podman_idle_stop_delay() > 0:
+            schedule_idle_stop()
+            return
         # Exclusive through the stop, so no other ltvm can find the
         # machine running between the check and the stop.
         with podman_idle_lock() as idle:

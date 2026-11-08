@@ -7,6 +7,7 @@ and sets up SSH.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import fcntl
 import hashlib
@@ -20,6 +21,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -94,17 +96,78 @@ def check_podman_machine_macos() -> None:
         )
 
     if any(m.get("Running") for m in machines):
-        return
+        if _podman_answers():
+            return
+        # A `podman machine start` that times out waiting for the
+        # guest's sshd kills gvproxy and leaves vfkit running: the
+        # machine then lists as running and refuses every connection
+        # until someone stops it.  Nothing can be using it, so restart.
+        log.warning(
+            "podman machine is running but not answering; restarting it"
+        )
+        _podman_machine_cmd("stop", timeout=120)
+    _start_podman_machine()
 
-    log.info("Starting podman machine...")
+
+#: How often, and how far apart, the preflight asks a machine that lists
+#: as running whether it answers, before restarting it: another ltvm's
+#: `podman machine start` may still be waiting for the guest's sshd.
+PODMAN_ANSWER_TRIES = 3
+PODMAN_ANSWER_WAIT = 10.0
+
+
+def _podman_answers() -> bool:
+    """True when the running machine's podman service answers."""
+    for attempt in range(PODMAN_ANSWER_TRIES):
+        if attempt:
+            time.sleep(PODMAN_ANSWER_WAIT)
+        try:
+            r = subprocess.run(
+                ["podman", "info", "--format", "{{.Host.Arch}}"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if r.returncode == 0 and r.stdout.strip():
+            return True
+    return False
+
+
+def _podman_machine_cmd(action: str, *, timeout: float) -> bool:
+    """`podman machine <action>`; True when it exited 0."""
     try:
-        subprocess.run(
-            ["podman", "machine", "start"],
-            check=True,
-            timeout=180,
+        r = subprocess.run(
+            ["podman", "machine", action], check=False, timeout=timeout
         )
     except (OSError, subprocess.SubprocessError) as e:
-        raise PodmanMachineError(f"failed to start podman machine: {e}") from e
+        log.warning("podman machine %s failed: %s", action, e)
+        return False
+    return r.returncode == 0
+
+
+def _start_podman_machine() -> None:
+    """Start the machine, once more after a failed start.
+
+    The failed start is what leaves the half-running machine
+    check_podman_machine_macos() repairs, so it is stopped (vfkit and
+    all) before the second try.
+    """
+    log.info("Starting podman machine...")
+    if _podman_machine_cmd("start", timeout=180) and _podman_answers():
+        return
+    log.warning("podman machine start failed; stopping it and trying again")
+    _podman_machine_cmd("stop", timeout=120)
+    if _podman_machine_cmd("start", timeout=180) and _podman_answers():
+        return
+    raise PodmanMachineError(
+        "failed to start podman machine twice.\n"
+        "Try by hand:\n"
+        "  podman machine stop; podman machine start\n"
+        "and see ~/.local/share/containers/podman/machine and "
+        "$TMPDIR/podman/*.log"
+    )
 
 
 log = logging.getLogger(__name__)
@@ -1613,6 +1676,83 @@ def _podman_lock_path() -> Path:
     return Path(tempfile.gettempdir()) / f"ltvm-podman-{os.getuid()}.lock"
 
 
+def _podman_file(suffix: str) -> Path:
+    """A file beside the usage lock (so the tests' isolation covers it)."""
+    lock = _podman_lock_path()
+    return lock.with_name(f"{lock.stem}.{suffix}")
+
+
+#: Seconds the machine stays up after the last ltvm used it, when the
+#: environment does not say (LTVM_PODMAN_IDLE_STOP; 0 stops at once).
+PODMAN_IDLE_STOP_DEFAULT = 1800
+
+
+def podman_idle_stop_delay() -> int:
+    """LTVM_PODMAN_IDLE_STOP as whole seconds, or the default."""
+    raw = os.environ.get("LTVM_PODMAN_IDLE_STOP", "").strip()
+    if not raw:
+        return PODMAN_IDLE_STOP_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        value = -1
+    if value < 0:
+        log.warning(
+            "LTVM_PODMAN_IDLE_STOP=%r is not a whole number of seconds; "
+            "using %d",
+            raw,
+            PODMAN_IDLE_STOP_DEFAULT,
+        )
+        return PODMAN_IDLE_STOP_DEFAULT
+    return value
+
+
+def touch_podman_use(path: Path | None = None) -> None:
+    """Note that an ltvm process used podman just now."""
+    path = path or _podman_file("last-use")
+    with contextlib.suppress(OSError):
+        path.touch()
+        os.utime(path)
+
+
+def podman_idle_seconds() -> float:
+    """Seconds since any ltvm process last used podman (0 if unknown)."""
+    try:
+        return max(0.0, time.time() - _podman_file("last-use").stat().st_mtime)
+    except OSError:
+        return 0.0
+
+
+def schedule_idle_stop() -> None:
+    """Have the machine stopped once no ltvm has used it for a while.
+
+    Stopping it the moment each build finished restarted it 25-35 times
+    a day here, each start costing ~25 s and the page cache, and each
+    one a chance at the failed start check_podman_machine_macos()
+    repairs.  A detached waiter (``python -m ltvm_pkg.podman_idle``)
+    stops it after podman_idle_stop_delay() seconds without use instead;
+    one waiter serves every build, the rest exit at once.
+    """
+    repo = Path(__file__).resolve().parent.parent
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (str(repo), env.get("PYTHONPATH", "")) if p
+    )
+    try:
+        with open(_podman_file("idle.log"), "ab") as out:
+            subprocess.Popen(
+                [sys.executable, "-m", "ltvm_pkg.podman_idle"],
+                cwd=str(repo),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=out,
+                start_new_session=True,
+            )
+    except OSError as e:
+        log.debug("podman idle stop not scheduled: %s", e)
+
+
 # This process's shared hold on the usage lock, or None.  Taken by the
 # first podman use and kept until the process exits or the auto-stop
 # turns it exclusive.
@@ -1647,6 +1787,11 @@ def hold_podman_usage() -> None:
         os.close(fd)
         return
     _usage_fd = fd
+    # The idle stop counts from the last use, which is when the
+    # process ends: a build may hold the machine for an hour.
+    last_use = _podman_file("last-use")
+    touch_podman_use(last_use)
+    atexit.register(touch_podman_use, last_use)
 
 
 @contextlib.contextmanager

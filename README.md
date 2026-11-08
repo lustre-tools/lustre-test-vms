@@ -64,11 +64,13 @@ a podman-managed Linux VM + QEMU microvms. A few things differ from Linux:
   `LTVM_MACOS_BUILD_VOLUMES=0` goes back to bind mounts.  A kernel's
   volume goes with the kernel (`ltvm clean`, `ltvm target clean`), and
   `ltvm doctor` shows what they take inside the podman machine.
-- **The podman machine stops after a build** to give its memory
-  back, unless another ltvm command is still using it, which costs
-  ~12 s and its page cache on the next one.
-  `export LTVM_PODMAN_AUTOSTOP=0` keeps it up: a rebuild then takes
-  ~8 s instead of ~22 s.
+- **The podman machine stops once ltvm has left it idle** for 30
+  minutes after a build, to give its memory back; the next build then
+  pays ~12 s and the page cache to start it.  `LTVM_PODMAN_IDLE_STOP`
+  sets the idle time in seconds (`0` stops it as soon as the build
+  ends), and `export LTVM_PODMAN_AUTOSTOP=0` keeps it up for good.
+  A machine that lists as running but does not answer -- a failed
+  start leaves it so -- is restarted by the next build.
 - **To confine an agent to a VM**, run ltvm inside an aarch64 Linux VM
   on the Mac instead: UTM on the Apple Virtualization backend with
   nested virtualization on, which needs an M3 or later and macOS 15+.

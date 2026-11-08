@@ -79,6 +79,7 @@ class TestCheckPodmanMachineMacos:
             stdout='[{"Name": "podman-machine-default", "Running": false}]',
         )
         start_result = MagicMock(returncode=0, stdout="", stderr="")
+        info_result = MagicMock(returncode=0, stdout="arm64\n", stderr="")
         with (
             patch("ltvm_pkg.host_setup.is_macos", return_value=True),
             patch(
@@ -87,7 +88,7 @@ class TestCheckPodmanMachineMacos:
             ),
             patch(
                 "ltvm_pkg.host_setup.subprocess.run",
-                side_effect=[list_result, start_result],
+                side_effect=[list_result, start_result, info_result],
             ) as run_mock,
         ):
             check_podman_machine_macos()
@@ -703,7 +704,8 @@ class TestPodmanUsageLock:
             patch.object(hs.subprocess, "run", side_effect=fake_run),
         ):
             hs.check_podman_machine_macos()
-        assert held == [True]
+        # `podman machine list`, then `podman info`: both under the hold.
+        assert held == [True, True]
 
 
 class TestAutostopConcurrency:
@@ -714,6 +716,7 @@ class TestAutostopConcurrency:
         from ltvm_pkg.cli import build as bmod
 
         stops: list[int] = []
+        monkeypatch.setenv("LTVM_PODMAN_IDLE_STOP", "0")
         monkeypatch.setattr(hs, "is_macos", lambda: True)
         monkeypatch.setattr(bmod, "is_macos", lambda: True)
         monkeypatch.setattr(
@@ -740,3 +743,202 @@ class TestAutostopConcurrency:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         assert self._run_cm(monkeypatch, other_build=False) == [1]
+
+
+def _ok(stdout: str = "") -> MagicMock:
+    return MagicMock(returncode=0, stdout=stdout, stderr="")
+
+
+def _fail() -> MagicMock:
+    return MagicMock(returncode=125, stdout="", stderr="")
+
+
+_RUNNING = '[{"Name": "podman-machine-default", "Running": true}]'
+_STOPPED = '[{"Name": "podman-machine-default", "Running": false}]'
+
+
+class TestPreflightRepair:
+    """A machine that lists as running but does not answer is restarted."""
+
+    @pytest.fixture(autouse=True)
+    def _mac(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import ltvm_pkg.host_setup as hs
+
+        monkeypatch.setattr(hs, "is_macos", lambda: True)
+        monkeypatch.setattr(hs.shutil, "which", lambda _: "/bin/podman")
+        monkeypatch.setattr(hs.time, "sleep", lambda _: None)
+
+    def _run(self, *results: MagicMock) -> list[list[str]]:
+        import ltvm_pkg.host_setup as hs
+
+        calls: list[list[str]] = []
+        it = iter(results)
+
+        def run(cmd: list[str], **_kw: Any) -> MagicMock:
+            calls.append(cmd[:3])
+            return next(it)
+
+        with patch.object(hs.subprocess, "run", side_effect=run):
+            hs.check_podman_machine_macos()
+        return calls
+
+    def test_running_and_answering_is_left_alone(self) -> None:
+        calls = self._run(_ok(_RUNNING), _ok("arm64"))
+        assert calls == [
+            ["podman", "machine", "list"],
+            ["podman", "info", "--format"],
+        ]
+
+    def test_running_but_refusing_is_restarted(self) -> None:
+        calls = self._run(
+            _ok(_RUNNING),
+            _fail(),
+            _fail(),
+            _fail(),  # never answers
+            _ok(),
+            _ok(),
+            _ok("arm64"),  # stop, start, answers
+        )
+        assert calls[4:] == [
+            ["podman", "machine", "stop"],
+            ["podman", "machine", "start"],
+            ["podman", "info", "--format"],
+        ]
+
+    def test_answering_on_a_later_try_is_left_alone(self) -> None:
+        """Another ltvm's start may still be waiting for sshd."""
+        calls = self._run(_ok(_RUNNING), _fail(), _ok("arm64"))
+        assert ["podman", "machine", "stop"] not in calls
+
+    def test_a_failed_start_is_stopped_and_tried_again(self) -> None:
+        calls = self._run(
+            _ok(_STOPPED),
+            _fail(),  # start fails
+            _ok(),
+            _ok(),
+            _ok("arm64"),  # stop, start, answers
+        )
+        assert calls[1:] == [
+            ["podman", "machine", "start"],
+            ["podman", "machine", "stop"],
+            ["podman", "machine", "start"],
+            ["podman", "info", "--format"],
+        ]
+
+    def test_two_failed_starts_are_an_error(self) -> None:
+        with pytest.raises(PodmanMachineError, match="twice"):
+            self._run(_ok(_STOPPED), _fail(), _ok(), _fail())
+
+
+class TestIdleStop:
+    """The machine is stopped once ltvm has left it unused for a while."""
+
+    def test_delay_from_the_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import ltvm_pkg.host_setup as hs
+
+        assert hs.podman_idle_stop_delay() == hs.PODMAN_IDLE_STOP_DEFAULT
+        monkeypatch.setenv("LTVM_PODMAN_IDLE_STOP", "0")
+        assert hs.podman_idle_stop_delay() == 0
+        monkeypatch.setenv("LTVM_PODMAN_IDLE_STOP", "90")
+        assert hs.podman_idle_stop_delay() == 90
+        monkeypatch.setenv("LTVM_PODMAN_IDLE_STOP", "soon")
+        assert hs.podman_idle_stop_delay() == hs.PODMAN_IDLE_STOP_DEFAULT
+
+    def test_the_hold_notes_the_use(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import ltvm_pkg.host_setup as hs
+
+        monkeypatch.setattr(hs, "is_macos", lambda: True)
+        last = hs._podman_file("last-use")
+        assert not last.exists()
+        hs.hold_podman_usage()
+        assert last.exists() and hs.podman_idle_seconds() < 5
+
+    def _waiter(
+        self, monkeypatch: pytest.MonkeyPatch, idle_for: list[float]
+    ) -> tuple[bool, list[float], list[int]]:
+        import ltvm_pkg.host_setup as hs
+        from ltvm_pkg import podman_idle
+
+        monkeypatch.setenv("LTVM_PODMAN_IDLE_STOP", "600")
+        ages = iter(idle_for)
+        monkeypatch.setattr(hs, "podman_idle_seconds", lambda: next(ages))
+        slept: list[float] = []
+        monkeypatch.setattr(podman_idle, "_sleep", slept.append)
+        stops: list[int] = []
+        monkeypatch.setattr(
+            hs, "should_stop_podman_machine_macos", lambda: True
+        )
+        monkeypatch.setattr(
+            hs, "stop_podman_machine_macos", lambda: stops.append(1)
+        )
+        return podman_idle.wait_and_stop(), slept, stops
+
+    def test_waits_out_the_delay_then_stops(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        stopped, slept, stops = self._waiter(monkeypatch, [100, 600, 600])
+        assert stopped and stops == [1]
+        assert slept == [500]
+
+    def test_a_use_meanwhile_restarts_the_clock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Idle long enough, but used again just before the lock is taken.
+        stopped, slept, _ = self._waiter(monkeypatch, [600, 10, 10, 600, 600])
+        assert stopped
+        from ltvm_pkg import podman_idle
+
+        assert slept == [podman_idle.BUSY_RECHECK, 590]
+
+    def test_not_while_another_ltvm_holds_the_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import ltvm_pkg.host_setup as hs
+
+        other = _OtherProcess(hs._podman_lock_path())
+        try:
+            from ltvm_pkg import podman_idle
+
+            monkeypatch.setattr(podman_idle, "BUSY_RECHECK", 0.0)
+            calls = {"n": 0}
+
+            def sleep(_s: float) -> None:
+                calls["n"] += 1
+                if calls["n"] == 2:
+                    other.release()
+
+            monkeypatch.setenv("LTVM_PODMAN_IDLE_STOP", "600")
+            monkeypatch.setattr(hs, "podman_idle_seconds", lambda: 600.0)
+            monkeypatch.setattr(podman_idle, "_sleep", sleep)
+            stops: list[int] = []
+            monkeypatch.setattr(
+                hs, "should_stop_podman_machine_macos", lambda: True
+            )
+            monkeypatch.setattr(
+                hs, "stop_podman_machine_macos", lambda: stops.append(1)
+            )
+            assert podman_idle.wait_and_stop()
+        finally:
+            if other.proc.poll() is None:
+                other.release()
+        assert calls["n"] == 2 and stops == [1]
+
+    def test_a_second_waiter_exits_at_once(self) -> None:
+        import fcntl
+        import os
+
+        import ltvm_pkg.host_setup as hs
+        from ltvm_pkg import podman_idle
+
+        fd = os.open(hs._podman_file("idle.lock"), os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            with patch.object(podman_idle, "wait_and_stop") as wait:
+                assert podman_idle.main() == 0
+            wait.assert_not_called()
+        finally:
+            os.close(fd)
