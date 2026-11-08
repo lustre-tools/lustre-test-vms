@@ -344,3 +344,110 @@ class TestReviewFixes:
             assert vm_claim._pid_start(1) == "Fri Sep 25 08:26:03 2026"
         env = run.call_args.kwargs["env"]
         assert (env["LC_ALL"], env["TZ"]) == ("C", "UTC0")
+
+
+_HOLD_LOCK = (
+    "import fcntl, os, sys\n"
+    "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+    "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+    "os.pwrite(fd, b'4242\\n', 0)\n"
+    "print('held', flush=True)\n"
+    "sys.stdin.read()\n"
+)
+_PROBE_LOCK = (
+    "import fcntl, os, sys\n"
+    "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+    "try:\n"
+    "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+    "except OSError:\n"
+    "    sys.exit(1)\n"
+)
+
+
+def _lock_is_free(path: Path) -> bool:
+    p = subprocess.Popen([sys.executable, "-c", _PROBE_LOCK, str(path)])
+    return p.wait(timeout=10) == 0
+
+
+class TestDeployLock:
+    """A second deploy into a VM is refused, not interleaved."""
+
+    def test_held_for_the_block_and_released(self) -> None:
+        path = vm_claim.deploy_lock_path("co9-mds")
+        with vm_claim.deploy_lock("co9-mds"):
+            assert not _lock_is_free(path)
+            assert path.read_text().strip() == str(os.getpid())
+        assert _lock_is_free(path)
+
+    def _other_deploy(self, path: Path) -> subprocess.Popen[str]:
+        with vm_claim.deploy_lock("co9-mds"):
+            pass  # create the file
+        other = subprocess.Popen(
+            [sys.executable, "-c", _HOLD_LOCK, str(path)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        assert other.stdout is not None
+        assert other.stdout.readline().strip() == "held"
+        return other
+
+    def _end(self, other: subprocess.Popen[str]) -> None:
+        assert other.stdin is not None
+        other.stdin.close()
+        other.wait(timeout=10)
+
+    def test_refuses_while_another_deploy_runs(self) -> None:
+        path = vm_claim.deploy_lock_path("co9-mds")
+        other = self._other_deploy(path)
+        try:
+            with pytest.raises(vm_claim.DeployInProgress, match="pid 4242"):
+                with vm_claim.deploy_lock("co9-mds"):
+                    pytest.fail("deployed alongside another deploy")
+            with pytest.raises(vm_claim.DeployInProgress, match="co9-mds"):
+                vm_claim.require_no_deploy(["co9-oss", "co9-mds"])
+        finally:
+            self._end(other)
+        # Once it is done, both let a deploy through.
+        vm_claim.require_no_deploy(["co9-oss", "co9-mds"])
+        with vm_claim.deploy_lock("co9-mds"):
+            pass
+
+    def test_a_refusal_is_a_runtime_error(self) -> None:
+        """deploy_to_vm's callers report RuntimeError per node."""
+        assert issubclass(vm_claim.DeployInProgress, RuntimeError)
+
+    def test_check_leaves_no_lock_behind(self) -> None:
+        with vm_claim.deploy_lock("co9-mds"):
+            pass
+        vm_claim.require_no_deploy(["co9-mds"])
+        assert _lock_is_free(vm_claim.deploy_lock_path("co9-mds"))
+
+    def test_other_vms_are_not_refused(self) -> None:
+        with vm_claim.deploy_lock("co9-mds"):
+            with vm_claim.deploy_lock("co9-oss"):
+                pass
+
+    def test_not_a_claim(self) -> None:
+        with vm_claim.deploy_lock("co9-mds"):
+            assert vm_claim.all_claims() == {}
+
+    def test_no_claims_dir_deploys_unlocked(self, tmp_path: Path) -> None:
+        with patch.object(vm_claim, "CLAIMS_DIR", tmp_path / "missing"):
+            with vm_claim.deploy_lock("co9-mds"):
+                pass
+
+    def test_deploy_to_vm_holds_it(self) -> None:
+        from ltvm_pkg import deploy
+        from ltvm_pkg.vm_state import VMInfo
+
+        vm = VMInfo(name="co9-mds", ip="192.168.100.9")
+        path = vm_claim.deploy_lock_path("co9-mds")
+        held: list[bool] = []
+        with patch.object(
+            deploy,
+            "_deploy_to_vm",
+            lambda *a, **k: held.append(not _lock_is_free(path)),
+        ):
+            deploy.deploy_to_vm(vm, Path("/nonexistent"), os_family="rhel")
+        assert held == [True]

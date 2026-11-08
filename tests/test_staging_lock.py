@@ -289,6 +289,71 @@ class TestDeploy:
         assert seen["build"] == "free"
 
 
+class TestDeployInProgress:
+    """A second deploy into a VM is refused before it builds anything."""
+
+    def test_deploy_lustre(
+        self,
+        tmp_sockets: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from ltvm_pkg import cli as cli_mod
+        from ltvm_pkg import vm_claim
+        from ltvm_pkg.cli import deploy as cli_deploy
+        from tests.test_deploy import _deploy_args, _make_vm
+
+        tree, _staging = _tree_and_staging(tmp_path)
+        vm = _make_vm(name="co1-lock", ip="10.0.0.41")
+        vm.os_id = "rocky9"
+        vm.save()
+        with (
+            patch.object(cli_deploy.subprocess, "run") as run,
+            patch("ltvm_pkg.cli.deploy_to_vm") as deploy,
+            vm_claim.deploy_lock("co1-lock"),
+        ):
+            rc = cli_mod.cmd_deploy(
+                _deploy_args(vm="co1-lock", lustre_tree=str(tree))
+            )
+        assert rc != 0
+        assert (
+            "another deploy to co1-lock is running" in capsys.readouterr().err
+        )
+        run.assert_not_called()
+        deploy.assert_not_called()
+
+    def test_cluster_deploy_checks_only_its_nodes(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from ltvm_pkg import vm_claim
+
+        cluster = ClusterInfo(
+            name="co3",
+            nodes=[
+                {"name": "co3-mds", "roles": ["mgs", "mds"]},
+                {"name": "co3-c1", "roles": ["client"]},
+            ],
+        )
+        args = argparse.Namespace(
+            name="co3", lustre_source=str(tmp_path), mount=False
+        )
+        with (
+            patch.object(ClusterInfo, "load", return_value=cluster),
+            patch.object(vm_cluster, "_validate_lustre_source"),
+            patch.object(
+                vm_cluster, "probe_mgs_lnet", side_effect=SystemExit("built")
+            ),
+            vm_claim.deploy_lock("co3-c1"),
+        ):
+            with pytest.raises(SystemExit):
+                vm_cluster.cmd_cluster_deploy(args)
+            assert "another deploy to co3-c1" in capsys.readouterr().err
+            # --server-only leaves the client alone, so it goes on.
+            args.server_only = True
+            with pytest.raises(SystemExit, match="built"):
+                vm_cluster.cmd_cluster_deploy(args)
+
+
 class TestClusterDeploy:
     def test_build_unlocked_streams_shared(self, tmp_path: Path) -> None:
         class _TC:
