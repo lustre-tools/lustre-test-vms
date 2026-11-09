@@ -126,8 +126,8 @@ then commit N times the budget, though one VM must still fit the budget
 on its own, and a refusal prints the ratio in force. It is off by
 default and it is the user's setting for the whole host: do not raise
 it to get past a refusal -- wait. `[memory] reserve` there (MiB, `NG` or
-`N%`) sets how much RAM the budget leaves the host, 1 GiB or 10% unless
-set; the same goes for it.
+`N%`) sets how much RAM the budget leaves the host, 25% (1-8 GiB)
+unless set; the same goes for it.
 
 `--numa-nodes N` gives the guest N simulated NUMA nodes, for testing
 Lustre CPTs (`cpu_npartitions`, `cpu_pattern`): the vCPUs, which N must

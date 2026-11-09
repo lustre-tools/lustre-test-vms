@@ -119,12 +119,16 @@ def _cgroup_memory_limit_mb(
     return min(limits) // (1024 * 1024) if limits else 0
 
 
-# Reserve for the host kernel + userspace.  1 GiB or 10% of total RAM,
-# whichever is larger, unless ``[memory] reserve`` says otherwise.  Host
-# bookkeeping (page cache, sshd, the QEMU monitor processes themselves)
-# needs slack -- without it, the OOM killer fires on the host instead of
-# refusing the launch up front.
+# Reserve for the host kernel + userspace: 25% of total RAM, at least
+# 1 GiB and at most 8 GiB, unless ``[memory] reserve`` says otherwise.
+# Host bookkeeping (page cache, sshd, the QEMU monitor processes
+# themselves) needs slack -- without it, the OOM killer fires on the host
+# instead of refusing the launch up front -- and a desktop host runs far
+# more beside its VMs.  Past 32 GiB the 8 GiB cap leaves the guests the
+# rest.
 _HOST_MEM_RESERVE_FLOOR_MB = 1024
+_HOST_MEM_RESERVE_CAP_MB = 8192
+_HOST_MEM_RESERVE_PERCENT = 25
 
 # ``[memory] reserve``: MiB, or with a M/G suffix, or a percentage.
 _RESERVE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(%|[mMgG](?:i?[bB])?)?")
@@ -172,14 +176,21 @@ def _warn_site_config(problem: str) -> None:
 
 def _memory_reserve(total_mb: int) -> int:
     """/etc/ltvm.conf's ``[memory] reserve`` for a host of ``total_mb``,
-    or the default: 1 GiB or 10%, whichever is larger.
+    or the default: 25%, at least 1 GiB and at most 8 GiB.
 
     A desktop host -- a Mac running a podman machine, a browser and the
-    agents' apps beside its VMs -- needs far more than 10% for itself;
+    agents' apps beside its VMs -- needs a good share for itself;
     without it the guests are admitted, the host swaps, and they and
-    everything else crawl.
+    everything else crawl.  The default's 25% covers a 24 GiB Mac; the
+    setting is for a host that needs more, or less.
     """
-    default = max(_HOST_MEM_RESERVE_FLOOR_MB, total_mb // 10)
+    default = min(
+        _HOST_MEM_RESERVE_CAP_MB,
+        max(
+            _HOST_MEM_RESERVE_FLOOR_MB,
+            total_mb * _HOST_MEM_RESERVE_PERCENT // 100,
+        ),
+    )
     parser = configparser.ConfigParser()
     try:
         parser.read(site_config.path())

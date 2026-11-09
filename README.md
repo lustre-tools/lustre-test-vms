@@ -498,15 +498,15 @@ names like `testvm`.
 
 `create` and `start` refuse a VM when the running guests' memory (each
 one's `--mem`) plus the new one would exceed the host's RAM less a
-reserve of 1 GiB or 10%, whichever is larger. `--wait SECONDS` waits
-for room instead.
+reserve of 25%, at least 1 GiB and at most 8 GiB. `--wait SECONDS`
+waits for room instead.
 
-A desktop host needs more than that for itself: on a Mac the podman
+The reserve is what the host keeps for itself: on a Mac the podman
 machine, a browser and the agents' apps run beside the VMs, and guests
-admitted into the last 10% send it into swap, where everything slows
-and a podman machine start can time out.  An admin sets the reserve for
-every user on the host, in MiB, with an `M` or `G` suffix, or as a
-percentage of RAM:
+admitted into that memory send it into swap, where everything slows and
+a podman machine start can time out.  An admin can change it for every
+user on the host, in MiB, with an `M` or `G` suffix, or as a percentage
+of RAM:
 
 ```ini
 # /etc/ltvm.conf

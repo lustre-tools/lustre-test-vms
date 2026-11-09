@@ -1159,7 +1159,7 @@ class TestMemoryBudgetCheck:
         """No other VMs running, but the request alone busts the budget."""
         vm = _make_vm(tmp_vmdir, name="big", mem=8192)
         with (
-            # 8 GiB host -> reserve = max(1024, 819) = 1024 -> budget 7168
+            # 8 GiB host -> reserve 25% = 2048 -> budget 6144
             patch("ltvm_pkg.qemu_run._read_meminfo_mb", return_value=8192),
             patch.object(VMInfo, "all_names", return_value=[]),
         ):
@@ -1192,8 +1192,8 @@ class TestMemoryBudgetCheck:
             return other.name in running_set
 
         with (
-            # 10 GiB host -> reserve max(1024, 1024) = 1024 -> budget 9216
-            # Committed 4096+2048+2048 = 8192; new wants 4096 -> 12288 > 9216
+            # 10 GiB host -> reserve 25% = 2560 -> budget 7680
+            # Committed 4096+2048+2048 = 8192; new wants 4096 -> 12288 > 7680
             patch("ltvm_pkg.qemu_run._read_meminfo_mb", return_value=10240),
             patch("ltvm_pkg.qemu_run.is_running", side_effect=fake_is_running),
         ):
@@ -1246,12 +1246,12 @@ class TestMemoryBudgetCheck:
     def _shortfall_with_running(
         tmp_vmdir: Path, running_mb: list[int], new_mb: int
     ) -> qemu_run._Shortfall | None:
-        """Check a new VM on a 10 GiB host (budget 9216 MiB)."""
+        """Check a new VM on a 12 GiB host (budget 9216 MiB)."""
         for i, mb in enumerate(running_mb):
             _make_vm(tmp_vmdir, name=f"co1-run{i}", mem=mb).save()
         new_vm = _make_vm(tmp_vmdir, name="co1-new", mem=new_mb)
         with (
-            patch("ltvm_pkg.qemu_run._read_meminfo_mb", return_value=10240),
+            patch("ltvm_pkg.qemu_run._read_meminfo_mb", return_value=12288),
             patch(
                 "ltvm_pkg.qemu_run.is_running",
                 side_effect=lambda o: o.name.startswith("co1-run"),
@@ -1344,14 +1344,15 @@ class TestMemoryBudgetCheck:
         assert qemu_run._memory_reserve(10240) == reserve_mb
         assert capsys.readouterr().err == ""
 
-    def test_reserve_defaults_to_a_tenth_or_a_gib(
+    def test_reserve_defaults_to_a_quarter_within_bounds(
         self,
         tmp_path_factory: pytest.TempPathFactory,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         self._site(tmp_path_factory, monkeypatch, "[memory]\novercommit = 2\n")
-        assert qemu_run._memory_reserve(32768) == 3276
-        assert qemu_run._memory_reserve(8192) == 1024
+        assert qemu_run._memory_reserve(24576) == 6144
+        assert qemu_run._memory_reserve(2048) == 1024  # floor
+        assert qemu_run._memory_reserve(131072) == 8192  # cap
 
     def test_reserve_shrinks_the_budget(
         self,
@@ -1361,10 +1362,10 @@ class TestMemoryBudgetCheck:
     ) -> None:
         """A VM the default budget (9216 MiB) admits is refused once the
         reserve leaves 6144 MiB for guests."""
-        self._site(tmp_path_factory, monkeypatch, "[memory]\nreserve = 4G\n")
+        self._site(tmp_path_factory, monkeypatch, "[memory]\nreserve = 6G\n")
         shortfall = self._shortfall_with_running(tmp_vmdir, [4096], 4096)
         assert shortfall is not None
-        assert "4096 MiB reserve" in shortfall.message
+        assert "6144 MiB reserve" in shortfall.message
         assert "shortfall:    2048 MiB" in shortfall.message
 
     @pytest.mark.parametrize("value", ["lots", "-1G", "4T", "100%", "20G"])
@@ -1378,8 +1379,8 @@ class TestMemoryBudgetCheck:
         self._site(
             tmp_path_factory, monkeypatch, f"[memory]\nreserve = {value}\n"
         )
-        assert qemu_run._memory_reserve(10240) == 1024
-        assert qemu_run._memory_reserve(10240) == 1024
+        assert qemu_run._memory_reserve(10240) == 2560
+        assert qemu_run._memory_reserve(10240) == 2560
         err = capsys.readouterr().err
         assert err.count("warning: ignoring [memory]") == 1
 

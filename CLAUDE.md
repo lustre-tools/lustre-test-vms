@@ -880,13 +880,16 @@ at the next `start`, as for any VM.
 
 **Host memory:** `create` and `start` admit a VM only when the running
 VMs' `-m` plus its own fit MemTotal less a reserve
-(`qemu_run._memory_shortfall`).  `[memory] overcommit` in
+(`qemu_run._memory_shortfall`): 25%, at least 1 GiB and at most 8 GiB
+(`_memory_reserve`).  It was 1 GiB or 10%, which let a 24 GiB Mac admit
+22 GiB of guests beside its podman machine and desktop apps and swap
+until the podman machine could not start.  `[memory] reserve` in
 `/etc/ltvm.conf` (`site_config.path()`; `LTVM_SITE_CONFIG` moves it, and
-the tests point it at a file that does not exist) multiplies that budget
-for the sum, never for one VM.  `[memory] reserve` (MiB, `NG`, or `N%`,
-read raw since configparser would take `%` for interpolation) replaces
-the default reserve of 1 GiB or 10%; a desktop host, a Mac with its
-podman machine and apps above all, needs far more.  It is 1.0 unless set, for hosts running
+the tests point it at a file that does not exist) replaces the default:
+MiB, `NM`/`NG`, or `N%`, read raw since configparser would take `%` for
+interpolation.  It is host-wide, not per-user, because the budget counts
+every user's guests.  `[memory] overcommit` there multiplies the budget
+for the sum, never for one VM.  It is 1.0 unless set, for hosts running
 KSM; a value below 1.0 or not a number warns once per process and counts
 as 1.0.  In a container MemTotal is the host's, so the budget is the
 cgroup's `memory.max` when that is smaller (`qemu_run.memory_budget`).
