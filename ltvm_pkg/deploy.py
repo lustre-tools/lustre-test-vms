@@ -337,6 +337,9 @@ def _deploy_to_vm(
 
     _stream_tree(vm, staging, exclude_modules=userspace_only)
 
+    if not userspace_only:
+        remove_unstaged_modules(vm, staging)
+
     # depmod + ldconfig to pick up new modules and libraries.
     post_deploy_cmd = "ldconfig" if userspace_only else "depmod -a && ldconfig"
     r = run_ssh(vm.ip, post_deploy_cmd, timeout=step_timeout())
@@ -482,6 +485,68 @@ def unload_lustre(vm: VMInfo) -> None:
     print(
         f"  Unloaded the running Lustre on {vm.name}{detail}", file=sys.stderr
     )
+
+
+def unstaged_modules_script(staging: Path, root: str = "") -> str:
+    """Shell script that removes, from each module directory the build
+    staged into, every module the build did not stage there.
+
+    Copying a tree over the VM only adds and replaces files.  A module
+    the new build does not produce (a client-only build over an image
+    that had a server build, or a module since removed from the tree)
+    stays on disk with the old symbol versions, and modprobe later
+    fails with "Unknown symbol".  Only directories that hold staged
+    modules are pruned, so ZFS and the distro's own modules are left
+    alone.  A module is matched by name, so a .ko.xz on the VM counts
+    as the staged .ko.  Returns "" when nothing was staged.
+    """
+    modroot = staging / "lib" / "modules"
+    dirs: dict[str, set[str]] = {}
+    if modroot.is_dir():
+        for ko in sorted(modroot.rglob("*.ko*")):
+            if not ko.is_file():
+                continue
+            rel = "/" + str(ko.parent.relative_to(staging))
+            dirs.setdefault(rel, set()).add(ko.name.split(".ko")[0])
+    if not dirs:
+        return ""
+    parts = []
+    for rel, names in sorted(dirs.items()):
+        keep = " ".join(shlex.quote(n) for n in sorted(names))
+        d = shlex.quote(root + rel)
+        parts.append(
+            f"for f in {d}/*.ko*; do "
+            '[ -f "$f" ] || continue; '
+            'b=$(basename "$f"); b=${b%%.ko*}; '
+            f'case " {keep} " in *" $b "*) continue;; esac; '
+            'echo "removed $f"; rm -f "$f"; done'
+        )
+    return "\n".join(parts) + "\n"
+
+
+def remove_unstaged_modules(vm: VMInfo, staging: Path) -> None:
+    """Remove modules the build did not produce from the directories it
+    installed into (see unstaged_modules_script), before depmod."""
+    script = unstaged_modules_script(staging)
+    if not script:
+        return
+    r = run_ssh(vm.ip, script, timeout=step_timeout())
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"removing stale modules on {vm.name} failed "
+            f"(rc={r.returncode}): {r.stderr}"
+        )
+    removed = [
+        ln for ln in (r.stdout or "").splitlines() if ln.startswith("removed ")
+    ]
+    if removed:
+        print(
+            f"{vm.name}: removed {len(removed)} module(s) the build "
+            "did not produce: "
+            + ", ".join(Path(ln[8:]).name for ln in removed[:8])
+            + ("" if len(removed) <= 8 else f" (+{len(removed) - 8} more)"),
+            file=sys.stderr,
+        )
 
 
 def verify_deployed_modules(vm: VMInfo, staging: Path) -> None:

@@ -402,7 +402,8 @@ class TestDeployToVm:
         ):
             deploy.deploy_to_vm(vm, staging)
         assert ssh_cmds[0] == deploy._UNLOAD_SCRIPT
-        assert ssh_cmds[2:] == [
+        assert ssh_cmds[2] == deploy.unstaged_modules_script(staging)
+        assert ssh_cmds[3:] == [
             "depmod -a && ldconfig",
             deploy.AUSTER_WRAPPER_SCRIPT,
         ]
@@ -2944,3 +2945,74 @@ class TestAusterWrapper:
     def test_matches_the_images(self) -> None:
         tools = Path("targets/common/build-tools.sh").read_text()
         assert deploy._AUSTER_WRAPPER in tools
+
+
+# -- stale modules the build did not produce --------------------------
+
+
+class TestUnstagedModules:
+    """A client-only build over an image with a server build must not
+    leave the old server modules (lfsck, mdt, ...) in the same
+    directory, where modprobe fails with "Unknown symbol"."""
+
+    def _tree(self, base: Path, files: list[str]) -> None:
+        for f in files:
+            p = base / f
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("")
+
+    def test_removes_only_unstaged_modules_in_staged_dirs(
+        self, tmp_path: Path
+    ) -> None:
+        lus = "lib/modules/5.14/extra/kernel/fs/lustre"
+        lnet = "lib/modules/5.14/extra/kernel/net/lustre"
+        staging = tmp_path / "staging"
+        self._tree(
+            staging, [f"{lus}/lustre.ko", f"{lus}/osc.ko", f"{lnet}/lnet.ko"]
+        )
+        root = tmp_path / "vm"
+        self._tree(
+            root,
+            [
+                f"{lus}/lustre.ko",
+                f"{lus}/osc.ko.xz",
+                f"{lus}/lfsck.ko",
+                f"{lus}/mdt.ko",
+                f"{lus}/README",
+                f"{lnet}/lnet.ko",
+                "lib/modules/5.14/extra/zfs/zfs.ko",
+            ],
+        )
+        script = deploy.unstaged_modules_script(staging, root=str(root))
+        r = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, check=True
+        )
+        left = sorted(
+            str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()
+        )
+        assert left == sorted(
+            [
+                f"{lus}/README",
+                f"{lus}/lustre.ko",
+                f"{lus}/osc.ko.xz",
+                f"{lnet}/lnet.ko",
+                "lib/modules/5.14/extra/zfs/zfs.ko",
+            ]
+        )
+        assert r.stdout.count("removed ") == 2
+
+    def test_no_staged_modules_no_script(self, tmp_path: Path) -> None:
+        (tmp_path / "usr/bin").mkdir(parents=True)
+        assert deploy.unstaged_modules_script(tmp_path) == ""
+
+    def test_userspace_only_does_not_prune(self, staging: Path) -> None:
+        ssh_cmds: list[str] = []
+        with (
+            patch("ltvm_pkg.deploy._stream_tree"),
+            patch(
+                "ltvm_pkg.deploy.run_ssh",
+                side_effect=lambda ip, cmd, **kw: ssh_cmds.append(cmd) or _ok(),
+            ),
+        ):
+            deploy.deploy_to_vm(_make_vm(), staging, userspace_only=True)
+        assert not any("removed" in c for c in ssh_cmds)
