@@ -264,7 +264,9 @@ ltvm cluster destroy co2
 `cluster create` and `cluster destroy` need `sudo` in front when this
 host cannot run VMs unprivileged; `ltvm doctor` says which applies.
 
-VM names must include the checkout number: `co<N>-<role>`.
+VM names are `<hh><N>-<role>`: the first two consonants of the host's
+short name (`bl` on a host called buildhost), a number unused on that host,
+and a role, e.g. `bl1-single`.
 
 
 ## Advanced Flow: LNet NIC Layouts

@@ -995,7 +995,10 @@ on any other host, macOS's HVF included.  KVM is 3-40x faster than TCG
 there; the benchmarks, against TCG and against ltvm on the Mac itself,
 are in [docs/NESTED_VIRTUALIZATION.md](docs/NESTED_VIRTUALIZATION.md).
 
-**Naming:** always include the checkout number: `co<N>-<role>`.
+**Naming:** `<hh><N>-<role>`, where `<hh>` is the first two consonants
+of the host's short name (`bl` on buildhost, `ts` on testnode) and N is unused
+on that host.  Older VMs and the examples here use `co<N>`, from when N
+was the Lustre checkout number; ltvm has no rename, so they keep it.
 
 **Root:** a host has one of two layouts, and
 [ltvm_pkg/rootless.py](ltvm_pkg/rootless.py) says which applies to the

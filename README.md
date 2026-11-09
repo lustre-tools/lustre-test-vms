@@ -490,9 +490,12 @@ Would create VM: co1-single
 Nothing was written.  Re-run without --dry-run to create it.
 ```
 
-VM names MUST include the checkout number and a descriptive role:
-`co<N>-<role>` (e.g. `co1-single`, `co2-mds`, `co2-oss`). Never bare
-names like `testvm`.
+VM names MUST start with a host tag and a number and end with a
+descriptive role: `<hh><N>-<role>`.  The tag is the first two consonants
+of the host's short name (`buildhost` is `bl`, `testnode` is `ts`), so a name
+in a report says which machine the VM is on and two hosts never hand out
+the same one: `bl1-single`, `ts2-mds`, `ts2-oss`.  The number need only
+be unused on that host.  Never bare names like `testvm`.
 
 ### Host memory
 

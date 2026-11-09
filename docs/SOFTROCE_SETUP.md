@@ -32,9 +32,9 @@ it at boot, via `targets/common/setup-nic-softroce.sh`.  That is the
 supported path and it does steps 3 and 4 below for you:
 
 ```bash
-ltvm create co<N>-rdma-a --vcpus 2 --mem 2048 --target rocky9 \
+ltvm create <hh><N>-rdma-a --vcpus 2 --mem 2048 --target rocky9 \
     --mdt-disks 0 --ost-disks 0 --nic softroce
-ltvm create co<N>-rdma-b --vcpus 2 --mem 2048 --target rocky9 \
+ltvm create <hh><N>-rdma-b --vcpus 2 --mem 2048 --target rocky9 \
     --mdt-disks 0 --ost-disks 0 --nic softroce
 ltvm list
 ```
@@ -44,7 +44,7 @@ the management NIC eth0 -- keeping RDMA traffic off the interface ssh
 and /etc/hosts rely on.  Check it came up:
 
 ```bash
-ssh co<N>-rdma-a 'rdma link'
+ssh <hh><N>-rdma-a 'rdma link'
 ```
 
 No MDT/OST disks needed unless you also intend to run Lustre on them.
@@ -74,9 +74,9 @@ For a VM without it, bind RXE to the extra NIC if there is one; only
 fall back to eth0 (the management NIC) when the VM has no other:
 
 ```bash
-ssh co<N>-rdma-a 'modprobe rdma_rxe && \
+ssh <hh><N>-rdma-a 'modprobe rdma_rxe && \
     rdma link add rxe0 type rxe netdev eth1 && rdma link'
-ssh co<N>-rdma-b 'modprobe rdma_rxe && \
+ssh <hh><N>-rdma-b 'modprobe rdma_rxe && \
     rdma link add rxe0 type rxe netdev eth1 && rdma link'
 ```
 
@@ -89,7 +89,7 @@ link rxe0/1 state ACTIVE physical_state LINK_UP netdev eth1
 Verify userspace can see it:
 
 ```bash
-ssh co<N>-rdma-a 'ibv_devices; ibv_devinfo -d rxe0'
+ssh <hh><N>-rdma-a 'ibv_devices; ibv_devinfo -d rxe0'
 ```
 
 You should see `rxe0` listed, port state `PORT_ACTIVE`, link_layer
@@ -103,11 +103,11 @@ because `ssh` is synchronous.
 ```bash
 # Server (VM-B) — note `true;` prefix avoids pkill nonzero exit
 # propagating; nohup + & detaches; -F skips CPU-frequency check
-ssh co<N>-rdma-b 'true; \
+ssh <hh><N>-rdma-b 'true; \
     nohup ib_write_bw -d rxe0 -F -D 5 > /tmp/ib.log 2>&1 & echo started'
 
 # Client (VM-A)
-ssh co<N>-rdma-a 'ib_write_bw -d rxe0 -F -D 5 <VM-B-IP>'
+ssh <hh><N>-rdma-a 'ib_write_bw -d rxe0 -F -D 5 <VM-B-IP>'
 ```
 
 Repeat for `ib_read_bw` and `ib_send_bw`. Typical result on default
@@ -118,14 +118,14 @@ overhead, not the wire.
 ### 5. (Optional) Bigger MTU for less-bad numbers
 
 ```bash
-ssh co<N>-rdma-a 'ip link set eth0 mtu 9000'
-ssh co<N>-rdma-b 'ip link set eth0 mtu 9000'
+ssh <hh><N>-rdma-a 'ip link set eth0 mtu 9000'
+ssh <hh><N>-rdma-b 'ip link set eth0 mtu 9000'
 ```
 
 Then re-create the rxe link to pick up the new MTU:
 
 ```bash
-ssh co<N>-rdma-a 'rdma link delete rxe0 && \
+ssh <hh><N>-rdma-a 'rdma link delete rxe0 && \
     rdma link add rxe0 type rxe netdev eth0'
 ```
 
