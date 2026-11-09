@@ -883,7 +883,10 @@ VMs' `-m` plus its own fit MemTotal less a reserve
 (`qemu_run._memory_shortfall`).  `[memory] overcommit` in
 `/etc/ltvm.conf` (`site_config.path()`; `LTVM_SITE_CONFIG` moves it, and
 the tests point it at a file that does not exist) multiplies that budget
-for the sum, never for one VM.  It is 1.0 unless set, for hosts running
+for the sum, never for one VM.  `[memory] reserve` (MiB, `NG`, or `N%`,
+read raw since configparser would take `%` for interpolation) replaces
+the default reserve of 1 GiB or 10%; a desktop host, a Mac with its
+podman machine and apps above all, needs far more.  It is 1.0 unless set, for hosts running
 KSM; a value below 1.0 or not a number warns once per process and counts
 as 1.0.  In a container MemTotal is the host's, so the budget is the
 cgroup's `memory.max` when that is smaller (`qemu_run.memory_budget`).

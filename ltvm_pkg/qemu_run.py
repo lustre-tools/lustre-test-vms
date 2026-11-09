@@ -120,10 +120,14 @@ def _cgroup_memory_limit_mb(
 
 
 # Reserve for the host kernel + userspace.  1 GiB or 10% of total RAM,
-# whichever is larger.  Host bookkeeping (page cache, sshd, the QEMU
-# monitor processes themselves) needs slack -- without it, the OOM
-# killer fires on the host instead of refusing the launch up front.
+# whichever is larger, unless ``[memory] reserve`` says otherwise.  Host
+# bookkeeping (page cache, sshd, the QEMU monitor processes themselves)
+# needs slack -- without it, the OOM killer fires on the host instead of
+# refusing the launch up front.
 _HOST_MEM_RESERVE_FLOOR_MB = 1024
+
+# ``[memory] reserve``: MiB, or with a M/G suffix, or a percentage.
+_RESERVE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(%|[mMgG](?:i?[bB])?)?")
 
 # How often a launch waiting for host memory looks again.
 _MEMORY_POLL_SECONDS = 5
@@ -153,13 +157,57 @@ def _memory_overcommit() -> float:
         if math.isfinite(ratio) and ratio >= 1.0:
             return ratio
         problem = f"overcommit must be a number >= 1.0, not {ratio}"
+    _warn_site_config(problem)
+    return 1.0
+
+
+def _warn_site_config(problem: str) -> None:
     if problem not in _site_config_warned:
         _site_config_warned.add(problem)
         print(
-            f"warning: ignoring [memory] in {site}: {problem}",
+            f"warning: ignoring [memory] in {site_config.path()}: {problem}",
             file=sys.stderr,
         )
-    return 1.0
+
+
+def _memory_reserve(total_mb: int) -> int:
+    """/etc/ltvm.conf's ``[memory] reserve`` for a host of ``total_mb``,
+    or the default: 1 GiB or 10%, whichever is larger.
+
+    A desktop host -- a Mac running a podman machine, a browser and the
+    agents' apps beside its VMs -- needs far more than 10% for itself;
+    without it the guests are admitted, the host swaps, and they and
+    everything else crawl.
+    """
+    default = max(_HOST_MEM_RESERVE_FLOOR_MB, total_mb // 10)
+    parser = configparser.ConfigParser()
+    try:
+        parser.read(site_config.path())
+        value = parser.get("memory", "reserve", raw=True, fallback=None)
+    except configparser.Error as e:
+        _warn_site_config(str(e))
+        return default
+    if value is None:
+        return default
+    match = _RESERVE_RE.fullmatch(value.strip())
+    if match is None:
+        _warn_site_config(
+            f"reserve must be MiB, NM, NG or N%, not {value.strip()!r}"
+        )
+        return default
+    number, unit = float(match.group(1)), (match.group(2) or "").lower()
+    if unit == "%":
+        reserve_mb = int(total_mb * number / 100)
+    elif unit.startswith("g"):
+        reserve_mb = int(number * 1024)
+    else:
+        reserve_mb = int(number)
+    if reserve_mb >= total_mb:
+        _warn_site_config(
+            f"reserve {value.strip()} leaves nothing of {total_mb} MiB"
+        )
+        return default
+    return reserve_mb
 
 
 @dataclass(frozen=True)
@@ -197,8 +245,9 @@ def memory_budget(cgroup: str | None = None) -> MemoryBudget | None:
     cgroup_mb = _cgroup_memory_limit_mb(relative=cgroup)
     if 0 < cgroup_mb < total_mb:
         total_mb, source = cgroup_mb, "cgroup memory.max"
-    reserve_mb = max(_HOST_MEM_RESERVE_FLOOR_MB, total_mb // 10)
-    return MemoryBudget(total_mb, source, reserve_mb, _memory_overcommit())
+    return MemoryBudget(
+        total_mb, source, _memory_reserve(total_mb), _memory_overcommit()
+    )
 
 
 def guest_memory_budget() -> MemoryBudget | None:

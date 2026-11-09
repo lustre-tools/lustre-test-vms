@@ -501,6 +501,19 @@ one's `--mem`) plus the new one would exceed the host's RAM less a
 reserve of 1 GiB or 10%, whichever is larger. `--wait SECONDS` waits
 for room instead.
 
+A desktop host needs more than that for itself: on a Mac the podman
+machine, a browser and the agents' apps run beside the VMs, and guests
+admitted into the last 10% send it into swap, where everything slows
+and a podman machine start can time out.  An admin sets the reserve for
+every user on the host, in MiB, with an `M` or `G` suffix, or as a
+percentage of RAM:
+
+```ini
+# /etc/ltvm.conf
+[memory]
+reserve = 40%
+```
+
 That counts every guest at its full size, which overstates what a host
 running KSM holds: guests booted from the same image share most of
 their pages. An admin can let the running guests commit a multiple of

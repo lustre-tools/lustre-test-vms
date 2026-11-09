@@ -1326,6 +1326,63 @@ class TestMemoryBudgetCheck:
         err = capsys.readouterr().err
         assert err.count("warning: ignoring [memory]") == 1
 
+    @pytest.mark.parametrize(
+        ("value", "reserve_mb"),
+        [("4096", 4096), ("6G", 6144), ("512MiB", 512), ("40%", 4096)],
+    )
+    def test_reserve_replaces_the_default(
+        self,
+        value: str,
+        reserve_mb: int,
+        tmp_path_factory: pytest.TempPathFactory,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._site(
+            tmp_path_factory, monkeypatch, f"[memory]\nreserve = {value}\n"
+        )
+        assert qemu_run._memory_reserve(10240) == reserve_mb
+        assert capsys.readouterr().err == ""
+
+    def test_reserve_defaults_to_a_tenth_or_a_gib(
+        self,
+        tmp_path_factory: pytest.TempPathFactory,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._site(tmp_path_factory, monkeypatch, "[memory]\novercommit = 2\n")
+        assert qemu_run._memory_reserve(32768) == 3276
+        assert qemu_run._memory_reserve(8192) == 1024
+
+    def test_reserve_shrinks_the_budget(
+        self,
+        tmp_vmdir: Path,
+        tmp_path_factory: pytest.TempPathFactory,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A VM the default budget (9216 MiB) admits is refused once the
+        reserve leaves 6144 MiB for guests."""
+        self._site(tmp_path_factory, monkeypatch, "[memory]\nreserve = 4G\n")
+        shortfall = self._shortfall_with_running(tmp_vmdir, [4096], 4096)
+        assert shortfall is not None
+        assert "4096 MiB reserve" in shortfall.message
+        assert "shortfall:    2048 MiB" in shortfall.message
+
+    @pytest.mark.parametrize("value", ["lots", "-1G", "4T", "100%", "20G"])
+    def test_bad_reserve_falls_back_and_warns_once(
+        self,
+        value: str,
+        tmp_path_factory: pytest.TempPathFactory,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._site(
+            tmp_path_factory, monkeypatch, f"[memory]\nreserve = {value}\n"
+        )
+        assert qemu_run._memory_reserve(10240) == 1024
+        assert qemu_run._memory_reserve(10240) == 1024
+        err = capsys.readouterr().err
+        assert err.count("warning: ignoring [memory]") == 1
+
     def test_read_meminfo_parses_memtotal(self, tmp_path: Path) -> None:
         """_read_meminfo_mb returns kB-from-meminfo // 1024 for the named key."""
         meminfo = tmp_path / "meminfo"
