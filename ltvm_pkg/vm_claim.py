@@ -330,7 +330,10 @@ def _deploy_busy(vm: str, holder: str) -> DeployInProgress:
 
 def _holder(fd: int) -> str:
     os.lseek(fd, 0, os.SEEK_SET)
-    return os.read(fd, 32).decode(errors="replace").strip()
+    # The first line only: a holder that wrote its pid without
+    # truncating leaves the tail of a longer pid after it.
+    lines = os.read(fd, 32).decode(errors="replace").strip().splitlines()
+    return lines[0].strip() if lines else ""
 
 
 @contextlib.contextmanager
