@@ -590,6 +590,11 @@ see stale data: sanity 39r fails every time.  `-H` makes `--only` honour
 the suite's `ALWAYS_EXCEPT` list; without it, a test named in `--only`
 runs even when CI skips it as known-broken.
 
+After llmount or a suite, each server target sits on a dm-flakey device,
+`/dev/mapper/<facet>_flakey` (`mds1_flakey`, `ost1_flakey`), and is
+mounted as type `lustre_tgt`. To remount one by hand use that device and
+type: `mount -t lustre_tgt /dev/mapper/ost1_flakey /mnt/lustre-ost1`.
+
 A suite left running after the ssh that started it has gone needs a
 session keyring of its own:
 

@@ -128,3 +128,13 @@ def test_unprivileged_without_sudo_uses_path_home(monkeypatch):
     monkeypatch.delenv("SUDO_USER", raising=False)
 
     assert skills._target_user() is None
+
+
+def test_the_skill_names_the_target_devices_and_mount_type():
+    """fb-d78afe59f126: a run hand-remounting an OST lost several retries
+    because the skill did not say targets sit on dm-flakey devices and
+    mount as lustre_tgt."""
+    text = (Path(__file__).resolve().parent.parent / "skills" / "ltvm"
+            / "SKILL.md").read_text()
+    assert "/dev/mapper/<facet>_flakey" in text
+    assert "mount -t lustre_tgt" in text
