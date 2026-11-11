@@ -177,9 +177,13 @@ ltvm refuses `root=`, `console=` and `fc_*`, which it sets itself.
 `cluster create` takes the same flag for every node.
 
 `create` is idempotent: it starts a stopped VM and no-ops on a running
-one. Name VMs `co<N>-<role>` after the checkout they serve -- `co1-single`,
-`co2-mds`, `co5-ec-dom`. Never a bare `testvm`: the number is what tells a
-later session which tree the VM belongs to.
+one. Name VMs `<hh><N>-<role>`: `<hh>` is the first two consonants of
+the host's short name (`hostname -s`; `buildhost` is `bl`, `testnode` is `ts`),
+N a number no VM on that host uses, and the role says what it is for --
+`bl1-single`, `ts2-mds`, `ts5-ec-dom`. The tag says in any report which
+machine a VM is on, and keeps two hosts from handing out the same name.
+Never a bare `testvm`. VMs named `co<N>-...` (this skill's examples too)
+predate this; ltvm cannot rename a VM, so they keep their names.
 
 `deploy-lustre` is idempotent: it unmounts and unloads first, builds the
 tree if the staging is stale, pushes it over ssh, and mounts with
