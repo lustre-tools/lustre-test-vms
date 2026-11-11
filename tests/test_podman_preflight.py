@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -88,13 +89,18 @@ class TestCheckPodmanMachineMacos:
             ),
             patch(
                 "ltvm_pkg.host_setup.subprocess.run",
-                side_effect=[list_result, start_result, info_result],
+                side_effect=[
+                    list_result,
+                    MagicMock(returncode=125, stdout="", stderr=""),
+                    start_result,
+                    info_result,
+                ],
             ) as run_mock,
         ):
             check_podman_machine_macos()
-        # Second call is `podman machine start`.
-        second_call_args = run_mock.call_args_list[1].args[0]
-        assert second_call_args[:3] == ["podman", "machine", "start"]
+        # After the look under the repair lock, `podman machine start`.
+        third_call_args = run_mock.call_args_list[2].args[0]
+        assert third_call_args[:3] == ["podman", "machine", "start"]
 
     def test_running_machine_passes(self) -> None:
         fake = MagicMock(
@@ -767,6 +773,7 @@ class TestPreflightRepair:
         monkeypatch.setattr(hs, "is_macos", lambda: True)
         monkeypatch.setattr(hs.shutil, "which", lambda _: "/bin/podman")
         monkeypatch.setattr(hs.time, "sleep", lambda _: None)
+        monkeypatch.setattr(hs, "_gvproxy_dead", lambda: False)
 
     def _run(self, *results: MagicMock) -> list[list[str]]:
         import ltvm_pkg.host_setup as hs
@@ -795,11 +802,12 @@ class TestPreflightRepair:
             _fail(),
             _fail(),
             _fail(),  # never answers
+            _fail(),  # nor under the repair lock
             _ok(),
             _ok(),
             _ok("arm64"),  # stop, start, answers
         )
-        assert calls[4:] == [
+        assert calls[5:] == [
             ["podman", "machine", "stop"],
             ["podman", "machine", "start"],
             ["podman", "info", "--format"],
@@ -813,21 +821,83 @@ class TestPreflightRepair:
     def test_a_failed_start_is_stopped_and_tried_again(self) -> None:
         calls = self._run(
             _ok(_STOPPED),
+            _fail(),  # not answering under the repair lock
             _fail(),  # start fails
             _ok(),
             _ok(),
             _ok("arm64"),  # stop, start, answers
         )
         assert calls[1:] == [
+            ["podman", "info", "--format"],
             ["podman", "machine", "start"],
             ["podman", "machine", "stop"],
             ["podman", "machine", "start"],
             ["podman", "info", "--format"],
         ]
 
-    def test_two_failed_starts_are_an_error(self) -> None:
-        with pytest.raises(PodmanMachineError, match="twice"):
-            self._run(_ok(_STOPPED), _fail(), _ok(), _fail())
+    def test_every_start_failing_is_an_error_and_leaves_it_stopped(
+        self,
+    ) -> None:
+        import ltvm_pkg.host_setup as hs
+
+        tries = hs.PODMAN_START_TRIES
+        with pytest.raises(PodmanMachineError, match=f"{tries} tries"):
+            self._run(_ok(_STOPPED), _fail(), *[_fail(), _ok()] * tries)
+        log = hs._podman_file("repair.log").read_text()
+        assert f"gave up after {tries} tries" in log
+
+    def test_the_third_start_is_enough(self) -> None:
+        """What a stop and start by hand took on 2026-11-11."""
+        import ltvm_pkg.host_setup as hs
+
+        calls = self._run(
+            _ok(_STOPPED),
+            _fail(),
+            *[_fail(), _ok()] * 2,  # two starts fail, each is stopped
+            _ok(),
+            _ok("arm64"),
+        )
+        assert calls.count(["podman", "machine", "start"]) == 3
+        assert "started on try 3" in hs._podman_file("repair.log").read_text()
+
+    def test_a_dead_gvproxy_is_restarted_without_waiting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import ltvm_pkg.host_setup as hs
+
+        monkeypatch.setattr(hs, "_gvproxy_dead", lambda: True)
+        calls = self._run(_ok(_RUNNING), _fail(), _ok(), _ok(), _ok("arm64"))
+        assert calls == [
+            ["podman", "machine", "list"],
+            ["podman", "info", "--format"],  # under the repair lock
+            ["podman", "machine", "stop"],
+            ["podman", "machine", "start"],
+            ["podman", "info", "--format"],
+        ]
+
+    def test_a_repair_another_ltvm_finished_is_not_repeated(self) -> None:
+        """The repair lock is waited for, and the machine looked at again."""
+        calls = self._run(
+            _ok(_RUNNING), _fail(), _fail(), _fail(), _ok("arm64")
+        )
+        assert ["podman", "machine", "stop"] not in calls
+
+
+def test_gvproxy_dead_reads_the_pid_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import ltvm_pkg.host_setup as hs
+
+    monkeypatch.setattr(hs.tempfile, "gettempdir", lambda: str(tmp_path))
+    assert not hs._gvproxy_dead()  # no pid file
+    pid_file = tmp_path / "podman" / "gvproxy.pid"
+    pid_file.parent.mkdir()
+    pid_file.write_text(f"{os.getpid()}\n")
+    assert not hs._gvproxy_dead()
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    pid_file.write_text(f"{proc.pid}\n")
+    assert hs._gvproxy_dead()
 
 
 class TestIdleStop:

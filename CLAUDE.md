@@ -1644,8 +1644,19 @@ waiting for the guest's sshd kills gvproxy and leaves vfkit running, so
 the machine lists as running and refuses every connection (22 hours of
 "Cannot connect to Podman", 2026-11-07).  The preflight therefore asks
 a running machine `podman info`, three times 10 s apart in case
-another start is still finishing, and stops and restarts it when it
-never answers; a failed start is stopped and tried once more.
+another start is still finishing (at once when gvproxy's pid file names
+a dead process), and stops and restarts it when it never answers.  The
+first start after a stop fails about half the time -- podman's ssh
+check through gvproxy beats the guest's sshd and gets "handshake
+failed: EOF" -- so a failed start is stopped and tried again, up to
+`PODMAN_START_TRIES` (4) with a growing pause, and a final failure
+leaves the machine stopped rather than half up.  Repairs and starts
+run under `ltvm-podman-<uid>.repair.lock`, and whoever gets it next
+looks again before acting, so two sessions never restart the machine
+at once; each retry and give-up (with gvproxy.log's tail) goes to
+`ltvm-podman-<uid>.repair.log`.  A machine that answers is never
+restarted, so nothing kills a running build's container.  Zincati is
+off in the machine: the boots are ltvm's own starts.
 
 Parallel builds share the machine through a flock,
 `$TMPDIR/ltvm-podman-<uid>.lock` (`host_setup.hold_podman_usage`):

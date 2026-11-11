@@ -95,18 +95,28 @@ def check_podman_machine_macos() -> None:
             "Then retry."
         )
 
-    if any(m.get("Running") for m in machines):
-        if _podman_answers():
+    running = any(m.get("Running") for m in machines)
+    # A dead gvproxy needs no waiting for: nothing can reach the guest.
+    if running and not _gvproxy_dead() and _podman_answers():
+        return
+    # One repair at a time: every session on the Mac shares the machine.
+    with _podman_repair_lock():
+        # Another ltvm may have repaired or started it while we waited.
+        if _podman_answers(tries=1):
             return
-        # A `podman machine start` that times out waiting for the
-        # guest's sshd kills gvproxy and leaves vfkit running: the
-        # machine then lists as running and refuses every connection
-        # until someone stops it.  Nothing can be using it, so restart.
-        log.warning(
-            "podman machine is running but not answering; restarting it"
-        )
-        _podman_machine_cmd("stop", timeout=120)
-    _start_podman_machine()
+        if running:
+            # A `podman machine start` that times out waiting for the
+            # guest's sshd kills gvproxy and leaves vfkit running: the
+            # machine then lists as running and refuses every
+            # connection until someone stops it.  Nothing can be using
+            # it -- a container's client reaches it through gvproxy too
+            # -- so restart.
+            _repair_log("running but not answering; restarting it")
+            log.warning(
+                "podman machine is running but not answering; restarting it"
+            )
+            _podman_machine_cmd("stop", timeout=120)
+        _start_podman_machine()
 
 
 #: How often, and how far apart, the preflight asks a machine that lists
@@ -115,10 +125,72 @@ def check_podman_machine_macos() -> None:
 PODMAN_ANSWER_TRIES = 3
 PODMAN_ANSWER_WAIT = 10.0
 
+#: Starts tried before the preflight gives up, and the pause before each
+#: retry.  The first start after a stop fails about half the time: podman
+#: checks the guest's sshd through gvproxy before sshd answers, gets
+#: "ssh: handshake failed: EOF", and gives up.  The third try was the one
+#: that worked on 2026-11-11.
+PODMAN_START_TRIES = 4
+PODMAN_START_BACKOFF = (5.0, 15.0, 30.0)
 
-def _podman_answers() -> bool:
+
+def _gvproxy_dead() -> bool:
+    """True when podman's gvproxy pid file names no live process.
+
+    That is the half-started machine: vfkit up, the port forward gone.
+    False when there is no pid file or it cannot be read.
+    """
+    pid_file = Path(tempfile.gettempdir()) / "podman" / "gvproxy.pid"
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+@contextlib.contextmanager
+def _podman_repair_lock() -> Iterator[None]:
+    """Hold the machine's repair lock, waiting for another repair."""
+    try:
+        fd = os.open(_podman_file("repair.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _repair_log(message: str) -> None:
+    """Note a repair in ltvm-podman-<uid>.repair.log, beside the lock,
+    so a machine that keeps wedging leaves a trail."""
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(_podman_file("repair.log"), "a") as f:
+            f.write(f"{stamp} ltvm[{os.getpid()}] {message}\n")
+    except OSError:
+        pass
+
+
+def _gvproxy_log_tail(lines: int = 8) -> str:
+    path = Path(tempfile.gettempdir()) / "podman" / "gvproxy.log"
+    try:
+        return "".join(path.read_text().splitlines(True)[-lines:])
+    except OSError:
+        return ""
+
+
+def _podman_answers(tries: int = PODMAN_ANSWER_TRIES) -> bool:
     """True when the running machine's podman service answers."""
-    for attempt in range(PODMAN_ANSWER_TRIES):
+    for attempt in range(tries):
         if attempt:
             time.sleep(PODMAN_ANSWER_WAIT)
         try:
@@ -148,25 +220,38 @@ def _podman_machine_cmd(action: str, *, timeout: float) -> bool:
 
 
 def _start_podman_machine() -> None:
-    """Start the machine, once more after a failed start.
+    """Start the machine, trying again after each failed start.
 
-    The failed start is what leaves the half-running machine
+    A failed start is what leaves the half-running machine
     check_podman_machine_macos() repairs, so it is stopped (vfkit and
-    all) before the second try.
+    all) before the next try.  Called under the repair lock.
     """
     log.info("Starting podman machine...")
-    if _podman_machine_cmd("start", timeout=180) and _podman_answers():
-        return
-    log.warning("podman machine start failed; stopping it and trying again")
-    _podman_machine_cmd("stop", timeout=120)
-    if _podman_machine_cmd("start", timeout=180) and _podman_answers():
-        return
+    for attempt in range(1, PODMAN_START_TRIES + 1):
+        if attempt > 1:
+            time.sleep(PODMAN_START_BACKOFF[attempt - 2])
+        if _podman_machine_cmd("start", timeout=180) and _podman_answers():
+            if attempt > 1:
+                _repair_log(f"started on try {attempt}")
+            return
+        _repair_log(f"start try {attempt} failed")
+        if attempt < PODMAN_START_TRIES:
+            log.warning(
+                "podman machine start failed (try %d of %d); "
+                "stopping it and trying again",
+                attempt,
+                PODMAN_START_TRIES,
+            )
+        _podman_machine_cmd("stop", timeout=120)
+    tail = _gvproxy_log_tail()
+    _repair_log(
+        f"gave up after {PODMAN_START_TRIES} tries; gvproxy.log:\n{tail}"
+    )
     raise PodmanMachineError(
-        "failed to start podman machine twice.\n"
+        f"failed to start podman machine ({PODMAN_START_TRIES} tries).\n"
         "Try by hand:\n"
         "  podman machine stop; podman machine start\n"
-        "and see ~/.local/share/containers/podman/machine and "
-        "$TMPDIR/podman/*.log"
+        f"and see {_podman_file('repair.log')} and $TMPDIR/podman/*.log"
     )
 
 
