@@ -913,7 +913,9 @@ it.
 **Waiting for SSH:** create and start wait `LTVM_SSH_TIMEOUT` (120s)
 for the guest's sshd, and longer, up to five times that, while the
 guest's serial console is still growing: on a loaded host a boot runs
-past two minutes and is fine.  `cluster create` echoes each node's
+past two minutes and is fine.  `cluster create` waits 400s per node instead (its nodes boot at once
+and share the host), and `LTVM_SSH_TIMEOUT` overrides both.
+`cluster create` echoes each node's
 create output as it comes, prefixed with the node's name, and gives
 each node a backstop of that cap plus the kdump seeding budget
 (`KDUMP_SEED_BUDGET`) plus headroom, so it never kills a node that is

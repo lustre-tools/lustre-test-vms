@@ -2869,3 +2869,50 @@ def test_child_ltvm_is_this_checkout() -> None:
     assert argv[1] == str(
         Path(vm_cluster.__file__).resolve().parent.parent / "ltvm"
     )
+
+
+class TestClusterSshTimeoutDefault:
+    """Regression: four rocky9 nodes created at once did not answer ssh
+    within the single-VM default of 120s; LTVM_SSH_TIMEOUT=400 worked."""
+
+    def test_cluster_default_is_longer_than_single_vm(
+        self, monkeypatch
+    ) -> None:
+        from ltvm_pkg.vm_state import CLUSTER_SSH_TIMEOUT, cluster_ssh_timeout
+
+        monkeypatch.delenv("LTVM_SSH_TIMEOUT", raising=False)
+        assert cluster_ssh_timeout() == CLUSTER_SSH_TIMEOUT == 400
+
+    def test_env_timeout_wins(self, monkeypatch) -> None:
+        from ltvm_pkg.vm_state import cluster_ssh_timeout
+
+        monkeypatch.setenv("LTVM_SSH_TIMEOUT", "90")
+        assert cluster_ssh_timeout() == 90
+
+    def test_backstop_follows_the_cluster_default(self, monkeypatch) -> None:
+        from ltvm_pkg.vm_commands import KDUMP_SEED_BUDGET
+        from ltvm_pkg.vm_net import ssh_wait_cap
+
+        monkeypatch.delenv("LTVM_SSH_TIMEOUT", raising=False)
+        monkeypatch.setattr("ltvm_pkg.vm_net.emulated", lambda arch: False)
+        assert vm_cluster._node_create_timeout() > (
+            ssh_wait_cap(400) + KDUMP_SEED_BUDGET
+        )
+
+    def test_child_gets_the_cluster_default_not_a_forced_value(
+        self, monkeypatch
+    ) -> None:
+        """The child inherits LTVM_SSH_TIMEOUT_DEFAULT=400 and no
+        LTVM_SSH_TIMEOUT, so ltvm_pkg.vm_state.SSH_TIMEOUT is 400 there
+        and TCG scaling still applies; an explicit LTVM_SSH_TIMEOUT
+        passes through and wins."""
+        import sys
+
+        code = "from ltvm_pkg.vm_state import SSH_TIMEOUT; print(SSH_TIMEOUT)"
+        monkeypatch.delenv("LTVM_SSH_TIMEOUT", raising=False)
+        monkeypatch.delenv("LTVM_SSH_TIMEOUT_DEFAULT", raising=False)
+        r = _RUN_PREFIXED([sys.executable, "-c", code], "n", timeout=60)
+        assert r.stdout.split()[-1] == "400"
+        monkeypatch.setenv("LTVM_SSH_TIMEOUT", "77")
+        r = _RUN_PREFIXED([sys.executable, "-c", code], "n", timeout=60)
+        assert r.stdout.split()[-1] == "77"

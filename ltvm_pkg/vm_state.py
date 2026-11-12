@@ -545,7 +545,30 @@ ROOT_PASSWORD = "initial0"
 # has taken over 30s beside a Lustre build, and the wait ends as soon as
 # ssh answers or QEMU exits, so the default is generous.  Cross-arch
 # (TCG) boots are 5-20x slower again: LTVM_SSH_TIMEOUT.
-SSH_TIMEOUT = int(os.environ.get("LTVM_SSH_TIMEOUT", "120"))
+#
+# LTVM_SSH_TIMEOUT_DEFAULT replaces the 120 when LTVM_SSH_TIMEOUT is not
+# set: `cluster create` hands it to its per-node children (see
+# CLUSTER_SSH_TIMEOUT), so a user's explicit LTVM_SSH_TIMEOUT still wins
+# and an emulated guest is still scaled (ssh_wait_budget looks only at
+# LTVM_SSH_TIMEOUT).
+SSH_TIMEOUT = int(
+    os.environ.get("LTVM_SSH_TIMEOUT")
+    or os.environ.get("LTVM_SSH_TIMEOUT_DEFAULT")
+    or "120"
+)
+# What `cluster create` waits per node for ssh unless LTVM_SSH_TIMEOUT
+# says otherwise.  The nodes boot at once and share the host's CPU and
+# disk, and four rocky9 nodes did not answer in 120s.  Only a ceiling:
+# the wait ends as soon as ssh answers.
+CLUSTER_SSH_TIMEOUT = 400
+
+
+def cluster_ssh_timeout() -> int:
+    """Per-node ssh wait for `cluster create`: LTVM_SSH_TIMEOUT if set,
+    else CLUSTER_SSH_TIMEOUT."""
+    return int(os.environ.get("LTVM_SSH_TIMEOUT") or CLUSTER_SSH_TIMEOUT)
+
+
 DEFAULT_TARGET = "rocky9"
 
 

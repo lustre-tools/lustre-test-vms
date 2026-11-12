@@ -32,16 +32,17 @@ from .vm_net import (
 )
 from .vm_owner import resolve_owner_id
 from .vm_state import (
+    CLUSTER_SSH_TIMEOUT,
     DEFAULT_TARGET,
     EXIT_TIMEOUT,
     EXIT_UNREACHABLE,
     SOCKETS,
-    SSH_TIMEOUT,
     ClusterInfo,
     ClusterNode,
     ClusterNotFound,
     VMInfo,
     VMNotFound,
+    cluster_ssh_timeout,
     lustre_libdir,
 )
 
@@ -689,7 +690,13 @@ def _run_prefixed(
     one was slow.  Raises TimeoutExpired, having killed the child, past
     ``timeout``.
     """
-    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    # The children wait for ssh as long as cluster_ssh_timeout() says,
+    # unless the user set LTVM_SSH_TIMEOUT, which they inherit as is.
+    env = dict(
+        os.environ,
+        PYTHONUNBUFFERED="1",
+        LTVM_SSH_TIMEOUT_DEFAULT=str(CLUSTER_SSH_TIMEOUT),
+    )
     lines: list[str] = []
     expired = threading.Event()
     with subprocess.Popen(
@@ -741,8 +748,8 @@ def _node_create_timeout(arch: str = "x86_64") -> int:
     """Wall-clock budget for one node's child `ltvm create`.
 
     A backstop over the child's own limits, which end it first: the
-    longest wait for SSH (ssh_wait_cap, which stretches SSH_TIMEOUT
-    while the guest's console moves) and the kdump seeding after it,
+    longest wait for SSH (ssh_wait_cap, which stretches
+    cluster_ssh_timeout() while the guest's console moves) and the kdump seeding after it,
     whose restart alone may take 300s on a loaded host.  A budget of
     SSH_TIMEOUT + 270s killed nodes that were up and seeding kdump, and
     the cleanup loop then destroyed the whole cluster.
@@ -750,7 +757,7 @@ def _node_create_timeout(arch: str = "x86_64") -> int:
     from .vm_commands import KDUMP_SEED_BUDGET
 
     return (
-        ssh_wait_cap(ssh_wait_budget(SSH_TIMEOUT, arch))
+        ssh_wait_cap(ssh_wait_budget(cluster_ssh_timeout(), arch))
         + KDUMP_SEED_BUDGET
         + _NODE_CREATE_HEADROOM
     )

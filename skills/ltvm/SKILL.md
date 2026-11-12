@@ -438,7 +438,8 @@ ltvm cluster create co8 rocky9 mgs+mds+oss:co8-srv:4 client:co8-sles \
     --node-target co8-sles=opensuse156 --node-kernel co8-sles=6.4-sles15sp6
 ```
 
-Create and start wait up to 120 seconds for a guest to answer ssh,
+Create and start wait up to 120 seconds (cluster create, 400 per node)
+for a guest to answer ssh,
 longer (up to 600) while its console shows it still booting, and stop
 sooner if its QEMU exits. A host busy enough to run out of that ("SSH
 not ready after ...") wants `LTVM_SSH_TIMEOUT=<seconds>` exported, not a
