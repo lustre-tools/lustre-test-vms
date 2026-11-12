@@ -25,6 +25,7 @@ COMPILEBENCH_REF="${COMPILEBENCH_REF:-28ad3d580d84428beeda5c857f7c4b42bd90f9eb}"
 CTHON04_REF="${CTHON04_REF:-86a4501a6e1e415844dc632894a85a5253cc1505}"
 TOOLKIT_REF="${TOOLKIT_REF:-3a62943ca32ddc63cac90679f2f43a38b608ea68}"
 DBENCH_LOADFILE_REF="${DBENCH_LOADFILE_REF:-a8e1c0fbb8bdb23ee22c0cc2e3f9b1049e537fff}"
+VMTOUCH_REF="${VMTOUCH_REF:-af86e27675843b3c7e4ddfee66ddbaf44eff43c4}"
 
 TARGET_ARCH="${TARGET_ARCH:-$(uname -m)}"
 HOST_ARCH="$(uname -m)"
@@ -205,6 +206,15 @@ for f in compilebench dataset-patched dataset-patched-compiled \
 done
 sed -i '1s|.*|#!/usr/bin/python3|' "${DESTDIR}/opt/compilebench/compilebench"
 chmod 755 "${DESTDIR}/opt/compilebench/compilebench"
+
+# vmtouch (sanity 600a-d, sanity-sec): EPEL10 has no package, so build
+# the one C file here for every target; where the distro packages it too,
+# both are the same tool.
+curl -fsSL "https://raw.githubusercontent.com/hoytech/vmtouch/${VMTOUCH_REF}/vmtouch.c" \
+    -o /tmp/vmtouch.c
+mkdir -p "$PREFIX/bin"
+${CC:-gcc} -Wall -O2 -std=c99 -o "$PREFIX/bin/vmtouch" /tmp/vmtouch.c
+rm -f /tmp/vmtouch.c
 
 # connectathon (parallel-scale, parallel-scale-nfs*): the suite runs
 # $cnt_DIR/runtests, from a built tree.

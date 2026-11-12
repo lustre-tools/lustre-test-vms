@@ -1244,3 +1244,26 @@ class TestBuildImageCleansUp:
         superseded.note.assert_called_once_with("ltvm-image-rocky9")
         superseded.drop.assert_called_once_with()
         prune.assert_called_once_with(out_dir)
+
+
+class TestSkippedTestPackagesAreBuilt:
+    """A test package a target cannot install is built by build-tools.sh,
+    or the tests needing it skip: sanity 600a-d skipped on rocky10 for want
+    of vmtouch (fb-cd606173b02e)."""
+
+    SOURCE_BUILT = {"vmtouch"}
+
+    def test_vmtouch_is_built_for_targets_that_skip_its_package(self) -> None:
+        build_tools = (TARGETS_DIR / "common" / "build-tools.sh").read_text()
+        skipping = [
+            path.parent.name
+            for path in sorted(TARGETS_DIR.glob("*/packages-skip.txt"))
+            if "vmtouch" in path.read_text().split()
+        ]
+        assert "rocky10" in skipping
+        assert 'VMTOUCH_REF="${VMTOUCH_REF:-' in build_tools
+        assert '-o "$PREFIX/bin/vmtouch"' in build_tools
+
+    def test_build_tools_parses(self) -> None:
+        script = TARGETS_DIR / "common" / "build-tools.sh"
+        subprocess.run(["bash", "-n", str(script)], check=True)
