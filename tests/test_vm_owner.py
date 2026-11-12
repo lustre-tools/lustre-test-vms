@@ -304,3 +304,20 @@ class TestClusterOwnerPropagation:
         )
 
         assert ClusterInfo.load("legacy").owner_id is None
+
+
+def test_list_json_with_no_vms_is_the_full_envelope(
+    tmp_vm_state, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`ltvm list --json` with no VMs prints only JSON on stdout, in the
+    shape the non-empty listing has, with empty lists and zero counts
+    (feedback fb-7e0a1ccce187: a caller's parse broke on the empty case)."""
+    vm_commands.cmd_list(argparse.Namespace(json=True))
+
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert payload["vms"] == []
+    assert payload["clusters"] == []
+    assert payload["totals"]["running"] == 0
+    assert payload["totals"]["stopped"] == 0
+    assert len(out.strip().splitlines()) == 1
