@@ -127,6 +127,7 @@ def _isolate_user_state(
     monkeypatch.setattr(build_volumes, "is_macos", lambda: False)
     monkeypatch.delenv("LTVM_MACOS_BUILD_VOLUMES", raising=False)
     monkeypatch.delenv("LTVM_PODMAN_AUTOSTOP", raising=False)
+    monkeypatch.delenv("LTVM_PODMAN_IDLE_STOP", raising=False)
     # Tab completion installs into /etc/bash_completion.d and the zsh
     # and fish equivalents, and `ltvm doctor --fix` installs any that
     # are missing -- so without this a doctor test rewrote the
@@ -209,7 +210,12 @@ def _isolate_podman_usage_lock(
 
     lock = tmp_path_factory.mktemp("podman-lock") / "podman.lock"
     hs._usage_fd = None
-    with patch.object(hs, "_podman_lock_path", lambda: lock):
+    # Nor may a test start the detached idle-stop waiter for real.
+    with (
+        patch.object(hs, "_podman_lock_path", lambda: lock),
+        patch.object(hs, "schedule_idle_stop"),
+        patch("ltvm_pkg.cli.build.schedule_idle_stop"),
+    ):
         yield
     if hs._usage_fd is not None:
         os.close(hs._usage_fd)

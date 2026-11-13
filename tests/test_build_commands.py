@@ -178,9 +178,13 @@ class TestPodmanMachineAutostop:
     retries don't pay the cold-start cost.
     """
 
-    def test_sets_success_stops_machine_on_macos(self) -> None:
+    def test_sets_success_stops_machine_on_macos(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """LTVM_PODMAN_IDLE_STOP=0: stopped as soon as the build ends."""
         from ltvm_pkg.cli.build import _podman_machine_autostop
 
+        monkeypatch.setenv("LTVM_PODMAN_IDLE_STOP", "0")
         with (
             patch("ltvm_pkg.cli.build.is_macos", return_value=True),
             patch(
@@ -192,6 +196,31 @@ class TestPodmanMachineAutostop:
             with _podman_machine_autostop() as h:
                 h.success = True
         stop.assert_called_once()
+
+    def test_by_default_the_stop_waits_for_idle(self) -> None:
+        """A detached waiter stops it later; nothing is stopped now."""
+        from ltvm_pkg.cli.build import _podman_machine_autostop
+
+        with (
+            patch("ltvm_pkg.cli.build.is_macos", return_value=True),
+            patch("ltvm_pkg.cli.build.schedule_idle_stop") as schedule,
+            patch("ltvm_pkg.cli.build.stop_podman_machine_macos") as stop,
+        ):
+            with _podman_machine_autostop() as h:
+                h.success = True
+        schedule.assert_called_once_with()
+        stop.assert_not_called()
+
+    def test_a_failed_build_schedules_nothing(self) -> None:
+        from ltvm_pkg.cli.build import _podman_machine_autostop
+
+        with (
+            patch("ltvm_pkg.cli.build.is_macos", return_value=True),
+            patch("ltvm_pkg.cli.build.schedule_idle_stop") as schedule,
+        ):
+            with _podman_machine_autostop():
+                pass
+        schedule.assert_not_called()
 
     def test_env_keeps_the_machine_running(
         self, monkeypatch: pytest.MonkeyPatch

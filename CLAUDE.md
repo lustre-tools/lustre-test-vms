@@ -1666,6 +1666,35 @@ suite -- otherwise a test that mocks only the build's own `podman run`,
 or runs clean or doctor, would create and list real volumes on a Mac.  `LTVM_PODMAN_AUTOSTOP=0` keeps the podman machine up after a
 build; its stop and restart are ~12 s of every incremental build.
 
+The stop is not immediate: a successful build starts a detached waiter,
+`python -m ltvm_pkg.podman_idle` (`host_setup.schedule_idle_stop`),
+which stops the machine once no ltvm has used podman for
+`LTVM_PODMAN_IDLE_STOP` seconds (1800; `0` is the old stop-at-once).
+Every hold of the usage lock touches `ltvm-podman-<uid>.last-use`
+beside it, at the hold and again at exit, and the waiter stops only
+under the exclusive lock with that file still old enough; one waiter
+serves every build (`.idle.lock`), its log is `.idle.log`.  Stopping at
+each build's end restarted the machine 25-35 times a day here.
+
+Each of those starts could fail: `podman machine start` that times out
+waiting for the guest's sshd kills gvproxy and leaves vfkit running, so
+the machine lists as running and refuses every connection (22 hours of
+"Cannot connect to Podman", 2026-11-07).  The preflight therefore asks
+a running machine `podman info`, three times 10 s apart in case
+another start is still finishing (at once when gvproxy's pid file names
+a dead process), and stops and restarts it when it never answers.  The
+first start after a stop fails about half the time -- podman's ssh
+check through gvproxy beats the guest's sshd and gets "handshake
+failed: EOF" -- so a failed start is stopped and tried again, up to
+`PODMAN_START_TRIES` (4) with a growing pause, and a final failure
+leaves the machine stopped rather than half up.  Repairs and starts
+run under `ltvm-podman-<uid>.repair.lock`, and whoever gets it next
+looks again before acting, so two sessions never restart the machine
+at once; each retry and give-up (with gvproxy.log's tail) goes to
+`ltvm-podman-<uid>.repair.log`.  A machine that answers is never
+restarted, so nothing kills a running build's container.  Zincati is
+off in the machine: the boots are ltvm's own starts.
+
 Parallel builds share the machine through a flock,
 `$TMPDIR/ltvm-podman-<uid>.lock` (`host_setup.hold_podman_usage`):
 every ltvm process takes it shared before its first podman command --
