@@ -1712,6 +1712,21 @@ at once; each retry and give-up (with gvproxy.log's tail) goes to
 restarted, so nothing kills a running build's container.  Zincati is
 off in the machine: the boots are ltvm's own starts.
 
+Those boots are also what made the starts fail every time
+(2026-11-13).  Fedora CoreOS's `coreos-ignition-write-issues.service`
+searches the journal for the first boot's Ignition run, and pam_nologin
+refuses `core` -- the user podman's start check logs in as -- until it
+ends.  journald's default cap (10% of the 100 GB disk, up to 4 GB) let
+the journal reach 3.7 GB over 1183 boots, the search took ~25 s, and
+podman gave up at ~25 s.  So after every start `_tune_machine_boot`
+masks the unit (it writes only /etc/issue banners), caps the journal at
+`PODMAN_JOURNAL_MAX` with a journald.conf.d drop-in, and the first time
+prunes it and runs fstrim, which hands the blocks back to the host's
+sparse disk file.  A machine already that slow cannot be reached once
+podman gives up -- it kills gvproxy -- so the last start try
+(`_start_rescuing`) logs in as root, which pam_nologin lets in, while
+podman is still waiting, and masks the unit then.
+
 Parallel builds share the machine through a flock,
 `$TMPDIR/ltvm-podman-<uid>.lock` (`host_setup.hold_podman_usage`):
 every ltvm process takes it shared before its first podman command --

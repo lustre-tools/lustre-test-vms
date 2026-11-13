@@ -134,6 +134,140 @@ PODMAN_START_TRIES = 4
 PODMAN_START_BACKOFF = (5.0, 15.0, 30.0)
 
 
+#: A Fedora CoreOS unit that searches the whole journal for the first
+#: boot's Ignition run, to write a login banner.  pam_nologin refuses the
+#: `core` user until it ends, and podman's start-up ssh check logs in as
+#: `core` and gives up after ~25 s.  Each boot adds to the journal, so
+#: after ~1100 boots it took 25 s and every start failed (2026-11-13).
+PODMAN_SLOW_BOOT_UNIT = "coreos-ignition-write-issues.service"
+
+#: How long the last start tries to get in as root, which pam_nologin
+#: does not refuse, to mask PODMAN_SLOW_BOOT_UNIT before podman gives up.
+PODMAN_RESCUE_WINDOW = 60.0
+
+
+#: What a started machine is given, as root: the slow unit masked, and
+#: the journal capped and pruned to the cap.  journald's own cap is 10%
+#: of the 100 GB disk up to 4 GB, which it had reached -- 3.7 GB over
+#: 1183 boots -- and the unit scanned all of it; a cap keeps any journal
+#: search short and the disk free.  The fstrim hands the pruned blocks
+#: back to the host, whose sparse disk file kept them (5 GB here): the
+#: guest's weekly fstrim.timer seldom fires in a machine stopped when
+#: idle.  A fixed script, nothing interpolated.
+PODMAN_JOURNAL_MAX = "256M"
+_MACHINE_TUNE_SCRIPT = f"""\
+set -e
+systemctl mask --quiet {PODMAN_SLOW_BOOT_UNIT}
+mkdir -p /etc/systemd/journald.conf.d
+conf=/etc/systemd/journald.conf.d/50-ltvm.conf
+want='[Journal]
+SystemMaxUse={PODMAN_JOURNAL_MAX}'
+if [ "$(cat $conf 2>/dev/null)" != "$want" ]; then
+    printf '%s\\n' "$want" > $conf
+    systemctl restart systemd-journald
+    journalctl --vacuum-size={PODMAN_JOURNAL_MAX} >/dev/null 2>&1 || true
+    fstrim / >/dev/null 2>&1 || true
+fi
+"""
+
+
+def _tune_machine_boot() -> None:
+    """Keep the machine's boot short enough for podman's start check.
+
+    Idempotent and cheap once done, so it runs after every start rather
+    than looking first.  A failure only warns: the machine works anyway.
+    """
+    try:
+        # On stdin: ssh would hand an argument to the guest's shell to
+        # split again.
+        r = subprocess.run(
+            ["podman", "machine", "ssh", "sudo", "sh", "-s"],
+            input=_MACHINE_TUNE_SCRIPT,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning("could not tune the podman machine's boot: %s", e)
+        return
+    if r.returncode != 0:
+        log.warning(
+            "could not tune the podman machine's boot: %s",
+            (r.stderr or r.stdout).strip(),
+        )
+
+
+def _machine_ssh_config() -> dict[str, Any] | None:
+    """The machine's SSHConfig (IdentityPath, Port), or None."""
+    try:
+        r = subprocess.run(
+            ["podman", "machine", "inspect", "--format", "{{json .SSHConfig}}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        config = json.loads(r.stdout.splitlines()[0])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+    if not isinstance(config, dict) or not config.get("Port"):
+        return None
+    return config
+
+
+def _start_rescuing() -> bool:
+    """`podman machine start`, masking PODMAN_SLOW_BOOT_UNIT meanwhile.
+
+    A machine already too slow to start cannot be reached once podman
+    gives up: podman kills gvproxy, the only way in.  While the start
+    waits, though, gvproxy forwards the ssh port, and root may log in
+    before the unit ends.  True when the start succeeded.
+    """
+    config = _machine_ssh_config()
+    start = subprocess.Popen(["podman", "machine", "start"])
+    masked = config is None
+    deadline = time.monotonic() + PODMAN_RESCUE_WINDOW
+    while not masked and start.poll() is None and time.monotonic() < deadline:
+        time.sleep(1)
+        assert config is not None
+        try:
+            r = subprocess.run(
+                [
+                    "ssh",
+                    "-i",
+                    str(config["IdentityPath"]),
+                    "-p",
+                    str(config["Port"]),
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    "ConnectTimeout=2",
+                    "-o",
+                    "StrictHostKeyChecking=no",
+                    "-o",
+                    "UserKnownHostsFile=/dev/null",
+                    "-o",
+                    "LogLevel=ERROR",
+                    "root@127.0.0.1",
+                    "systemctl",
+                    "mask",
+                    "--quiet",
+                    PODMAN_SLOW_BOOT_UNIT,
+                ],
+                capture_output=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if r.returncode == 0:
+            masked = True
+            _repair_log(f"masked {PODMAN_SLOW_BOOT_UNIT} during the start")
+    try:
+        return start.wait(timeout=240) == 0
+    except subprocess.TimeoutExpired:
+        start.kill()
+        return False
+
+
 def _gvproxy_dead() -> bool:
     """True when podman's gvproxy pid file names no live process.
 
@@ -230,9 +364,14 @@ def _start_podman_machine() -> None:
     for attempt in range(1, PODMAN_START_TRIES + 1):
         if attempt > 1:
             time.sleep(PODMAN_START_BACKOFF[attempt - 2])
-        if _podman_machine_cmd("start", timeout=180) and _podman_answers():
+        if attempt < PODMAN_START_TRIES:
+            started = _podman_machine_cmd("start", timeout=180)
+        else:
+            started = _start_rescuing()
+        if started and _podman_answers():
             if attempt > 1:
                 _repair_log(f"started on try {attempt}")
+            _tune_machine_boot()
             return
         _repair_log(f"start try {attempt} failed")
         if attempt < PODMAN_START_TRIES:
