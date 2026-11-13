@@ -1243,10 +1243,18 @@ def premount_cleanup_script(libdir: str) -> str:
 
     llmountcleanup.sh first, which stops the targets the way the test
     framework set them up, then the sweep for anything it left.
+
+    llmountcleanup.sh only when there is something for it to stop: a
+    Lustre or LNet module loaded, or a Lustre mount.  Its test-framework
+    setup alone takes a second, nested on a 16-vCPU host, and
+    deploy-lustre --mount has always unloaded Lustre just before
+    (unload_lustre), as has a fresh VM.  The sweep runs either way, for the dm-flakey maps.
     """
     return (
-        f"cd {libdir}/tests && LUSTRE={libdir} bash llmountcleanup.sh "
-        f"2>/dev/null; {premount_sweep_script()}"
+        "if [ -d /sys/module/libcfs ] || [ -d /sys/module/ldiskfs ] || "
+        f'[ -n "$({_LUSTRE_MOUNTS})" ]; then '
+        f"(cd {libdir}/tests && LUSTRE={libdir} bash llmountcleanup.sh "
+        f"2>/dev/null); fi; {premount_sweep_script()}"
     )
 
 

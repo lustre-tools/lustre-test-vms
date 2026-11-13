@@ -719,6 +719,50 @@ class TestLustreMountVm:
         assert "llmount.sh" in calls[1]
         assert "llmountcleanup.sh" not in calls[1]
 
+    @pytest.mark.parametrize(
+        ("loaded", "mounted", "runs"),
+        [
+            (False, False, False),
+            (True, False, True),
+            (False, True, True),
+        ],
+    )
+    def test_cleanup_runs_llmountcleanup_only_with_lustre_up(
+        self, tmp_path: Path, loaded: bool, mounted: bool, runs: bool
+    ) -> None:
+        """The script itself, in a shell: llmountcleanup.sh only when a
+        Lustre module is loaded or a Lustre mount exists; the sweep
+        always."""
+        libdir = tmp_path / "lib"
+        (libdir / "tests").mkdir(parents=True)
+        log = tmp_path / "log"
+        (libdir / "tests" / "llmountcleanup.sh").write_text(
+            f"echo llmountcleanup >> {log}\n"
+        )
+        sysmod = tmp_path / "sys_module"
+        sysmod.mkdir()
+        if loaded:
+            (sysmod / "libcfs").mkdir()
+        mounts = tmp_path / "mounts"
+        mounts.write_text(
+            "/dev/vdb /mnt/lustre-mds1 lustre_tgt rw 0 0\n" if mounted else ""
+        )
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        for tool in ("dmsetup", "lustre_rmmod", "modprobe"):
+            (bindir / tool).write_text(f"#!/bin/sh\necho {tool} >> {log}\n")
+            (bindir / tool).chmod(0o755)
+        script = (
+            deploy.premount_cleanup_script(str(libdir))
+            .replace("/sys/module", str(sysmod))
+            .replace("/proc/mounts", str(mounts))
+        )
+        env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}
+        subprocess.run(["bash", "-c", script], env=env, check=True)
+        lines = log.read_text().split()
+        assert ("llmountcleanup" in lines) == runs
+        assert "dmsetup" in lines
+
     @pytest.mark.parametrize("quiet", [False, True])
     def test_llmount_output_is_streamed(
         self, tmp_sockets: Path, quiet: bool
