@@ -912,6 +912,15 @@ def _start_qemu(vm: VMInfo) -> None:
     )
     if vm.arch in ("", "x86_64"):
         boot_args += NMI_PANIC_ARGS
+    # Quiet kernel boot messages: each console byte is a VM exit, and
+    # nested on a loaded host the kernel's boot log alone cost 2.5s of
+    # every create.  journald still forwards to the console, so a boot
+    # keeps showing progress (wait_for_ssh watches for it), and once
+    # ssh answers _seed_kdump_boot puts the kernel's own console level
+    # back for the rest of this boot and every later one, so oopses and
+    # Lustre console messages during tests are logged as before.
+    # Before the user's arguments, so loglevel= or debug there wins.
+    boot_args += " quiet"
     # Last, so that a parameter whose last occurrence wins
     # (crashkernel=, panic=) takes the user's value.
     if vm.kernel_args:

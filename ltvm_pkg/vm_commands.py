@@ -219,6 +219,31 @@ def _nmi_panic_script(vm: VMInfo) -> str:
     )
 
 
+CONSOLE_SYSCTL_CONF = "/etc/sysctl.d/90-ltvm-console.conf"
+# Kernel arguments that set the console level themselves.
+_CONSOLE_LEVEL_ARGS = frozenset({"quiet", "debug", "loglevel"})
+
+
+def _console_level_script(vm: VMInfo) -> str:
+    """Shell that undoes the boot's `quiet` (see qemu_run's boot_args):
+    the console level goes back to the kernel's built-in default, the
+    fourth field of kernel.printk, now and, through a sysctl drop-in
+    that systemd-sysctl applies early in userspace, on every later boot.
+    So only the kernel's own boot messages stay off the console.
+
+    When the user's --kernel-args choose a level, theirs stands: the
+    drop-in is removed instead.  Best effort, like _nmi_panic_script.
+    """
+    names = {a.split("=", 1)[0] for a in vm.kernel_args.split()}
+    if names & _CONSOLE_LEVEL_ARGS:
+        return f"rm -f {CONSOLE_SYSCTL_CONF}"
+    return (
+        "set -- $(cat /proc/sys/kernel/printk) && "
+        "printf 'kernel.printk = %s %s %s %s\\n' $4 $2 $3 $4 "
+        f"> {CONSOLE_SYSCTL_CONF} && sysctl -q -p {CONSOLE_SYSCTL_CONF}"
+    )
+
+
 # How long a crash trigger waits for the crash kernel to load.  A VM
 # just created or started loads it in the background (see
 # _seed_kdump_boot), which a nested or loaded host can stretch to a
@@ -354,12 +379,16 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
         # `start` is a no-op for a service already active or starting,
         # so the boot's own run carries on; one that failed is retried.
         # --no-block returns once the job is queued.
-        nmi = _nmi_panic_script(vm)
+        setup = "".join(
+            f"{{ {step}; }} >/dev/null 2>&1; "
+            for step in (_nmi_panic_script(vm), _console_level_script(vm))
+            if step
+        )
         probe = run_ssh(
             vm.ip,
             f"test -f /boot/vmlinuz-{kver} && test -f {initrd_path}; "
             "rc=$?; "
-            + (f"{{ {nmi}; }} >/dev/null 2>&1; " if nmi else "")
+            + setup
             + f"[ $rc = 0 ] && systemctl --no-block start {service} "
             ">/dev/null 2>&1; exit $rc",
             timeout=KDUMP_PROBE_TIMEOUT,

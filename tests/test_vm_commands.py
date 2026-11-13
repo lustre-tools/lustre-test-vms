@@ -1398,8 +1398,15 @@ class TestSeedKdumpBoot:
             (bindir / tool).chmod(0o755)
 
         def _shell(ip, cmd, **kw):
-            cmd = cmd.replace("/boot/", f"{boot}/").replace(
-                vm_commands.NMI_SYSCTL_CONF, str(tmp_path / "nmi.conf")
+            cmd = (
+                cmd.replace("/boot/", f"{boot}/")
+                .replace(
+                    vm_commands.NMI_SYSCTL_CONF, str(tmp_path / "nmi.conf")
+                )
+                .replace(
+                    vm_commands.CONSOLE_SYSCTL_CONF,
+                    str(tmp_path / "console.conf"),
+                )
             )
             env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}
             return subprocess.run(
@@ -1428,6 +1435,48 @@ class TestSeedKdumpBoot:
             started = log.read_text() if log.exists() else ""
             assert ("systemctl --no-block start kdump" in started) == present
             assert "sysctl -q -p" in started
+
+    @pytest.mark.parametrize(
+        ("kernel_args", "want"),
+        [
+            ("", "kernel.printk = 7 4 1 7\n"),
+            ("crashkernel=1G", "kernel.printk = 7 4 1 7\n"),
+            ("loglevel=8", None),
+            ("debug", None),
+            ("quiet", None),
+        ],
+    )
+    def test_console_level_is_put_back(
+        self, tmp_path: Path, kernel_args: str, want: str | None
+    ) -> None:
+        """The script itself, in a shell, on a guest booted `quiet`
+        (printk "4 4 1 7"): the drop-in holds the kernel's default
+        console level, the fourth field, and is applied now; with a
+        level of the user's on the cmdline there is no drop-in."""
+        vm = self._vm(tmp_path)
+        vm.kernel_args = kernel_args
+        printk = tmp_path / "printk"
+        printk.write_text("4\t4\t1\t7\n")
+        conf = tmp_path / "console.conf"
+        conf.write_text("stale\n")
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        log = tmp_path / "sysctl.log"
+        (bindir / "sysctl").write_text(f'#!/bin/sh\necho "$@" >> {log}\n')
+        (bindir / "sysctl").chmod(0o755)
+        script = (
+            vm_commands._console_level_script(vm)
+            .replace("/proc/sys/kernel/printk", str(printk))
+            .replace(vm_commands.CONSOLE_SYSCTL_CONF, str(conf))
+        )
+        env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}
+        subprocess.run(["sh", "-c", script], env=env, check=True)
+        if want is None:
+            assert not conf.exists()
+            assert not log.exists()
+        else:
+            assert conf.read_text() == want
+            assert log.read_text() == f"-q -p {conf}\n"
 
     def test_fast_path_debian_uses_kdump_config(self, tmp_path: Path) -> None:
         vm = self._vm(tmp_path, os_id="ubuntu24")

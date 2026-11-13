@@ -391,7 +391,7 @@ class TestLaunchQemuCommand:
         _run_launch(vm, h)
         append = h.qemu_args[h.qemu_args.index("-append") + 1]
         assert append.endswith(
-            f" fc_nics=tcp{NMI_PANIC_ARGS} crashkernel=1G kasan_multi_shot"
+            f" fc_nics=tcp{NMI_PANIC_ARGS} quiet crashkernel=1G kasan_multi_shot"
         )
 
     def test_no_kernel_args_leaves_cmdline_as_before(
@@ -401,7 +401,19 @@ class TestLaunchQemuCommand:
         h = _LaunchHarness()
         _run_launch(vm, h)
         append = h.qemu_args[h.qemu_args.index("-append") + 1]
-        assert append.endswith(f" fc_name=co1-single{NMI_PANIC_ARGS}")
+        assert append.endswith(f" fc_name=co1-single{NMI_PANIC_ARGS} quiet")
+
+    def test_boots_quiet_before_the_users_args(self, tmp_vmdir: Path) -> None:
+        """The kernel's boot log stays off the serial console, but a
+        loglevel= of the user's comes after `quiet`, so it wins."""
+        vm = _make_vm(tmp_vmdir)
+        vm.kernel_args = "loglevel=8"
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        assert append.endswith(" quiet loglevel=8")
+        # journald still forwards, so a boot keeps writing the console.
+        assert "systemd.journald.forward_to_console=1" in append
 
     def test_x86_boots_with_nmi_panic(self, tmp_vmdir: Path) -> None:
         """An NMI from the host must panic a guest that no longer
