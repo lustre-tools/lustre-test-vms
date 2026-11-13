@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from . import priv
 from .image_store import current_image, install_image, prune_superseded
 from .paths import load_meta_safe
 from .podman_gc import Superseded, final_image_tag, remove_tag
@@ -53,18 +54,27 @@ def _run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _e2fs(tool: str) -> str:
+    """Return the path to run an e2fsprogs tool.
+
+    Debian installs e2fsprogs in /usr/sbin, and the PATH of a normal
+    user there has no sbin directory.
+    """
+    return priv.which(tool) or tool
+
+
 def _check_mke2fs() -> None:
     """Verify mke2fs and fakeroot are installed up-front."""
-    import shutil as _sh
-
-    missing = [t for t in ("mke2fs", "fakeroot") if _sh.which(t) is None]
+    missing = [t for t in ("mke2fs", "fakeroot") if priv.which(t) is None]
     if missing:
         raise RuntimeError(
             f"missing host tool(s): {', '.join(missing)} -- "
             f"install e2fsprogs and fakeroot, or run `sudo ltvm install`"
         )
     # -d support was added in e2fsprogs 1.43 (2016)
-    result = subprocess.run(["mke2fs", "-V"], capture_output=True, text=True)
+    result = subprocess.run(
+        [_e2fs("mke2fs"), "-V"], capture_output=True, text=True
+    )
     version_str = result.stderr + result.stdout
     if "mke2fs" not in version_str:
         raise RuntimeError("mke2fs not functional; reinstall e2fsprogs")
@@ -1396,7 +1406,8 @@ def _export_to_ext4(
                 f"{shlex.quote(str(rootfs))}/dev/shm "
                 f"{shlex.quote(str(rootfs))}/dev/mqueue; "
                 f"chmod -R u+rX {shlex.quote(str(rootfs))}; "
-                f"mke2fs -t ext4 -b 4096 -L rootfs -E root_owner=0:0 "
+                f"{shlex.quote(_e2fs('mke2fs'))} -t ext4 -b 4096 "
+                f"-L rootfs -E root_owner=0:0 "
                 f"-O ^metadata_csum,^dir_index "
                 f"-d {shlex.quote(str(rootfs))} "
                 f"{shlex.quote(tmpfile)} {size_mb}M"
@@ -1411,7 +1422,9 @@ def _export_to_ext4(
         )
         container_id = None
 
-        r_fsck = subprocess.run(["e2fsck", "-fy", tmpfile], capture_output=True)
+        r_fsck = subprocess.run(
+            [_e2fs("e2fsck"), "-fy", tmpfile], capture_output=True
+        )
         # e2fsck exit codes: 0 = clean, 1 = errors corrected (both OK),
         # 2+ = errors remain or operational failure.
         if r_fsck.returncode > 1:
@@ -1419,11 +1432,11 @@ def _export_to_ext4(
                 f"e2fsck failed (rc={r_fsck.returncode}): "
                 f"{r_fsck.stderr.decode(errors='replace').strip()}"
             )
-        _run(["resize2fs", "-M", tmpfile])
+        _run([_e2fs("resize2fs"), "-M", tmpfile])
         # Re-enable metadata_csum and dir_index that were skipped during
         # populate to work around e2fsprogs 1.46.5 bugs.  e2fsck -D
         # rebuilds htree indexes over the linear dirs we just wrote.
-        _run(["tune2fs", "-O", "metadata_csum,dir_index", tmpfile])
+        _run([_e2fs("tune2fs"), "-O", "metadata_csum,dir_index", tmpfile])
         # Check this one too.  It is the pass that actually builds the
         # htree indexes and checksums tune2fs just enabled, and it runs
         # on a filesystem resize2fs -M has already shrunk to minimum --
@@ -1432,7 +1445,7 @@ def _export_to_ext4(
         # feature flags set and the reorganisation half-done as a good
         # image.  Same 0/1-are-fine convention as the check above.
         r_fsck2 = subprocess.run(
-            ["e2fsck", "-fyD", tmpfile], capture_output=True
+            [_e2fs("e2fsck"), "-fyD", tmpfile], capture_output=True
         )
         if r_fsck2.returncode > 1:
             raise RuntimeError(

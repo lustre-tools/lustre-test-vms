@@ -237,15 +237,15 @@ class TestImageOutputDirPerKernel:
 
 
 class TestCheckMke2fs:
-    """_check_mke2fs does two things: a `shutil.which` presence check for
+    """_check_mke2fs does two things: a `priv.which` presence check for
     mke2fs and fakeroot, then a functional check on `mke2fs -V` output.
 
     These tests are about the second one, so the first is satisfied here
     rather than left to chance.  Without this they only passed on a host
     that happened to have both tools installed -- on any other they all
     failed on the presence check, never reaching the behaviour under
-    test.  `_check_mke2fs` imports shutil inside the function, so
-    patching the attribute on the module is what reaches it.
+    test.  `priv.which` calls `shutil.which`, so patching the attribute
+    on the shutil module is what reaches it.
     """
 
     @pytest.fixture(autouse=True)
@@ -306,7 +306,77 @@ class TestCheckMke2fs:
         with patch("subprocess.run", return_value=mock_result) as mock_run:
             image._check_mke2fs()
             args, kwargs = mock_run.call_args
-            assert args[0] == ["mke2fs", "-V"]
+            assert args[0] == ["/usr/sbin/mke2fs", "-V"]
+
+
+class TestE2fsprogsInSbin:
+    """Debian installs e2fsprogs in /usr/sbin, which is not in the PATH
+    of a normal user.  The image build must find the tools there."""
+
+    TOOLS = ("mke2fs", "e2fsck", "resize2fs", "tune2fs")
+
+    @pytest.fixture
+    def sbin(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """A PATH with fakeroot only, and the tools in an sbin directory."""
+        from ltvm_pkg import priv
+
+        bin_dir = tmp_path / "bin"
+        sbin_dir = tmp_path / "sbin"
+        for directory, names in (
+            (bin_dir, ("fakeroot",)),
+            (sbin_dir, self.TOOLS),
+        ):
+            directory.mkdir()
+            for name in names:
+                (directory / name).write_text("#!/bin/sh\n")
+                (directory / name).chmod(0o755)
+        monkeypatch.setenv("PATH", str(bin_dir))
+        monkeypatch.setattr(priv, "_SBIN_DIRS", (str(sbin_dir),))
+        return sbin_dir
+
+    def test_preflight_runs_mke2fs_from_sbin(self, sbin: Path) -> None:
+        version = MagicMock(stdout="", stderr="mke2fs 1.47.0 (5-Feb-2023)\n")
+        with patch("subprocess.run", return_value=version) as run:
+            ib._check_mke2fs()
+        assert run.call_args.args[0] == [str(sbin / "mke2fs"), "-V"]
+
+    def test_preflight_names_a_tool_that_is_in_no_directory(
+        self, sbin: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ltvm_pkg import priv
+
+        monkeypatch.setattr(priv, "_SBIN_DIRS", ())
+        with pytest.raises(
+            RuntimeError, match=r"missing host tool\(s\): mke2fs"
+        ):
+            ib._check_mke2fs()
+
+    def test_export_runs_every_tool_from_sbin(
+        self, sbin: Path, tmp_path: Path
+    ) -> None:
+        out = tmp_path / "images"
+        out.mkdir()
+        cmds: list[list[str]] = []
+
+        def fake_run(cmd: list[str], *a: object, **kw: object) -> object:
+            cmds.append(cmd)
+            if cmd[0] == "fakeroot":
+                (tmp,) = out.glob("ltvm-image-*.ext4")
+                tmp.write_bytes(b"image")
+            output = "cid\n" if kw.get("text") else b""
+            return subprocess.CompletedProcess(cmd, 0, output, output)
+
+        with (
+            patch.object(ib.subprocess, "run", side_effect=fake_run),
+            patch.object(ib, "_is_macos_build_host", return_value=False),
+        ):
+            ib._export_to_ext4("tag", out)
+
+        (script,) = [c[-1] for c in cmds if c[0] == "fakeroot"]
+        assert f"{sbin / 'mke2fs'} -t ext4" in script
+        ran = {Path(c[0]).name: c[0] for c in cmds}
+        for tool in ("e2fsck", "resize2fs", "tune2fs"):
+            assert ran[tool] == str(sbin / tool)
 
 
 class TestKdumpInjectLines:
