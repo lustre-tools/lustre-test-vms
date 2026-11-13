@@ -6,7 +6,6 @@ Covers behaviours that were absent from existing tests:
 2. ClusterInfo.load on corrupt state raises RuntimeError with hint
 3. lustre_build._needs_reconfigure stamp-driven logic
 4. lustre_build._kernel_changed distinguishes "never built" from "changed"
-5. lustre_build.lustre_status integrates stamp + ko discovery correctly
 """
 
 from __future__ import annotations

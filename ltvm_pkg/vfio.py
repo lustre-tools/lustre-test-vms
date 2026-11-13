@@ -262,42 +262,6 @@ def iommu_enabled() -> bool:
         return False
 
 
-def resolve_ifname_to_bdf(ifname: str) -> str:
-    """Map a Linux netdev name (e.g. 'ens17f0v0') to its PCIe BDF.
-
-    Reads /sys/class/net/<ifname>/device, which is a symlink into
-    /sys/bus/pci/devices/<bdf> for PCIe-backed devices.  The BDF is
-    returned in standard "0000:XX:YY.Z" form.
-
-    Raises VfioError if the netdev does not exist or is not backed
-    by a PCI device (e.g. it's a virtual interface like a bridge or
-    tap).
-    """
-    net_dir = SYSFS_ROOT / "class" / "net" / ifname
-    if not net_dir.exists():
-        raise VfioError(f"netdev {ifname!r} not found at {net_dir}")
-    device_link = net_dir / "device"
-    if not device_link.exists():
-        raise VfioError(
-            f"netdev {ifname!r} has no PCI parent "
-            f"(no {device_link}); is it a virtual interface?"
-        )
-    try:
-        target = device_link.resolve()
-    except OSError as exc:
-        raise VfioError(f"failed resolving {device_link}: {exc}") from exc
-
-    # The resolved path for a PCI-backed netdev ends in the BDF.
-    # Sanity-check format before returning.
-    bdf = target.name
-    if not _looks_like_bdf(bdf):
-        raise VfioError(
-            f"netdev {ifname!r} resolves to {target} which does "
-            "not look like a PCI BDF"
-        )
-    return bdf
-
-
 def _looks_like_bdf(s: str) -> bool:
     """Cheap check: XXXX:XX:XX.X with hex digits."""
     # e.g. 0000:85:00.1

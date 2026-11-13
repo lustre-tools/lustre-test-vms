@@ -81,8 +81,6 @@ class ImageMeta(_BaseMeta, total=False):
 
 
 _KERNEL_REQUIRED = ("kernel_version", "lustre_target")
-_CONTAINER_REQUIRED = ("image_tag",)
-_IMAGE_REQUIRED = ("kernel_name", "build_date")
 
 
 def _require(
@@ -98,11 +96,3 @@ def _require(
 def require_kernel_meta(meta: Mapping[str, Any], path: object) -> None:
     """Raise RuntimeError if a kernel meta.json lacks required fields."""
     _require(meta, _KERNEL_REQUIRED, path)
-
-
-def require_container_meta(meta: Mapping[str, Any], path: object) -> None:
-    _require(meta, _CONTAINER_REQUIRED, path)
-
-
-def require_image_meta(meta: Mapping[str, Any], path: object) -> None:
-    _require(meta, _IMAGE_REQUIRED, path)

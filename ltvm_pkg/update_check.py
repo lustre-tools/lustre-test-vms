@@ -61,7 +61,7 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -88,7 +88,6 @@ _STATE_DIR = (
 _STATE_FILE = _STATE_DIR / "update_cache.json"
 
 
-Mode = Literal["prompt", "auto", "never"]
 _DEFAULT_CONFIG: dict[str, Any] = {
     "update_check": {"mode": "prompt"},
 }

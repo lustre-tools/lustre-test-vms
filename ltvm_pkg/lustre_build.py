@@ -359,14 +359,6 @@ class BuildResult(TypedDict):
     staging: str
 
 
-class StatusResult(TypedDict):
-    configured: bool
-    ko_count: int
-    built_against: str | None
-    current_kernel: str | None
-    stale: bool
-
-
 def _kernel_release(build_tree: str | Path) -> str:
     """Read the kernel version from the build-tree.
 
@@ -1759,61 +1751,4 @@ fi""")
         "ko_count": len(ko_files),
         "container": container_tag,
         "staging": str(host_staging),
-    }
-
-
-def lustre_status(
-    lustre_tree: str | Path,
-    build_tree: str | Path,
-    target: str = DEFAULT_TARGET,
-    arch: str = "x86_64",
-    kernel: str | None = None,
-    variant: str = "base",
-) -> StatusResult:
-    """Return a status dict for the Lustre build."""
-    lustre_tree = Path(lustre_tree).resolve()
-    build_tree = Path(build_tree).resolve()
-
-    stamp = lustre_tree / f".ltvm-kernel-{_stamp_suffix(target, arch)}"
-    config_status = lustre_tree / "config.status"
-    if kernel is None:
-        # No kernel known -- enumerate per-kernel staging dirs under the
-        # (target, arch) base and sum their .ko counts.  Returning the
-        # base path itself is wrong: that path no longer holds .ko files,
-        # only kernel-keyed subdirs do.
-        base = Path(lustre_tree) / ".ltvm-staging" / target / arch
-        ko_count = (
-            sum(
-                len(list(d.rglob("*.ko"))) for d in base.iterdir() if d.is_dir()
-            )
-            if base.is_dir()
-            else 0
-        )
-    else:
-        host_staging = staging_path(
-            lustre_tree, target, arch=arch, kernel=kernel, variant=variant
-        )
-        if host_staging.is_dir():
-            # Variants live in sibling directories (<kernel>__<variant>),
-            # not under this one, so every .ko here belongs to this
-            # variant's staging tree.
-            ko_count = len(list(host_staging.rglob("*.ko")))
-        else:
-            ko_count = 0
-
-    built_against = stamp.read_text().strip() if stamp.exists() else None
-    current_kver = _kernel_release(build_tree) if build_tree.exists() else None
-
-    stale = (
-        built_against != current_kver
-        if built_against and current_kver
-        else True
-    )
-
-    return {
-        "configured": config_status.exists(),
-        "ko_count": ko_count,
-        "built_against": built_against,
-        "current_kernel": current_kver,
-        "stale": stale,
     }

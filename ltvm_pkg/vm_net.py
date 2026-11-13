@@ -347,14 +347,6 @@ def _used_ips_by_net(exclude_name: str) -> dict[str, set[str]]:
     return used
 
 
-def _used_ips(exclude_name: str) -> set[str]:
-    """Every IP in use by any VM, flattened across all networks."""
-    flat: set[str] = set()
-    for ips in _used_ips_by_net(exclude_name).values():
-        flat |= ips
-    return flat
-
-
 def _validate_explicit_ip(ip: str) -> None:
     """Reject a --ip that isn't a host address on the VM subnet.
 

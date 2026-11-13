@@ -284,7 +284,7 @@ def running_vm_memory(skip: str = "") -> list[tuple[str, int]]:
             # and `start` fail for every *other* VM on the host -- and
             # inside cmd_create the raise lands in `except
             # BaseException`, which rolls back the healthy VM being
-            # built.  vm_net._used_ips guards the same hazard for the
+            # built.  vm_net._used_ips_by_net guards the same hazard for the
             # same reason; this call site was missed.
             print(
                 f"warning: ignoring corrupt VM state for {name!r} "
