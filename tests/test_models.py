@@ -1125,6 +1125,26 @@ class TestWaitForSshStretch:
         assert not ok
         assert took < 130
         assert "SSH not ready after" in msg
+        # The guest booted quiet: say how to get the kernel's boot log.
+        assert "--kernel-args loglevel=7" in msg
+
+    @pytest.mark.parametrize(
+        ("kernel_args", "hint"),
+        [
+            ("", True),
+            ("crashkernel=1G", True),
+            ("loglevel=8", False),
+            ("debug", False),
+            ("quiet", False),
+        ],
+    )
+    def test_the_quiet_boot_hint(self, kernel_args: str, hint: bool) -> None:
+        """Only when ltvm's own `quiet` set the boot's console level."""
+        from ltvm_pkg.vm_net import _quiet_boot_hint
+
+        vm = MagicMock(kernel_args=kernel_args)
+        assert ("loglevel=7" in _quiet_boot_hint(vm)) == hint
+        assert _quiet_boot_hint(None) == ""
 
     def test_the_stretch_has_a_cap(self, tmp_sockets: Path) -> None:
         from ltvm_pkg.vm_net import ssh_wait_cap

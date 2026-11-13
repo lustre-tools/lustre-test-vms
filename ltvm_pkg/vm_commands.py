@@ -44,6 +44,7 @@ from .vm_net import (
     provision_vm_ssh,
     register_ssh_name,
     run_ssh,
+    sets_console_level,
     ssh_client_config_error,
     ssh_never_connected,
     sshpass_scp_argv,
@@ -220,8 +221,6 @@ def _nmi_panic_script(vm: VMInfo) -> str:
 
 
 CONSOLE_SYSCTL_CONF = "/etc/sysctl.d/90-ltvm-console.conf"
-# Kernel arguments that set the console level themselves.
-_CONSOLE_LEVEL_ARGS = frozenset({"quiet", "debug", "loglevel"})
 
 
 def _console_level_script(vm: VMInfo) -> str:
@@ -234,8 +233,7 @@ def _console_level_script(vm: VMInfo) -> str:
     When the user's --kernel-args choose a level, theirs stands: the
     drop-in is removed instead.  Best effort, like _nmi_panic_script.
     """
-    names = {a.split("=", 1)[0] for a in vm.kernel_args.split()}
-    if names & _CONSOLE_LEVEL_ARGS:
+    if sets_console_level(vm.kernel_args):
         return f"rm -f {CONSOLE_SYSCTL_CONF}"
     return (
         "set -- $(cat /proc/sys/kernel/printk) && "

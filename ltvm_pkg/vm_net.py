@@ -1039,6 +1039,30 @@ def ssh_wait_budget(max_wait: int, arch: str) -> int:
     return max_wait
 
 
+# Kernel arguments that set the console level themselves.  Without one
+# the guest boots `quiet` (qemu_run's boot_args) until _seed_kdump_boot
+# puts the kernel's own level back.
+CONSOLE_LEVEL_ARGS = frozenset({"quiet", "debug", "loglevel"})
+
+
+def sets_console_level(kernel_args: str) -> bool:
+    """True when *kernel_args* choose the guest's console level."""
+    names = {a.split("=", 1)[0] for a in kernel_args.split()}
+    return bool(names & CONSOLE_LEVEL_ARGS)
+
+
+def _quiet_boot_hint(vm: VMInfo | None) -> str:
+    """For a boot that failed before ssh answered: what its console log
+    lacks, and how to get it."""
+    if vm is None or sets_console_level(vm.kernel_args):
+        return ""
+    return (
+        "\n  the guest boots quiet, so its console log has panics, oopses "
+        "and errors but not the kernel's boot messages; create it with "
+        "--kernel-args loglevel=7 to see where a silent boot stops"
+    )
+
+
 def _console_size(vm: VMInfo | None) -> int:
     if vm is None:
         return -1
@@ -1132,6 +1156,7 @@ def wait_for_ssh(
             die(
                 f"QEMU for {vm.name} exited while waiting for ssh on {ip}; "
                 f"`ltvm vm console-log {vm.name}` shows why"
+                f"{_quiet_boot_hint(vm)}"
             )
         size = _console_size(vm)
         if size != console:
@@ -1147,5 +1172,5 @@ def wait_for_ssh(
     die(
         f"SSH not ready after {elapsed}s on {ip}{detail}\n"
         f"  if the guest is still booting, set LTVM_SSH_TIMEOUT to wait "
-        f"longer"
+        f"longer{_quiet_boot_hint(vm)}"
     )
