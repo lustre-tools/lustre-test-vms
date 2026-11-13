@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from . import rootless, vm_claim
+from . import numa_dist, rootless, vm_claim
 from .deploy import configure_test_disks, premount_cleanup_script
 from .host_setup import is_macos
 from .nic_guest import wait_for_layout as guest_nic_layout
@@ -675,6 +675,7 @@ _RESOURCE_FLAGS = {
     "root_size": "--root-size",
     "kernel_args": "--kernel-args",
     "numa_nodes": "--numa-nodes",
+    "numa_dist": "--numa-dist",
     "disk_dir": "--disk-dir",
     "disk_cache": "--disk-cache",
     "disk_prealloc": "--disk-prealloc",
@@ -905,6 +906,7 @@ def _allocate_and_persist_vm(
             passthrough_drivers={},
             kernel_args=getattr(args, "kernel_args", ""),
             numa_nodes=getattr(args, "numa_nodes", 0) or 0,
+            numa_dist=getattr(args, "numa_dist", "") or "",
             share_disks=bool(getattr(args, "share_disks", False)),
             disks_from=getattr(args, "disks_from", None) or "",
             disk_dir=getattr(args, "disk_dir", "") or "",
@@ -1006,6 +1008,7 @@ def _print_create_plan(
         "extra_nics": [str(n) for n in extra_nic_types],
         "kernel_args": getattr(args, "kernel_args", ""),
         "numa_nodes": getattr(args, "numa_nodes", 0) or 0,
+        "numa_dist": getattr(args, "numa_dist", "") or "",
         "share_disks": bool(getattr(args, "share_disks", False)),
         "disks_from": getattr(args, "disks_from", None) or "",
         "disk_dir": getattr(args, "disk_dir", "") or "",
@@ -1030,6 +1033,8 @@ def _print_create_plan(
     print(f"  cpu/mem: {args.vcpus} vcpus, {args.mem} MB")
     if getattr(args, "numa_nodes", 0):
         print(f"  numa:    {args.numa_nodes} nodes")
+    if getattr(args, "numa_dist", ""):
+        print(f"  dist:    {args.numa_dist}")
     if getattr(args, "disks_from", None):
         print(f"  disks:   those of {args.disks_from}, shared")
     else:
@@ -1649,6 +1654,19 @@ def cmd_create(args: argparse.Namespace) -> None:
     args.kernel_args = _validate_kernel_args(getattr(args, "kernel_args", None))
     if (getattr(args, "numa_nodes", 0) or 0) < 0:
         die(f"--numa-nodes must be >= 0 (got {args.numa_nodes})")
+    # Before the existing-VM check, which compares the stored table with
+    # this spelling, and so that a bad table writes nothing.  An existing
+    # VM keeps its layout, so only a new one must fit --numa-nodes.
+    try:
+        args.numa_dist = numa_dist.resolve(
+            getattr(args, "numa_dist", None),
+            getattr(args, "numa_dist_file", None),
+            None
+            if (SOCKETS / f"{name}.info").exists()
+            else getattr(args, "numa_nodes", 0) or 0,
+        )
+    except numa_dist.NumaDistError as e:
+        die(str(e))
 
     dry_run = getattr(args, "dry_run", False)
     info_path = SOCKETS / f"{name}.info"
@@ -3264,7 +3282,7 @@ def cmd_restore(args: argparse.Namespace) -> None:
 
 
 def cmd_set(args: argparse.Namespace) -> None:
-    """Change the vCPUs, memory, NUMA nodes or disk cache of a stopped VM.
+    """Change the vCPUs, memory, NUMA layout or disk cache of a stopped VM.
 
     All are read from the .info file each time QEMU is launched, so
     the new values take effect at the next start, and the VM keeps its
@@ -3273,16 +3291,20 @@ def cmd_set(args: argparse.Namespace) -> None:
     its old size, and `list` would then report values it isn't using.
     """
     numa = getattr(args, "numa_nodes", None)
+    dist_inline = getattr(args, "numa_dist", None)
+    dist_file = getattr(args, "numa_dist_file", None)
     cache = getattr(args, "disk_cache", None)
     if (
         args.vcpus is None
         and args.mem is None
         and numa is None
+        and dist_inline is None
+        and dist_file is None
         and cache is None
     ):
         die(
-            "nothing to set: give --vcpus, --mem, --numa-nodes and/or "
-            "--disk-cache"
+            "nothing to set: give --vcpus, --mem, --numa-nodes, "
+            "--numa-dist[-file] and/or --disk-cache"
         )
     if cache == "default":
         cache = ""
@@ -3311,6 +3333,30 @@ def cmd_set(args: argparse.Namespace) -> None:
     if numa is not None and numa != vm.numa_nodes:
         changes.append(f"numa nodes {vm.numa_nodes} -> {numa}")
         vm.numa_nodes = numa
+    if dist_inline == "default":
+        dist = ""
+    else:
+        try:
+            dist = numa_dist.resolve(dist_inline, dist_file, vm.numa_nodes)
+        except numa_dist.NumaDistError as e:
+            die(str(e))
+    if (dist_inline is not None or dist_file is not None) and (
+        dist != vm.numa_dist
+    ):
+        changes.append(
+            f"numa dist {vm.numa_dist or 'default'} -> {dist or 'default'}"
+        )
+        vm.numa_dist = dist
+    elif vm.numa_dist:
+        # A new node count must still fit the stored table.
+        why = numa_dist.problem(
+            numa_dist.parse_matrix(vm.numa_dist), vm.numa_nodes
+        )
+        if why:
+            die(
+                f"{why}; {vm.name} keeps its --numa-dist table: give a new "
+                f"one, or --numa-dist default"
+            )
     if cache is not None and cache != vm.disk_cache:
         if cache not in ("", "none") and (vm.share_disks or vm.disks_from):
             die(

@@ -663,6 +663,9 @@ class VMInfo:
     # Simulated NUMA nodes (--numa-nodes): the vCPUs and memory split
     # evenly across this many nodes, one socket each.  0 is none.
     numa_nodes: int = 0
+    # Their distance table (--numa-dist), as numa_dist.format_matrix
+    # writes it.  Empty is QEMU's default: 10 local, 20 remote.
+    numa_dist: str = ""
 
     # Failover pairs (--share-disks / --disks-from).  A VM with
     # share_disks opens its data disks so that one other QEMU can open
@@ -789,6 +792,7 @@ class VMInfo:
             f"{'|'.join(f'{bdf}={drv}' for bdf, drv in self.passthrough_drivers.items())}\n"
             f"KERNEL_ARGS={self.kernel_args}\n"
             f"NUMA_NODES={self.numa_nodes}\n"
+            f"NUMA_DIST={self.numa_dist}\n"
             f"SHARE_DISKS={int(self.share_disks)}\n"
             f"DISKS_FROM={self.disks_from}\n"
             f"DISK_DIR={self.disk_dir}\n"
@@ -977,6 +981,7 @@ class VMInfo:
             passthrough_drivers=pt_drivers,
             kernel_args=vals.get("KERNEL_ARGS", ""),
             numa_nodes=int(vals.get("NUMA_NODES") or 0),
+            numa_dist=vals.get("NUMA_DIST", ""),
             share_disks=vals.get("SHARE_DISKS", "0") == "1",
             disks_from=vals.get("DISKS_FROM", ""),
             disk_dir=vals.get("DISK_DIR", ""),

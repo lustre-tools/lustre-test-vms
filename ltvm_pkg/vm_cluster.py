@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import vm_claim
+from . import numa_dist, vm_claim
 from .nic_spec import numa_problem as nic_numa_problem
 from .qemu_run import die, is_running, run
 from .vm_net import (
@@ -577,6 +577,7 @@ def _create_one_node(
     owner_id: str | None = None,
     wait_seconds: int = 0,
     numa_nodes: int = 0,
+    numa_dist: str = "",
     kernel: str | None = None,
     variant: str = "base",
     share_disks: bool = False,
@@ -658,6 +659,8 @@ def _create_one_node(
         cmd += [f"--kernel-args={kernel_args}"]
     if numa_nodes:
         cmd += ["--numa-nodes", str(numa_nodes)]
+    if numa_dist:
+        cmd += [f"--numa-dist={numa_dist}"]
     if wait_seconds:
         cmd += ["--wait", str(wait_seconds)]
 
@@ -1112,6 +1115,16 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
         owner_id = resolve_owner_id(getattr(args, "owner_id", None))
     except ValueError as e:
         die(str(e))
+    # Resolved once (a file is read here, not by every node) and handed
+    # to each node in the stored spelling.
+    try:
+        dist = numa_dist.resolve(
+            getattr(args, "numa_dist", None),
+            getattr(args, "numa_dist_file", None),
+            numa_nodes,
+        )
+    except numa_dist.NumaDistError as e:
+        die(str(e))
 
     if getattr(args, "dry_run", False):
         # Everything above is validation and reads -- name rules,
@@ -1175,6 +1188,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                     owner_id,
                     wait_seconds=wait_seconds,
                     numa_nodes=numa_nodes,
+                    numa_dist=dist,
                     kernel=node_kernels[node.name]
                     or (None if node_targets[node.name] else kernel),
                     variant="base" if node_targets[node.name] else variant,

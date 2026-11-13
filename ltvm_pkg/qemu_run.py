@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
-from . import rootless, site_config, vm_state
+from . import numa_dist, rootless, site_config, vm_state
 from .host_setup import is_macos, socket_vmnet_socket_path
 from .nic_cmdline import network_names, prefixes
 from .priv import ensure_dir, ensure_lock_file, invoking_user, sudo_run
@@ -451,12 +451,14 @@ def numa_problem(vcpus: int, mem: int, nodes: int) -> str | None:
     return None
 
 
-def smp_args(vcpus: int, mem: int, nodes: int) -> list[str]:
+def smp_args(vcpus: int, mem: int, nodes: int, dist: str = "") -> list[str]:
     """-smp, -m and, for a simulated NUMA layout, -numa arguments.
 
     Each node is one socket with an equal share of the vCPUs and its own
     memory backend; memory is split in whole 2 MB units, the last node
-    taking the remainder, so the backends add up to -m exactly.
+    taking the remainder, so the backends add up to -m exactly.  *dist*
+    is the stored distance table (numa_dist.format_matrix); empty leaves
+    QEMU's 10/20 default.
     """
     if nodes <= 1:
         return ["-smp", str(vcpus), "-m", str(mem)]
@@ -478,6 +480,8 @@ def smp_args(vcpus: int, mem: int, nodes: int) -> list[str]:
             "-numa",
             f"node,nodeid={i},cpus={cpus},memdev=numa{i}",
         ]
+    if dist:
+        args += numa_dist.qemu_args(numa_dist.parse_matrix(dist))
     return args
 
 
@@ -1089,7 +1093,7 @@ def _start_qemu(vm: VMInfo) -> None:
         machine,
         "-cpu",
         cpu_model,
-        *smp_args(vm.vcpus, vm.mem, vm.numa_nodes),
+        *smp_args(vm.vcpus, vm.mem, vm.numa_nodes, vm.numa_dist),
         "-kernel",
         str(kernel),
         "-append",
