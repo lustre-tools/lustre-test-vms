@@ -26,6 +26,10 @@ from ltvm_pkg.host_setup import (
     check_podman_machine_macos,
 )
 
+# conftest stubs these two for every test; these are the real ones.
+from ltvm_pkg.host_setup import _start_rescuing as real_start_rescuing
+from ltvm_pkg.host_setup import _tune_machine_boot as real_tune_machine_boot
+
 _LTVM_PATH = str(Path(__file__).parent.parent / "ltvm")
 
 
@@ -898,6 +902,95 @@ def test_gvproxy_dead_reads_the_pid_file(
     proc.wait()
     pid_file.write_text(f"{proc.pid}\n")
     assert hs._gvproxy_dead()
+
+
+class TestTuneMachineBoot:
+    """The slow CoreOS unit is masked and the journal capped."""
+
+    def test_script_goes_on_stdin(self) -> None:
+        import ltvm_pkg.host_setup as hs
+
+        with patch.object(hs.subprocess, "run", return_value=_ok()) as run:
+            real_tune_machine_boot()
+        cmd = run.call_args.args[0]
+        assert cmd == ["podman", "machine", "ssh", "sudo", "sh", "-s"]
+        script = run.call_args.kwargs["input"]
+        assert f"systemctl mask --quiet {hs.PODMAN_SLOW_BOOT_UNIT}" in script
+        assert f"SystemMaxUse={hs.PODMAN_JOURNAL_MAX}" in script
+
+    def test_a_failure_only_warns(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import ltvm_pkg.host_setup as hs
+
+        with patch.object(hs.subprocess, "run", return_value=_fail()):
+            real_tune_machine_boot()  # no exception
+
+    def test_runs_after_a_start(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import ltvm_pkg.host_setup as hs
+
+        monkeypatch.setattr(hs, "_podman_machine_cmd", lambda *a, **k: True)
+        monkeypatch.setattr(hs, "_podman_answers", lambda *a, **k: True)
+        hs._start_podman_machine()
+        hs._tune_machine_boot.assert_called_once_with()  # type: ignore[attr-defined]
+
+
+class TestStartRescuing:
+    """The last start logs in as root during the boot and masks the unit."""
+
+    def _rescue(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        ssh_rcs: list[int],
+        polls: list[int | None],
+    ) -> tuple[bool, list[list[str]]]:
+        import ltvm_pkg.host_setup as hs
+
+        monkeypatch.setattr(hs.time, "sleep", lambda _: None)
+        monkeypatch.setattr(
+            hs,
+            "_machine_ssh_config",
+            lambda: {"IdentityPath": "/k", "Port": 1234},
+        )
+        start = MagicMock()
+        start.poll.side_effect = polls
+        start.wait.return_value = 0
+        rcs = iter(ssh_rcs)
+        calls: list[list[str]] = []
+
+        def run(cmd: list[str], **_kw: Any) -> MagicMock:
+            calls.append(cmd)
+            return MagicMock(returncode=next(rcs))
+
+        with (
+            patch.object(hs.subprocess, "Popen", return_value=start),
+            patch.object(hs.subprocess, "run", side_effect=run),
+        ):
+            ok = real_start_rescuing()
+        return ok, calls
+
+    def test_masks_once_root_gets_in(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import ltvm_pkg.host_setup as hs
+
+        ok, calls = self._rescue(monkeypatch, [255, 255, 0], [None] * 5)
+        assert ok
+        assert len(calls) == 3  # stops trying once masked
+        assert calls[-1][-4:] == [
+            "systemctl",
+            "mask",
+            "--quiet",
+            hs.PODMAN_SLOW_BOOT_UNIT,
+        ]
+        assert "root@127.0.0.1" in calls[-1] and "1234" in calls[-1]
+        assert "masked" in hs._podman_file("repair.log").read_text()
+
+    def test_stops_trying_when_the_start_ends(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ok, calls = self._rescue(monkeypatch, [255], [None, 0])
+        assert ok and len(calls) == 1
 
 
 class TestIdleStop:

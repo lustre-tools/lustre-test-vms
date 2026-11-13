@@ -210,11 +210,20 @@ def _isolate_podman_usage_lock(
 
     lock = tmp_path_factory.mktemp("podman-lock") / "podman.lock"
     hs._usage_fd = None
-    # Nor may a test start the detached idle-stop waiter for real.
+    # Nor may a test start the detached idle-stop waiter for real, nor
+    # the last start's rescue (a real Popen of `podman machine start`):
+    # it is a plain start here.  Tuning the machine's boot after a start
+    # is one more podman command the start tests would have to script.
     with (
         patch.object(hs, "_podman_lock_path", lambda: lock),
         patch.object(hs, "schedule_idle_stop"),
         patch("ltvm_pkg.cli.build.schedule_idle_stop"),
+        patch.object(
+            hs,
+            "_start_rescuing",
+            lambda: hs._podman_machine_cmd("start", timeout=180),
+        ),
+        patch.object(hs, "_tune_machine_boot"),
     ):
         yield
     if hs._usage_fd is not None:
