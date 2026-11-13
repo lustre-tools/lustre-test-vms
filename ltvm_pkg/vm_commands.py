@@ -2912,7 +2912,8 @@ def cmd_crash_collect(args: argparse.Namespace) -> int:
         time.sleep(5)
         for i in range(args.wait):
             try:
-                r = run_ssh(vm.ip, "true", timeout=3)
+                # The loop retries; run_ssh's backoff would stall it.
+                r = run_ssh(vm.ip, "true", timeout=3, retry_connect=False)
                 if r.returncode == 0:
                     print(f" up after {i + 5}s")
                     break

@@ -1114,7 +1114,10 @@ def wait_for_ssh(
                     flush=True,
                 )
         try:
-            r = run_ssh(ip, "true", timeout=5)
+            # retry_connect=False: this loop is the retry.  run_ssh's own
+            # backoff (2+5+10s) slept through the moment sshd came up, on
+            # every probe a booting guest refused.
+            r = run_ssh(ip, "true", timeout=5, retry_connect=False)
             if r.returncode == 0:
                 return
             err = _one_line(r.stderr or "")

@@ -235,7 +235,13 @@ def _qmp(vm: VMInfo, command: str, **arguments: Any) -> Any:
 
 def _ssh_up(vm: VMInfo) -> bool:
     try:
-        return run_ssh(vm.ip, "true", timeout=_SSH_PROBE).returncode == 0
+        # A probe in a polling loop: the loop retries, not run_ssh.
+        return (
+            run_ssh(
+                vm.ip, "true", timeout=_SSH_PROBE, retry_connect=False
+            ).returncode
+            == 0
+        )
     except subprocess.TimeoutExpired:
         return False
 

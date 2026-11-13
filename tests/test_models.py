@@ -636,6 +636,32 @@ class TestWaitForSsh:
         with patch("ltvm_pkg.vm_net.run_ssh", return_value=ok_result):
             wait_for_ssh("192.168.100.50", max_wait=5)  # should not raise
 
+    def test_a_refused_probe_is_not_backed_off(self, tmp_sockets: Path) -> None:
+        """The loop polls each second; run_ssh's own connect retries
+        (2+5+10s) inside one probe slept through sshd coming up."""
+        from ltvm_pkg.vm_net import wait_for_ssh
+
+        answers = iter(
+            [
+                _ssh_result(
+                    255,
+                    "ssh: connect to host 10.0.0.9 port 22: No route to host",
+                ),
+                _ssh_result(
+                    255, "kex_exchange_identification: Connection reset"
+                ),
+                _ssh_result(0, ""),
+            ]
+        )
+        with (
+            patch(
+                "ltvm_pkg.vm_net.run", side_effect=lambda *a, **k: next(answers)
+            ),
+            patch("ltvm_pkg.vm_net.time.sleep") as sleep,
+        ):
+            wait_for_ssh("10.0.0.9", max_wait=60)
+        assert [c.args[0] for c in sleep.call_args_list] == [1, 1]
+
 
 class TestWaitForSshQemuExit:
     """Given the VM, the wait ends once its QEMU is gone."""
