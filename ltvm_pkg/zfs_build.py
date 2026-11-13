@@ -566,6 +566,63 @@ def fetch_tarball(version: str, dest_dir: Path | None = None) -> Path:
     return tarball
 
 
+# Python 3.12 has the tarfile data filter, and so do 3.10.12 and 3.11.4.
+# Debian 12 has Python 3.11.2, which does not.
+_HAS_DATA_FILTER = hasattr(tarfile, "data_filter")
+
+
+def _leaves(path: str, links: set[str]) -> bool:
+    """Tell if ``path``, relative to the extraction root, can leave it.
+
+    ``links`` holds the symlinks of the archive.  A path through one of
+    them goes where that symlink points, so the check refuses such a path.
+    """
+    if path.startswith("/"):
+        return True
+    stack: list[str] = []
+    for part in path.split("/"):
+        if "/".join(stack) in links:
+            return True
+        if part == "..":
+            if not stack:
+                return True
+            stack.pop()
+        elif part not in ("", "."):
+            stack.append(part)
+    return False
+
+
+def _extract(tf: tarfile.TarFile, dest: Path) -> None:
+    """Extract ``tf`` into ``dest``, and refuse a member that leaves it.
+
+    Do not trust a downloaded archive to stay in its directory.  The
+    data filter keeps each member inside ``dest``.  Without the filter,
+    the checks here refuse an absolute path, a ../ escape, a link that
+    points outside ``dest``, and a special file.  As the filter does,
+    they drop the owner and the mode bits that root would restore.
+    """
+    if _HAS_DATA_FILTER:
+        tf.extractall(dest, filter="data")
+        return
+    members = tf.getmembers()
+    links = {os.path.normpath(m.name) for m in members if m.issym()}
+    for m in members:
+        if not (m.isreg() or m.isdir() or m.issym() or m.islnk()):
+            raise ZfsBuildError(f"archive member {m.name} is a special file")
+        target = None
+        if m.issym():
+            target = os.path.join(os.path.dirname(m.name), m.linkname)
+        elif m.islnk():
+            target = m.linkname
+        if _leaves(m.name, links) or (target and _leaves(target, links)):
+            raise ZfsBuildError(
+                f"archive member {m.name} leaves the extraction directory"
+            )
+        m.uid, m.gid, m.uname, m.gname = os.getuid(), os.getgid(), "", ""
+        m.mode = (m.mode & 0o755) | (0o700 if m.isdir() else 0o600)
+    tf.extractall(dest, members=members)
+
+
 def _unpack(
     tarball: Path, version: str, src_dir: Path, sha256: str | None = None
 ) -> None:
@@ -590,10 +647,7 @@ def _unpack(
                 )
             raw.seek(0)
         with tarfile.open(fileobj=raw, mode="r:gz") as tf:
-            # data filter: refuse absolute paths and ../ escapes rather
-            # than trusting a downloaded archive to stay in its dir.
-            # Python 3.12+ defaults to it; 3.10/3.11 need it named.
-            tf.extractall(tmp, filter="data")
+            _extract(tf, tmp)
         inner = tmp / f"zfs-{version}"
         if not inner.is_dir():
             # Tolerate a differently-named top directory (e.g. an rc
