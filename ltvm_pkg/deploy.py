@@ -110,6 +110,37 @@ def _stream_tree(
         raise RuntimeError(str(e)) from None
 
 
+def _tar_create_argv(tree: Path) -> tuple[list[str], dict[str, str] | None]:
+    """``tar cf - -C tree`` for the host, and the environment to run it in.
+
+    macOS's bsdtar, given a file with xattrs -- and APFS gives every file
+    com.apple.provenance -- writes an AppleDouble ``._name`` entry beside
+    it and pax xattr headers GNU tar warns about.  Unpacked in the guest
+    those are real files: a ``._libcfs.ko`` that depmod fails on with
+    "Exec format error", and a ``._`` twin of every script and binary in
+    the tree (over 1300 per deploy).  The flags are bsdtar's own, so it
+    is called by path; a Homebrew GNU tar first on PATH would refuse
+    them.  image_build and build_volumes do the same.
+    """
+    from .build_volumes import BSDTAR
+    from .host_setup import is_macos
+
+    if not is_macos():
+        return ["tar", "cf", "-", "-C", str(tree)], None
+    return (
+        [
+            BSDTAR,
+            "--no-mac-metadata",
+            "--no-xattrs",
+            "-cf",
+            "-",
+            "-C",
+            str(tree),
+        ],
+        {**os.environ, "COPYFILE_DISABLE": "1"},
+    )
+
+
 def _stream_tree_once(
     vm: VMInfo, tree: Path, *, exclude_modules: bool = False
 ) -> None:
@@ -125,7 +156,7 @@ def _stream_tree_once(
     whole either fails such a host or waits that long on a hung one.
     gzip -1 takes a staging to about 40% of its size.
     """
-    tar_argv = ["tar", "cf", "-", "-C", str(tree)]
+    tar_argv, tar_env = _tar_create_argv(tree)
     if exclude_modules:
         tar_argv.append("--exclude=./lib/modules")
     # Never ship ltvm's own build bookkeeping into the VM's /.
@@ -146,7 +177,7 @@ def _stream_tree_once(
         tempfile.TemporaryFile() as ssh_out,
     ):
         tar = subprocess.Popen(
-            tar_argv, stdout=subprocess.PIPE, stderr=local_err
+            tar_argv, stdout=subprocess.PIPE, stderr=local_err, env=tar_env
         )
         assert tar.stdout is not None
         gz = subprocess.Popen(

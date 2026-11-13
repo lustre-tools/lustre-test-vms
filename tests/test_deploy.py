@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -3016,3 +3017,36 @@ class TestUnstagedModules:
         ):
             deploy.deploy_to_vm(_make_vm(), staging, userspace_only=True)
         assert not any("removed" in c for c in ssh_cmds)
+
+
+class TestTarCreateArgv:
+    """Deploy's tar must not ship macOS metadata into the guest."""
+
+    def test_linux_is_plain_tar(self, tmp_path: Path) -> None:
+        with patch("ltvm_pkg.host_setup.is_macos", return_value=False):
+            argv, env = deploy._tar_create_argv(tmp_path)
+        assert argv == ["tar", "cf", "-", "-C", str(tmp_path)]
+        assert env is None
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS bsdtar")
+    def test_no_appledouble_entries(self, tmp_path: Path) -> None:
+        """APFS files carry xattrs; bsdtar left alone writes a ._ twin
+        for each, which landed in the guest as ._libcfs.ko and broke
+        depmod."""
+        tree = tmp_path / "tree"
+        (tree / "lib/modules/5.14").mkdir(parents=True)
+        ko = tree / "lib/modules/5.14/libcfs.ko"
+        ko.write_bytes(b"\x7fELF")
+        subprocess.run(
+            ["xattr", "-w", "com.ltvm.test", "1", str(ko)], check=True
+        )
+        argv, env = deploy._tar_create_argv(tree)
+        out = subprocess.run(
+            [*argv, "."], env=env, capture_output=True, check=True
+        ).stdout
+        names = subprocess.run(
+            ["tar", "tf", "-"], input=out, capture_output=True, check=True
+        ).stdout.decode()
+        assert "./lib/modules/5.14/libcfs.ko" in names.split()
+        assert "._" not in names
+        assert b"LIBARCHIVE.xattr" not in out
