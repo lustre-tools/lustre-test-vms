@@ -202,26 +202,52 @@ _NMI_SYSCTLS = (
 )
 
 
-def _set_nmi_panic(vm: VMInfo) -> None:
-    """Make an NMI from the host panic the guest, now and every boot.
+def _nmi_panic_script(vm: VMInfo) -> str:
+    """Shell that makes an NMI from the host panic the guest, now and
+    every boot, or "" where NMIs do not apply.
 
     The boot cmdline does it on kernels from 5.8 (qemu_run.NMI_PANIC_ARGS);
     this drop-in does it on rocky8's 4.18, for every boot after this one.
-    Best effort, like the rest of the kdump setup.
+    Best effort, like the rest of the kdump setup: _seed_kdump_boot runs
+    it in the same ssh as its probe and ignores its status.
     """
     if vm.arch not in ("", "x86_64"):
-        return
+        return ""
     body = "".join(f"{k} = 1\\n" for k in _NMI_SYSCTLS)
+    return (
+        f"printf '{body}' > {NMI_SYSCTL_CONF} && sysctl -q -p {NMI_SYSCTL_CONF}"
+    )
+
+
+# How long a crash trigger waits for the crash kernel to load.  A VM
+# just created or started loads it in the background (see
+# _seed_kdump_boot), which a nested or loaded host can stretch to a
+# minute or more on its first boot.
+CRASH_KERNEL_WAIT = 180
+
+
+def _wait_crash_kernel(vm: VMInfo) -> None:
+    """Wait until the guest has a crash kernel loaded, so a crash fired
+    now leaves a vmcore.  Immediate when it is already loaded; a note on
+    stderr, never a failure, when it is not or the guest cannot say."""
+    script = (
+        f"for i in $(seq {CRASH_KERNEL_WAIT}); do "
+        '[ "$(cat /sys/kernel/kexec_crash_loaded 2>/dev/null)" = 1 ] '
+        "&& exit 0; sleep 1; done; exit 1"
+    )
     try:
-        run_ssh(
-            vm.ip,
-            f"printf '{body}' > {NMI_SYSCTL_CONF} && "
-            f"sysctl -q -p {NMI_SYSCTL_CONF}",
-            timeout=KDUMP_PROBE_TIMEOUT,
-        )
-    except Exception as e:  # noqa: BLE001 - best-effort step
+        r = run_ssh(vm.ip, script, timeout=CRASH_KERNEL_WAIT + 30)
+    except Exception as e:  # noqa: BLE001 - the guest may be hung
         print(
-            f"warning: could not set the NMI panic sysctls on '{vm.name}': {e}",
+            f"note: could not check '{vm.name}' for a loaded crash kernel: {e}",
+            file=sys.stderr,
+        )
+        return
+    if r.returncode != 0:
+        print(
+            f"warning: '{vm.name}' has no crash kernel loaded after "
+            f"{CRASH_KERNEL_WAIT}s; the crash will not leave a vmcore "
+            f"(check `systemctl status kdump` in the guest)",
             file=sys.stderr,
         )
 
@@ -275,8 +301,17 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
 
     QEMU passes the kernel externally via -kernel, so the VM image has
     no /boot/vmlinuz or initramfs unless image_build baked them in.
-    Fresh images ship with both pre-built, so this is just a probe +
-    kdump service reload.
+    Fresh images ship with both pre-built, so this is one ssh: the
+    probe, which also queues the kdump service without waiting for it.
+
+    Not waiting is the point.  The service is enabled in the image and
+    already starting when ssh first answers, and on RHEL its first run
+    builds the kdump initramfs with dracut (seconds on an idle host,
+    much longer nested or under load).  A synchronous restart here
+    killed that run, started it over and held create, start and every
+    cluster node until it finished.  The crash kernel finishes loading
+    in the background; `vm nmi` and `crash-collect --trigger` wait for
+    it (_wait_crash_kernel) before they fire.
     """
     if not vm.kernel:
         return
@@ -286,7 +321,6 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
             f"VM {vm.name!r} has no kver recorded; recreate the VM"
         )
     kver = vm.kver
-    _set_nmi_panic(vm)
 
     # Determine OS family from target config.  A blanket
     # `except Exception: pass` would silently fall back to "rhel" for
@@ -296,14 +330,17 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
 
     if os_family == "debian":
         initrd_path = f"/var/lib/kdump/initrd.img-{kver}"
+        service = "kdump-tools"
         reload_cmd = (
             "kdump-config load 2>&1; systemctl restart kdump-tools 2>&1"
         )
     elif os_family == "suse":
         initrd_path = "/var/lib/kdump/initrd"
+        service = "kdump"
         reload_cmd = "systemctl restart kdump 2>&1"
     else:
         initrd_path = f"/boot/initramfs-{kver}.img"
+        service = "kdump"
         reload_cmd = "systemctl restart kdump 2>&1"
 
     # Every ssh step below is best-effort for the same reason the
@@ -314,9 +351,17 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
     # BaseException`, which destroyed a VM that had booted fine and
     # exited with a traceback.
     try:
+        # `start` is a no-op for a service already active or starting,
+        # so the boot's own run carries on; one that failed is retried.
+        # --no-block returns once the job is queued.
+        nmi = _nmi_panic_script(vm)
         probe = run_ssh(
             vm.ip,
-            f"test -f /boot/vmlinuz-{kver} && test -f {initrd_path}",
+            f"test -f /boot/vmlinuz-{kver} && test -f {initrd_path}; "
+            "rc=$?; "
+            + (f"{{ {nmi}; }} >/dev/null 2>&1; " if nmi else "")
+            + f"[ $rc = 0 ] && systemctl --no-block start {service} "
+            ">/dev/null 2>&1; exit $rc",
             timeout=KDUMP_PROBE_TIMEOUT,
         )
     except Exception as e:  # noqa: BLE001 - best-effort step
@@ -326,65 +371,71 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
             file=sys.stderr,
         )
         return
-    if probe.returncode != 0:
-        # Image predates baked-in kdump artifacts (or they got wiped).
-        # Fall back to seeding from the host's kernel dir: scp vmlinuz
-        # to /boot/, then regenerate initramfs inside the VM so it has
-        # matching module dependencies for the kernel actually running.
-        kernel_dir = Path(vm.kernel).parent if vm.kernel else None
-        vmlinuz = kernel_dir / "vmlinuz" if kernel_dir else None
-        if not vmlinuz or not vmlinuz.exists():
-            die(
-                f"no vmlinuz next to {vm.kernel!r} to seed to VM; "
-                f"rebuild the image with `ltvm build image` "
-                f"or restore the kernel output dir."
-            )
-        scp_r = run(
-            sshpass_scp_argv(
-                str(vmlinuz),
-                f"root@{vm.ip}:/boot/vmlinuz-{kver}",
-                extra_opts=["-o", "ConnectTimeout=5"],
-            ),
+    if probe.returncode == 0:
+        return
+    # Image predates baked-in kdump artifacts (or they got wiped).
+    # Fall back to seeding from the host's kernel dir: scp vmlinuz
+    # to /boot/, then regenerate initramfs inside the VM so it has
+    # matching module dependencies for the kernel actually running.
+    kernel_dir = Path(vm.kernel).parent if vm.kernel else None
+    vmlinuz = kernel_dir / "vmlinuz" if kernel_dir else None
+    if not vmlinuz or not vmlinuz.exists():
+        die(
+            f"no vmlinuz next to {vm.kernel!r} to seed to VM; "
+            f"rebuild the image with `ltvm build image` "
+            f"or restore the kernel output dir."
         )
-        if scp_r.returncode != 0:
-            err = (scp_r.stderr or scp_r.stdout or "").strip()
-            die(
-                f"failed to seed vmlinuz to '{vm.name}' "
-                f"(rc={scp_r.returncode}): {err}"
-            )
-        if os_family == "debian":
-            regen_cmd = f"update-initramfs -c -k {kver}"
-        elif os_family == "suse":
-            # kdump.service runs mkdumprd itself when the initrd is
-            # missing, and restarting it waits out a first-boot run
-            # rather than racing it.
-            regen_cmd = f"ln -sf vmlinuz-{kver} /boot/vmlinuz && systemctl restart kdump"
-        else:
-            regen_cmd = f"dracut --kver {kver} --force {initrd_path}"
-        # 600s, not 120: dracut on a TCG guest is in the same league as
-        # the kdump restart below, which was raised to 300 for exactly
-        # this reason.  And the return code is checked -- it used to be
-        # discarded entirely, so a failed regen left /boot/vmlinuz-<k>
-        # with no initramfs and `vm crash-collect` later reported "no
-        # vmcore found" with nothing pointing at the cause.
-        try:
-            regen = run_ssh(vm.ip, regen_cmd, timeout=KDUMP_REGEN_TIMEOUT)
-        except Exception as e:  # noqa: BLE001 - best-effort step
-            print(
-                f"warning: initramfs regen on '{vm.name}' did not "
-                f"complete: {e} -- kdump will not produce a vmcore",
-                file=sys.stderr,
-            )
-            return
-        if regen.returncode != 0:
-            err = (regen.stderr or regen.stdout or "").strip().splitlines()
-            print(
-                f"warning: initramfs regen on '{vm.name}' failed "
-                f"(rc={regen.returncode}): {err[-1] if err else 'no output'}"
-                f" -- kdump will not produce a vmcore",
-                file=sys.stderr,
-            )
-            return
+    scp_r = run(
+        sshpass_scp_argv(
+            str(vmlinuz),
+            f"root@{vm.ip}:/boot/vmlinuz-{kver}",
+            extra_opts=["-o", "ConnectTimeout=5"],
+        ),
+    )
+    if scp_r.returncode != 0:
+        err = (scp_r.stderr or scp_r.stdout or "").strip()
+        die(
+            f"failed to seed vmlinuz to '{vm.name}' "
+            f"(rc={scp_r.returncode}): {err}"
+        )
+    if os_family == "debian":
+        regen_cmd = f"update-initramfs -c -k {kver}"
+    elif os_family == "suse":
+        # kdump.service runs mkdumprd itself when the initrd is
+        # missing, and restarting it waits out a first-boot run
+        # rather than racing it.
+        regen_cmd = (
+            f"ln -sf vmlinuz-{kver} /boot/vmlinuz && systemctl restart kdump"
+        )
+    else:
+        regen_cmd = f"dracut --kver {kver} --force {initrd_path}"
+    # 600s, not 120: dracut on a TCG guest is in the same league as
+    # the kdump restart below, which was raised to 300 for exactly
+    # this reason.  And the return code is checked -- it used to be
+    # discarded entirely, so a failed regen left /boot/vmlinuz-<k>
+    # with no initramfs and `vm crash-collect` later reported "no
+    # vmcore found" with nothing pointing at the cause.
+    try:
+        regen = run_ssh(vm.ip, regen_cmd, timeout=KDUMP_REGEN_TIMEOUT)
+    except Exception as e:  # noqa: BLE001 - best-effort step
+        print(
+            f"warning: initramfs regen on '{vm.name}' did not "
+            f"complete: {e} -- kdump will not produce a vmcore",
+            file=sys.stderr,
+        )
+        return
+    if regen.returncode != 0:
+        err = (regen.stderr or regen.stdout or "").strip().splitlines()
+        print(
+            f"warning: initramfs regen on '{vm.name}' failed "
+            f"(rc={regen.returncode}): {err[-1] if err else 'no output'}"
+            f" -- kdump will not produce a vmcore",
+            file=sys.stderr,
+        )
+        return
+    # The files were just seeded, so the service has to run again to
+    # load them, and here it is waited for: this path is rare.
+    #
     # kdump seeding is a debugging convenience, not required for the VM to
     # function.  Under TCG emulation -- a cross-arch guest, or any guest
     # started with LTVM_FORCE_TCG -- a kdump restart routinely exceeds 30s,
@@ -2653,6 +2704,24 @@ def _connection_lost_hint(
     )
 
 
+def _sysrq_trigger_error(name: str, r: subprocess.CompletedProcess) -> str:
+    """Why a sysrq crash trigger failed, or "" when the guest went down.
+
+    The panic takes sshd with it, so the trigger's ssh either times out
+    or ends in ssh's own 255 with the connection reset or closed; both
+    mean the write landed.  A 255 from a connection that never got in,
+    or any other status, means it did not.
+    """
+    if r.returncode == 0:
+        return ""
+    if r.returncode == 255 and not ssh_never_connected(r.returncode, r.stderr):
+        return ""
+    return (
+        f"failed to trigger crash on '{name}' (rc={r.returncode}): "
+        f"{(r.stderr or '').strip() or '(no stderr)'}"
+    )
+
+
 def cmd_nmi(args: argparse.Namespace) -> int:
     vm_claim.require(args.name, "NMI")
     vm = VMInfo.load(args.name)
@@ -2668,18 +2737,14 @@ def cmd_nmi(args: argparse.Namespace) -> int:
     # arch-independent way (sysrq), the same mechanism as
     # `crash-collect --trigger`.
     if vm.arch != "x86_64":
+        _wait_crash_kernel(vm)
         try:
             r = run_ssh(vm.ip, "echo c > /proc/sysrq-trigger", timeout=5)
         except subprocess.TimeoutExpired:
             pass  # panic in flight -- ssh dying is the happy path
         else:
-            if r.returncode != 0:
-                return _handler_error(
-                    args,
-                    f"failed to trigger crash on '{args.name}' "
-                    f"(rc={r.returncode}): "
-                    f"{(r.stderr or '').strip() or '(no stderr)'}",
-                )
+            if err := _sysrq_trigger_error(args.name, r):
+                return _handler_error(args, err)
         print(
             f"crash triggered on '{args.name}' via sysrq "
             f"({vm.arch} has no NMI; expect panic + kdump reboot)"
@@ -2724,6 +2789,10 @@ def cmd_nmi(args: argparse.Namespace) -> int:
             f"settings were set at boot",
             file=sys.stderr,
         )
+    else:
+        # The guest answers, so it can say whether kdump is ready; a
+        # hung one, which an NMI is mostly for, is not waited on.
+        _wait_crash_kernel(vm)
     try:
         _qmp_nmi(vm.socket_path)
     except Exception as e:
@@ -2821,11 +2890,12 @@ def cmd_crash_collect(args: argparse.Namespace) -> int:
             return _handler_error(
                 args, f"VM '{args.name}' not running, can't trigger crash"
             )
+        _wait_crash_kernel(vm)
         print(f"triggering crash on {args.name}...")
         # The trigger's expected success case is ssh dying mid-command
-        # as the kernel panics -- TimeoutExpired is the happy path.
-        # A clean ssh return with rc != 0 means the SSH connection
-        # worked but the sysrq write failed (auth, permissions,
+        # as the kernel panics: a timeout, or ssh's 255 with the
+        # connection reset (_sysrq_trigger_error).  Any other failure
+        # means the sysrq write did not happen (auth, permissions,
         # command not found), and we'd hang forever waiting for a
         # kdump that never happens -- fail loud.  A clean rc == 0 is
         # unusual (kernel usually dies before ssh returns) but still
@@ -2835,13 +2905,8 @@ def cmd_crash_collect(args: argparse.Namespace) -> int:
         except subprocess.TimeoutExpired:
             pass  # panic in flight; proceed to wait-for-reboot
         else:
-            if r.returncode != 0:
-                return _handler_error(
-                    args,
-                    f"failed to trigger crash on {args.name} "
-                    f"(rc={r.returncode}): "
-                    f"{(r.stderr or '').strip() or '(no stderr)'}",
-                )
+            if err := _sysrq_trigger_error(args.name, r):
+                return _handler_error(args, err)
 
         print("waiting for kdump + reboot...", end="", flush=True)
         time.sleep(5)

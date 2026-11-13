@@ -209,7 +209,8 @@ class TestKdump:
     def test_probes_suses_initrd(self, tmp_path: Path) -> None:
         cmds = self._seed(tmp_path, present=True)
         assert any("test -f /var/lib/kdump/initrd" in c for c in cmds)
-        assert any(c.startswith("systemctl restart kdump") for c in cmds)
+        assert any("systemctl --no-block start kdump " in c for c in cmds)
+        assert not any("restart" in c for c in cmds)
         assert not any("mkdumprd" in c for c in cmds)
 
     def test_missing_initrd_is_built_by_the_service(

@@ -1369,15 +1369,65 @@ class TestSeedKdumpBoot:
             vm_commands._seed_kdump_boot(vm)
 
         mock_run.assert_not_called()
-        cmds = [c.args[1] for c in mock_ssh.call_args_list]
-        assert any("test -f /boot/vmlinuz-" in c for c in cmds)
-        assert any("systemctl restart kdump" in c for c in cmds)
-        assert not any("dracut" in c for c in cmds)
+        # One ssh: the probe, the NMI drop-in and a kdump start that
+        # does not wait -- the boot's own kdump run is left to finish
+        # (a restart killed it and redid the dracut while create waited).
+        (cmd,) = [c.args[1] for c in mock_ssh.call_args_list]
+        assert cmd.startswith("test -f /boot/vmlinuz-5.14.0-test")
+        assert "systemctl --no-block start kdump " in cmd
+        assert "restart" not in cmd
+        assert "dracut" not in cmd
         # NMI panic for every later boot too, for kernels older than
         # sysctl.* on the cmdline.
-        nmi = next(c for c in cmds if vm_commands.NMI_SYSCTL_CONF in c)
-        assert "kernel.panic_on_unrecovered_nmi = 1" in nmi
-        assert f"sysctl -q -p {vm_commands.NMI_SYSCTL_CONF}" in nmi
+        assert "kernel.panic_on_unrecovered_nmi = 1" in cmd
+        assert f"sysctl -q -p {vm_commands.NMI_SYSCTL_CONF}" in cmd
+
+    def test_fast_path_script_runs(self, tmp_path: Path) -> None:
+        """The probe script itself, run by a real shell: the exit status
+        is the probe's, whatever the NMI and systemctl steps do."""
+        vm = self._vm(tmp_path)
+        boot = tmp_path / "boot"
+        boot.mkdir()
+        bindir = tmp_path / "bin"
+        bindir.mkdir()
+        log = tmp_path / "systemctl.log"
+        for tool in ("systemctl", "sysctl"):
+            (bindir / tool).write_text(
+                f'#!/bin/sh\necho {tool} "$@" >> {log}\n'
+            )
+            (bindir / tool).chmod(0o755)
+
+        def _shell(ip, cmd, **kw):
+            cmd = cmd.replace("/boot/", f"{boot}/").replace(
+                vm_commands.NMI_SYSCTL_CONF, str(tmp_path / "nmi.conf")
+            )
+            env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}"}
+            return subprocess.run(
+                ["sh", "-c", cmd], env=env, capture_output=True, text=True
+            )
+
+        for present, want_rc in ((False, 1), (True, 0)):
+            if present:
+                (boot / "vmlinuz-5.14.0-test").write_text("")
+                (boot / "initramfs-5.14.0-test.img").write_text("")
+            log.unlink(missing_ok=True)
+            with (
+                patch("ltvm_pkg.vm_commands.run_ssh", side_effect=_shell) as m,
+                patch("ltvm_pkg.vm_commands.run") as mock_run,
+                patch("ltvm_pkg.target_config.TargetConfig") as mock_tc,
+            ):
+                mock_run.return_value = MagicMock(returncode=1, stderr="no")
+                mock_tc.return_value.os_family = "rhel"
+                if present:
+                    vm_commands._seed_kdump_boot(vm)
+                else:
+                    with pytest.raises(SystemExit):
+                        # rc 1 takes the seeding path, whose scp fails.
+                        vm_commands._seed_kdump_boot(vm)
+            assert m.call_args_list[0].kwargs["timeout"]
+            started = log.read_text() if log.exists() else ""
+            assert ("systemctl --no-block start kdump" in started) == present
+            assert "sysctl -q -p" in started
 
     def test_fast_path_debian_uses_kdump_config(self, tmp_path: Path) -> None:
         vm = self._vm(tmp_path, os_id="ubuntu24")
@@ -1395,7 +1445,7 @@ class TestSeedKdumpBoot:
         mock_run.assert_not_called()
         cmds = [c.args[1] for c in mock_ssh.call_args_list]
         assert any("test -f /var/lib/kdump/initrd.img-" in c for c in cmds)
-        assert any("kdump-config load" in c for c in cmds)
+        assert any("systemctl --no-block start kdump-tools" in c for c in cmds)
         assert not any("update-initramfs" in c for c in cmds)
 
     def test_fallback_path_runs_scp_and_dracut(self, tmp_path: Path) -> None:
@@ -2034,8 +2084,11 @@ class TestCmdNmi:
         ):
             rc = vm_commands.cmd_nmi(args)
         assert rc == 0
-        # The single run_ssh call must enable all three panic sysctls.
-        cmd = mock_ssh.call_args.args[1]
+        # The first run_ssh call must enable all three panic sysctls; the
+        # second waits for the crash kernel, which a VM just started may
+        # still be loading.
+        cmd, wait = (c.args[1] for c in mock_ssh.call_args_list)
+        assert "kexec_crash_loaded" in wait
         assert "panic_on_unrecovered_nmi=1" in cmd
         assert "panic_on_io_nmi=1" in cmd
         assert "unknown_nmi_panic=1" in cmd

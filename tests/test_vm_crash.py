@@ -675,7 +675,8 @@ class TestCrashTriageScript:
             rc = vm_commands.cmd_crash_collect(args)
         assert rc == EXIT_OK
         # The sysrq trigger command was the first ssh call
-        assert "sysrq-trigger" in ssh_calls[0]
+        assert "kexec_crash_loaded" in ssh_calls[0]
+        assert "sysrq-trigger" in ssh_calls[1]
         # The true probe was invoked at least once
         assert probe_count["n"] >= 1
 
@@ -776,3 +777,34 @@ class TestCrashTriageScript:
         assert rc == EXIT_OK
         err = capsys.readouterr().err
         assert "triage script failed" in err
+
+
+class TestSysrqTriggerError:
+    """A panic takes sshd with it: the trigger's ssh comes back 255 with
+    the connection reset, which is the crash happening, not a failure."""
+
+    @pytest.mark.parametrize(
+        ("rc", "stderr", "failed"),
+        [
+            (0, "", False),
+            (
+                255,
+                "Read from remote host 10.0.0.9: Connection reset by peer",
+                False,
+            ),
+            (255, "Connection to 10.0.0.9 closed by remote host.", False),
+            (
+                255,
+                "ssh: connect to host 10.0.0.9 port 22: Connection refused",
+                True,
+            ),
+            (255, "kex_exchange_identification: read: Connection reset", True),
+            (1, "sh: /proc/sysrq-trigger: Permission denied", True),
+        ],
+    )
+    def test_classifies(self, rc: int, stderr: str, failed: bool) -> None:
+        r = MagicMock(returncode=rc, stdout="", stderr=stderr)
+        err = vm_commands._sysrq_trigger_error("vm1", r)
+        assert bool(err) == failed
+        if failed:
+            assert f"rc={rc}" in err
