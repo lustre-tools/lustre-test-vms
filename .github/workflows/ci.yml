@@ -1,0 +1,56 @@
+# The pre-commit hook's checks and the test suite, on every push and pull
+# request.  The hook (.githooks/pre-commit) runs only in a clone that ran
+# `make hooks`, and only for commits made there, so it cannot stop a
+# change from reaching master; this can, once branch protection requires
+# it.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: ruff check
+        run: uv run --locked ruff check .
+      - name: ruff format
+        run: uv run --locked ruff format --check .
+      - name: mypy
+        run: uv run --locked mypy ltvm
+      - name: input hash goldens
+        run: >-
+          uv run --locked pytest -q --no-cov -p no:cacheprovider
+          tests/test_input_hash_stability.py
+
+  # The suite must pass on a bare checkout (tests that need host tools
+  # skip, naming them), at the 3.10 floor and on a current Python, and on
+  # macOS on Apple Silicon -- see "Test suite" in CLAUDE.md.
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            python: "3.10"
+          - os: ubuntu-24.04
+            python: "3.13"
+          - os: macos-15
+            python: "3.13"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the version tests read the v* tags
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: pytest
+        run: uv run --locked pytest -q --no-cov -p no:cacheprovider

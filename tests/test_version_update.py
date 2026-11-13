@@ -154,6 +154,9 @@ class TestVersionFromTag:
             )
 
         git("init", "-q")
+        # An annotated tag needs an identity, which a CI runner lacks.
+        git("config", "user.name", "t")
+        git("config", "user.email", "t@t")
         git(
             "-c",
             "user.name=t",

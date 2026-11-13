@@ -149,6 +149,14 @@ def _isolate_user_state(
     claims.mkdir()
     claims.chmod(0o1777)
     monkeypatch.setattr("ltvm_pkg.vm_claim.CLAIMS_DIR", claims)
+    # Whether a missing claims dir can be made is asked of its parent,
+    # and VM names are registered under a lock beside it: both the real
+    # /opt/qemu-vms otherwise, which a CI runner has not got -- making
+    # it went to the real sudo.
+    monkeypatch.setattr("ltvm_pkg.vm_claim.VM_DIR", root)
+    monkeypatch.setattr(
+        "ltvm_pkg.vm_net._HOSTS_LOCK_PATH", root / ".hosts.lock"
+    )
     # The update check has no kill switch and would otherwise `git
     # ls-remote` once per test, so it is patched out.  Telemetry needs
     # no patch: the env above disables it through its own front door,
