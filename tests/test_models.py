@@ -660,7 +660,39 @@ class TestWaitForSsh:
             patch("ltvm_pkg.vm_net.time.sleep") as sleep,
         ):
             wait_for_ssh("10.0.0.9", max_wait=60)
-        assert [c.args[0] for c in sleep.call_args_list] == [1, 1]
+        pauses = [c.args[0] for c in sleep.call_args_list]
+        assert len(pauses) == 2 and all(0.9 < p <= 1 for p in pauses)
+
+    def test_a_slow_probe_is_not_followed_by_a_sleep(
+        self, tmp_sockets: Path
+    ) -> None:
+        """A probe that took 3s to fail (ARP) is retried at once."""
+        from ltvm_pkg.vm_net import wait_for_ssh
+
+        clock = _FakeClock()
+        answers = iter(
+            [
+                _ssh_result(
+                    255,
+                    "ssh: connect to host 10.0.0.9 port 22: No route to host",
+                ),
+                _ssh_result(0, ""),
+            ]
+        )
+
+        def probe(*a: object, **k: object) -> MagicMock:
+            clock.now += 3
+            return next(answers)
+
+        with (
+            patch("ltvm_pkg.vm_net.run", side_effect=probe),
+            patch(
+                "ltvm_pkg.vm_net.time.monotonic", side_effect=clock.monotonic
+            ),
+            patch("ltvm_pkg.vm_net.time.sleep") as sleep,
+        ):
+            wait_for_ssh("10.0.0.9", max_wait=60)
+        sleep.assert_not_called()
 
 
 class TestWaitForSshQemuExit:

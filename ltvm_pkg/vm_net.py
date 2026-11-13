@@ -1105,6 +1105,7 @@ def wait_for_ssh(
                     file=sys.stderr,
                     flush=True,
                 )
+        probed = time.monotonic()
         try:
             # retry_connect=False: this loop is the retry.  run_ssh's own
             # backoff (2+5+10s) slept through the moment sshd came up, on
@@ -1135,7 +1136,12 @@ def wait_for_ssh(
         size = _console_size(vm)
         if size != console:
             console, console_moved = size, time.monotonic()
-        time.sleep(1)
+        # Probe once a second, not a second after each probe: before the
+        # guest answers ARP a probe takes 3s to fail ("No route to
+        # host"), and a sleep on top of that only delays the next one.
+        pause = 1 - (time.monotonic() - probed)
+        if pause > 0:
+            time.sleep(pause)
     elapsed = int(time.monotonic() - start)
     detail = f"; last ssh error: {last}" if last else ""
     die(
