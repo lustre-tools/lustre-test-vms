@@ -37,9 +37,9 @@ from .vm_net import (
     HOSTS_FILE,
     _real_user_ssh_dir,
     alloc_ip,
-    alloc_vm_addresses,
     check_tap_collision,
     mac_for_name,
+    nic_ip6s,
     nic_network_problem,
     provision_vm_ssh,
     register_ssh_name,
@@ -76,7 +76,6 @@ from .vm_state import (
     VMNotFound,
     drop_orphan_clusters,
     lustre_libdir,
-    nic_ip6,
     resolve_os_artifacts,
 )
 
@@ -813,27 +812,6 @@ def _image_id(image: str) -> str:
         return ""
 
 
-@contextmanager
-def _create_addresses(
-    name: str, nics: list[NicSpec], explicit_ip: str | None
-) -> Iterator[tuple[list[str], list[str]]]:
-    """Keep both address families reserved until the new .info is saved."""
-    if any(n.subnet or n.subnet6 for n in nics):
-        # Explicit pools share the existing lock and peer allocation state.
-        try:
-            with alloc_vm_addresses(name, nics, explicit_ip) as addresses:
-                yield addresses
-        except ValueError as exc:
-            # This CLI boundary owns the allocation failure message.
-            die(str(exc))
-    else:
-        # Existing tests and callers retain the original allocator interface.
-        with alloc_ip(
-            name, count=1 + len(nics), explicit_ip=explicit_ip
-        ) as ips:
-            yield ips, [nic_ip6(address) for address in ips[1:]]
-
-
 def _allocate_and_persist_vm(
     args: argparse.Namespace,
     info_path: Path,
@@ -860,11 +838,12 @@ def _allocate_and_persist_vm(
     # lock so that concurrent creates cannot race and claim the same
     # addresses.  The lock is held until vm.save() commits the .info
     # file, at which point the IPs are visible to peers.
-    with _create_addresses(
+    with alloc_ip(
         name,
-        extra_nic_types,
+        count=1 + len(extra_nic_types),
         explicit_ip=getattr(args, "ip", None) or None,
-    ) as (ips, nic_ip6s):
+        nics=extra_nic_types,
+    ) as ips:
         ip = ips[0]
         nic_ips = ips[1:]
         # Re-check existence under the alloc_ip lock: the earlier check
@@ -899,8 +878,7 @@ def _allocate_and_persist_vm(
             variant=variant,
             nics=list(extra_nic_types),
             nic_ips=list(nic_ips),
-            # Both families remain reserved until this VM state is saved.
-            nic_ip6s=nic_ip6s,
+            nic_ip6s=nic_ip6s(name, extra_nic_types, nic_ips),
             # passthrough_drivers is filled in below, inside the launch
             # umbrella, after we've actually bound each BDF to vfio-pci.
             passthrough_drivers={},

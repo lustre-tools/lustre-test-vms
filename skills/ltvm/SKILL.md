@@ -168,6 +168,19 @@ ssh co1-numa cat /sys/class/net/eth1/device/../numa_node
 The guest kernel logs "[Firmware Bug]: Overriding NUMA node" and is
 tainted (W) when the node is set; that is expected.
 
+`--nic` also sets each extra NIC's LNet network and subnets. `net=`
+groups NICs on one LNet network, and `subnet=` and `subnet6=` pick their
+IP networks. All NICs stay on the one bridge, so the rails are not
+isolated at L2. `cluster create` gives every node the same list. `net=`
+needs an image built after the option was added, and `create` fails when
+the layout did not take:
+
+```bash
+ltvm create co1-rails --nic tcp:net=tcp0,subnet=192.0.2.0/24 \
+    --nic tcp:net=tcp0,subnet=198.51.100.0/24
+ssh co1-rails cat /etc/modprobe.d/lnet.conf   # tcp0(eth1,eth2)
+```
+
 `--kernel-args` adds kernel boot parameters, also fixed at create time.
 The target kernels have no KASAN, but they build in SLUB debugging (and
 the Rocky ones page owner tracking), off until booted with them:
