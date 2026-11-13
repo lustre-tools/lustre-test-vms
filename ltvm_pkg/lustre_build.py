@@ -428,6 +428,131 @@ def configure_stamp_hash(cfg: str, zfs_version: str | None = None) -> str:
     return hashlib.sha256(f"{cfg}\0zfs={zfs_version}".encode()).hexdigest()
 
 
+# Lustre's configure costs every fresh tree 20-60s, most of it kernel
+# compile probes that come out the same for the same configure script,
+# flags, kernel and container.  Patch Watcher clones a fresh tree per
+# run, so it paid that on every run's first build.  The configure
+# cache keeps each configure's config.status, keyed on all of those,
+# and a later configure with the same key replays it through
+# `./config.status` (about 2s) instead.
+#
+# The key masks the version: autoconf bakes it into configure, and two
+# commits of one branch differ in nothing else there.  The replay puts
+# the new version back -- the full string everywhere, and the four
+# numbers config/lustre-version.m4 derives from it -- and checks the
+# result; anything that does not check out runs configure for real.
+# Measured against a real configure five commits away: every Makefile
+# and config.h byte-identical, libtool differing only in the build
+# host's name in a comment.
+#
+# The cache lives in the /ccache mount, which is per target container
+# and outlives the tree (a host dir, a podman volume on a Mac, or
+# whatever a site mounts there).  LTVM_CONFIGURE_CACHE=0 turns it off.
+CONFIGURE_CACHE_DIR = "/ccache/ltvm-configure"
+CONFIGURE_CACHE_KEEP = 200
+
+
+def configure_cache_key_base(
+    *,
+    cfg_hash: str,
+    build_tree: Path,
+    container_tag: str,
+    target: str,
+    arch: str,
+) -> str | None:
+    """The host's half of the configure cache key, or None for no cache.
+
+    Covers what the replay cannot see from inside the tree: the flags
+    (cfg_hash, which carries the ZFS version), the kernel's config,
+    exported symbols and release, and the container image, whose
+    compiler and -devel packages the userspace checks probe.  The
+    container adds the version-masked configure script and libtool.
+    """
+    if os.environ.get("LTVM_CONFIGURE_CACHE", "1") == "0":
+        return None
+    from .podman_gc import image_id
+
+    image = image_id(container_tag)
+    if not image:
+        return None
+    h = hashlib.sha256()
+    for part in (cfg_hash, target, arch, image, _kernel_release(build_tree)):
+        h.update(part.encode() + b"\0")
+    for name in (".config", "Module.symvers"):
+        try:
+            h.update((build_tree / name).read_bytes())
+        except OSError:
+            return None
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def configure_cache_block(cfg: str, key_base: str | None) -> str:
+    """Shell that runs configure, through the cache when *key_base* is
+    given: replay a cached config.status, else configure for real and
+    store its config.status.  Runs in the tree, after autogen.sh, with
+    LTVER set."""
+    if key_base is None:
+        return cfg
+    d = CONFIGURE_CACHE_DIR
+    return f"""\
+LTVM_CC_DIR={d}
+VER=$(sed -n "s/^PACKAGE_VERSION='\\(.*\\)'$/\\1/p" configure)
+KEY=
+if [ -n "$VER" ] && mkdir -p "$LTVM_CC_DIR" 2>/dev/null; then
+  VRE=$(printf '%s' "$VER" | sed 's/[][\\.*^$/]/\\\\&/g')
+  KEY=$({{ printf '%s\\n' {key_base} "$LTVER"; sed "s/$VRE/@V@/g" configure; }} |
+    sha256sum | cut -c1-32)
+fi
+ltvm_lv() {{
+  echo "$1" | sed -re 's/([0-9]+)\\.([0-9]+)\\.([0-9]+)(\\.([0-9]+))?.*/\\1 \\2 \\3/'
+}}
+ltvm_lv_fix() {{
+  f=$(echo "$1" | sed -re 's/([0-9]+)\\.([0-9]+)\\.([0-9]+)([-\\._][a-z]*([0-9]+))?.*/\\5/')
+  echo "${{f:-0}}"
+}}
+ltvm_d() {{
+  sed -n "s/^D\\[\\"LUSTRE_$2\\"\\]=\\" \\(.*\\)\\"$/\\1/p" "$1"
+}}
+ltvm_replay() {{
+  src=$LTVM_CC_DIR/$KEY.status
+  [ -f "$src" ] || return 1
+  old=$(sed -n 's/^S\\["PACKAGE_VERSION"\\]="\\(.*\\)"$/\\1/p' "$src")
+  [ -n "$old" ] || return 1
+  # The cached numbers must be what this derivation gives for its own
+  # version, or the derivation is not Lustre's any more.
+  [ "$(ltvm_d "$src" MAJOR) $(ltvm_d "$src" MINOR) $(ltvm_d "$src" PATCH) $(ltvm_d "$src" FIX)" = \\
+    "$(ltvm_lv "$old") $(ltvm_lv_fix "$old")" ] || return 1
+  set -- $(ltvm_lv "$VER") $(ltvm_lv_fix "$VER")
+  ore=$(printf '%s' "$old" | sed 's/[][\\.*^$/]/\\\\&/g')
+  nrep=$(printf '%s' "$VER" | sed 's/[\\/&]/\\\\&/g')
+  sed -e "s/$ore/$nrep/g" \\
+    -e "s/^D\\[\\"LUSTRE_MAJOR\\"\\]=.*/D[\\"LUSTRE_MAJOR\\"]=\\" $1\\"/" \\
+    -e "s/^D\\[\\"LUSTRE_MINOR\\"\\]=.*/D[\\"LUSTRE_MINOR\\"]=\\" $2\\"/" \\
+    -e "s/^D\\[\\"LUSTRE_PATCH\\"\\]=.*/D[\\"LUSTRE_PATCH\\"]=\\" $3\\"/" \\
+    -e "s/^D\\[\\"LUSTRE_FIX\\"\\]=.*/D[\\"LUSTRE_FIX\\"]=\\" $4\\"/" \\
+    "$src" > config.status.ltvm || return 1
+  if [ "$old" != "$VER" ] && grep -qF "$old" config.status.ltvm; then
+    return 1
+  fi
+  mv -f config.status.ltvm config.status && chmod +x config.status &&
+    ./config.status >/dev/null &&
+    grep -qxF "#define VERSION \\"$VER\\"" config.h
+}}
+if [ -n "$KEY" ] && ltvm_replay; then
+  echo "  configure: replayed cached results ($KEY)"
+else
+  rm -f config.status config.status.ltvm
+  {cfg}
+  if [ -n "$KEY" ]; then
+    {{ cp config.status "$LTVM_CC_DIR/.$KEY.$$" &&
+      mv -f "$LTVM_CC_DIR/.$KEY.$$" "$LTVM_CC_DIR/$KEY.status" &&
+      ls -1t "$LTVM_CC_DIR"/*.status | tail -n +{CONFIGURE_CACHE_KEEP + 1} |
+      xargs -r rm -f; }} || true
+  fi
+fi"""
+
+
 def _stamp_suffix(target: str, arch: str) -> str:
     """Reconfigure-stamp suffix that captures both target and arch.
 
@@ -1275,6 +1400,19 @@ def _build_in_container(
     # Shell block: run autogen+configure when force-requested OR when the
     # container's libtool version differs from the last autogen stamp.
     force_reconf_flag = "1" if need_reconf else "0"
+    # Cross builds install their sysroot in the run, and a ZFS build's
+    # probes read a tree the key does not cover: both configure for real.
+    cache_key = (
+        None
+        if cross_compiling or zfs_src is not None
+        else configure_cache_key_base(
+            cfg_hash=cfg_hash,
+            build_tree=Path(build_tree),
+            container_tag=container_tag,
+            target=target,
+            arch=arch,
+        )
+    )
     script_parts.append(f"""\
 FORCE_RECONF={force_reconf_flag}
 LTVER=$(libtool --version 2>/dev/null | head -1)
@@ -1282,7 +1420,7 @@ STAMPED=$(cat .ltvm-container-libtool 2>/dev/null || echo '')
 if [ "$FORCE_RECONF" = "1" ] || [ "$LTVER" != "$STAMPED" ]; then
   [ "$LTVER" != "$STAMPED" ] && echo "  libtool changed, re-running autogen+configure"
   bash autogen.sh
-  {cfg}
+{configure_cache_block(cfg, cache_key)}
   echo "$LTVER" > .ltvm-container-libtool
 else
   echo "  autogen/configure up to date, skipping"

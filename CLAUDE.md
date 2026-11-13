@@ -1585,6 +1585,21 @@ in one source tree distcleans on each switch, and staying
 on one target never does.  autogen + configure re-run on
 a narrower condition still (`_needs_reconfigure`).
 
+When configure does run, it goes through the configure cache
+(`configure_cache_block` in lustre_build.py): each configure's
+`config.status` is kept in `/ccache/ltvm-configure/`, keyed on
+the configure script with its version masked, the flags, the
+kernel (`.config`, `Module.symvers`, release), the container
+image and libtool, and a later configure with the same key
+replays it through `./config.status` -- about 1s instead of
+20-60s.  That is what a fresh tree pays on its first build,
+and Patch Watcher clones one per run.  The replay puts the new
+version back (the string, and the four numbers
+`config/lustre-version.m4` derives) and checks config.h; an
+entry whose numbers do not match its own version's derivation
+is not replayed.  Cross and ZFS builds configure for real;
+`LTVM_CONFIGURE_CACHE=0` turns it off.
+
 The Lustre version is decided on the host
 (`ltvm_pkg/lustre_version.py`): `git describe` fails in the
 container for a git worktree (its gitdir is not mounted) and
