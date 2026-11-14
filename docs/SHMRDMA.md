@@ -16,7 +16,8 @@ There are two ways in:
 - **`--nic shmnet`**, a virtio-net NIC on a switch inside the daemon
   instead of the bridge. socklnd, TCP and ssh run unchanged; the guest
   configures it as a `tcp` NIC. TSO and checksum offload pass through,
-  so 64 KB segments are never cut up or summed, but the guest's own TCP
+  so 64 KB segments are never cut up or summed (unless the receiving
+  NIC has `tso=off`, below), but the guest's own TCP
   receive copy remains, so it is two copies per byte against RDMA's one.
 
 Sources: `shmrdma/` (`daemon/`, `kmod/`, `include/`, `tools/`, and the
@@ -63,6 +64,28 @@ ltvm vm shmrdmad [status|start|stop]
   RX queue by flow hash) and help multi-stream iperf3, but on Sookie
   they slowed socklnd with conns_per_peer=4 from 2.7-3.3 to 2.0-2.4
   GB/s, so the default stays one.
+- **Normal-sized packets.** By default a TSO frame crosses the switch
+  whole and the receiving guest takes up to 64 KB as one frame, as if
+  its NIC did perfect receive offload.  `--nic shmnet:tso=off` turns
+  receive TSO off for that NIC (`guest_tso4`, `guest_tso6` and
+  `guest_ecn` off on its virtio-net device), and the switch then cuts
+  each TCP frame for it into MSS-sized segments, as a NIC without LRO
+  delivers them; GRO in the guest merges them again unless `ethtool -K
+  eth1 gro off`.  Use it to check that a socklnd change does not win
+  only with 64 KB frames.  It costs throughput: on Sookie a TSO-off
+  receiver took one iperf3 stream from 15-39 to 12-13 Gbit/s (7 with
+  GRO off), and LNet bulk writes into it (1 MB, 8 in flight) from
+  1.5-2.2 to 1.1 GB/s (0.5 GB/s with GRO off).
+- **Switch counters.** The daemon rewrites `<net socket>.stats` about
+  once a second: one line per port, `key=value`, with its MAC and
+  negotiated offloads, packets and bytes each way, drops, and the RX
+  starvation counters: `rx_holds` (sends that found no RX buffers on
+  this port and held the sender), `rx_hold_ns` (time held),
+  `rx_hold_drops` (frames dropped when a hold ran out), `tx_holds` and
+  `tx_hold_ns` (this port as the held sender), `rx_segs` (segments cut
+  for it) and `rx_seg_drops` (GSO frames it could not be given).  A
+  sender that looks idle in a profile while its peer's `rx_hold_ns`
+  climbs is waiting for the peer to post RX buffers.
 - **It is never restarted behind a VM's back.** QEMU's vhost-user
   devices do not reconnect, so a daemon restart breaks every attached
   guest's device until that VM restarts. `ltvm vm shmrdmad stop`
@@ -239,6 +262,14 @@ vhost-user` with a standard `virtio-net-pci` (mergeable RX buffers,
 TSO4/6, checksum offload). The daemon learns MACs from transmitted
 frames, floods broadcasts and unknown destinations, and copies each
 frame with its virtio-net header into the destination's RX buffers.
+A destination without receive TSO gets a TCP GSO frame as MSS-sized
+segments instead: headers copied per segment, IPv4 length, id and
+header checksum, IPv6 payload length and TCP sequence fixed up, FIN
+and PSH on the last segment only, CWR on the first only, and the TCP
+checksum left to the guest as a partial checksum when it took
+`GUEST_CSUM`, computed in full otherwise.  Every segment's RX buffers
+are taken before any is handed over, so a frame is delivered whole or
+not at all.  Other GSO frames for such a port are dropped and counted.
 When the destination has no RX buffers it holds the sender's TX queue
 for up to 2 ms before dropping, which keeps TCP from losing segments to
 a guest that is merely slow to refill.

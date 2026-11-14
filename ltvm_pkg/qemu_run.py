@@ -1327,6 +1327,12 @@ def _start_qemu(vm: VMInfo) -> None:
             _q = _nic.queues
             _mq = f",queues={_q}" if _q > 1 else ""
             _dev_mq = f",mq=on,vectors={2 * _q + 2}" if _q > 1 else ""
+            # guest_ecn depends on receive TSO in the virtio spec.
+            _tso = (
+                ""
+                if _nic.tso
+                else ",guest_tso4=off,guest_tso6=off,guest_ecn=off"
+            )
             qemu_args += [
                 "-chardev",
                 f"socket,id=char{_netdev_id},path={_sock}",
@@ -1334,7 +1340,7 @@ def _start_qemu(vm: VMInfo) -> None:
                 f"vhost-user,id={_netdev_id},chardev=char{_netdev_id}{_mq}",
                 "-device",
                 f"{net_driver},netdev={_netdev_id},mac={_mac},mrg_rxbuf=on"
-                f"{_dev_mq}",
+                f"{_dev_mq}{_tso}",
             ]
         elif _base_type == "passthrough":
             _bdf = _nic.bdf
