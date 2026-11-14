@@ -78,6 +78,7 @@ class ImageMeta(_BaseMeta, total=False):
     packages: Any
     with_lustre: str | None
     lustre_version: str | None
+    shmrdma_kmod: bool
 
 
 _KERNEL_REQUIRED = ("kernel_version", "lustre_target")

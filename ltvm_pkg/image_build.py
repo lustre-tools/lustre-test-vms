@@ -973,6 +973,8 @@ def build_image(
         _run(v_cmd, capture_output=False)
         tag = overlay_tag  # downstream stages layer on top of the overlay
 
+    shmrdma_kmod = False
+
     # ── Step 1b: Add kernel modules + Lustre via a second Dockerfile stage ──
     # resolve_kernel never raises -- it returns the short name if no
     # built directory exists yet.  The actual "no kernel built yet"
@@ -1128,6 +1130,25 @@ def build_image(
                     "RUN rpm -ivh --nodeps --force /tmp/mofed-kmods/*.rpm "
                     "&& rm -rf /tmp/mofed-kmods"
                 )
+            # The shmrdma guest driver (see ltvm_pkg/shmrdma.py), when it
+            # builds for this kernel.  Not for a cross build: the build
+            # container runs the target's arch.
+            if kver and not cross:
+                from .shmrdma import MODPROBE_CONF, build_kmod
+
+                shm_ko = build_kmod(target_config, kernel, kver)
+                if shm_ko is not None:
+                    shm_dest = inject_dir / "shmrdma"
+                    shm_dest.mkdir(exist_ok=True)
+                    shutil.copy2(shm_ko, shm_dest / "shmrdma.ko")
+                    (shm_dest / "shmrdma.conf").write_text(MODPROBE_CONF)
+                    lines.append(
+                        f"COPY shmrdma/shmrdma.ko /lib/modules/{kver}/extra/"
+                    )
+                    lines.append(
+                        "COPY shmrdma/shmrdma.conf /etc/modprobe.d/shmrdma.conf"
+                    )
+                    shmrdma_kmod = True
             if kver:
                 lines.append(f"RUN ldconfig && depmod -a {kver}")
             else:
@@ -1234,6 +1255,7 @@ def build_image(
             if mofed_kmods_dir is not None
             else None
         ),
+        shmrdma_kmod=shmrdma_kmod,
         build_seconds=round(elapsed, 1),
         image_size_mb=round(size_mb, 1),
         packages=pkg_manifest,
