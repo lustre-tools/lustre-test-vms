@@ -24,7 +24,7 @@ setup() {
 	case $t in
 	shm) net="o2ib --if eth0${CPP:+ --conns-per-peer $CPP}" ;;
 	rxe) net="o2ib1 --if eth1" ;;
-	tcp|lo) net="tcp --if eth0" ;;
+	tcp|lo) net="tcp --if eth0${CPP:+ --conns-per-peer $CPP}" ;;
 	snet) net="tcp --if eth1${CPP:+ --conns-per-peer $CPP}" ;;
 	esac
 	if [[ $t == rxe ]]; then

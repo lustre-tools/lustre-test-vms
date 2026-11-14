@@ -313,15 +313,58 @@ static struct netport *port_by_mac(const uint8_t *mac)
 	return NULL;
 }
 
-/* deliver to dp on the RX queue matching the sender's TX queue */
-static int net_send_to(struct netport *dp, int qi, const struct vnet_hdr *h,
-		       struct cursor *frame, uint64_t flen)
+/*
+ * A hash of the frame's IP addresses and TCP/UDP ports, as RSS would
+ * take it, so that every segment of a flow lands on one RX queue and is
+ * received in order.  0 for anything else.
+ */
+static uint32_t net_flow_hash(const struct cursor *frame, uint64_t flen)
+{
+	uint8_t b[96];
+	struct cursor c = *frame;
+	uint32_t n = flen < sizeof(b) ? flen : sizeof(b);
+	uint32_t h = 0x9e3779b9, l4 = 0, ab = 0;
+	uint8_t proto = 0;
+
+	if (n < 34)
+		return 0;
+	cur_read(&c, b, n);
+	uint16_t et = b[12] << 8 | b[13];
+
+	if (et == 0x0800) {
+		uint32_t ihl = (b[14] & 15) * 4;
+
+		proto = b[23];
+		ab = 26;			/* saddr, daddr: 8 bytes */
+		h ^= 8;
+		l4 = 14 + ihl;
+		for (int i = 0; i < 8; i++)
+			h = (h ^ b[ab + i]) * 0x01000193;
+	} else if (et == 0x86dd && n >= 54) {
+		proto = b[20];
+		ab = 22;			/* saddr, daddr: 32 bytes */
+		l4 = 54;
+		for (int i = 0; i < 32; i++)
+			h = (h ^ b[ab + i]) * 0x01000193;
+	} else {
+		return 0;
+	}
+	if ((proto == 6 || proto == 17) && l4 + 4 <= n)
+		for (uint32_t i = 0; i < 4; i++)
+			h = (h ^ b[l4 + i]) * 0x01000193;
+	return h ^ (h >> 16);
+}
+
+/* deliver to dp on the RX queue its flow hashes to */
+static int net_send_to(struct netport *dp, uint32_t hash,
+		       const struct vnet_hdr *h, struct cursor *frame,
+		       uint64_t flen)
 {
 	int nq = net_rx_queues(dp);
 
 	if (!nq)
 		return DLV_DROP;
-	return net_deliver(dp, qi % nq, h, frame, flen);
+	return net_deliver(dp, nq == 1 ? 0 : hash % nq, h, frame, flen);
 }
 
 /* process up to budget transmitted frames; returns frames handled */
@@ -361,24 +404,25 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 			}
 
 			int rc = DLV_DROP;
+			uint32_t fh = net_flow_hash(&frame, flen);
 
 			if (eth[0] & 1) {
 				for (struct netport *o = g_ports; o; o = o->next)
 					if (o != p && o->attached)
-						net_send_to(o, nq->qi, &h, &frame,
+						net_send_to(o, fh, &h, &frame,
 							    flen);
 				rc = DLV_OK;
 			} else {
 				struct netport *dp = port_by_mac(eth);
 
 				if (dp && dp != p && dp->attached) {
-					rc = net_send_to(dp, nq->qi, &h, &frame,
+					rc = net_send_to(dp, fh, &h, &frame,
 							 flen);
 				} else if (!dp) {
 					for (struct netport *o = g_ports; o;
 					     o = o->next)
 						if (o != p && o->attached)
-							net_send_to(o, nq->qi, &h,
+							net_send_to(o, fh, &h,
 								    &frame, flen);
 					rc = DLV_OK;
 				}
