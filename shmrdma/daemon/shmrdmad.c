@@ -2347,7 +2347,12 @@ static void on_kick(struct vdev *d, int idx)
 
 	if (q->kickfd < 0)
 		return;
-	plat_notifier_drain(q->kickfd);
+	if (plat_notifier_drain(q->kickfd)) {
+		/* QEMU closed its end without telling us; no more kicks */
+		LOG("dev%d: vq%d kick fd closed by QEMU", d->id, idx);
+		ep_del(q->kickfd);
+		return;
+	}
 	if (d->kind == KIND_NET) {
 		/* TX: frames to send; RX: buffers for a stalled sender */
 		if (idx & 1)

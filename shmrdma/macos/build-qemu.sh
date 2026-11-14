@@ -4,8 +4,11 @@
 # Homebrew's QEMU is built without vhost-user, so it has no
 # vhost-user-fs-pci and no -netdev vhost-user.  This builds the same
 # release with vhost-user enabled.  QEMU's meson turns vhost-user off by
-# default outside Linux, and one file, hw/net/vhost_net.c, includes a
-# Linux-only header; the patch next to this script fixes that.
+# default outside Linux.  The patch next to this script fixes two things
+# that break without eventfd: hw/net/vhost_net.c includes a Linux-only
+# header, and vhost-user's SET_VRING_KICK writes a kick into the kick
+# fd, which off Linux is the read end of a pipe (EBADF, and vhost start
+# fails).
 #
 #   build-qemu.sh [PREFIX]      default PREFIX: ./qemu-shmrdma-install
 #
@@ -24,9 +27,9 @@ if [ ! -d "$src" ]; then
 		https://gitlab.com/qemu-project/qemu.git "$src"
 fi
 cd "$src"
-if ! git apply --reverse --check "$here/qemu-vhost-net-non-linux.patch" \
+if ! git apply --reverse --check "$here/qemu-vhost-user-non-linux.patch" \
 	2>/dev/null; then
-	git apply "$here/qemu-vhost-net-non-linux.patch"
+	git apply "$here/qemu-vhost-user-non-linux.patch"
 fi
 mkdir -p build
 cd build

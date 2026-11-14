@@ -1,0 +1,36 @@
+diff --git a/hw/net/vhost_net.c b/hw/net/vhost_net.c
+index 323d117..b0c57ea 100644
+--- a/hw/net/vhost_net.c
++++ b/hw/net/vhost_net.c
+@@ -33,7 +33,12 @@
+ #include "standard-headers/linux/virtio_ring.h"
+ #include "hw/virtio/vhost.h"
+ #include "hw/virtio/virtio-bus.h"
++#ifdef CONFIG_LINUX
+ #include "linux-headers/linux/vhost.h"
++#else
++#include "standard-headers/linux/vhost_types.h"
++#define VHOST_FILE_UNBIND -1
++#endif
+ 
+ void vhost_net_get_features_ex(struct vhost_net *net, uint64_t *features)
+ {
+diff --git a/hw/virtio/vhost-user.c b/hw/virtio/vhost-user.c
+index 2881cec..aa71815 100644
+--- a/hw/virtio/vhost-user.c
++++ b/hw/virtio/vhost-user.c
+@@ -1507,7 +1507,13 @@ static int vhost_user_set_vring_kick(struct vhost_dev *dev,
+             nwritten = write(file->fd, &val, sizeof(val));
+         } while (nwritten < 0 && errno == EINTR);
+ 
+-        if (nwritten < 0 && errno != EAGAIN /* back-end can already read */) {
++        /*
++         * EBADF: without eventfd the kick fd is the read end of a pipe
++         * and cannot be written.  Its notifier was created active, so
++         * the back-end has a kick waiting anyway.
++         */
++        if (nwritten < 0 && errno != EAGAIN /* back-end can already read */
++            && errno != EBADF) {
+             return -errno;
+         }
+     }

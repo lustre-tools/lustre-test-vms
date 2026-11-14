@@ -79,8 +79,12 @@ static inline void plat_notifier_signal(int wfd)
 	(void)!write(wfd, &one, sizeof(one));
 }
 
-/* empty a notifier's read end (non-blocking) */
-static inline void plat_notifier_drain(int rfd)
+/*
+ * Empty a notifier's read end (non-blocking).  True when its writer is
+ * gone: a pipe whose write end QEMU closed reads as EOF, and stays
+ * readable, so the caller must stop polling it.  An eventfd never does.
+ */
+static inline bool plat_notifier_drain(int rfd)
 {
 	uint64_t buf[64];
 	ssize_t n;
@@ -88,6 +92,7 @@ static inline void plat_notifier_drain(int rfd)
 	do {
 		n = read(rfd, buf, sizeof(buf));
 	} while (n == (ssize_t)sizeof(buf) || (n < 0 && errno == EINTR));
+	return n == 0;
 }
 
 /* ---------------------------------------------------------------- */
