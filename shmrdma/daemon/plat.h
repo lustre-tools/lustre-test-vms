@@ -9,8 +9,10 @@
  *   - notifiers: the kick and call fds QEMU passes, and each worker's
  *     wake fd.  An eventfd on Linux; on macOS QEMU uses non-blocking
  *     pipes (it writes an 8-byte 1 per kick and drops it when the pipe
- *     is full), so a woken reader must drain until EAGAIN.  One drain
- *     loop serves both: an eventfd empties in one read;
+ *     is full).  PLAT_NOTIFIER_DRAIN says whether kick fds must be
+ *     drained.  A drained fd must have exactly one poller: epoll and
+ *     kqueue both re-check readability before reporting an event, so
+ *     a drain by one thread drops the others' wakeups for that kick;
  *   - spinlocks, and the socket calls whose flags macOS lacks.
  *
  * By arch, here: now_ns, cpu_relax, the non-temporal bulk copy.
@@ -60,6 +62,7 @@ struct plat_event {
  *   int  plat_poller_wait(int poller, struct plat_event *evs, int max,
  *			   int timeout_ms);
  *   int  plat_notifier_new(int *wfd);	read end; *wfd the write end
+ *   PLAT_NOTIFIER_DRAIN		1 if kick fds must be drained
  *   plat_spinlock_t, plat_spin_init/lock/unlock/destroy
  *   int  plat_unix_socket(void);	AF_UNIX stream, close-on-exec
  *   int  plat_accept(int lsock);	close-on-exec

@@ -12,6 +12,8 @@
 #include <sys/time.h>
 
 #define PLAT_MAX_EVENTS	64
+/* QEMU's pipes fill and then drop kicks: every kick fd must be drained */
+#define PLAT_NOTIFIER_DRAIN 1
 #define PLAT_MSG_NOSIGNAL 0	/* none on macOS; SIGPIPE is ignored */
 
 static inline void plat_cloexec(int fd)

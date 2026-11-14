@@ -8,6 +8,8 @@
 #include <sys/eventfd.h>
 
 #define PLAT_MAX_EVENTS	64
+/* an eventfd left unread stays readable: doorbells need no drain */
+#define PLAT_NOTIFIER_DRAIN 0
 #define PLAT_MSG_NOSIGNAL MSG_NOSIGNAL
 
 static inline int plat_poller_new(void)

@@ -368,12 +368,14 @@ static void wake_workers(void)
 /*
  * The doorbell of a device a worker serves goes straight into the
  * worker's poller, edge-triggered: every guest kick wakes it with no
- * hop through the main thread.  The worker drains it when woken (a
- * pipe on macOS stops signalling once full).
+ * hop through the main thread, and nobody reads the eventfd.  Where
+ * kick fds must be drained (macOS pipes), a doorbell has one reader
+ * instead, the main thread, whose on_kick() wakes the workers: several
+ * workers draining one fd would lose each other's wakeups.
  */
 static void worker_watch(struct worker *w, int fd)
 {
-	if (fd < 0)
+	if (fd < 0 || PLAT_NOTIFIER_DRAIN)
 		return;
 	if (plat_poller_add(w->epfd, fd, (void *)(intptr_t)fd, true))
 		LOG("worker%d: watch fd %d: %s", w->idx, fd, strerror(errno));
@@ -1463,9 +1465,10 @@ static void *worker_main(void *arg)
 			int ne = plat_poller_wait(w->epfd, evs, 16,
 						  stalled ? 1 : 1000);
 
-			/* its wake fd and doorbells alike */
+			/* its own wake fd; doorbells are never read here */
 			for (int i = 0; i < ne; i++)
-				plat_notifier_drain((int)(intptr_t)evs[i].tag);
+				if ((int)(intptr_t)evs[i].tag == w->evfd)
+					plat_notifier_drain(w->evfd);
 		}
 		__atomic_store_n(&w->sleeping, 0, __ATOMIC_SEQ_CST);
 		pthread_mutex_lock(&w->mtx);
@@ -2224,8 +2227,11 @@ static int handle_msg(struct vdev *d)
 			}
 			q->kickfd = fd;
 			if (fd >= 0) {
-				bool doorbell = d->kind == KIND_NET ?
-					idx & 1 : idx == SHMRDMA_VQ_DOORBELL;
+				/* where kicks are drained, the main thread
+				 * reads doorbells too (worker_watch()) */
+				bool doorbell = !PLAT_NOTIFIER_DRAIN &&
+					(d->kind == KIND_NET ?
+					 idx & 1 : idx == SHMRDMA_VQ_DOORBELL);
 
 				if (doorbell && d->kind == KIND_NET) {
 					/* its worker, if the queue is served */
