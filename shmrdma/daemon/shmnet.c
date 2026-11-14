@@ -69,6 +69,9 @@ struct netport {
 	plat_spinlock_t rx_lock[NET_MAX_QP];
 	struct netq q[NET_MAX_QP];
 	uint64_t tx_pkts, tx_bytes, rx_pkts, rx_bytes, drops;
+	/* sends that found no RX buffers here, held the sender, and the
+	 * drops when the hold ran out; and as the held sender */
+	uint64_t rx_holds, rx_hold_ns, rx_hold_drops, tx_holds, tx_hold_ns;
 	/* segments cut from GSO frames for this port; frames not cut */
 	uint64_t rx_segs, rx_seg_drops;
 	struct netport *next;
@@ -734,6 +737,7 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 			}
 
 			int rc = DLV_DROP;
+			struct netport *dp = NULL;
 			uint32_t fh = net_flow_hash(&frame, flen);
 
 			if (eth[0] & 1) {
@@ -743,8 +747,7 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 							    flen);
 				rc = DLV_OK;
 			} else {
-				struct netport *dp = port_by_mac(eth);
-
+				dp = port_by_mac(eth);
 				if (dp && dp != p && dp->attached) {
 					rc = net_send_to(dp, fh, &h, &frame,
 							 flen);
@@ -760,12 +763,23 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 			if (rc == DLV_NOBUF) {
 				uint64_t t = now_ns();
 
-				if (!nq->stall_since)
+				if (!nq->stall_since) {
 					nq->stall_since = t;
+					STAT_ADD(p->tx_holds, 1);
+					STAT_ADD(dp->rx_holds, 1);
+				}
 				if (t - nq->stall_since < g_net_stall_ns) {
 					*stalled = true;
 					break;
 				}
+				STAT_ADD(dp->rx_hold_drops, 1);
+			}
+			if (nq->stall_since) {
+				uint64_t held = now_ns() - nq->stall_since;
+
+				STAT_ADD(p->tx_hold_ns, held);
+				if (dp)
+					STAT_ADD(dp->rx_hold_ns, held);
 			}
 			if (rc != DLV_OK)
 				STAT_ADD(p->drops, 1);
@@ -912,3 +926,51 @@ static void net_port_free(struct vdev *d)
 	d->port = NULL;
 }
 
+/*
+ * Every port's counters, one line each, in <net socket>.stats.  Run
+ * on the main thread, which alone changes the port list.
+ */
+static void net_write_stats(void)
+{
+	/* a socket path fits in sun_path */
+	char path[160], tmp[168];
+	FILE *f;
+
+	if (!*g_net_sock_path ||
+	    snprintf(path, sizeof(path), "%s.stats", g_net_sock_path) >=
+		    (int)sizeof(path) ||
+	    snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp))
+		return;
+	f = fopen(tmp, "w");
+	if (!f)
+		return;
+	for (struct netport *p = g_ports; p; p = p->next) {
+		uint64_t ft = p->dev->features;
+
+		fprintf(f, "dev=%d mac=%02x:%02x:%02x:%02x:%02x:%02x "
+			"attached=%d queues=%d guest_tso4=%d guest_tso6=%d "
+			"guest_csum=%d",
+			p->dev->id, p->mac[0], p->mac[1], p->mac[2],
+			p->mac[3], p->mac[4], p->mac[5], p->attached,
+			p->attached ? net_rx_queues(p) : 0,
+			!!(ft & VNET_F_GUEST_TSO4), !!(ft & VNET_F_GUEST_TSO6),
+			!!(ft & VNET_F_GUEST_CSUM));
+#define STAT_OUT(x) fprintf(f, " " #x "=%" PRIu64, RLX(&p->x))
+		STAT_OUT(tx_pkts);
+		STAT_OUT(tx_bytes);
+		STAT_OUT(rx_pkts);
+		STAT_OUT(rx_bytes);
+		STAT_OUT(drops);
+		STAT_OUT(rx_holds);
+		STAT_OUT(rx_hold_ns);
+		STAT_OUT(rx_hold_drops);
+		STAT_OUT(tx_holds);
+		STAT_OUT(tx_hold_ns);
+		STAT_OUT(rx_segs);
+		STAT_OUT(rx_seg_drops);
+#undef STAT_OUT
+		fputc('\n', f);
+	}
+	if (fclose(f) || rename(tmp, path))
+		unlink(tmp);
+}
