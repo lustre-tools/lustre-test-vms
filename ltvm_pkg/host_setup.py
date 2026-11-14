@@ -2760,13 +2760,17 @@ def _write_root_file(path: Path, text: str, mode: int = 0o644) -> None:
 
 
 def _setup_vhost_net() -> None:
-    """Load vhost_net now and at boot, for the NICs' in-kernel datapath.
+    """Load vhost_net now and at boot, and give the ltvm group the device.
 
     Best effort: VMs run without it, and a host whose admin blocks the
     module keeps it blocked.
     """
     from . import vhost_net
+    from .qemu_run import vhost_net_setting
 
+    if vhost_net_setting() == "off":
+        log.info("vhost-net: off in %s; not set up", "/etc/ltvm.conf")
+        return
     try:
         vhost_net.ensure()
         log.info("vhost_net loaded, and at boot (%s)", vhost_net.MODULES_LOAD)
@@ -3055,6 +3059,8 @@ def install_scripts(host: HostInfo) -> None:
 
     _setup_shared_vm_dirs()
     _setup_bridge_helper(host)
+    # After the group exists: it gets read-write /dev/vhost-net.
+    _setup_vhost_net()
     from ltvm_pkg import vm_claim
 
     vm_claim.ensure_claims_dir()
@@ -3862,7 +3868,6 @@ def run_setup(
         install_qemu(host, force=force)
     if "network" in active:
         setup_network(host, subnet=subnet, force=force)
-        _setup_vhost_net()
     if "install" in active:
         install_scripts(host)
     if "ssh" in active:

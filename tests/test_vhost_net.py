@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -186,9 +187,11 @@ class TestDoctor:
             patch("ltvm_pkg.vhost_net.persistent", return_value=False),
             patch("ltvm_pkg.priv.sudo_run") as sudo_run,
             patch("ltvm_pkg.priv.atomic_write") as write,
+            patch("ltvm_pkg.vhost_net.ensure_access") as access,
         ):
             vhost_net.ensure()
         sudo_run.assert_called_once_with(["modprobe", "vhost_net"], quiet=True)
+        access.assert_called_once()
         assert write.call_args[0][0] == vhost_net.MODULES_LOAD
         assert "vhost_net" in write.call_args[0][1]
 
@@ -209,19 +212,103 @@ class TestDoctor:
             patch("ltvm_pkg.vhost_net.loaded", return_value=True),
             patch("ltvm_pkg.vhost_net.persistent", return_value=True),
             patch("ltvm_pkg.vhost_net.DEVICE", dev),
+            patch("ltvm_pkg.vhost_net.access_problem", return_value=None),
             patch("ltvm_pkg.vhost_net.os.access", return_value=False),
         ):
+            # the group's device, but this login is not in the group yet
             rep = vhost_net.doctor(fix=False, qemu_as_user=True)
-            assert rep.issues == 1 and "add the user to group" in rep.lines[0]
+            assert rep.issues == 1 and "log in again" in rep.lines[0]
             # a root QEMU does not care
             assert vhost_net.doctor(fix=False, qemu_as_user=False).issues == 0
 
 
-def test_install_sets_it_up() -> None:
+def test_install_sets_it_up(monkeypatch) -> None:
     from ltvm_pkg import host_setup
 
+    monkeypatch.setenv("LTVM_VHOST_NET", "auto")
     with patch("ltvm_pkg.vhost_net.ensure", side_effect=vhost_net.Blocked("x")):
         host_setup._setup_vhost_net()  # a blocked host is not an error
     with patch("ltvm_pkg.vhost_net.ensure") as ensure:
         host_setup._setup_vhost_net()
     ensure.assert_called_once()
+    monkeypatch.setenv("LTVM_VHOST_NET", "off")
+    with patch("ltvm_pkg.vhost_net.ensure") as ensure:
+        host_setup._setup_vhost_net()
+    ensure.assert_not_called()
+
+
+def test_install_runs_it_after_the_group() -> None:
+    import inspect
+
+    from ltvm_pkg import host_setup
+
+    src = inspect.getsource(host_setup.install_scripts)
+    assert src.index("_setup_shared_vm_dirs()") < src.index(
+        "_setup_vhost_net()"
+    )
+
+
+class TestAccess:
+    @pytest.fixture
+    def dev(self, tmp_path: Path):
+        d = tmp_path / "vhost-net"
+        d.write_text("")
+        rule = tmp_path / "70-ltvm-vhost-net.rules"
+        with (
+            patch("ltvm_pkg.vhost_net.DEVICE", d),
+            patch("ltvm_pkg.vhost_net.UDEV_RULE", rule),
+            patch("ltvm_pkg.vhost_net._group_gid", return_value=os.getgid()),
+        ):
+            yield d, rule
+
+    def test_ok(self, dev) -> None:
+        d, rule = dev
+        rule.write_text("x")
+        os.chmod(d, 0o660)
+        assert vhost_net.access_problem() is None
+
+    def test_wrong_group_and_no_rule(self, dev) -> None:
+        d, _ = dev
+        os.chmod(d, 0o600)
+        with patch(
+            "ltvm_pkg.vhost_net._group_gid", return_value=os.getgid() + 1
+        ):
+            why = vhost_net.access_problem()
+        assert why is not None
+        assert "no " in why and "want ltvm 0660" in why
+
+    def test_no_group_no_problem(self, dev) -> None:
+        with patch("ltvm_pkg.vhost_net._group_gid", return_value=None):
+            assert vhost_net.access_problem() is None
+
+    def test_ensure_access(self, dev) -> None:
+        d, rule = dev
+        with (
+            patch("ltvm_pkg.priv.atomic_write") as write,
+            patch("ltvm_pkg.priv.sudo_run") as sudo_run,
+            patch(
+                "ltvm_pkg.vhost_net.shutil.which", return_value="/bin/udevadm"
+            ),
+        ):
+            vhost_net.ensure_access()
+        assert write.call_args[0][0] == rule
+        assert (
+            'KERNEL=="vhost-net", GROUP="ltvm", MODE="0660"'
+            in write.call_args[0][1]
+        )
+        cmds = [c[0][0] for c in sudo_run.call_args_list]
+        assert ["udevadm", "control", "--reload"] in cmds
+        assert ["chgrp", "ltvm", str(d)] in cmds
+        assert ["chmod", "0660", str(d)] in cmds
+
+    def test_doctor_fixes_access(self, dev, no_site_config: Path) -> None:
+        with (
+            patch("ltvm_pkg.vhost_net.blocked", return_value=[]),
+            patch("ltvm_pkg.vhost_net.loaded", return_value=True),
+            patch("ltvm_pkg.vhost_net.persistent", return_value=True),
+            patch("ltvm_pkg.vhost_net.ensure_access") as fix,
+        ):
+            rep = vhost_net.doctor(fix=True, qemu_as_user=True)
+        fix.assert_called_once()
+        assert rep.issues == 1 and rep.failures == 0
+        assert "fixed" in rep.lines[1]
