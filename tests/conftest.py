@@ -116,6 +116,9 @@ def _isolate_user_state(
     monkeypatch.setenv("XDG_CACHE_HOME", str(root / "cache"))
     monkeypatch.setenv("LTVM_TELEMETRY", "0")
     monkeypatch.setenv("LTVM_SITE_CONFIG", str(root / "no-such-ltvm.conf"))
+    # Whether the host has /dev/vhost-net must not change QEMU's args;
+    # tests/test_vhost_net.py turns it on where it is the subject.
+    monkeypatch.setenv("LTVM_VHOST_NET", "off")
     # The developer's own build time limit would change podman argv.
     monkeypatch.delenv("LTVM_BUILD_TIMEOUT", raising=False)
     # On a Mac, build_lustre, clean and doctor would otherwise create,

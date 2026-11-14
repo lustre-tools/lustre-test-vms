@@ -2759,6 +2759,23 @@ def _write_root_file(path: Path, text: str, mode: int = 0o644) -> None:
         f.write(text)
 
 
+def _setup_vhost_net() -> None:
+    """Load vhost_net now and at boot, for the NICs' in-kernel datapath.
+
+    Best effort: VMs run without it, and a host whose admin blocks the
+    module keeps it blocked.
+    """
+    from . import vhost_net
+
+    try:
+        vhost_net.ensure()
+        log.info("vhost_net loaded, and at boot (%s)", vhost_net.MODULES_LOAD)
+    except vhost_net.Blocked as e:
+        log.info("vhost-net: %s", e)
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as e:
+        log.warning("vhost-net not set up: %s", e)
+
+
 def setup_network(
     host: HostInfo, subnet: str = DEFAULT_SUBNET, force: bool = False
 ) -> None:
@@ -3845,6 +3862,7 @@ def run_setup(
         install_qemu(host, force=force)
     if "network" in active:
         setup_network(host, subnet=subnet, force=force)
+        _setup_vhost_net()
     if "install" in active:
         install_scripts(host)
     if "ssh" in active:
