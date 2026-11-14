@@ -6,7 +6,9 @@
  * copied straight from its TX buffers into the destination guest's RX
  * buffers: one memcpy, no tap, no host stack.  Offload state (TSO,
  * partial checksum) travels in the virtio-net header, so a 64 KB TCP
- * segment crosses as one copy and is never segmented or summed.
+ * segment crosses as one copy and is never segmented or summed.  A
+ * port that did not negotiate receive TSO gets such a frame cut into
+ * MSS-sized TCP segments instead, as a NIC without LRO delivers them.
  *
  * Included by shmrdmad.c; shares its vhost-user and worker machinery.
  */
@@ -67,6 +69,8 @@ struct netport {
 	plat_spinlock_t rx_lock[NET_MAX_QP];
 	struct netq q[NET_MAX_QP];
 	uint64_t tx_pkts, tx_bytes, rx_pkts, rx_bytes, drops;
+	/* segments cut from GSO frames for this port; frames not cut */
+	uint64_t rx_segs, rx_seg_drops;
 	struct netport *next;
 };
 
@@ -187,10 +191,6 @@ static void cur_write(struct cursor *dst, const void *in, uint32_t len)
 
 enum { DLV_OK, DLV_NOBUF, DLV_DROP };
 
-/*
- * Copy one frame into dp's RX buffers.  src is positioned at the
- * start of the frame.  The cursor is restored on return.
- */
 static uint16_t *vq_avail_event(struct vq *q)
 {
 	return (uint16_t *)&q->used->ring[q->num];
@@ -216,93 +216,423 @@ static int net_rx_queues(struct netport *dp)
 	return n;
 }
 
-static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
-		       struct cursor *src0, uint64_t len)
+#define RX_MAX_BUFS	512
+
+/* RX buffers taken from one queue and not yet handed back */
+struct rxtake {
+	struct vdev *d;
+	struct vq *q;
+	uint16_t ai, idx;
+	int nb, ns;
+	uint16_t head[RX_MAX_BUFS];
+	uint32_t len[RX_MAX_BUFS];
+	struct seg segs[RX_MAX_BUFS * 2];
+};
+
+/* caller holds the queue's rx_lock */
+static void rx_begin(struct rxtake *t, struct vdev *d, struct vq *q)
 {
-	struct vdev *d = dp->dev;
-	struct vq *q = &d->vq[NET_RXQ(rqi)];
-	struct {
-		uint16_t head;
-		int first, nsegs;
-		uint64_t cap;
-	} bufs[64];
-	struct seg segs[MAX_SEGS * 2];
-	int nb = 0, ns = 0;
-	uint64_t need = sizeof(struct vnet_hdr) + len, got = 0;
-	struct vnet_hdr h = *th;
+	t->d = d;
+	t->q = q;
+	t->ai = ACQ(&q->avail->idx);
+	t->idx = q->last_avail;
+	t->nb = 0;
+	t->ns = 0;
+}
 
-	if (d->dead || !vq_ready(q))
-		return DLV_DROP;
-	if (!(d->features & VNET_F_MRG_RXBUF))
-		return DLV_DROP;
-	if ((h.gso_type & ~VNET_HDR_GSO_ECN) == VNET_HDR_GSO_TCPV4 &&
-	    !(d->features & VNET_F_GUEST_TSO4))
-		return DLV_DROP;
-	if ((h.gso_type & ~VNET_HDR_GSO_ECN) == VNET_HDR_GSO_TCPV6 &&
-	    !(d->features & VNET_F_GUEST_TSO6))
-		return DLV_DROP;
-	if ((h.flags & VNET_HDR_F_NEEDS_CSUM) &&
-	    !(d->features & VNET_F_GUEST_CSUM))
-		return DLV_DROP;
-
-	plat_spin_lock(&dp->rx_lock[rqi]);
-	uint16_t ai = ACQ(&q->avail->idx);
-	uint16_t idx = q->last_avail;
+/* buffers for one frame of need bytes, virtio-net header included */
+static int rx_take(struct rxtake *t, uint64_t need, struct cursor *dst,
+		   uint16_t *nbufs)
+{
+	struct vq *q = t->q;
+	int fb = t->nb, fs = t->ns;
+	uint64_t got = 0;
 
 	while (got < need) {
 		uint64_t cap;
 		int n;
 
-		if (idx == ai || nb == 64 || ns + MAX_SEGS > MAX_SEGS * 2) {
-			if (idx == ai)
-				net_want_rx_kick(q);
-			plat_spin_unlock(&dp->rx_lock[rqi]);
-			return idx == ai ? DLV_NOBUF : DLV_DROP;
+		if (t->idx == t->ai) {
+			/* a full ring that is still too small never fits */
+			if ((uint16_t)(t->ai - q->last_avail) >= q->num)
+				return DLV_DROP;
+			return DLV_NOBUF;
 		}
-		bufs[nb].head = q->avail->ring[idx % q->num];
-		n = vq_chain(d, q, bufs[nb].head, true, segs + ns, MAX_SEGS, &cap);
-		if (n <= 0) {
-			plat_spin_unlock(&dp->rx_lock[rqi]);
+		if (t->nb == RX_MAX_BUFS || t->ns + MAX_SEGS > RX_MAX_BUFS * 2)
 			return DLV_DROP;
-		}
-		bufs[nb].first = ns;
-		bufs[nb].nsegs = n;
-		bufs[nb].cap = cap;
-		ns += n;
+		t->head[t->nb] = q->avail->ring[t->idx % q->num];
+		n = vq_chain(t->d, q, t->head[t->nb], true, t->segs + t->ns,
+			     MAX_SEGS, &cap);
+		if (n <= 0)
+			return DLV_DROP;
+		t->len[t->nb] = need - got < cap ? need - got : cap;
+		t->ns += n;
+		t->nb++;
+		t->idx++;
 		got += cap;
-		nb++;
-		idx++;
 	}
+	*dst = (struct cursor){ .s = t->segs + fs, .n = t->ns - fs };
+	*nbufs = t->nb - fb;
+	return DLV_OK;
+}
 
-	struct cursor dst = { .s = segs, .n = ns };
-	struct cursor src = *src0;
+/* hand every taken buffer to the guest; caller holds rx_lock */
+static void rx_put(struct rxtake *t)
+{
+	struct vq *q = t->q;
 
-	h.num_buffers = nb;
-	cur_write(&dst, &h, sizeof(h));
-	cur_copy(&dst, &src, len);
-
-	uint64_t left = need;
-
-	for (int i = 0; i < nb; i++) {
+	for (int i = 0; i < t->nb; i++) {
 		struct vring_used_elem *e =
 			&q->used->ring[(q->used_idx + i) % q->num];
-		uint64_t l = left < bufs[i].cap ? left : bufs[i].cap;
 
-		e->id = bufs[i].head;
-		e->len = l;
-		left -= l;
+		e->id = t->head[i];
+		e->len = t->len[i];
 	}
-	q->last_avail = idx;
-	q->used_idx += nb;
+	q->last_avail = t->idx;
+	q->used_idx += t->nb;
 	REL(&q->used->idx, q->used_idx);
 	if (!q->event_idx && !q->used->flags)
 		REL(&q->used->flags, VRING_USED_F_NO_NOTIFY);
+}
+
+static int net_deliver_segs(struct netport *dp, int rqi,
+			    const struct vnet_hdr *th,
+			    const struct cursor *src0, uint64_t len);
+
+/*
+ * Copy one frame into dp's RX buffers.  src is positioned at the
+ * start of the frame.  The cursor is restored on return.
+ */
+static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
+		       struct cursor *src0, uint64_t len)
+{
+	struct vdev *d = dp->dev;
+	struct vq *q = &d->vq[NET_RXQ(rqi)];
+	struct rxtake t;
+	struct cursor dst;
+	struct vnet_hdr h = *th;
+	uint8_t gso = h.gso_type & ~VNET_HDR_GSO_ECN;
+	uint16_t nbufs;
+	int rc;
+
+	if (d->dead || !vq_ready(q))
+		return DLV_DROP;
+	if (!(d->features & VNET_F_MRG_RXBUF))
+		return DLV_DROP;
+	if ((gso == VNET_HDR_GSO_TCPV4 && !(d->features & VNET_F_GUEST_TSO4)) ||
+	    (gso == VNET_HDR_GSO_TCPV6 && !(d->features & VNET_F_GUEST_TSO6)) ||
+	    (gso == VNET_HDR_GSO_NONE && (h.flags & VNET_HDR_F_NEEDS_CSUM) &&
+	     !(d->features & VNET_F_GUEST_CSUM)))
+		return net_deliver_segs(dp, rqi, th, src0, len);
+	if ((h.flags & VNET_HDR_F_NEEDS_CSUM) &&
+	    !(d->features & VNET_F_GUEST_CSUM))
+		return DLV_DROP;
+
+	plat_spin_lock(&dp->rx_lock[rqi]);
+	rx_begin(&t, d, q);
+	rc = rx_take(&t, sizeof(h) + len, &dst, &nbufs);
+	h.num_buffers = nbufs;
+	if (rc != DLV_OK) {
+		if (rc == DLV_NOBUF)
+			net_want_rx_kick(q);
+		plat_spin_unlock(&dp->rx_lock[rqi]);
+		return rc;
+	}
+
+	struct cursor src = *src0;
+
+	cur_write(&dst, &h, sizeof(h));
+	cur_copy(&dst, &src, len);
+	rx_put(&t);
 	STAT_ADD(dp->rx_pkts, 1);
 	STAT_ADD(dp->rx_bytes, len);
 	plat_spin_unlock(&dp->rx_lock[rqi]);
 	FENCE();
 	vq_signal(q);
 	return DLV_OK;
+}
+
+/* skip len bytes of c */
+static void cur_skip(struct cursor *c, uint64_t len)
+{
+	while (len && c->i < c->n) {
+		uint64_t k = c->s[c->i].len - c->off;
+
+		if (k > len)
+			k = len;
+		len -= k;
+		c->off += k;
+		if (c->off == c->s[c->i].len) {
+			c->i++;
+			c->off = 0;
+		}
+	}
+}
+
+/* the next len bytes of c as up to max segments; advances c */
+static int cur_slice(struct cursor *c, uint64_t len, struct seg *out, int max)
+{
+	int n = 0;
+
+	while (len && c->i < c->n && n < max) {
+		uint64_t k = c->s[c->i].len - c->off;
+
+		if (k > len)
+			k = len;
+		out[n].p = c->s[c->i].p + c->off;
+		out[n].len = k;
+		n++;
+		len -= k;
+		c->off += k;
+		if (c->off == c->s[c->i].len) {
+			c->i++;
+			c->off = 0;
+		}
+	}
+	return len ? -1 : n;
+}
+
+/*
+ * Internet checksum.  Sums are taken in host byte order and stored
+ * back the same way, which gives network order on either endianness.
+ */
+static uint64_t csum_add(uint64_t sum, const uint8_t *p, uint32_t n)
+{
+	uint32_t w;
+	uint16_t h;
+
+	for (; n >= 4; p += 4, n -= 4) {
+		memcpy(&w, p, 4);
+		sum += w;
+	}
+	if (n >= 2) {
+		memcpy(&h, p, 2);
+		sum += h;
+		p += 2;
+		n -= 2;
+	}
+	if (n) {
+		uint8_t b[2] = { *p, 0 };
+
+		memcpy(&h, b, 2);
+		sum += h;
+	}
+	return sum;
+}
+
+static uint16_t csum_fold(uint64_t s)
+{
+	s = (s & 0xffffffff) + (s >> 32);
+	s = (s & 0xffffffff) + (s >> 32);
+	s = (s & 0xffff) + (s >> 16);
+	s = (s & 0xffff) + (s >> 16);
+	s = (s & 0xffff) + (s >> 16);
+	return s;
+}
+
+/* sum of segments laid end to end, the first at an even offset */
+static uint64_t csum_segs(const struct seg *s, int n)
+{
+	uint64_t sum = 0, pos = 0;
+
+	for (int i = 0; i < n; i++) {
+		uint16_t f = csum_fold(csum_add(0, s[i].p, s[i].len));
+
+		if (pos & 1)
+			f = (uint16_t)(f << 8 | f >> 8);
+		sum += f;
+		pos += s[i].len;
+	}
+	return sum;
+}
+
+static uint16_t get_be16(const uint8_t *p)
+{
+	return p[0] << 8 | p[1];
+}
+
+static uint32_t get_be32(const uint8_t *p)
+{
+	return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3];
+}
+
+static void put_be16(uint8_t *p, uint16_t v)
+{
+	p[0] = v >> 8;
+	p[1] = v;
+}
+
+static void put_be32(uint8_t *p, uint32_t v)
+{
+	p[0] = v >> 24;
+	p[1] = v >> 16;
+	p[2] = v >> 8;
+	p[3] = v;
+}
+
+#define TCP_FIN		0x01
+#define TCP_PSH		0x08
+#define TCP_CWR		0x80
+#define NET_HDR_MAX	192
+
+/*
+ * Deliver a TCP frame to a port that cannot take it as it is: a GSO
+ * frame to one without receive TSO is cut into gso_size segments, and
+ * a frame with a partial checksum to one without GUEST_CSUM gets the
+ * full checksum.  Every segment is taken from the ring before any is
+ * handed over, so a retry after DLV_NOBUF repeats nothing.
+ */
+static int net_deliver_segs(struct netport *dp, int rqi,
+			    const struct vnet_hdr *th,
+			    const struct cursor *src0, uint64_t len)
+{
+	struct vdev *d = dp->dev;
+	struct vq *q = &d->vq[NET_RXQ(rqi)];
+	uint8_t gso = th->gso_type & ~VNET_HDR_GSO_ECN;
+	bool partial = d->features & VNET_F_GUEST_CSUM;
+	uint8_t hb[NET_HDR_MAX];
+	uint32_t n = len < sizeof(hb) ? len : sizeof(hb);
+	uint32_t l3 = 14, l4, hlen;
+	struct cursor c = *src0;
+	struct rxtake t;
+	uint16_t et;
+	bool v6;
+
+	cur_read(&c, hb, n);
+	if (n < 14)
+		goto bad;
+	et = get_be16(hb + 12);
+	while ((et == 0x8100 || et == 0x88a8) && l3 + 4 <= n) {
+		et = get_be16(hb + l3 + 2);
+		l3 += 4;
+	}
+	if (et == 0x0800 && l3 + 20 <= n && hb[l3] >> 4 == 4 &&
+	    (hb[l3] & 15) >= 5 && hb[l3 + 9] == 6) {
+		v6 = false;
+		l4 = l3 + (hb[l3] & 15) * 4;
+	} else if (et == 0x86dd && l3 + 40 <= n && hb[l3] >> 4 == 6 &&
+		   hb[l3 + 6] == 6) {
+		v6 = true;
+		l4 = l3 + 40;
+	} else {
+		goto bad;
+	}
+	if (gso != VNET_HDR_GSO_NONE &&
+	    gso != (v6 ? VNET_HDR_GSO_TCPV6 : VNET_HDR_GSO_TCPV4))
+		goto bad;
+	if (l4 + 20 > n || hb[l4 + 12] >> 4 < 5)
+		goto bad;
+	hlen = l4 + (hb[l4 + 12] >> 4) * 4;
+	if (hlen > n)
+		goto bad;
+
+	uint64_t payload = len - hlen;
+	uint64_t mss = gso == VNET_HDR_GSO_NONE ? payload : th->gso_size;
+	uint32_t nseg;
+
+	if (!payload)
+		nseg = 1;
+	else if (!mss)
+		goto bad;
+	else
+		nseg = (payload + mss - 1) / mss;
+	if (nseg > RX_MAX_BUFS)
+		goto bad;
+
+	uint32_t seq0 = get_be32(hb + l4 + 4);
+	uint16_t id0 = get_be16(hb + l3 + 4);
+	uint64_t off = 0, bytes = 0;
+	int rc = DLV_OK;
+
+	c = *src0;
+	cur_skip(&c, hlen);
+	plat_spin_lock(&dp->rx_lock[rqi]);
+	rx_begin(&t, d, q);
+	for (uint32_t i = 0; i < nseg; i++) {
+		uint64_t sl = payload - off < mss ? payload - off : mss;
+		uint32_t tl = hlen - l4 + sl;
+		struct vnet_hdr vh = { 0 };
+		uint8_t sh[NET_HDR_MAX];
+		struct seg ps[MAX_SEGS + 1];
+		struct cursor dst;
+		uint64_t sum;
+		uint16_t v, nbufs;
+		int np;
+
+		memcpy(sh, hb, hlen);
+		if (v6) {
+			uint8_t ph[8] = { tl >> 24, tl >> 16, tl >> 8, tl,
+					  0, 0, 0, 6 };
+
+			put_be16(sh + l3 + 4, l4 - l3 - 40 + tl);
+			sum = csum_add(csum_add(0, sh + l3 + 8, 32), ph, 8);
+		} else {
+			uint8_t ph[4] = { 0, 6, tl >> 8, tl };
+
+			put_be16(sh + l3 + 2, l4 - l3 + tl);
+			put_be16(sh + l3 + 4, id0 + i);
+			sh[l3 + 10] = sh[l3 + 11] = 0;
+			v = ~csum_fold(csum_add(0, sh + l3, l4 - l3));
+			memcpy(sh + l3 + 10, &v, 2);
+			sum = csum_add(csum_add(0, sh + l3 + 12, 8), ph, 4);
+		}
+		put_be32(sh + l4 + 4, seq0 + (uint32_t)off);
+		if (i)
+			sh[l4 + 13] &= ~TCP_CWR;
+		if (i + 1 < nseg)
+			sh[l4 + 13] &= ~(TCP_FIN | TCP_PSH);
+		sh[l4 + 16] = sh[l4 + 17] = 0;
+
+		ps[0].p = sh;
+		ps[0].len = hlen;
+		np = cur_slice(&c, sl, ps + 1, MAX_SEGS);
+		if (np < 0) {
+			rc = DLV_DROP;
+			break;
+		}
+		if (partial) {
+			v = csum_fold(sum);
+			vh.flags = VNET_HDR_F_NEEDS_CSUM;
+			vh.csum_start = l4;
+			vh.csum_offset = 16;
+		} else {
+			sum += csum_add(0, sh + l4, hlen - l4);
+			v = ~csum_fold(sum + csum_segs(ps + 1, np));
+		}
+		memcpy(sh + l4 + 16, &v, 2);
+
+		rc = rx_take(&t, sizeof(vh) + hlen + sl, &dst, &nbufs);
+		if (rc != DLV_OK)
+			break;
+		vh.num_buffers = nbufs;
+
+		struct cursor pc = { .s = ps, .n = np + 1 };
+
+		cur_write(&dst, &vh, sizeof(vh));
+		cur_copy(&dst, &pc, hlen + sl);
+		off += sl;
+		bytes += hlen + sl;
+	}
+	if (rc != DLV_OK) {
+		if (rc == DLV_NOBUF)
+			net_want_rx_kick(q);
+		plat_spin_unlock(&dp->rx_lock[rqi]);
+		if (rc == DLV_DROP)
+			STAT_ADD(dp->rx_seg_drops, 1);
+		return rc;
+	}
+	rx_put(&t);
+	STAT_ADD(dp->rx_pkts, nseg);
+	STAT_ADD(dp->rx_bytes, bytes);
+	if (gso != VNET_HDR_GSO_NONE)
+		STAT_ADD(dp->rx_segs, nseg);
+	plat_spin_unlock(&dp->rx_lock[rqi]);
+	FENCE();
+	vq_signal(q);
+	return DLV_OK;
+bad:
+	STAT_ADD(dp->rx_seg_drops, 1);
+	return DLV_DROP;
 }
 
 static struct netport *port_by_mac(const uint8_t *mac)
@@ -581,3 +911,4 @@ static void net_port_free(struct vdev *d)
 	free(p);
 	d->port = NULL;
 }
+
