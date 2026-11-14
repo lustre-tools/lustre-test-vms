@@ -318,7 +318,8 @@ class TestPidFile:
 
     def _proc(self, uid: int, exe: str):
         return patch(
-            "ltvm_pkg.shmrdma._proc_owner_exe", return_value=(uid, exe)
+            "ltvm_pkg.shmrdma._proc_info",
+            return_value=(uid, Path(exe).name, exe),
         )
 
     def test_own_process_with_its_binary(self, tmp_path: Path) -> None:
@@ -345,17 +346,18 @@ class TestPidFile:
 
     def test_gone_process(self, tmp_path: Path) -> None:
         d = self._daemon(tmp_path, f"{os.getpid()} abc {self.EXE}\n")
-        with self._proc(-1, ""):
+        with patch("ltvm_pkg.shmrdma._proc_info", return_value=(-1, "", "")):
             assert d.pid() == 0
 
-    def test_proc_owner_exe_self(self) -> None:
+    def test_proc_info_self(self) -> None:
         import sys
 
-        uid, exe = shmrdma._proc_owner_exe(os.getpid())
-        assert uid == os.geteuid()
+        # comm is whatever this process was started as (pytest, python3)
+        uid, comm, exe = shmrdma._proc_info(os.getpid())
+        assert uid == os.geteuid() and comm
         assert Path(exe).resolve() == Path(sys.executable).resolve()
 
-    def test_proc_owner_exe_ps(self) -> None:
+    def test_proc_info_ps(self) -> None:
         r = subprocess.CompletedProcess(
             [], 0, stdout="  501 /Users/x/My Cache/shmrdmad\n", stderr=""
         )
@@ -363,8 +365,9 @@ class TestPidFile:
             patch("ltvm_pkg.shmrdma._LINUX", False),
             patch("ltvm_pkg.shmrdma.subprocess.run", return_value=r),
         ):
-            assert shmrdma._proc_owner_exe(1) == (
+            assert shmrdma._proc_info(1) == (
                 501,
+                "shmrdmad",
                 "/Users/x/My Cache/shmrdmad",
             )
         gone = subprocess.CompletedProcess([], 1, stdout="", stderr="")
@@ -372,7 +375,7 @@ class TestPidFile:
             patch("ltvm_pkg.shmrdma._LINUX", False),
             patch("ltvm_pkg.shmrdma.subprocess.run", return_value=gone),
         ):
-            assert shmrdma._proc_owner_exe(1) == (-1, "")
+            assert shmrdma._proc_info(1) == (-1, "", "")
 
     def test_symlinked_pid_file_ignored(self, tmp_path: Path) -> None:
         target = tmp_path / "target"

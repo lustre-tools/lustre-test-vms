@@ -311,8 +311,8 @@ class Daemon:
             pid, exe_want = int(rec[0]), rec[2]
         except (ValueError, IndexError):
             return 0
-        uid, exe = _proc_owner_exe(pid)
-        if Path(exe).name != "shmrdmad" or uid != self.uid:
+        uid, comm, exe = _proc_info(pid)
+        if comm != "shmrdmad" or uid != self.uid:
             return 0
         return pid if exe == exe_want else 0
 
@@ -322,17 +322,16 @@ class Daemon:
         return rec[1] if len(rec) > 1 else ""
 
 
-def _proc_owner_exe(pid: int) -> tuple[int, str]:
-    """(uid, executable path) of *pid*, or (-1, "") if it is gone."""
+def _proc_info(pid: int) -> tuple[int, str, str]:
+    """(uid, command name, executable path) of *pid*; (-1, "", "") if gone."""
     if _LINUX:
         try:
             uid = os.stat(f"/proc/{pid}").st_uid
             comm = Path(f"/proc/{pid}/comm").read_text().strip()
             exe = os.readlink(f"/proc/{pid}/exe")
         except OSError:
-            return -1, ""
-        # comm, not the path, names a process that exec'd elsewhere
-        return (uid, exe) if comm == Path(exe).name else (-1, "")
+            return -1, "", ""
+        return uid, comm, exe
     # macOS: no /proc; ps prints the full executable path as comm
     try:
         r = subprocess.run(
@@ -343,9 +342,9 @@ def _proc_owner_exe(pid: int) -> tuple[int, str]:
             check=False,
         )
         uid_s, exe = r.stdout.strip().split(None, 1)
-        return int(uid_s), exe
+        return int(uid_s), Path(exe).name, exe
     except (OSError, subprocess.TimeoutExpired, ValueError):
-        return -1, ""
+        return -1, "", ""
 
 
 def daemon(create: bool = True) -> Daemon:
