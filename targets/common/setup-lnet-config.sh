@@ -5,6 +5,8 @@
 # fc_nic_nets= optionally names the LNet network of each extra NIC.
 # Equal explicit names group interfaces on one LNet network. Empty
 # entries get separate automatic names, skipping explicit names.
+# fc_shmrdma=1 (ltvm create --shmrdma) puts eth0 on o2ib: the shmrdma
+# RDMA device takes its addresses from eth0.
 #
 # Usage: setup-lnet-config.sh [-s|--stdin] [output-path]
 set -euo pipefail
@@ -19,7 +21,7 @@ nic_transport() {
 	# Return the LNet transport for a NIC type; retain passthrough args.
 	case "${1%%;*}" in
 	tcp) printf 'tcp\n' ;;
-	softroce|passthrough) printf 'o2ib\n' ;;
+	softroce|passthrough|shmrdma) printf 'o2ib\n' ;;
 	none) printf '\n' ;;
 	*) config_error "unknown NIC type '${1%%;*}'" ;;
 	esac
@@ -157,6 +159,7 @@ cmdline_parameter() {
 main() {
 	# Validate all inputs before opening the optional output file.
 	local out_path='' from_stdin=false cmdline fc_nics fc_nic_nets body nets
+	local shm
 	local -a nic_array=(tcp) extras=()
 	(( $# <= 3 )) ||
 		{ config_error 'too many arguments'; return 1; }
@@ -199,6 +202,8 @@ main() {
 	elif [[ -n $nets ]]; then
 		config_error 'fc_nic_nets requires extra NICs'; return 1
 	fi
+	shm=$(cmdline_parameter fc_shmrdma "$cmdline") || return 1
+	[[ ${shm#*=} != 1 ]] || nic_array[0]=shmrdma
 	body=$(emit_lnet_conf_nets "$fc_nic_nets" "${nic_array[@]}") || return 1
 	if [[ -n $out_path ]]; then
 		printf '%s\n' "$body" > "$out_path"

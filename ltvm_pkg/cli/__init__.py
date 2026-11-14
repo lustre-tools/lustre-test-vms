@@ -173,6 +173,7 @@ from ltvm_pkg.cli.vm import (  # noqa: E402
     cmd_restore,
     cmd_snapshot,
     cmd_vm_set,
+    cmd_vm_shmrdmad,
     cmd_vm_start,
     cmd_vm_stop,
 )
@@ -287,6 +288,7 @@ __all__ = [
     "cmd_update",
     "cmd_validate",
     "cmd_vm_set",
+    "cmd_vm_shmrdmad",
     "cmd_vm_start",
     "cmd_vm_stop",
     "cmd_claim",

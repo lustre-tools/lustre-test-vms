@@ -402,6 +402,14 @@ autologin, kdump pre-configured (vmlinuz + initramfs
 baked in at build time).  No kernel inside the image --
 QEMU passes it via `-kernel`.
 
+The shmrdma guest driver (`shmrdma/kmod/`) is built per kernel in the
+build container (`ltvm_pkg/shmrdma.py`, cached under
+`kernels/<k>/shmrdma/`) and copied into `/lib/modules/<kver>/extra/`
+in the final stage; its sources are an image hash input.  A kernel it
+does not build for gets an image without it (`shmrdma_kmod: false` in
+meta.json), which `create --shmrdma` refuses.  docs/SHMRDMA.md covers
+the daemon and the device.
+
 ### Image files are never replaced
 
 A VM's root disk is a qcow2 overlay backed by an image file

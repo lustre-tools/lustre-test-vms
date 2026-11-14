@@ -578,6 +578,8 @@ def _create_one_node(
     wait_seconds: int = 0,
     numa_nodes: int = 0,
     numa_dist: str = "",
+    shmrdma: str = "",
+    host_node: int = -1,
     kernel: str | None = None,
     variant: str = "base",
     share_disks: bool = False,
@@ -661,6 +663,10 @@ def _create_one_node(
         cmd += ["--numa-nodes", str(numa_nodes)]
     if numa_dist:
         cmd += [f"--numa-dist={numa_dist}"]
+    if shmrdma:
+        cmd += [f"--shmrdma={shmrdma}"]
+    if host_node >= 0:
+        cmd += ["--host-node", str(host_node)]
     if wait_seconds:
         cmd += ["--wait", str(wait_seconds)]
 
@@ -912,6 +918,7 @@ def _require_cluster_memory(
     node_targets: dict[str, str | None],
     os_target: str | None,
     wait_seconds: int,
+    shared_ram: bool = False,
 ) -> None:
     """Refuse a cluster whose nodes cannot all start, before any does.
 
@@ -920,7 +927,7 @@ def _require_cluster_memory(
     them all back.  With --wait the running VMs may yet stop, so only
     a cluster too big for an idle host is refused.
     """
-    from .qemu_run import guest_memory_budget, running_vm_memory
+    from .qemu_run import charged_mb, guest_memory_budget, running_vm_memory
     from .target_config import TargetConfig
 
     budget = guest_memory_budget()
@@ -936,8 +943,12 @@ def _require_cluster_memory(
             sizes[node.name] = TargetConfig(target).default_mem
         except (ValueError, FileNotFoundError):
             return
-    need = sum(sizes.values())
-    running = [] if wait_seconds else running_vm_memory()
+    need = sum(
+        charged_mb(m, shared_ram, budget.overcommit) for m in sizes.values()
+    )
+    running = (
+        [] if wait_seconds else running_vm_memory(overcommit=budget.overcommit)
+    )
     used = sum(m for _, m in running)
     biggest = max(sizes.values(), default=0)
     if biggest <= budget.budget_mb and used + need <= budget.limit_mb:
@@ -1152,7 +1163,13 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
         return
 
     _require_cluster_memory(
-        node_specs, mem, node_targets, os_target, wait_seconds
+        node_specs,
+        mem,
+        node_targets,
+        os_target,
+        wait_seconds,
+        shared_ram=bool(getattr(args, "shmrdma", ""))
+        or any(n.type == "shmnet" for n in nic_specs),
     )
 
     print(f"=== Creating cluster '{cluster_name}' ===", flush=True)
@@ -1189,6 +1206,8 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                     wait_seconds=wait_seconds,
                     numa_nodes=numa_nodes,
                     numa_dist=dist,
+                    shmrdma=getattr(args, "shmrdma", "") or "",
+                    host_node=getattr(args, "host_node", -1),
                     kernel=node_kernels[node.name]
                     or (None if node_targets[node.name] else kernel),
                     variant="base" if node_targets[node.name] else variant,

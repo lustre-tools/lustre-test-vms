@@ -21,6 +21,9 @@ NetworkManager    network-manager
 iproute           iproute2
 iputils           iputils-ping
 openssh-clients   openssh-client
+# Debian 13 has no smc-tools package here; the shmrdma boot hook
+# adds the SMC user EID through smc_ueid.py instead.
+smc-tools         -
 vim-minimal       vim-tiny
 vim-enhanced      vim
 device-mapper     dmsetup

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import configparser
 import fcntl
+import functools
 import math
 import os
 import pwd
@@ -20,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
-from . import numa_dist, rootless, site_config, vm_state
+from . import numa_dist, rootless, shmrdma, site_config, vm_state
 from .host_setup import is_macos, socket_vmnet_socket_path
 from .nic_cmdline import network_names, prefixes
 from .priv import ensure_dir, ensure_lock_file, invoking_user, sudo_run
@@ -266,8 +267,19 @@ def guest_memory_budget() -> MemoryBudget | None:
     return memory_budget(_guest_cgroup(VMInfo(name="ltvm-budget", ip="")))
 
 
-def running_vm_memory(skip: str = "") -> list[tuple[str, int]]:
-    """(name, MiB) of every running VM but ``skip``."""
+def charged_mb(mem: int, shared: bool, overcommit: float) -> int:
+    """What a VM of *mem* MiB counts against the overcommitted limit.
+
+    Guest RAM in a shared memfd (shmrdma, shmnet) is not merged by KSM,
+    so such a VM is charged at its full size: overcommit times its -m.
+    """
+    return int(mem * overcommit) if shared else mem
+
+
+def running_vm_memory(
+    skip: str = "", overcommit: float = 1.0
+) -> list[tuple[str, int]]:
+    """(name, MiB) of every running VM but ``skip``, as charged."""
     running: list[tuple[str, int]] = []
     for name in VMInfo.all_names():
         if name == skip:
@@ -293,7 +305,12 @@ def running_vm_memory(skip: str = "") -> list[tuple[str, int]]:
             )
             continue
         if is_running(other):
-            running.append((other.name, other.mem))
+            running.append(
+                (
+                    other.name,
+                    charged_mb(other.mem, other.shared_ram, overcommit),
+                )
+            )
     return running
 
 
@@ -325,14 +342,13 @@ def _memory_shortfall(vm: VMInfo) -> _Shortfall | None:
     reserve_mb, budget_mb = budget.reserve_mb, budget.budget_mb
     overcommit, limit_mb = budget.overcommit, budget.limit_mb
 
-    running = running_vm_memory(skip=vm.name)
+    running = running_vm_memory(skip=vm.name, overcommit=overcommit)
     committed_mb = sum(m for _, m in running)
-    if needed_mb <= budget_mb and committed_mb + needed_mb <= limit_mb:
+    charged = charged_mb(needed_mb, vm.shared_ram, overcommit)
+    if needed_mb <= budget_mb and committed_mb + charged <= limit_mb:
         return None
 
-    shortfall_mb = max(
-        committed_mb + needed_mb - limit_mb, needed_mb - budget_mb
-    )
+    shortfall_mb = max(committed_mb + charged - limit_mb, needed_mb - budget_mb)
     lines = [
         f"not enough host memory to start VM '{vm.name}'",
         f"  requested:    {needed_mb} MiB",
@@ -345,7 +361,8 @@ def _memory_shortfall(vm: VMInfo) -> _Shortfall | None:
         lines.append(
             f"  overcommit:   {overcommit:g} ({site_config.path()}), so "
             f"running VMs may commit {limit_mb} MiB, but no single VM "
-            f"more than the budget"
+            f"more than the budget; shared-memory (shmrdma, shmnet) "
+            f"VMs count {overcommit:g} times their size"
         )
     lines.append(f"  shortfall:    {shortfall_mb} MiB")
     if running:
@@ -451,7 +468,70 @@ def numa_problem(vcpus: int, mem: int, nodes: int) -> str | None:
     return None
 
 
-def smp_args(vcpus: int, mem: int, nodes: int, dist: str = "") -> list[str]:
+def host_node_cpus(node: int) -> str:
+    """The cpulist of host NUMA node *node*, or "" if it has none."""
+    try:
+        return (
+            Path(f"/sys/devices/system/node/node{node}/cpulist")
+            .read_text()
+            .strip()
+        )
+    except OSError:
+        return ""
+
+
+@functools.cache
+def qemu_binds_numa(qemu_bin: str) -> bool:
+    """Whether *qemu_bin* can bind memory backends to host nodes.
+
+    host-nodes= needs a QEMU built with libnuma; without it QEMU
+    refuses to start ("NUMA node binding are not supported").
+    """
+    try:
+        r = subprocess.run(
+            ["ldd", qemu_bin], capture_output=True, text=True, check=False
+        )
+    except OSError:
+        return False
+    return "libnuma" in r.stdout
+
+
+def host_node_prefix(node: int, qemu_binds: bool) -> list[str]:
+    """The command that runs QEMU on host node *node*'s CPUs.
+
+    When QEMU cannot bind its memory itself, numactl binds it from
+    outside if the host has it; otherwise the vCPU threads, pinned to
+    the node, still fault guest memory in there first.
+    """
+    if not qemu_binds and shutil.which("numactl"):
+        return ["numactl", f"--cpunodebind={node}", f"--membind={node}"]
+    return ["taskset", "-c", host_node_cpus(node)]
+
+
+def host_node_problem(node: int) -> str | None:
+    """Why *node* cannot hold a VM on this host, or None if it can."""
+    if node < 0:
+        return None
+    if not host_node_cpus(node):
+        nodes = sorted(
+            p.name.removeprefix("node")
+            for p in Path("/sys/devices/system/node").glob("node[0-9]*")
+        )
+        return (
+            f"--host-node {node}: this host has no NUMA node {node} with "
+            f"CPUs (its nodes: {', '.join(nodes) or 'none'})"
+        )
+    return None
+
+
+def smp_args(
+    vcpus: int,
+    mem: int,
+    nodes: int,
+    dist: str = "",
+    shared: bool = False,
+    host_node: int = -1,
+) -> list[str]:
     """-smp, -m and, for a simulated NUMA layout, -numa arguments.
 
     Each node is one socket with an equal share of the vCPUs and its own
@@ -459,8 +539,26 @@ def smp_args(vcpus: int, mem: int, nodes: int, dist: str = "") -> list[str]:
     taking the remainder, so the backends add up to -m exactly.  *dist*
     is the stored distance table (numa_dist.format_matrix); empty leaves
     QEMU's 10/20 default.
+
+    *shared* backs guest RAM with a shared memfd, which a vhost-user
+    backend (shmrdmad) can map.  *host_node* binds guest RAM to that
+    host NUMA node.  Either makes, without NUMA nodes, the backend
+    ``ram0``, which -machine must name.
     """
+    backend = "memory-backend-memfd" if shared else "memory-backend-ram"
+    share = ",share=on" if shared else ""
+    if host_node >= 0:
+        share += f",host-nodes={host_node},policy=bind"
     if nodes <= 1:
+        if shared or host_node >= 0:
+            return [
+                "-smp",
+                str(vcpus),
+                "-m",
+                str(mem),
+                "-object",
+                f"{backend},id=ram0,size={mem}M{share}",
+            ]
         return ["-smp", str(vcpus), "-m", str(mem)]
     per_cpu = vcpus // nodes
     per_mem = (mem // nodes) // 2 * 2
@@ -476,7 +574,7 @@ def smp_args(vcpus: int, mem: int, nodes: int, dist: str = "") -> list[str]:
         cpus = f"{first}-{first + per_cpu - 1}" if per_cpu > 1 else f"{first}"
         args += [
             "-object",
-            f"memory-backend-ram,id=numa{i},size={size}M",
+            f"{backend},id=numa{i},size={size}M{share}",
             "-numa",
             f"node,nodeid={i},cpus={cpus},memdev=numa{i}",
         ]
@@ -909,6 +1007,7 @@ def _start_qemu(vm: VMInfo) -> None:
         f"{fc_nic_ip6_prefixes_fragment}"
         f"{fc_nic_numa_fragment}"
         f"{network_names(vm)}"
+        f"{' fc_shmrdma=1' if vm.shmrdma else ''}"
     )
     if vm.arch in ("", "x86_64"):
         boot_args += NMI_PANIC_ARGS
@@ -1040,10 +1139,11 @@ def _start_qemu(vm: VMInfo) -> None:
                 check=True,
                 quiet=True,
             )
-        elif _base_type == "passthrough":
+        elif _base_type in ("passthrough", "shmnet"):
             # No host TAP: the VF is attached directly to the guest
-            # via vfio-pci.  The host-side bind-to-vfio happened in
-            # cmd_create; launch_qemu only emits the QEMU flag below.
+            # via vfio-pci (the host-side bind-to-vfio happened in
+            # cmd_create), and a shmnet NIC is a port on shmrdmad's
+            # switch.  launch_qemu only emits the QEMU flags below.
             pass
         else:
             die(
@@ -1094,6 +1194,35 @@ def _start_qemu(vm: VMInfo) -> None:
     else:
         cpu_model = "Nehalem"
 
+    # shmrdmad must be serving every socket the VM's shmrdma device and
+    # shmnet NICs connect to, and must be able to map guest RAM.
+    from . import shmrdma_req
+
+    feats = shmrdma_req.features_of(vm.shmrdma, vm.nics, vm.host_node)
+    if feats:
+        target = shmrdma_req.Target(
+            vm.os_id or "this target",
+            image=Path(vm.image) if vm.image else None,
+            kernel_dir=kernel.parent,
+        )
+        why = shmrdma_req.refusal(
+            feats, target if vm.shmrdma and vm.image else None
+        )
+        if why:
+            die(f"{vm.name}: {why}")
+    shm_socks = shmrdma.prepare_launch(vm) if vm.shared_ram else []
+    if shm_socks != vm.shm_sockets:
+        vm.shm_sockets = list(shm_socks)
+        vm._update_field("SHM_SOCKETS", "|".join(shm_socks))
+    bind_node = (
+        vm.host_node if vm.host_node >= 0 and qemu_binds_numa(qemu_bin) else -1
+    )
+    if (vm.shared_ram or bind_node >= 0) and vm.numa_nodes <= 1:
+        machine = f"{machine},memory-backend=ram0"
+    problem = host_node_problem(vm.host_node)
+    if problem:
+        die(f"{vm.name}: {problem}")
+
     qemu_args = [
         qemu_bin,
         "-name",
@@ -1102,7 +1231,14 @@ def _start_qemu(vm: VMInfo) -> None:
         machine,
         "-cpu",
         cpu_model,
-        *smp_args(vm.vcpus, vm.mem, vm.numa_nodes, vm.numa_dist),
+        *smp_args(
+            vm.vcpus,
+            vm.mem,
+            vm.numa_nodes,
+            vm.numa_dist,
+            shared=vm.shared_ram,
+            host_node=bind_node,
+        ),
         "-kernel",
         str(kernel),
         "-append",
@@ -1183,6 +1319,23 @@ def _start_qemu(vm: VMInfo) -> None:
                 "-device",
                 f"{net_driver},netdev={_netdev_id},mac={_mac}",
             ]
+        elif _base_type == "shmnet":
+            _sock = shm_socks.pop(1 if vm.shmrdma else 0)
+            # One queue pair unless queues=N: more spread many TCP
+            # streams over the guest's vCPUs, but slowed socklnd with
+            # conns_per_peer=4 on Sookie (2.0-2.4 GB/s against 2.7-3.3).
+            _q = _nic.queues
+            _mq = f",queues={_q}" if _q > 1 else ""
+            _dev_mq = f",mq=on,vectors={2 * _q + 2}" if _q > 1 else ""
+            qemu_args += [
+                "-chardev",
+                f"socket,id=char{_netdev_id},path={_sock}",
+                "-netdev",
+                f"vhost-user,id={_netdev_id},chardev=char{_netdev_id}{_mq}",
+                "-device",
+                f"{net_driver},netdev={_netdev_id},mac={_mac},mrg_rxbuf=on"
+                f"{_dev_mq}",
+            ]
         elif _base_type == "passthrough":
             _bdf = _nic.bdf
             # pcie-root-port gives the vfio'd device a dedicated slot;
@@ -1200,7 +1353,26 @@ def _start_qemu(vm: VMInfo) -> None:
                 f"{str(_nic)!r} on VM {vm.name!r}"
             )
 
+    if vm.shmrdma:
+        qemu_args += [
+            "-chardev",
+            f"socket,id=shmrdma0,path={shm_socks[0]}",
+            "-device",
+            # QEMU will not create its generic vhost-user-device from
+            # the command line, so shmrdma rides on vhost-user-fs: three
+            # vqs, and the guest driver claims the "shmrdma" tag.
+            "vhost-user-fs-pci,chardev=shmrdma0,tag=shmrdma,"
+            "num-request-queues=2,queue-size=256",
+        ]
+
     qemu_args += data_disk_args(vm, blk_driver)
+
+    if vm.host_node >= 0:
+        # QEMU's threads inherit the affinity across -daemonize.
+        qemu_args = [
+            *host_node_prefix(vm.host_node, bind_node >= 0),
+            *qemu_args,
+        ]
 
     try:
         _prepare_log(vm)

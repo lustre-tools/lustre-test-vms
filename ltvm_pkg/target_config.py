@@ -1302,6 +1302,13 @@ class TargetConfig:
                     h.label("kernel-artifact")
                     h.update(b"kernel:")
                     h.update(kh.encode())
+            # The shmrdma guest driver is built and baked into the image
+            # (image_build), so its sources are image inputs.
+            from .shmrdma import MODPROBE_CONF, kmod_source_hash
+
+            h.label("shmrdma-kmod")
+            h.update(kmod_source_hash())
+            h.update(MODPROBE_CONF.encode())
 
         if extra:
             # For a kernel this is the Lustre tree's patch series, config

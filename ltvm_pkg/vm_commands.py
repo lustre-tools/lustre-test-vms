@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from . import numa_dist, rootless, vm_claim
+from . import numa_dist, rootless, shmrdma_req, vm_claim
 from .deploy import configure_test_disks, premount_cleanup_script
 from .host_setup import is_macos
 from .nic_guest import wait_for_layout as guest_nic_layout
@@ -27,6 +27,7 @@ from .paths import load_meta_safe
 from .priv import SudoUnavailable, chmod_regular, sudo_prime, sudo_run
 from .qemu_run import (
     die,
+    host_node_problem,
     is_running,
     kill_qemu,
     launch_qemu,
@@ -706,6 +707,8 @@ _RESOURCE_FLAGS = {
     "disk_dir": "--disk-dir",
     "disk_cache": "--disk-cache",
     "disk_prealloc": "--disk-prealloc",
+    "shmrdma": "--shmrdma",
+    "host_node": "--host-node",
 }
 
 # Flags whose typed spelling differs from the stored one only cosmetically.
@@ -934,6 +937,8 @@ def _allocate_and_persist_vm(
             kernel_args=getattr(args, "kernel_args", ""),
             numa_nodes=getattr(args, "numa_nodes", 0) or 0,
             numa_dist=getattr(args, "numa_dist", "") or "",
+            shmrdma=getattr(args, "shmrdma", "") or "",
+            host_node=getattr(args, "host_node", -1),
             share_disks=bool(getattr(args, "share_disks", False)),
             disks_from=getattr(args, "disks_from", None) or "",
             disk_dir=getattr(args, "disk_dir", "") or "",
@@ -1178,7 +1183,47 @@ def _resolve_os_and_kernel(
         )
     kver = meta["kernel_version"]
 
+    feats = shmrdma_req.features_of(
+        getattr(args, "shmrdma", "") or "",
+        extra_nic_types or [],
+        getattr(args, "host_node", -1),
+    )
+    if feats:
+        target = shmrdma_req.Target(
+            os_target,
+            explicit_kernel or None,
+            image=Path(image),
+            kernel_dir=Path(kernel).parent,
+        )
+        why = shmrdma_req.refusal(feats, target)
+        if why:
+            die(why)
+
     return os_arts, image, kernel, kver, os_target, variant
+
+
+def _check_shmrdma_socket(value: str) -> None:
+    """--shmrdma takes 'auto' or an absolute socket path."""
+    from .nic_spec import socket_path_problem
+
+    if value == "auto":
+        return
+    problem = socket_path_problem(value)
+    if problem:
+        die(
+            f"--shmrdma {value!r}: give no value for ltvm's own daemon, or "
+            f"the {problem}"
+        )
+
+
+def _check_shmrdma_image(image: str, target: str, kernel: str) -> None:
+    """Refuse --shmrdma on an image built without the guest module."""
+    t = shmrdma_req.Target(
+        target, kernel or None, image=Path(image), kernel_dir=Path(image).parent
+    )
+    why = shmrdma_req.refusal({shmrdma_req.SHMRDMA}, t)
+    if why:
+        die(why)
 
 
 def _validate_create_bounds(
@@ -1195,6 +1240,11 @@ def _validate_create_bounds(
         die(f"--vcpus must be > 0 (got {args.vcpus})")
     if args.mem is not None and args.mem <= 0:
         die(f"--mem must be > 0 (got {args.mem})")
+    if getattr(args, "shmrdma", ""):
+        _check_shmrdma_socket(args.shmrdma)
+    problem = host_node_problem(getattr(args, "host_node", -1))
+    if problem:
+        die(problem)
 
     # Disk count bounds: vda is the rootfs, leaving vdb..vdz for
     # MDT+OST.  Past 25 letters we'd write /dev/vd{ etc. into the
@@ -3321,6 +3371,13 @@ def cmd_set(args: argparse.Namespace) -> None:
     dist_inline = getattr(args, "numa_dist", None)
     dist_file = getattr(args, "numa_dist_file", None)
     cache = getattr(args, "disk_cache", None)
+    shm = getattr(args, "shmrdma", None)
+    host_node = getattr(args, "host_node", None)
+    if host_node is not None:
+        problem = host_node_problem(host_node)
+        if problem:
+            die(problem)
+        host_node = max(host_node, -1)
     if (
         args.vcpus is None
         and args.mem is None
@@ -3328,11 +3385,17 @@ def cmd_set(args: argparse.Namespace) -> None:
         and dist_inline is None
         and dist_file is None
         and cache is None
+        and shm is None
+        and host_node is None
     ):
         die(
             "nothing to set: give --vcpus, --mem, --numa-nodes, "
-            "--numa-dist[-file] and/or --disk-cache"
+            "--numa-dist[-file], --disk-cache, --host-node and/or --shmrdma"
         )
+    if shm == "none":
+        shm = ""
+    if shm:
+        _check_shmrdma_socket(shm)
     if cache == "default":
         cache = ""
     if cache and cache not in DISK_CACHE_MODES:
@@ -3360,6 +3423,14 @@ def cmd_set(args: argparse.Namespace) -> None:
     if numa is not None and numa != vm.numa_nodes:
         changes.append(f"numa nodes {vm.numa_nodes} -> {numa}")
         vm.numa_nodes = numa
+    if shm is not None and shm != vm.shmrdma:
+        if shm:
+            _check_shmrdma_image(vm.image, vm.os_id, "")
+        changes.append(f"shmrdma {vm.shmrdma or 'none'} -> {shm or 'none'}")
+        vm.shmrdma = shm
+    if host_node is not None and host_node != vm.host_node:
+        changes.append(f"host node {vm.host_node} -> {host_node}")
+        vm.host_node = host_node
     if dist_inline == "default":
         dist = ""
     else:
@@ -3942,6 +4013,27 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     print(f"  FAILED to remove: {err}")
                     fix_failures += 1
 
+    # Running VMs whose shmrdmad is gone: their shmrdma device and
+    # shmnet NICs are dead until each VM restarts and starts it again.
+    from . import shmrdma
+
+    shm = shmrdma.daemon(create=False)
+    if not shm.pid():
+        orphans = []
+        for name in VMInfo.all_names():
+            try:
+                vm = VMInfo.load(name)
+            except (VMNotFound, ValueError):
+                continue
+            if vm.shared_ram and shmrdma.vm_uses(vm, shm) and is_running(vm):
+                orphans.append(name)
+        if orphans:
+            print(
+                f"shmrdmad is not running but {', '.join(orphans)} use it: "
+                f"restart them (`ltvm stop`, `ltvm start`) to bring it back"
+            )
+            issues += 1
+
     # Cluster files referencing dead nodes.  A user can `ltvm destroy
     # node` individually after a `cluster create`, leaving the .cluster
     # file pointing at VMs that no longer exist.
@@ -4144,6 +4236,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     if args.fix:
                         unregister_ssh_name(sname)
                         print("  fixed: removed ssh config")
+
+    # --shmrdma [TARGET]: what the shmrdma family needs (shmrdma_req).
+    shm_target = getattr(args, "shmrdma", None)
+    if shm_target:
+        target = shmrdma_req.resolve_target(
+            shm_target,
+            getattr(args, "kernel", None),
+            getattr(args, "lustre_tree", None),
+        )
+        found, failed = shmrdma_req.doctor(target, args.fix)
+        issues += found
+        fix_failures += failed
 
     if issues == 0:
         print("no issues found")

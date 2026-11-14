@@ -239,6 +239,7 @@ try:
         cmd_update,
         cmd_validate,
         cmd_vm_set,
+        cmd_vm_shmrdmad,
         cmd_vm_start,
         cmd_vm_stop,
     )
@@ -263,6 +264,7 @@ try:
     )
     from ltvm_pkg.vm_cluster import IP_FAMILIES  # noqa: E402
     from ltvm_pkg.vm_state import (  # noqa: E402
+        DEFAULT_TARGET,
         DISK_CACHE_MODES,
         DISK_PREALLOC_MODES,
     )
@@ -1533,7 +1535,11 @@ def build_parser() -> argparse.ArgumentParser:
             "omit its 'bdf=' key.  node=N (tcp, softroce) puts the NIC "
             "on guest NUMA node N of --numa-nodes. net= groups NICs on "
             "one LNet network; subnet= and subnet6= choose their IPv4 "
-            "and IPv6 data networks (tcp, softroce only)."
+            "and IPv6 data networks (tcp, softroce, shmnet only).  "
+            "'shmnet[:SOCKET]' is a virtio-net NIC on shmrdmad's "
+            "host-memory switch instead of the bridge; the guest "
+            "configures it as a tcp NIC (see --shmrdma), and queues=N "
+            "(1-8) gives it N queue pairs."
         ),
     )
     _vm_create_args.add_argument(
@@ -1550,6 +1556,35 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _add_numa_dist_args(_vm_create_args, "for --numa-nodes")
+    _vm_create_args.add_argument(
+        "--host-node",
+        dest="host_node",
+        type=int,
+        default=-1,
+        metavar="N",
+        help=(
+            "Bind the VM to host NUMA node N: guest memory is allocated "
+            "there and QEMU runs on that node's CPUs.  On a multi-node "
+            "host, VMs that talk to each other (and shmrdmad, see "
+            "[shmrdma] nodes in /etc/ltvm.conf) on one node move data "
+            "several times faster.  `ltvm vm set` changes it."
+        ),
+    )
+    _vm_create_args.add_argument(
+        "--shmrdma",
+        dest="shmrdma",
+        nargs="?",
+        const="auto",
+        default="",
+        metavar="SOCKET",
+        help=(
+            "Give the VM a shmrdma device: an RDMA (RoCE) device whose "
+            "transfers to other VMs on this host are one memcpy by "
+            "shmrdmad, and LNet on o2ib over it.  Guest RAM becomes a "
+            "shared memfd.  ltvm builds and starts the daemon for you; "
+            "SOCKET names one you run yourself instead."
+        ),
+    )
     _vm_create_args.add_argument(
         "--kernel-args",
         dest="kernel_args",
@@ -1882,7 +1917,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="New QEMU cache mode for the data disks; 'default' drops "
         "cache= and leaves QEMU's own (writeback)",
     )
+    vsetp.add_argument(
+        "--host-node",
+        dest="host_node",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Bind to host NUMA node N (-1 for none)",
+    )
+    vsetp.add_argument(
+        "--shmrdma",
+        dest="shmrdma",
+        default=None,
+        metavar="auto|SOCKET|none",
+        help="Add a shmrdma device ('auto' for ltvm's daemon), or "
+        "'none' to drop it",
+    )
     vsetp.set_defaults(func=cmd_vm_set)
+
+    vshp = vm_sub.add_parser(
+        "shmrdmad",
+        parents=[common],
+        help="Show, start or stop this user's shmrdmad (the host daemon "
+        "behind --shmrdma and --nic shmnet)",
+    )
+    vshp.add_argument(
+        "action",
+        nargs="?",
+        default="status",
+        choices=["status", "start", "stop"],
+    )
+    vshp.add_argument(
+        "--force",
+        action="store_true",
+        help="stop it even though running VMs use it (their devices "
+        "stop working until they restart)",
+    )
+    vshp.set_defaults(func=cmd_vm_shmrdmad)
 
     def _vm_no_action(args: argparse.Namespace) -> int:
         vm_parser.print_help()
@@ -1901,6 +1972,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Fix issues automatically",
+    )
+    _doc_shm = sp.add_argument(
+        "--shmrdma",
+        nargs="?",
+        const=DEFAULT_TARGET,
+        default=None,
+        metavar="TARGET",
+        help="Also check what --shmrdma, --nic shmnet, --host-node and "
+        "SMC need on this host and in TARGET's image and kernel "
+        f"(default {DEFAULT_TARGET}); with --fix, install and build it",
+    )
+    _doc_shm.completer = complete_targets  # type: ignore[attr-defined]
+    sp.add_argument(
+        "--kernel",
+        default=None,
+        help="With --shmrdma: the kernel of TARGET to check",
+    )
+    sp.add_argument(
+        "--lustre-tree",
+        dest="lustre_tree",
+        default=None,
+        help="With --shmrdma --fix: the Lustre tree a kernel rebuild "
+        "(for SMC) takes its patches from",
     )
     sp.set_defaults(func=cmd_doctor)
 
@@ -2404,6 +2498,25 @@ def build_parser() -> argparse.ArgumentParser:
         "`ltvm create --numa-nodes`",
     )
     _add_numa_dist_args(ccp, "for every node")
+    ccp.add_argument(
+        "--host-node",
+        dest="host_node",
+        type=int,
+        default=-1,
+        metavar="N",
+        help="Bind every node to host NUMA node N, as "
+        "`ltvm create --host-node`",
+    )
+    ccp.add_argument(
+        "--shmrdma",
+        dest="shmrdma",
+        nargs="?",
+        const="auto",
+        default="",
+        metavar="SOCKET",
+        help="A shmrdma device on every node, with LNet on o2ib over it, "
+        "as `ltvm create --shmrdma`",
+    )
     ccp.add_argument(
         "--kernel-args",
         dest="kernel_args",
