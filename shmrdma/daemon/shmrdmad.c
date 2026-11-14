@@ -2491,10 +2491,19 @@ int main(int argc, char **argv)
 	LOG("listening on %s, %d workers, %d copiers, spin %" PRIu64 " us",
 	    g_sock_path, g_nworkers, g_ncopiers, g_spin_ns / 1000);
 
+	uint64_t next_stats = 0;
+
 	for (;;) {
 		struct plat_event evs[32];
-		int n = plat_poller_wait(g_epfd, evs, 32, 1000);
+		uint64_t t = now_ns();
+		int n;
 
+		if (t >= next_stats) {
+			net_write_stats();
+			next_stats = t + 1000000000ull;
+		}
+		n = plat_poller_wait(g_epfd, evs, 32,
+				     (next_stats - t) / 1000000 + 1);
 		if (g_stats) {
 			g_stats = 0;
 			dump_stats();
