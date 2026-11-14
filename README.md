@@ -535,6 +535,21 @@ host wants swap behind it, because merged pages are copied apart again
 as soon as guests write different data to them. The kernel boots with
 KSM off; `w /sys/kernel/mm/ksm/run - - - - 1` in a file under
 `/etc/tmpfiles.d/` turns it on at every boot.
+A VM with `--shmrdma` or a `shmnet` NIC keeps its RAM in shared memory
+that KSM cannot merge, so it counts at overcommit times its size.
+
+### Fast networking between VMs: shmrdma
+
+`--shmrdma` gives a VM an RDMA device whose transfers to other VMs on
+the host are one memcpy by a host daemon ltvm runs, and LNet comes up
+on o2ib over it: about 25 GB/s between two VMs where the bridge gives
+1 GB/s.  `--nic shmnet` puts a virtio-net NIC on the same daemon's
+switch instead of the bridge.  See [docs/SHMRDMA.md](docs/SHMRDMA.md).
+
+```bash
+ltvm cluster create co2 --shmrdma mgs+mds+oss:co2-srv:3 client:co2-c1
+ltvm cluster deploy co2 --build <tree> --mount
+```
 
 ### Shared host: hot and cold artifact storage
 

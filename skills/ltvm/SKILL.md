@@ -488,6 +488,30 @@ LTVM.TEST; rerunning keeps the keys, recreating the cluster loses them):
 ltvm cluster krb5 co2
 ```
 
+### Fast LNet between VMs: shmrdma
+
+`--shmrdma` (on `create` and `cluster create`) gives each node an RDMA
+device served by a host daemon that copies straight between the
+guests' memory, and LNet comes up on o2ib over it: about 25 GB/s of
+LNet between two VMs, where the bridge gives 1.  Use it when a test
+needs network speed (bulk I/O, many clients); ordinary functional
+testing does not.  `--nic shmnet` is a TCP NIC on the same daemon's
+switch.  ltvm builds and starts the daemon (`ltvm vm shmrdmad status`);
+never stop it while VMs use it, since their devices die until they
+restart.  On a multi-NUMA host, put the VMs that talk to each other
+on one node with `--host-node N` (memory bound there, QEMU on its
+CPUs), and the daemon with `[shmrdma] nodes = N` in /etc/ltvm.conf:
+placement alone made a 3-4x difference on Sookie.  Shared-memory VMs
+cannot be merged by KSM, so they cost their
+full RAM on the host.  An image without the guest module (a fetched
+one) is refused: `ltvm build image <target>`.  docs/SHMRDMA.md has the
+detail.
+
+```bash
+ltvm cluster create co2 --shmrdma mgs+mds+oss:co2-srv:3 client:co2-c1
+ltvm cluster deploy co2 --build <tree> --mount
+```
+
 ### Failover pairs
 
 To move a target between 2 servers (`fail mds1`, replay and recovery
