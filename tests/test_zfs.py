@@ -16,7 +16,9 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
 import platform
+import stat
 import tarfile
 import urllib.error
 from io import BytesIO
@@ -370,6 +372,105 @@ class TestUnpack:
         zb._unpack(tb, "2.4.0", src)
         assert not (src / "stale").exists()
         assert (src / "zfs.release.in").is_file()
+
+
+# (name, type, link target) of each member
+_Members = list[tuple[str, bytes, str]]
+
+_UNSAFE: dict[str, _Members] = {
+    "absolute-name": [("/abs/evil", tarfile.REGTYPE, "")],
+    "dotdot-name": [("../evil", tarfile.REGTYPE, "")],
+    "absolute-symlink": [("zfs/s", tarfile.SYMTYPE, "/etc/passwd")],
+    "symlink-outside": [("zfs/s", tarfile.SYMTYPE, "../../evil")],
+    "hardlink-outside": [("zfs/h", tarfile.LNKTYPE, "../evil")],
+    "fifo": [("zfs/pipe", tarfile.FIFOTYPE, "")],
+    "through-a-symlink": [
+        ("zfs/s", tarfile.SYMTYPE, "."),
+        ("zfs/s/../../evil", tarfile.REGTYPE, ""),
+    ],
+}
+
+
+def _archive(members: _Members) -> BytesIO:
+    """A .tar.gz of ``members``; each regular file holds four bytes."""
+    buf = BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, kind, link in members:
+            info = tarfile.TarInfo(name)
+            info.type = kind
+            info.linkname = link
+            if info.isreg():
+                info.size = 4
+                tf.addfile(info, BytesIO(b"zfs\n"))
+            else:
+                tf.addfile(info)
+    buf.seek(0)
+    return buf
+
+
+@pytest.mark.filterwarnings("ignore:Python 3.14 will:DeprecationWarning")
+class TestExtract:
+    """Debian 12 has Python 3.11.2, which has no tarfile data filter.
+    The member check must keep an archive inside its directory there."""
+
+    def _extract(self, members: _Members, dest: Path) -> None:
+        with tarfile.open(fileobj=_archive(members), mode="r:gz") as tf:
+            zb._extract(tf, dest)
+
+    @pytest.mark.parametrize("data_filter", [True, False])
+    def test_safe_archive_is_extracted(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        data_filter: bool,
+    ) -> None:
+        if data_filter and not zb._HAS_DATA_FILTER:
+            pytest.skip("this Python has no tarfile data filter")
+        monkeypatch.setattr(zb, "_HAS_DATA_FILTER", data_filter)
+        self._extract(
+            [
+                ("zfs/a", tarfile.REGTYPE, ""),
+                ("zfs/sub/s", tarfile.SYMTYPE, "../a"),
+                ("zfs/h", tarfile.LNKTYPE, "zfs/a"),
+            ],
+            tmp_path,
+        )
+        assert (tmp_path / "zfs" / "sub" / "s").read_bytes() == b"zfs\n"
+        assert (tmp_path / "zfs" / "h").read_bytes() == b"zfs\n"
+
+    @pytest.mark.parametrize("data_filter", [True, False])
+    def test_owner_and_setuid_bits_are_dropped(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        data_filter: bool,
+    ) -> None:
+        if data_filter and not zb._HAS_DATA_FILTER:
+            pytest.skip("this Python has no tarfile data filter")
+        monkeypatch.setattr(zb, "_HAS_DATA_FILTER", data_filter)
+        buf = BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            info = tarfile.TarInfo("zfs/tool")
+            info.mode, info.uid, info.size = 0o6777, 12345, 4
+            tf.addfile(info, BytesIO(b"zfs\n"))
+        buf.seek(0)
+        with tarfile.open(fileobj=buf, mode="r:gz") as tf:
+            zb._extract(tf, tmp_path)
+        st = (tmp_path / "zfs" / "tool").stat()
+        assert stat.S_IMODE(st.st_mode) == 0o755
+        assert st.st_uid == os.getuid()
+
+    @pytest.mark.parametrize("case", sorted(_UNSAFE))
+    def test_member_check_refuses_before_it_writes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str
+    ) -> None:
+        monkeypatch.setattr(zb, "_HAS_DATA_FILTER", False)
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        with pytest.raises(zb.ZfsBuildError, match="archive member"):
+            self._extract(_UNSAFE[case], dest)
+        assert list(tmp_path.iterdir()) == [dest]
+        assert list(dest.iterdir()) == []
 
 
 # ── build preconditions ──────────────────────────────────
