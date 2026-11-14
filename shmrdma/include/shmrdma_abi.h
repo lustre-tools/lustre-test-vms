@@ -58,7 +58,14 @@ enum {
 #define SHMRDMA_MAX_SGE		16
 #define SHMRDMA_GRH_BYTES	40
 
-/* A ring: entries of entry_size bytes in pages listed at pages_gpa. */
+/*
+ * A ring: entries of entry_size bytes in pages listed at pages_gpa.
+ * Ring pages are 4 KB whatever the guest's page size: a 16 KB or 64 KB
+ * page kernel lists each 4 KB piece of its pages.
+ */
+#define SHMRDMA_RING_PAGE_SHIFT	12
+#define SHMRDMA_RING_PAGE_SIZE	(1u << SHMRDMA_RING_PAGE_SHIFT)
+
 struct shmrdma_ring_desc {
 	__u64 pages_gpa;	/* GPA of __u64 page GPA array */
 	__u32 npages;

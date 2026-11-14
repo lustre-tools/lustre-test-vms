@@ -204,7 +204,8 @@ static int ring_alloc(struct shmrdma_ring *r, u32 entries, u32 esz)
 
 	r->entries = entries;
 	r->esz = esz;
-	r->npages = bytes >> PAGE_SHIFT;
+	/* the ABI's 4 KB ring pages, several per page on 16K/64K kernels */
+	r->npages = bytes >> SHMRDMA_RING_PAGE_SHIFT;
 	r->buf = vzalloc(bytes);
 	if (!r->buf)
 		return -ENOMEM;
@@ -214,9 +215,12 @@ static int ring_alloc(struct shmrdma_ring *r, u32 entries, u32 esz)
 		r->buf = NULL;
 		return -ENOMEM;
 	}
-	for (i = 0; i < r->npages; i++)
-		r->pages[i] = page_to_phys(vmalloc_to_page(r->buf +
-							   i * PAGE_SIZE));
+	for (i = 0; i < r->npages; i++) {
+		size_t off = (size_t)i << SHMRDMA_RING_PAGE_SHIFT;
+
+		r->pages[i] = page_to_phys(vmalloc_to_page(r->buf + off)) +
+			      (off & ~PAGE_MASK);
+	}
 	return 0;
 }
 
