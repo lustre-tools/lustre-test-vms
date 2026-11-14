@@ -48,6 +48,9 @@ class NicSpec:
     socket: str = ""
     # Queue pairs of a shmnet NIC (queues=N).
     queues: int = 1
+    # Receive TSO on a shmnet NIC (tso=off: the switch cuts TCP frames
+    # into MSS-sized segments for it).
+    tso: bool = True
 
     @classmethod
     def parse(cls, raw: str) -> NicSpec:
@@ -110,6 +113,8 @@ class NicSpec:
             value = getattr(self, k.field)
             if value == _DEFAULTS[k.field]:
                 continue
+            if isinstance(value, bool):
+                value = "on" if value else "off"
             if key == positional:
                 # parse() takes the positional value only first.
                 items.insert(0, str(value))
@@ -177,6 +182,13 @@ def _queues(value: str) -> int:
             f"--nic shmnet queues={value!r}: expected 1 to {SHMNET_MAX_QUEUES}"
         )
     return int(value)
+
+
+def _on_off(value: str) -> bool:
+    """on or off."""
+    if value.lower() not in ("on", "off"):
+        raise NicSpecError(f"--nic: expected on or off, not {value!r}")
+    return value.lower() == "on"
 
 
 def _socket(value: str) -> str:
@@ -276,6 +288,7 @@ _KEYS: dict[str, _Key] = {
     "subnet6": _Key("subnet6", ("tcp", "softroce", "shmnet"), _subnet6),
     "socket": _Key("socket", ("shmnet",), _socket),
     "queues": _Key("queues", ("shmnet",), _queues),
+    "tso": _Key("tso", ("shmnet",), _on_off),
 }
 
 # The key a type's first item may give without "key=".

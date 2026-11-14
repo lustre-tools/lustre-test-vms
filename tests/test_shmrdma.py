@@ -541,6 +541,29 @@ class TestShmnetQueues:
             NicSpec.parse("tcp:queues=2")
 
 
+class TestShmnetTso:
+    def test_on_by_default(self, tmp_vmdir, daemon_socket) -> None:  # noqa: F811
+        joined = TestShmnetQueues()._argv(tmp_vmdir, daemon_socket, "")
+        assert "guest_tso" not in joined
+
+    def test_off(self, tmp_vmdir, daemon_socket) -> None:  # noqa: F811
+        joined = TestShmnetQueues()._argv(tmp_vmdir, daemon_socket, "tso=off")
+        assert (
+            "mrg_rxbuf=on,guest_tso4=off,guest_tso6=off,guest_ecn=off" in joined
+        )
+
+    def test_round_trip(self) -> None:
+        spec = NicSpec.parse("shmnet:tso=off,queues=2")
+        assert not spec.tso
+        assert str(spec) == "shmnet:queues=2,tso=off"
+        assert NicSpec.parse(str(spec)) == spec
+        assert NicSpec.parse("shmnet:tso=on") == NicSpec.parse("shmnet")
+        with pytest.raises(NicSpecError):
+            NicSpec.parse("shmnet:tso=maybe")
+        with pytest.raises(NicSpecError):
+            NicSpec.parse("tcp:tso=off")
+
+
 def test_daemon_nodes(monkeypatch, tmp_path: Path) -> None:
     conf = tmp_path / "ltvm.conf"
     conf.write_text("[shmrdma]\nnodes = 0, 2\n")
