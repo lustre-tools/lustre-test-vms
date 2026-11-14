@@ -95,11 +95,9 @@ rdma link add "$linkname" type rxe netdev "$IFNAME" \
 	|| die "rdma link add $linkname on $IFNAME failed"
 
 # 4. Tune the underlying netdev.
-# MTU >1500 avoids RoCEv2 fragmentation stalls. 4200 leaves headroom
-# under a 4500-ish typical virtio ceiling and matches common RoCE
-# lab settings.
-ip link set dev "$IFNAME" mtu 4200 \
-	|| log "warning: failed to set mtu 4200 on $IFNAME"
+# The MTU stays at the bridge's 1500: the host taps are 1500, so a
+# larger guest MTU drops every RoCE frame over 1500 bytes and every
+# bulk transfer ends in retry-exceeded.
 
 # Checksum / segmentation offloads are emulated for SoftRoCE and only
 # add latency; turn them off. Each -K flag is best-effort (some
@@ -109,4 +107,4 @@ for feat in tx rx tso gso gro; do
 done
 
 # 5. Summary.
-log "configured $linkname on $IFNAME (mtu 4200, offloads off)"
+log "configured $linkname on $IFNAME (offloads off)"

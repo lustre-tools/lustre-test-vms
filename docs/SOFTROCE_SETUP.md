@@ -39,7 +39,7 @@ ltvm create <hh><N>-rdma-b --vcpus 2 --mem 2048 --target rocky9 \
 ltvm list
 ```
 
-Note the RXE link lands on the **extra** NIC (eth1, MTU 4200), not on
+Note the RXE link lands on the **extra** NIC (eth1), not on
 the management NIC eth0 -- keeping RDMA traffic off the interface ssh
 and /etc/hosts rely on.  Check it came up:
 
@@ -115,22 +115,11 @@ Repeat for `ib_read_bw` and `ib_send_bw`. Typical result on default
 verbs at default message size. The numbers are dominated by SoftRoCE
 overhead, not the wire.
 
-### 5. (Optional) Bigger MTU for less-bad numbers
+### 5. MTU
 
-```bash
-ssh <hh><N>-rdma-a 'ip link set eth0 mtu 9000'
-ssh <hh><N>-rdma-b 'ip link set eth0 mtu 9000'
-```
-
-Then re-create the rxe link to pick up the new MTU:
-
-```bash
-ssh <hh><N>-rdma-a 'rdma link delete rxe0 && \
-    rdma link add rxe0 type rxe netdev eth0'
-```
-
-(Same on B.) Active RDMA MTU should now be 4096. The host bridge needs
-to support the larger MTU end-to-end; if pings stop working, revert.
+The NICs stay at 1500 bytes, because the host taps and bridge are 1500
+and drop anything larger: a guest MTU above that lets LNet ping work
+but ends every bulk transfer in retry-exceeded.
 
 ## Gotchas
 
