@@ -495,7 +495,9 @@ device served by a host daemon that copies straight between the
 guests' memory, and LNet comes up on o2ib over it: about 25 GB/s of
 LNet between two VMs, where the bridge gives 1.  Use it when a test
 needs network speed (bulk I/O, many clients); ordinary functional
-testing does not.  `--nic shmnet` is a TCP NIC on the same daemon's
+testing does not.  Plain TCP programs can ride it too, through SMC:
+`smc_run iperf3 ...` in a `--shmrdma` VM (`smcss` shows the
+connections).  `--nic shmnet` is a TCP NIC on the same daemon's
 switch.  ltvm builds and starts the daemon (`ltvm vm shmrdmad status`);
 never stop it while VMs use it, since their devices die until they
 restart.  On a multi-NUMA host, put the VMs that talk to each other

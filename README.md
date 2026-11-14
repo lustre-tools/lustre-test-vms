@@ -544,7 +544,8 @@ that KSM cannot merge, so it counts at overcommit times its size.
 the host are one memcpy by a host daemon ltvm runs, and LNet comes up
 on o2ib over it: about 25 GB/s between two VMs where the bridge gives
 1 GB/s.  `--nic shmnet` puts a virtio-net NIC on the same daemon's
-switch instead of the bridge.  See [docs/SHMRDMA.md](docs/SHMRDMA.md).
+switch instead of the bridge, and TCP programs can use the RDMA
+device through SMC (`smc_run CMD`).  See [docs/SHMRDMA.md](docs/SHMRDMA.md).
 
 ```bash
 ltvm cluster create co2 --shmrdma mgs+mds+oss:co2-srv:3 client:co2-c1

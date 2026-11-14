@@ -96,6 +96,55 @@ ltvm vm shmrdmad [status|start|stop]
   Shared memfd memory also gets no transparent huge pages unless the
   host's `shmem_enabled` allows them.
 
+## SMC sockets over shmrdma
+
+SMC-R moves a TCP connection's data over RDMA once both ends agree on
+it in the TCP handshake, and it runs over the shmrdma device unchanged,
+as over any RoCE HCA.  So any TCP program can use shmrdma, with no
+change to it.  ltvm kernels are built with `CONFIG_SMC`, images carry
+smc-tools, and a `--shmrdma` VM's boot loads `smc`, adds the SMC user
+EID `LTVM-SHMRDMA`, and sets `net.smc.wmem` and `net.smc.rmem` to 1 MB
+(`shmrdma/guest/shmrdma-boot.sh`).  SMC v2 off s390 connects two peers
+only when they share a user EID; without one every connection falls
+back to TCP.
+
+```bash
+smc_run iperf3 -s                       # smc-tools: TCP sockets become SMC
+LD_PRELOAD=./smc_preload.so iperf3 -c HOST
+smcss                                   # SMC connections, and which fell back
+smcr -d stats                           # counts, including fallbacks
+```
+
+`smc_preload.so` is built from `shmrdma/tools/smc_preload.c` (the
+build line is in its header), for images without smc-tools (Debian
+13 has none; the boot hook adds the EID with `tools/smc_ueid.py`
+there).  Socket buffers stay at or below 16 MB, because SMC-R
+registers each as one memory region and the device takes up to 4096
+pages; 1 MB measured best for LNet bulk, 4 MB was slower.
+
+On Sookie, between two VMs:
+
+| | TCP (bridge) | SMC over shmrdma |
+|---|---|---|
+| iperf3, 1 stream | 18.5 Gbit/s | 34 to 56 Gbit/s |
+| iperf3, 4 streams | 15.8 Gbit/s | 70 to 91 Gbit/s |
+| LNet bulk, conns_per_peer=4 | 1.2 to 1.5 GB/s | 4.1 to 4.6 GB/s |
+| LNet ping, 1 in flight | 1,100/s | 6,300 to 8,200/s |
+
+No connection fell back to TCP.  Two caveats:
+
+- **LNet over SMC needs a Lustre patch that is not in Lustre**: an
+  lnet `socket_smc=1` parameter that makes socklnd open its sockets
+  as SMC.  It is a local commit (branch socklnd-smc in the shmrdma
+  Lustre worktree), not posted.  o2iblnd straight over the device is
+  faster still (above), so this matters for testing socklnd.
+- **A kernel bug.** When an SMC connection falls back to TCP, an
+  in-kernel `kernel_accept()` of it dereferences NULL in
+  `smc_accept_dequeue` (upstream too).  socklnd's acceptor hits it;
+  userspace programs do not.  A fix exists but has not been sent
+  anywhere, and ltvm kernels do not carry it, so make sure peers share
+  the EID (the boot hook does) before running socklnd over SMC.
+
 ## Architecture
 
 ```
@@ -183,11 +232,11 @@ a guest that is merely slow to refill.
   Virtqueues would cost a descriptor chain per work request and could
   not be polled by the daemon without the guest's cooperation. Rings
   the daemon polls make the busy path syscall-free and exit-free.
-- **shmnet rather than SMC-D for the socket path.** The Rocky 9 and 10
-  kernels are built without `CONFIG_SMC`, and SMC's capability
-  negotiation is a TCP SYN option compiled into the core TCP stack, so
-  SMC needs a kernel rebuild. A vhost-user-net switch needs no guest
-  change at all and speeds up every protocol.
+- **shmnet and SMC-R, not SMC-D, for sockets.** SMC-R needs no new
+  device: it runs over shmrdma.  SMC-D would need a virtual ISM
+  device, and in these kernels an ISM device can only register from
+  the s390 driver.  shmnet needs no guest change at all and speeds up
+  every protocol, at the cost of the guest TCP stack.
 
 ### Limits
 

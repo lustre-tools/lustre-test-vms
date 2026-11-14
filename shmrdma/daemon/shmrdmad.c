@@ -240,7 +240,8 @@ struct mr {
 	uint32_t npages;
 	uint32_t fpo;		/* offset of iova in the first page */
 	bool valid;
-	uint64_t pages[SHMRDMA_MAX_FRPL];
+	uint32_t cap;		/* entries pages[] has room for */
+	uint64_t *pages;	/* grows, never shrinks or moves once used */
 };
 
 struct worker;
@@ -1242,6 +1243,16 @@ static int exec_reg_mr(struct qp *qp, struct shmrdma_sq_wqe *w)
 		d->mrs[idx] = mr;
 	}
 	REL(&mr->valid, false);
+	if (w->reg.npages > mr->cap) {
+		/* a FastReg MR's page list is sized once, at its first use */
+		uint32_t cap = w->reg.npages < 64 ? 64 : w->reg.npages;
+		uint64_t *np = realloc(mr->pages, cap * sizeof(*np));
+
+		if (!np)
+			return WC_GENERAL_ERR;
+		mr->pages = np;
+		mr->cap = cap;
+	}
 	mr->key = w->reg.key;
 	mr->iova = w->reg.iova;
 	mr->length = w->reg.length;
@@ -1622,6 +1633,8 @@ static void dev_reset_state(struct vdev *d)
 	}
 	if (d->mrs) {
 		for (int i = 0; i < SHMRDMA_MAX_MR; i++) {
+			if (d->mrs[i])
+				free(d->mrs[i]->pages);
 			free(d->mrs[i]);
 			d->mrs[i] = NULL;
 		}
@@ -1860,6 +1873,8 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		if (idx >= SHMRDMA_MAX_MR || !d->mrs)
 			return -EINVAL;
 		wlock();
+		if (d->mrs[idx])
+			free(d->mrs[idx]->pages);
 		free(d->mrs[idx]);
 		d->mrs[idx] = NULL;
 		wunlock();

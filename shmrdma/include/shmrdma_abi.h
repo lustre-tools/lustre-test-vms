@@ -42,7 +42,7 @@ enum {
 #define SHMRDMA_MAX_QP		4096	/* qpn < this */
 #define SHMRDMA_MAX_CQ		8192	/* cqn < this; also EQ size */
 #define SHMRDMA_MAX_GID		32
-#define SHMRDMA_MAX_FRPL	512	/* fast-reg page list length */
+#define SHMRDMA_MAX_FRPL	4096	/* fast-reg page list length */
 #define SHMRDMA_MAX_QP_WR	16384
 #define SHMRDMA_MAX_CQE		(1 << 20)
 #define SHMRDMA_MAX_SGE		16

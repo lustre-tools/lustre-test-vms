@@ -1134,7 +1134,12 @@ def build_image(
             # builds for this kernel.  Not for a cross build: the build
             # container runs the target's arch.
             if kver and not cross:
-                from .shmrdma import MODPROBE_CONF, build_kmod
+                from .shmrdma import (
+                    GUEST_FILES,
+                    MODPROBE_CONF,
+                    SRC_DIR,
+                    build_kmod,
+                )
 
                 shm_ko = build_kmod(target_config, kernel, kver)
                 if shm_ko is not None:
@@ -1148,6 +1153,16 @@ def build_image(
                     lines.append(
                         "COPY shmrdma/shmrdma.conf /etc/modprobe.d/shmrdma.conf"
                     )
+                    # rc.local runs the boot hook for fc_shmrdma=1.
+                    names = []
+                    for rel in GUEST_FILES:
+                        name = Path(rel).name
+                        shutil.copy2(SRC_DIR / rel, shm_dest / name)
+                        names.append(f"/usr/local/sbin/{name}")
+                        lines.append(
+                            f"COPY shmrdma/{name} /usr/local/sbin/{name}"
+                        )
+                    lines.append(f"RUN chmod 0755 {' '.join(names)}")
                     shmrdma_kmod = True
             if kver:
                 lines.append(f"RUN ldconfig && depmod -a {kver}")

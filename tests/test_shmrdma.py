@@ -503,3 +503,34 @@ def test_daemon_nodes(monkeypatch, tmp_path: Path) -> None:
         assert shmrdma.daemon_cpus() == "0-7,16-23"
         monkeypatch.setenv("LTVM_SHMRDMAD_NODES", "5")
         assert shmrdma.daemon_cpus() == ""
+
+
+def test_guest_files_parse() -> None:
+    """The boot hook and the EID tool baked into images are well formed."""
+    for rel in shmrdma.GUEST_FILES:
+        path = shmrdma.SRC_DIR / rel
+        assert os.access(path, os.X_OK), rel
+    r = subprocess.run(
+        ["bash", "-n", str(shmrdma.SRC_DIR / "guest/shmrdma-boot.sh")],
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    compile(
+        (shmrdma.SRC_DIR / "tools/smc_ueid.py").read_text(),
+        "smc_ueid.py",
+        "exec",
+    )
+
+
+def test_guest_files_feed_image_hash(tmp_path: Path) -> None:
+    from ltvm_pkg.target_config import TargetConfig
+
+    tc = TargetConfig("rocky10")
+    before = tc.input_hash("image")
+    src = tmp_path / "shmrdma"
+    shutil.copytree(shmrdma.SRC_DIR, src)
+    with (src / "guest" / "shmrdma-boot.sh").open("a") as f:
+        f.write("# changed\n")
+    with patch("ltvm_pkg.shmrdma.SRC_DIR", src):
+        assert tc.input_hash("image") != before
