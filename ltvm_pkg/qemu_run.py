@@ -467,8 +467,41 @@ def numa_problem(vcpus: int, mem: int, nodes: int) -> str | None:
     return None
 
 
+def host_node_cpus(node: int) -> str:
+    """The cpulist of host NUMA node *node*, or "" if it has none."""
+    try:
+        return (
+            Path(f"/sys/devices/system/node/node{node}/cpulist")
+            .read_text()
+            .strip()
+        )
+    except OSError:
+        return ""
+
+
+def host_node_problem(node: int) -> str | None:
+    """Why *node* cannot hold a VM on this host, or None if it can."""
+    if node < 0:
+        return None
+    if not host_node_cpus(node):
+        nodes = sorted(
+            p.name.removeprefix("node")
+            for p in Path("/sys/devices/system/node").glob("node[0-9]*")
+        )
+        return (
+            f"--host-node {node}: this host has no NUMA node {node} with "
+            f"CPUs (its nodes: {', '.join(nodes) or 'none'})"
+        )
+    return None
+
+
 def smp_args(
-    vcpus: int, mem: int, nodes: int, dist: str = "", shared: bool = False
+    vcpus: int,
+    mem: int,
+    nodes: int,
+    dist: str = "",
+    shared: bool = False,
+    host_node: int = -1,
 ) -> list[str]:
     """-smp, -m and, for a simulated NUMA layout, -numa arguments.
 
@@ -479,13 +512,16 @@ def smp_args(
     QEMU's 10/20 default.
 
     *shared* backs guest RAM with a shared memfd, which a vhost-user
-    backend (shmrdmad) can map; without NUMA nodes it is the backend
+    backend (shmrdmad) can map.  *host_node* binds guest RAM to that
+    host NUMA node.  Either makes, without NUMA nodes, the backend
     ``ram0``, which -machine must name.
     """
     backend = "memory-backend-memfd" if shared else "memory-backend-ram"
     share = ",share=on" if shared else ""
+    if host_node >= 0:
+        share += f",host-nodes={host_node},policy=bind"
     if nodes <= 1:
-        if shared:
+        if shared or host_node >= 0:
             return [
                 "-smp",
                 str(vcpus),
@@ -1132,8 +1168,11 @@ def _start_qemu(vm: VMInfo) -> None:
     # shmrdmad must be serving every socket the VM's shmrdma device and
     # shmnet NICs connect to, and must be able to map guest RAM.
     shm_socks = shmrdma.prepare_launch(vm) if vm.shared_ram else []
-    if vm.shared_ram and vm.numa_nodes <= 1:
+    if (vm.shared_ram or vm.host_node >= 0) and vm.numa_nodes <= 1:
         machine = f"{machine},memory-backend=ram0"
+    problem = host_node_problem(vm.host_node)
+    if problem:
+        die(f"{vm.name}: {problem}")
 
     qemu_args = [
         qemu_bin,
@@ -1144,7 +1183,12 @@ def _start_qemu(vm: VMInfo) -> None:
         "-cpu",
         cpu_model,
         *smp_args(
-            vm.vcpus, vm.mem, vm.numa_nodes, vm.numa_dist, shared=vm.shared_ram
+            vm.vcpus,
+            vm.mem,
+            vm.numa_nodes,
+            vm.numa_dist,
+            shared=vm.shared_ram,
+            host_node=vm.host_node,
         ),
         "-kernel",
         str(kernel),
@@ -1228,13 +1272,19 @@ def _start_qemu(vm: VMInfo) -> None:
             ]
         elif _base_type == "shmnet":
             _sock = shm_socks.pop(1 if vm.shmrdma else 0)
+            # One queue pair per vCPU, up to the daemon's limit, so the
+            # guest spreads flows over its vCPUs.
+            _q = min(vm.vcpus, shmrdma.SHMNET_MAX_QUEUES)
+            _mq = f",queues={_q}" if _q > 1 else ""
+            _dev_mq = f",mq=on,vectors={2 * _q + 2}" if _q > 1 else ""
             qemu_args += [
                 "-chardev",
                 f"socket,id=char{_netdev_id},path={_sock}",
                 "-netdev",
-                f"vhost-user,id={_netdev_id},chardev=char{_netdev_id}",
+                f"vhost-user,id={_netdev_id},chardev=char{_netdev_id}{_mq}",
                 "-device",
-                f"{net_driver},netdev={_netdev_id},mac={_mac},mrg_rxbuf=on",
+                f"{net_driver},netdev={_netdev_id},mac={_mac},mrg_rxbuf=on"
+                f"{_dev_mq}",
             ]
         elif _base_type == "passthrough":
             _bdf = _nic.bdf
@@ -1266,6 +1316,15 @@ def _start_qemu(vm: VMInfo) -> None:
         ]
 
     qemu_args += data_disk_args(vm, blk_driver)
+
+    if vm.host_node >= 0:
+        # QEMU's threads inherit the affinity across -daemonize.
+        qemu_args = [
+            "taskset",
+            "-c",
+            host_node_cpus(vm.host_node),
+            *qemu_args,
+        ]
 
     try:
         _prepare_log(vm)

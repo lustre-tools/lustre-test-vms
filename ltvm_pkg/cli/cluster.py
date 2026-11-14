@@ -213,6 +213,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> int:
             numa_dist=args.numa_dist,
             numa_dist_file=args.numa_dist_file,
             shmrdma=args.shmrdma,
+            host_node=args.host_node,
             owner_id=args.owner_id,
             dry_run=args.dry_run,
             wait=args.wait,

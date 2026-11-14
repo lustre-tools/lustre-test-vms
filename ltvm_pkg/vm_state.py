@@ -674,6 +674,11 @@ class VMInfo:
     # Empty is none.
     shmrdma: str = ""
 
+    # Host NUMA node the VM is bound to (--host-node): its memory is
+    # allocated there and its QEMU runs on that node's CPUs.  -1 is
+    # none.
+    host_node: int = -1
+
     # Failover pairs (--share-disks / --disks-from).  A VM with
     # share_disks opens its data disks so that one other QEMU can open
     # them too.  A VM with disks_from has no data disks of its own: it
@@ -806,6 +811,7 @@ class VMInfo:
             f"NUMA_NODES={self.numa_nodes}\n"
             f"NUMA_DIST={self.numa_dist}\n"
             f"SHMRDMA={self.shmrdma}\n"
+            f"HOST_NODE={'' if self.host_node < 0 else self.host_node}\n"
             f"SHARE_DISKS={int(self.share_disks)}\n"
             f"DISKS_FROM={self.disks_from}\n"
             f"DISK_DIR={self.disk_dir}\n"
@@ -996,6 +1002,7 @@ class VMInfo:
             numa_nodes=int(vals.get("NUMA_NODES") or 0),
             numa_dist=vals.get("NUMA_DIST", ""),
             shmrdma=vals.get("SHMRDMA", ""),
+            host_node=int(vals.get("HOST_NODE") or -1),
             share_disks=vals.get("SHARE_DISKS", "0") == "1",
             disks_from=vals.get("DISKS_FROM", ""),
             disk_dir=vals.get("DISK_DIR", ""),

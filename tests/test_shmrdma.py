@@ -240,3 +240,93 @@ def test_daemon_builds_clean() -> None:
         text=True,
     )
     assert r.returncode == 0, r.stderr
+
+
+class TestHostNode:
+    def test_backend_bound(self) -> None:
+        args = qemu_run.smp_args(2, 2048, 0, host_node=3)
+        assert (
+            "memory-backend-ram,id=ram0,size=2048M,host-nodes=3,policy=bind"
+            in args
+        )
+
+    def test_numa_backends_bound(self) -> None:
+        joined = " ".join(qemu_run.smp_args(4, 4096, 2, host_node=1))
+        assert joined.count("host-nodes=1,policy=bind") == 2
+
+    def test_shared_and_bound(self) -> None:
+        args = qemu_run.smp_args(2, 2048, 0, shared=True, host_node=0)
+        assert (
+            "memory-backend-memfd,id=ram0,size=2048M,share=on,"
+            "host-nodes=0,policy=bind" in args
+        )
+
+    def test_launch_pins(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        vm = _make_vm(tmp_vmdir)
+        vm.host_node = 1
+        h = _LaunchHarness()
+        with (
+            patch("ltvm_pkg.qemu_run.host_node_cpus", return_value="8-15"),
+        ):
+            _run_launch(vm, h)
+        argv = h.qemu_argv or []
+        assert argv[:3] == ["taskset", "-c", "8-15"]
+        assert argv[argv.index("-machine") + 1].endswith(",memory-backend=ram0")
+
+    def test_launch_refuses_missing_node(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        vm = _make_vm(tmp_vmdir)
+        vm.host_node = 999
+        with pytest.raises(SystemExit):
+            _run_launch(vm, _LaunchHarness())
+
+    def test_info_round_trip(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        vm = _make_vm(tmp_vmdir)
+        vm.save()
+        assert VMInfo.load(vm.name).host_node == -1
+        vm.host_node = 2
+        vm.save()
+        assert VMInfo.load(vm.name).host_node == 2
+
+
+class TestShmnetQueues:
+    def _argv(self, vmdir: Path, sock: Path, vcpus: int) -> str:
+        vm = _make_vm(vmdir)
+        vm.vcpus = vcpus
+        vm.nics = [NicSpec(type="shmnet", socket=str(sock))]
+        vm.nic_ips = ["172.16.100.50"]
+        h = _LaunchHarness()
+        _run_launch(vm, h)
+        return " ".join(h.qemu_argv or [])
+
+    def test_one_pair_per_vcpu(self, tmp_vmdir, daemon_socket) -> None:  # noqa: F811
+        joined = self._argv(tmp_vmdir, daemon_socket, 4)
+        assert "chardev=charnet1,queues=4" in joined
+        assert "mrg_rxbuf=on,mq=on,vectors=10" in joined
+
+    def test_capped(self, tmp_vmdir, daemon_socket) -> None:  # noqa: F811
+        joined = self._argv(tmp_vmdir, daemon_socket, 32)
+        assert "queues=8" in joined and "vectors=18" in joined
+
+    def test_single(self, tmp_vmdir, daemon_socket) -> None:  # noqa: F811
+        joined = self._argv(tmp_vmdir, daemon_socket, 1)
+        assert "queues=" not in joined and "mq=on" not in joined
+
+
+def test_daemon_nodes(monkeypatch, tmp_path: Path) -> None:
+    conf = tmp_path / "ltvm.conf"
+    conf.write_text("[shmrdma]\nnodes = 0, 2\n")
+    monkeypatch.setenv("LTVM_SITE_CONFIG", str(conf))
+    monkeypatch.delenv("LTVM_SHMRDMAD_NODES", raising=False)
+    assert shmrdma.daemon_nodes() == [0, 2]
+    monkeypatch.setenv("LTVM_SHMRDMAD_NODES", "1")
+    assert shmrdma.daemon_nodes() == [1]
+    monkeypatch.setenv("LTVM_SHMRDMAD_NODES", "")
+    assert shmrdma.daemon_nodes() == []
+    with patch(
+        "ltvm_pkg.qemu_run.host_node_cpus",
+        side_effect=lambda n: {0: "0-7", 2: "16-23"}.get(n, ""),
+    ):
+        monkeypatch.setenv("LTVM_SHMRDMAD_NODES", "0,2")
+        assert shmrdma.daemon_cpus() == "0-7,16-23"
+        monkeypatch.setenv("LTVM_SHMRDMAD_NODES", "5")
+        assert shmrdma.daemon_cpus() == ""

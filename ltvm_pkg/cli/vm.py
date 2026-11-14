@@ -163,6 +163,8 @@ def cmd_vm_shmrdmad(args: argparse.Namespace) -> int:
         print(f"  rdma socket: {st['rdma_socket']}")
         print(f"  net socket:  {st['net_socket']}")
         print(f"  log:         {st['log']}")
+        if st["cpus"]:
+            print(f"  cpus:        {st['cpus']}")
         if st["current"] is False:
             print("  built from older sources; stop it once no VM uses it")
         vms = st["vms"]

@@ -61,6 +61,11 @@ MODPROBE_CONF = (
     "softdep virtiofs pre: shmrdma\n"
 )
 
+# Queue pairs a shmnet NIC gets: one per vCPU up to this many (the
+# daemon answers VHOST_USER_GET_QUEUE_NUM with 8).  1 turns
+# multiqueue off.
+SHMNET_MAX_QUEUES = 8
+
 DAEMON_CFLAGS = (
     "-O2",
     "-g",
@@ -339,6 +344,8 @@ def ensure_daemon() -> Daemon:
         from .vm_state import VMInfo
 
         scope = _guest_scope(VMInfo(name=f"shmrdmad-{d.user}", ip=""))
+        cpus = daemon_cpus()
+        pin = ["taskset", "-c", cpus] if cpus else []
         extra = os.environ.get("LTVM_SHMRDMAD_ARGS", "").split()
         with open(d.log_path, "a") as logf:
             logf.write(
@@ -348,6 +355,7 @@ def ensure_daemon() -> Daemon:
             proc = subprocess.Popen(
                 [
                     *scope,
+                    *pin,
                     str(binary),
                     "-s",
                     str(d.rdma_socket),
@@ -370,6 +378,42 @@ def ensure_daemon() -> Daemon:
             time.sleep(0.05)
         d.pid_path.unlink(missing_ok=True)
         raise RuntimeError(f"shmrdmad did not come up; see {d.log_path}")
+
+
+def daemon_nodes() -> list[int]:
+    """Host NUMA nodes the daemon runs on: ``LTVM_SHMRDMAD_NODES`` or
+    /etc/ltvm.conf's ``[shmrdma] nodes``, comma-separated; empty is
+    unpinned."""
+    raw = os.environ.get("LTVM_SHMRDMAD_NODES")
+    if raw is None:
+        import configparser
+
+        from . import site_config
+
+        parser = configparser.ConfigParser()
+        try:
+            parser.read(site_config.path())
+            raw = parser.get("shmrdma", "nodes", fallback="")
+        except configparser.Error:
+            raw = ""
+    try:
+        return [int(n) for n in raw.replace(" ", "").split(",") if n]
+    except ValueError:
+        log.warning("shmrdmad nodes %r are not node numbers; unpinned", raw)
+        return []
+
+
+def daemon_cpus() -> str:
+    """The cpulist the daemon is pinned to, or "" for none."""
+    from .qemu_run import host_node_cpus
+
+    lists = [host_node_cpus(n) for n in daemon_nodes()]
+    if not all(lists):
+        log.warning(
+            "shmrdmad nodes %s: not all exist; unpinned", daemon_nodes()
+        )
+        return ""
+    return ",".join(lists)
 
 
 def stop_daemon(force: bool = False) -> str:
@@ -403,6 +447,7 @@ def status() -> dict[str, object]:
     current = _source_hash(_DAEMON_FILES)[:16]
     return {
         "running": bool(pid),
+        "cpus": daemon_cpus(),
         "pid": pid,
         "user": d.user,
         "rdma_socket": str(d.rdma_socket),

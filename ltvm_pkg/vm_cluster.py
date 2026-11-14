@@ -579,6 +579,7 @@ def _create_one_node(
     numa_nodes: int = 0,
     numa_dist: str = "",
     shmrdma: str = "",
+    host_node: int = -1,
     kernel: str | None = None,
     variant: str = "base",
     share_disks: bool = False,
@@ -664,6 +665,8 @@ def _create_one_node(
         cmd += [f"--numa-dist={numa_dist}"]
     if shmrdma:
         cmd += [f"--shmrdma={shmrdma}"]
+    if host_node >= 0:
+        cmd += ["--host-node", str(host_node)]
     if wait_seconds:
         cmd += ["--wait", str(wait_seconds)]
 
@@ -1204,6 +1207,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                     numa_nodes=numa_nodes,
                     numa_dist=dist,
                     shmrdma=getattr(args, "shmrdma", "") or "",
+                    host_node=getattr(args, "host_node", -1),
                     kernel=node_kernels[node.name]
                     or (None if node_targets[node.name] else kernel),
                     variant="base" if node_targets[node.name] else variant,

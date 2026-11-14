@@ -27,6 +27,7 @@ from .paths import load_meta_safe
 from .priv import SudoUnavailable, chmod_regular, sudo_prime, sudo_run
 from .qemu_run import (
     die,
+    host_node_problem,
     is_running,
     kill_qemu,
     launch_qemu,
@@ -935,6 +936,7 @@ def _allocate_and_persist_vm(
             numa_nodes=getattr(args, "numa_nodes", 0) or 0,
             numa_dist=getattr(args, "numa_dist", "") or "",
             shmrdma=getattr(args, "shmrdma", "") or "",
+            host_node=getattr(args, "host_node", -1),
             share_disks=bool(getattr(args, "share_disks", False)),
             disks_from=getattr(args, "disks_from", None) or "",
             disk_dir=getattr(args, "disk_dir", "") or "",
@@ -1224,6 +1226,9 @@ def _validate_create_bounds(
         die(f"--mem must be > 0 (got {args.mem})")
     if getattr(args, "shmrdma", ""):
         _check_shmrdma_socket(args.shmrdma)
+    problem = host_node_problem(getattr(args, "host_node", -1))
+    if problem:
+        die(problem)
 
     # Disk count bounds: vda is the rootfs, leaving vdb..vdz for
     # MDT+OST.  Past 25 letters we'd write /dev/vd{ etc. into the
@@ -3351,6 +3356,12 @@ def cmd_set(args: argparse.Namespace) -> None:
     dist_file = getattr(args, "numa_dist_file", None)
     cache = getattr(args, "disk_cache", None)
     shm = getattr(args, "shmrdma", None)
+    host_node = getattr(args, "host_node", None)
+    if host_node is not None:
+        problem = host_node_problem(host_node)
+        if problem:
+            die(problem)
+        host_node = max(host_node, -1)
     if (
         args.vcpus is None
         and args.mem is None
@@ -3359,10 +3370,11 @@ def cmd_set(args: argparse.Namespace) -> None:
         and dist_file is None
         and cache is None
         and shm is None
+        and host_node is None
     ):
         die(
             "nothing to set: give --vcpus, --mem, --numa-nodes, "
-            "--numa-dist[-file], --disk-cache and/or --shmrdma"
+            "--numa-dist[-file], --disk-cache, --host-node and/or --shmrdma"
         )
     if shm == "none":
         shm = ""
@@ -3400,6 +3412,9 @@ def cmd_set(args: argparse.Namespace) -> None:
             _check_shmrdma_image(vm.image, vm.os_id, "")
         changes.append(f"shmrdma {vm.shmrdma or 'none'} -> {shm or 'none'}")
         vm.shmrdma = shm
+    if host_node is not None and host_node != vm.host_node:
+        changes.append(f"host node {vm.host_node} -> {host_node}")
+        vm.host_node = host_node
     if dist_inline == "default":
         dist = ""
     else:
