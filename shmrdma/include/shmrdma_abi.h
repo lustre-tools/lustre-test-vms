@@ -15,7 +15,17 @@
 #ifndef SHMRDMA_ABI_H
 #define SHMRDMA_ABI_H
 
+#if defined(__linux__) || defined(__KERNEL__)
 #include <linux/types.h>
+#else
+/* the host daemon on macOS: the same fixed-width types */
+#include <stdint.h>
+typedef uint8_t __u8;
+typedef uint16_t __u16;
+typedef uint32_t __u32;
+typedef uint64_t __u64;
+typedef int32_t __s32;
+#endif
 
 /*
  * QEMU does not let users create its generic vhost-user-device, so the

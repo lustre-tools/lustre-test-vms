@@ -22,8 +22,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/epoll.h>
-#include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -31,9 +29,9 @@
 #include <time.h>
 #include <unistd.h>
 
-#include <immintrin.h>
 
 #include "../include/shmrdma_abi.h"
+#include "plat.h"
 
 /* ---------------------------------------------------------------- */
 /* utilities                                                        */
@@ -50,21 +48,6 @@ static int g_verbose;
 #define RLX(p)		__atomic_load_n((p), __ATOMIC_RELAXED)
 #define REL(p, v)	__atomic_store_n((p), (v), __ATOMIC_RELEASE)
 #define FENCE()		__atomic_thread_fence(__ATOMIC_SEQ_CST)
-
-static inline uint64_t now_ns(void)
-{
-	struct timespec ts;
-
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
-}
-
-static inline void cpu_relax(void)
-{
-#if defined(__x86_64__)
-	__builtin_ia32_pause();
-#endif
-}
 
 /* ib_wc_status values */
 enum {
@@ -227,7 +210,7 @@ struct cq {
 	struct shmrdma_cq_rec *rec;
 	struct ring ring;
 	uint32_t prod;
-	pthread_spinlock_t lock;
+	plat_spinlock_t lock;
 	bool overflowed;
 };
 
@@ -261,7 +244,7 @@ struct qp {
 	uint32_t rnr_retry;
 	struct qp *peer;
 	uint64_t peer_gen;
-	pthread_spinlock_t rq_lock;
+	plat_spinlock_t rq_lock;
 	struct worker *w;
 	uint64_t stall_since;
 	bool fatal_sent;
@@ -289,7 +272,7 @@ struct vdev {
 	int nold;
 	struct mapping old[64];
 	struct vq vq[MAX_VQS];
-	pthread_spinlock_t evq_lock;	/* event vq + EQ */
+	plat_spinlock_t evq_lock;	/* event vq + EQ */
 
 	bool initialized;
 	struct shmrdma_dev_shared *shared;
@@ -312,8 +295,9 @@ struct worker {
 	int idx;
 	pthread_t thr;
 	pthread_mutex_t mtx;
-	int evfd;
-	int epfd;		/* evfd and the doorbells of its devices */
+	int evfd;		/* wake notifier, read end */
+	int evfd_w;		/* and its write end (the same fd on Linux) */
+	int epfd;		/* poller: evfd and the doorbells of its devices */
 	int sleeping;
 	struct qp **qps;
 	int nqps, cap;
@@ -357,8 +341,6 @@ static void wunlock(void)
 /* wake sleeping workers; only those with a QP on d, unless d is NULL */
 static void wake_workers_for(struct vdev *d)
 {
-	uint64_t one = 1;
-
 	for (int i = 0; i < g_nworkers; i++) {
 		struct worker *w = &g_workers[i];
 		bool mine = !d;
@@ -374,7 +356,7 @@ static void wake_workers_for(struct vdev *d)
 			pthread_mutex_unlock(&w->mtx);
 		}
 		if (mine)
-			(void)!write(w->evfd, &one, 8);
+			plat_notifier_signal(w->evfd_w);
 	}
 }
 
@@ -385,17 +367,15 @@ static void wake_workers(void)
 
 /*
  * The doorbell of a device a worker serves goes straight into the
- * worker's epoll, edge-triggered: every guest kick wakes it with no
- * hop through the main thread, and nobody needs to read the eventfd.
+ * worker's poller, edge-triggered: every guest kick wakes it with no
+ * hop through the main thread.  The worker drains it when woken (a
+ * pipe on macOS stops signalling once full).
  */
 static void worker_watch(struct worker *w, int fd)
 {
-	struct epoll_event ev = { .events = EPOLLIN | EPOLLET };
-
 	if (fd < 0)
 		return;
-	ev.data.fd = fd;
-	if (epoll_ctl(w->epfd, EPOLL_CTL_ADD, fd, &ev) && errno != EEXIST)
+	if (plat_poller_add(w->epfd, fd, (void *)(intptr_t)fd, true))
 		LOG("worker%d: watch fd %d: %s", w->idx, fd, strerror(errno));
 }
 
@@ -445,8 +425,6 @@ static void *uaddr_hva(struct vdev *d, uint64_t ua, uint64_t len)
 
 static void vq_signal(struct vq *q)
 {
-	uint64_t one = 1;
-
 	if (q->callfd < 0)
 		return;
 	if (q->event_idx) {
@@ -462,7 +440,7 @@ static void vq_signal(struct vq *q)
 	} else if (ACQ(&q->avail->flags) & VRING_AVAIL_F_NO_INTERRUPT) {
 		return;
 	}
-	(void)!write(q->callfd, &one, 8);
+	plat_notifier_signal(q->callfd);
 }
 
 static void vq_push_used(struct vq *q, uint32_t head, uint32_t len)
@@ -506,7 +484,7 @@ static void dev_raise_eq(struct vdev *d, uint32_t cqn, uint32_t type)
 {
 	if (!d->eq)
 		return;
-	pthread_spin_lock(&d->evq_lock);
+	plat_spin_lock(&d->evq_lock);
 	struct shmrdma_eqe *e = &d->eq[d->eq_prod & (d->eq_entries - 1)];
 
 	e->cqn = cqn;
@@ -518,7 +496,7 @@ static void dev_raise_eq(struct vdev *d, uint32_t cqn, uint32_t type)
 		REL(&d->shared->eq_armed, 0);
 		dev_send_irq(d);
 	}
-	pthread_spin_unlock(&d->evq_lock);
+	plat_spin_unlock(&d->evq_lock);
 }
 
 /* ---------------------------------------------------------------- */
@@ -528,7 +506,7 @@ static void cq_post(struct cq *cq, const struct shmrdma_cqe *cqe, bool solicited
 {
 	bool event = false;
 
-	pthread_spin_lock(&cq->lock);
+	plat_spin_lock(&cq->lock);
 	uint32_t cons = ACQ(&cq->rec->cons);
 
 	if (cq->prod - cons >= cq->ring.entries) {
@@ -536,7 +514,7 @@ static void cq_post(struct cq *cq, const struct shmrdma_cqe *cqe, bool solicited
 			LOG("dev%d cq%u overflow (prod %u cons %u)",
 			    cq->dev->id, cq->cqn, cq->prod, cons);
 		cq->overflowed = true;
-		pthread_spin_unlock(&cq->lock);
+		plat_spin_unlock(&cq->lock);
 		return;
 	}
 	memcpy(ring_entry(&cq->ring, cq->prod), cqe, sizeof(*cqe));
@@ -553,7 +531,7 @@ static void cq_post(struct cq *cq, const struct shmrdma_cqe *cqe, bool solicited
 						__ATOMIC_SEQ_CST))
 			event = true;
 	}
-	pthread_spin_unlock(&cq->lock);
+	plat_spin_unlock(&cq->lock);
 	if (event)
 		dev_raise_eq(cq->dev, cq->cqn, SHMRDMA_EQE_COMP);
 }
@@ -561,46 +539,11 @@ static void cq_post(struct cq *cq, const struct shmrdma_cqe *cqe, bool solicited
 /* ---------------------------------------------------------------- */
 /* copying                                                          */
 
-/*
- * Bulk copies use non-temporal stores: the destination is another
- * guest's buffer that will not be in this CPU's cache, and streaming
- * stores skip reading each destination line first.
- */
-__attribute__((target("avx2")))
-static void copy_stream(uint8_t *dst, const uint8_t *src, uint64_t n)
-{
-	uint64_t head = (32 - ((uintptr_t)dst & 31)) & 31;
-
-	if (head > n)
-		head = n;
-	memcpy(dst, src, head);
-	dst += head;
-	src += head;
-	n -= head;
-	while (n >= 128) {
-		__m256i a = _mm256_loadu_si256((const __m256i *)src);
-		__m256i b = _mm256_loadu_si256((const __m256i *)(src + 32));
-		__m256i c = _mm256_loadu_si256((const __m256i *)(src + 64));
-		__m256i d = _mm256_loadu_si256((const __m256i *)(src + 96));
-
-		_mm256_stream_si256((__m256i *)dst, a);
-		_mm256_stream_si256((__m256i *)(dst + 32), b);
-		_mm256_stream_si256((__m256i *)(dst + 64), c);
-		_mm256_stream_si256((__m256i *)(dst + 96), d);
-		dst += 128;
-		src += 128;
-		n -= 128;
-	}
-	memcpy(dst, src, n);
-}
-
-static bool g_have_avx2;
-
 static inline void copy_bytes(uint8_t *dst, const uint8_t *src, uint64_t n,
 			      bool nt)
 {
-	if (nt && g_have_avx2 && n >= 512)
-		copy_stream(dst, src, n);
+	if (nt && plat_have_nt && n >= 512)
+		plat_copy_nt(dst, src, n);
 	else
 		memcpy(dst, src, n);
 }
@@ -753,7 +696,7 @@ static int sg_copy_nt(struct sg_iter *dst, struct sg_iter *src, uint64_t len,
 	if (dl)
 		dst->off -= dl;
 	if (nt)
-		_mm_sfence();
+		plat_nt_fence();
 	return 0;
 }
 
@@ -987,7 +930,7 @@ static void qp_flush_rq(struct qp *qp)
 {
 	struct shmrdma_cqe c = {0};
 
-	pthread_spin_lock(&qp->rq_lock);
+	plat_spin_lock(&qp->rq_lock);
 	uint32_t prod = ACQ(&qp->rec->rq_prod);
 
 	while (qp->rq_cons != prod) {
@@ -1001,7 +944,7 @@ static void qp_flush_rq(struct qp *qp)
 		qp->rq_cons++;
 	}
 	REL(&qp->rec->rq_cons, qp->rq_cons);
-	pthread_spin_unlock(&qp->rq_lock);
+	plat_spin_unlock(&qp->rq_lock);
 }
 
 enum { EX_DONE, EX_STALL };
@@ -1074,11 +1017,11 @@ static int exec_ud_send(struct qp *qp, struct shmrdma_sq_wqe *w,
 	struct shmrdma_cqe c = {0};
 	int rc = WC_SUCCESS;
 
-	pthread_spin_lock(&peer->rq_lock);
+	plat_spin_lock(&peer->rq_lock);
 	uint32_t prod = ACQ(&peer->rec->rq_prod);
 
 	if (peer->rq_cons == prod) {
-		pthread_spin_unlock(&peer->rq_lock);
+		plat_spin_unlock(&peer->rq_lock);
 		DBG("dev%d qp%u: UD drop, no recv on dev%d qp%u", qp->dev->id,
 		    qp->qpn, pd->id, peer->qpn);
 		return WC_SUCCESS;
@@ -1117,7 +1060,7 @@ static int exec_ud_send(struct qp *qp, struct shmrdma_sq_wqe *w,
 		if (sg_copy(&dst, &src, len)) {
 			if (src.err) {
 				rc = src.err;
-				pthread_spin_unlock(&peer->rq_lock);
+				plat_spin_unlock(&peer->rq_lock);
 				return rc;
 			}
 			c.status = dst.err;
@@ -1126,7 +1069,7 @@ static int exec_ud_send(struct qp *qp, struct shmrdma_sq_wqe *w,
 	c.byte_len = len + SHMRDMA_GRH_BYTES;
 	peer->rq_cons++;
 	REL(&peer->rec->rq_cons, peer->rq_cons);
-	pthread_spin_unlock(&peer->rq_lock);
+	plat_spin_unlock(&peer->rq_lock);
 	cq_post(peer->rcq, &c, w->flags & SHMRDMA_WQE_SOLICITED);
 	return rc;
 }
@@ -1144,11 +1087,11 @@ static int deliver_recv(struct qp *qp, struct qp *peer,
 	int rc = WC_SUCCESS;
 	uint64_t len = 0;
 
-	pthread_spin_lock(&peer->rq_lock);
+	plat_spin_lock(&peer->rq_lock);
 	uint32_t prod = ACQ(&peer->rec->rq_prod);
 
 	if (peer->rq_cons == prod) {
-		pthread_spin_unlock(&peer->rq_lock);
+		plat_spin_unlock(&peer->rq_lock);
 		return -1;
 	}
 	struct shmrdma_rq_wqe *rw = ring_entry(&peer->rq, peer->rq_cons);
@@ -1186,7 +1129,7 @@ static int deliver_recv(struct qp *qp, struct qp *peer,
 				if (sg_copy_par(&dst, &src, len)) {
 					if (src.err) {
 						/* local fault: peer unaffected */
-						pthread_spin_unlock(&peer->rq_lock);
+						plat_spin_unlock(&peer->rq_lock);
 						return src.err;
 					}
 					c.status = dst.err;
@@ -1213,7 +1156,7 @@ static int deliver_recv(struct qp *qp, struct qp *peer,
 	}
 	peer->rq_cons++;
 	REL(&peer->rec->rq_cons, peer->rq_cons);
-	pthread_spin_unlock(&peer->rq_lock);
+	plat_spin_unlock(&peer->rq_lock);
 	cq_post(peer->rcq, &c, w->flags & SHMRDMA_WQE_SOLICITED);
 	if (c.status != WC_SUCCESS) {
 		peer->state = QPS_ERR;
@@ -1516,13 +1459,13 @@ static void *worker_main(void *arg)
 		pthread_mutex_unlock(&w->mtx);
 
 		if (!work) {
-			struct epoll_event evs[16];
-			uint64_t v;
-			int ne = epoll_wait(w->epfd, evs, 16, stalled ? 1 : 1000);
+			struct plat_event evs[16];
+			int ne = plat_poller_wait(w->epfd, evs, 16,
+						  stalled ? 1 : 1000);
 
+			/* its wake fd and doorbells alike */
 			for (int i = 0; i < ne; i++)
-				if (evs[i].data.fd == w->evfd)
-					(void)!read(w->evfd, &v, 8);
+				plat_notifier_drain((int)(intptr_t)evs[i].tag);
 		}
 		__atomic_store_n(&w->sleeping, 0, __ATOMIC_SEQ_CST);
 		pthread_mutex_lock(&w->mtx);
@@ -1604,7 +1547,7 @@ static void qp_free(struct qp *qp)
 {
 	free(qp->sq.pages);
 	free(qp->rq.pages);
-	pthread_spin_destroy(&qp->rq_lock);
+	plat_spin_destroy(&qp->rq_lock);
 	free(qp);
 }
 
@@ -1627,7 +1570,7 @@ static void dev_reset_state(struct vdev *d)
 		if (!cq)
 			continue;
 		free(cq->ring.pages);
-		pthread_spin_destroy(&cq->lock);
+		plat_spin_destroy(&cq->lock);
 		free(cq);
 		d->cqs[i] = NULL;
 	}
@@ -1737,7 +1680,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 			free(cq);
 			return -EINVAL;
 		}
-		pthread_spin_init(&cq->lock, 0);
+		plat_spin_init(&cq->lock);
 		cq->prod = RLX(&cq->rec->prod);
 		wlock();
 		d->cqs[cqn] = cq;
@@ -1761,7 +1704,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		d->cqs[cqn] = NULL;
 		wunlock();
 		free(cq->ring.pages);
-		pthread_spin_destroy(&cq->lock);
+		plat_spin_destroy(&cq->lock);
 		free(cq);
 		return 0;
 	}
@@ -1799,7 +1742,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 			free(qp);
 			return rc ? rc : -EINVAL;
 		}
-		pthread_spin_init(&qp->rq_lock, 0);
+		plat_spin_init(&qp->rq_lock);
 		qp->sq_cons = RLX(&qp->rec->sq_cons);
 		qp->rq_cons = RLX(&qp->rec->rq_cons);
 		qp->rnr_retry = 7;
@@ -1960,20 +1903,18 @@ struct ep_tag {
 static void ep_add(int fd, int kind, struct vdev *d, int vq)
 {
 	struct ep_tag *t = calloc(1, sizeof(*t));
-	struct epoll_event ev = { .events = EPOLLIN };
 
 	t->kind = kind;
 	t->d = d;
 	t->vq = vq;
-	ev.data.ptr = t;
-	if (epoll_ctl(g_epfd, EPOLL_CTL_ADD, fd, &ev))
-		LOG("epoll add %d: %s", fd, strerror(errno));
+	if (plat_poller_add(g_epfd, fd, t, false))
+		LOG("poller add %d: %s", fd, strerror(errno));
 }
 
 static void ep_del(int fd)
 {
 	/* the tag leaks; there are few */
-	epoll_ctl(g_epfd, EPOLL_CTL_DEL, fd, NULL);
+	plat_poller_del(g_epfd, fd);
 }
 
 static void unmap_all(struct mapping *m, int n)
@@ -2019,7 +1960,7 @@ static void dev_destroy(struct vdev *d)
 	unmap_all(d->map, d->nmap);
 	unmap_all(d->old, d->nold);
 	free(d->mrs);
-	pthread_spin_destroy(&d->evq_lock);
+	plat_spin_destroy(&d->evq_lock);
 	free(d);
 }
 
@@ -2034,7 +1975,7 @@ static int vu_reply(struct vdev *d, uint32_t req, const void *p, uint32_t sz)
 	m.h.flags = VU_VERSION | VU_FLAG_REPLY;
 	m.h.size = sz;
 	memcpy(m.b, p, sz);
-	return send(d->sock, &m, sizeof(m.h) + sz, MSG_NOSIGNAL) < 0 ? -1 : 0;
+	return send(d->sock, &m, sizeof(m.h) + sz, PLAT_MSG_NOSIGNAL) < 0 ? -1 : 0;
 }
 
 static int set_mem_table(struct vdev *d, struct vu_memtab *mt, int *fds, int nfds)
@@ -2105,7 +2046,7 @@ static int handle_msg(struct vdev *d)
 	ssize_t n;
 	int rc = 0;
 
-	n = recvmsg(d->sock, &mh, MSG_CMSG_CLOEXEC);
+	n = plat_recvmsg(d->sock, &mh);
 	if (n <= 0) {
 		free(pl);
 		return -1;
@@ -2241,9 +2182,9 @@ static int handle_msg(struct vdev *d)
 			net_detach(d);
 		else if (st.index == SHMRDMA_VQ_CTRL)
 			dev_reset_state(d);	/* device stopped/reset */
-		pthread_spin_lock(&d->evq_lock);
+		plat_spin_lock(&d->evq_lock);
 		vq_stop(d, st.index);
-		pthread_spin_unlock(&d->evq_lock);
+		plat_spin_unlock(&d->evq_lock);
 		wunlock();
 		st.num = d->vq[st.index].last_avail;
 		rc = vu_reply(d, h.request, &st, sizeof(st));
@@ -2269,11 +2210,11 @@ static int handle_msg(struct vdev *d)
 			if (fd >= 0)
 				close(fd);
 		} else if (h.request == VU_SET_VRING_CALL) {
-			pthread_spin_lock(&d->evq_lock);
+			plat_spin_lock(&d->evq_lock);
 			int old = q->callfd;
 
 			q->callfd = fd;
-			pthread_spin_unlock(&d->evq_lock);
+			plat_spin_unlock(&d->evq_lock);
 			if (old >= 0)
 				close(old);
 		} else {
@@ -2370,7 +2311,7 @@ static int handle_msg(struct vdev *d)
 
 static void accept_conn(int lsock, int kind)
 {
-	int s = accept4(lsock, NULL, NULL, SOCK_CLOEXEC);
+	int s = plat_accept(lsock);
 	struct vdev *d;
 
 	if (s < 0)
@@ -2383,7 +2324,7 @@ static void accept_conn(int lsock, int kind)
 		d->vq[i].kickfd = -1;
 		d->vq[i].callfd = -1;
 	}
-	pthread_spin_init(&d->evq_lock, 0);
+	plat_spin_init(&d->evq_lock);
 	wlock();
 	d->next = g_devs;
 	g_devs = d;
@@ -2396,11 +2337,11 @@ static void accept_conn(int lsock, int kind)
 
 static void on_kick(struct vdev *d, int idx)
 {
-	uint64_t v;
 	struct vq *q = &d->vq[idx];
 
-	if (q->kickfd < 0 || read(q->kickfd, &v, 8) < 0)
+	if (q->kickfd < 0)
 		return;
+	plat_notifier_drain(q->kickfd);
 	if (d->kind == KIND_NET) {
 		/* TX: frames to send; RX: buffers for a stalled sender */
 		if (idx & 1)
@@ -2414,10 +2355,10 @@ static void on_kick(struct vdev *d, int idx)
 		ctrl_process(d);
 		break;
 	case SHMRDMA_VQ_EVENT:
-		pthread_spin_lock(&d->evq_lock);
+		plat_spin_lock(&d->evq_lock);
 		if (d->irq_pending)
 			dev_send_irq(d);
-		pthread_spin_unlock(&d->evq_lock);
+		plat_spin_unlock(&d->evq_lock);
 		break;
 	case SHMRDMA_VQ_DOORBELL:
 		wake_workers_for(d);
@@ -2490,8 +2431,7 @@ int main(int argc, char **argv)
 	}
 	if (g_nworkers < 1)
 		g_nworkers = 1;
-	__builtin_cpu_init();
-	g_have_avx2 = __builtin_cpu_supports("avx2") && !getenv("SHMRDMA_NO_NT");
+	plat_init();
 	signal(SIGPIPE, SIG_IGN);
 	signal(SIGUSR1, on_usr1);
 	setvbuf(stderr, NULL, _IOLBF, 0);
@@ -2502,14 +2442,10 @@ int main(int argc, char **argv)
 
 		w->idx = i;
 		pthread_mutex_init(&w->mtx, NULL);
-		w->evfd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-		w->epfd = epoll_create1(EPOLL_CLOEXEC);
-		{
-			struct epoll_event ev = { .events = EPOLLIN,
-						  .data.fd = w->evfd };
-
-			epoll_ctl(w->epfd, EPOLL_CTL_ADD, w->evfd, &ev);
-		}
+		w->evfd = plat_notifier_new(&w->evfd_w);
+		w->epfd = plat_poller_new();
+		plat_poller_add(w->epfd, w->evfd, (void *)(intptr_t)w->evfd,
+				false);
 	}
 	for (int i = 0; i < g_nworkers; i++)
 		pthread_create(&g_workers[i].thr, NULL, worker_main,
@@ -2528,21 +2464,21 @@ int main(int argc, char **argv)
 	umask(077);
 	strncpy(sa.sun_path, g_sock_path, sizeof(sa.sun_path) - 1);
 	unlink(g_sock_path);
-	g_lsock = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	g_lsock = plat_unix_socket();
 	if (bind(g_lsock, (struct sockaddr *)&sa, sizeof(sa)) ||
 	    listen(g_lsock, 64)) {
 		LOG("listen %s: %s", g_sock_path, strerror(errno));
 		return 1;
 	}
 	chmod(g_sock_path, 0600);
-	g_epfd = epoll_create1(EPOLL_CLOEXEC);
+	g_epfd = plat_poller_new();
 	ep_add(g_lsock, EP_LISTEN, NULL, 0);
 	if (*g_net_sock_path) {
 		struct sockaddr_un na = { .sun_family = AF_UNIX };
 
 		strncpy(na.sun_path, g_net_sock_path, sizeof(na.sun_path) - 1);
 		unlink(g_net_sock_path);
-		g_lsock_net = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+		g_lsock_net = plat_unix_socket();
 		if (bind(g_lsock_net, (struct sockaddr *)&na, sizeof(na)) ||
 		    listen(g_lsock_net, 64)) {
 			LOG("listen %s: %s", g_net_sock_path, strerror(errno));
@@ -2556,15 +2492,15 @@ int main(int argc, char **argv)
 	    g_sock_path, g_nworkers, g_ncopiers, g_spin_ns / 1000);
 
 	for (;;) {
-		struct epoll_event evs[32];
-		int n = epoll_wait(g_epfd, evs, 32, 1000);
+		struct plat_event evs[32];
+		int n = plat_poller_wait(g_epfd, evs, 32, 1000);
 
 		if (g_stats) {
 			g_stats = 0;
 			dump_stats();
 		}
 		for (int i = 0; i < n; i++) {
-			struct ep_tag *t = evs[i].data.ptr;
+			struct ep_tag *t = evs[i].tag;
 
 			switch (t->kind) {
 			case EP_LISTEN:
@@ -2574,13 +2510,13 @@ int main(int argc, char **argv)
 				accept_conn(g_lsock_net, KIND_NET);
 				break;
 			case EP_SOCK:
-				if (evs[i].events & (EPOLLHUP | EPOLLERR) ||
+				if (evs[i].hup ||
 				    handle_msg(t->d)) {
 					struct vdev *d = t->d;
 
 					/* stale tags for d's fds may follow */
 					for (int j = i + 1; j < n; j++) {
-						struct ep_tag *u = evs[j].data.ptr;
+						struct ep_tag *u = evs[j].tag;
 
 						if (u->d == d)
 							u->kind = 0;

@@ -64,7 +64,7 @@ struct netport {
 	uint8_t mac[6];
 	bool mac_known;
 	bool attached;		/* on the switch */
-	pthread_spinlock_t rx_lock[NET_MAX_QP];
+	plat_spinlock_t rx_lock[NET_MAX_QP];
 	struct netq q[NET_MAX_QP];
 	uint64_t tx_pkts, tx_bytes, rx_pkts, rx_bytes, drops;
 	struct netport *next;
@@ -245,7 +245,7 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 	    !(d->features & VNET_F_GUEST_CSUM))
 		return DLV_DROP;
 
-	pthread_spin_lock(&dp->rx_lock[rqi]);
+	plat_spin_lock(&dp->rx_lock[rqi]);
 	uint16_t ai = ACQ(&q->avail->idx);
 	uint16_t idx = q->last_avail;
 
@@ -256,13 +256,13 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 		if (idx == ai || nb == 64 || ns + MAX_SEGS > MAX_SEGS * 2) {
 			if (idx == ai)
 				net_want_rx_kick(q);
-			pthread_spin_unlock(&dp->rx_lock[rqi]);
+			plat_spin_unlock(&dp->rx_lock[rqi]);
 			return idx == ai ? DLV_NOBUF : DLV_DROP;
 		}
 		bufs[nb].head = q->avail->ring[idx % q->num];
 		n = vq_chain(d, q, bufs[nb].head, true, segs + ns, MAX_SEGS, &cap);
 		if (n <= 0) {
-			pthread_spin_unlock(&dp->rx_lock[rqi]);
+			plat_spin_unlock(&dp->rx_lock[rqi]);
 			return DLV_DROP;
 		}
 		bufs[nb].first = ns;
@@ -299,7 +299,7 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 		REL(&q->used->flags, VRING_USED_F_NO_NOTIFY);
 	STAT_ADD(dp->rx_pkts, 1);
 	STAT_ADD(dp->rx_bytes, len);
-	pthread_spin_unlock(&dp->rx_lock[rqi]);
+	plat_spin_unlock(&dp->rx_lock[rqi]);
 	FENCE();
 	vq_signal(q);
 	return DLV_OK;
@@ -554,7 +554,7 @@ static void net_port_new(struct vdev *d)
 
 	p->dev = d;
 	for (int i = 0; i < NET_MAX_QP; i++) {
-		pthread_spin_init(&p->rx_lock[i], 0);
+		plat_spin_init(&p->rx_lock[i]);
 		p->q[i].p = p;
 		p->q[i].qi = i;
 	}
@@ -577,7 +577,7 @@ static void net_port_free(struct vdev *d)
 			break;
 		}
 	for (int i = 0; i < NET_MAX_QP; i++)
-		pthread_spin_destroy(&p->rx_lock[i]);
+		plat_spin_destroy(&p->rx_lock[i]);
 	free(p);
 	d->port = NULL;
 }
