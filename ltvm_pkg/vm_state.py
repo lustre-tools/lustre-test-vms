@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
 
-from .nic_spec import NicSpec, load_stored
+from .nic_spec import NicSpec, NicSpecError, load_stored, parse_speed
 
 
 def _atomic_write(
@@ -684,6 +684,10 @@ class VMInfo:
     disk_cache: str = ""
     disk_prealloc: str = ""
 
+    # Link speed in Mbps eth0 advertises (--eth0-speed); None is
+    # nic_spec.DEFAULT_SPEED, 0 none.  Extra NICs carry their own.
+    eth0_speed: int | None = None
+
     @property
     def info_path(self) -> Path:
         return SOCKETS / f"{self.name}.info"
@@ -798,6 +802,7 @@ class VMInfo:
             f"DISK_DIR={self.disk_dir}\n"
             f"DISK_CACHE={self.disk_cache}\n"
             f"DISK_PREALLOC={self.disk_prealloc}\n"
+            f"ETH0_SPEED={'' if self.eth0_speed is None else self.eth0_speed}\n"
         )
         _atomic_write(self.info_path, text)
 
@@ -987,11 +992,21 @@ class VMInfo:
             disk_dir=vals.get("DISK_DIR", ""),
             disk_cache=vals.get("DISK_CACHE", ""),
             disk_prealloc=vals.get("DISK_PREALLOC", ""),
+            eth0_speed=_load_speed(vals.get("ETH0_SPEED", "")),
         )
 
     @staticmethod
     def all_names() -> list[str]:
         return [f.stem for f in sorted(SOCKETS.glob("*.info"))]
+
+
+def _load_speed(raw: str) -> int | None:
+    """ETH0_SPEED as saved: empty is the default."""
+    try:
+        return parse_speed(raw) if raw else None
+    except NicSpecError:
+        log.warning("ignoring unreadable ETH0_SPEED=%s", raw)
+        return None
 
 
 class VMNotFound(Exception):

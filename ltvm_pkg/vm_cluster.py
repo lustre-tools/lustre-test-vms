@@ -584,6 +584,7 @@ def _create_one_node(
     disk_dir: str = "",
     disk_cache: str = "",
     disk_prealloc: str = "",
+    eth0_speed: int | None = None,
 ) -> tuple[str, int, str]:
     """Create a single cluster VM via ltvm subprocess.
 
@@ -661,6 +662,8 @@ def _create_one_node(
         cmd += ["--numa-nodes", str(numa_nodes)]
     if numa_dist:
         cmd += [f"--numa-dist={numa_dist}"]
+    if eth0_speed is not None:
+        cmd += ["--eth0-speed", str(eth0_speed)]
     if wait_seconds:
         cmd += ["--wait", str(wait_seconds)]
 
@@ -1193,6 +1196,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                     or (None if node_targets[node.name] else kernel),
                     variant="base" if node_targets[node.name] else variant,
                     share_disks=node.name in shared,
+                    eth0_speed=getattr(args, "eth0_speed", None),
                     **disk_opts,
                 ): node
                 for node in wave

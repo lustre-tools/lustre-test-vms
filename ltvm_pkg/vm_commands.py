@@ -21,7 +21,7 @@ from . import numa_dist, rootless, vm_claim
 from .deploy import configure_test_disks, premount_cleanup_script
 from .host_setup import is_macos
 from .nic_guest import wait_for_layout as guest_nic_layout
-from .nic_spec import NicSpec, NicSpecError
+from .nic_spec import DEFAULT_SPEED, NicSpec, NicSpecError, parse_speed
 from .nic_spec import numa_problem as nic_numa_problem
 from .paths import load_meta_safe
 from .priv import SudoUnavailable, chmod_regular, sudo_prime, sudo_run
@@ -706,6 +706,7 @@ _RESOURCE_FLAGS = {
     "disk_dir": "--disk-dir",
     "disk_cache": "--disk-cache",
     "disk_prealloc": "--disk-prealloc",
+    "eth0_speed": "--eth0-speed",
 }
 
 # Flags whose typed spelling differs from the stored one only cosmetically.
@@ -939,6 +940,7 @@ def _allocate_and_persist_vm(
             disk_dir=getattr(args, "disk_dir", "") or "",
             disk_cache=getattr(args, "disk_cache", "") or "",
             disk_prealloc=getattr(args, "disk_prealloc", "") or "",
+            eth0_speed=getattr(args, "eth0_speed", None),
         )
         problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes)
         if problem:
@@ -1041,6 +1043,7 @@ def _print_create_plan(
         "disk_dir": getattr(args, "disk_dir", "") or "",
         "disk_cache": getattr(args, "disk_cache", "") or "",
         "disk_prealloc": getattr(args, "disk_prealloc", "") or "",
+        "eth0_speed": getattr(args, "eth0_speed", None),
         "owner_id": getattr(args, "owner_id", None),
     }
     if args.json:
@@ -3309,7 +3312,8 @@ def cmd_restore(args: argparse.Namespace) -> None:
 
 
 def cmd_set(args: argparse.Namespace) -> None:
-    """Change the vCPUs, memory, NUMA layout or disk cache of a stopped VM.
+    """Change the vCPUs, memory, NUMA layout, disk cache or eth0 speed of
+    a stopped VM.
 
     All are read from the .info file each time QEMU is launched, so
     the new values take effect at the next start, and the VM keeps its
@@ -3321,6 +3325,7 @@ def cmd_set(args: argparse.Namespace) -> None:
     dist_inline = getattr(args, "numa_dist", None)
     dist_file = getattr(args, "numa_dist_file", None)
     cache = getattr(args, "disk_cache", None)
+    speed_arg = getattr(args, "eth0_speed", None)
     if (
         args.vcpus is None
         and args.mem is None
@@ -3328,11 +3333,18 @@ def cmd_set(args: argparse.Namespace) -> None:
         and dist_inline is None
         and dist_file is None
         and cache is None
+        and speed_arg is None
     ):
         die(
             "nothing to set: give --vcpus, --mem, --numa-nodes, "
-            "--numa-dist[-file] and/or --disk-cache"
+            "--numa-dist[-file], --disk-cache and/or --eth0-speed"
         )
+    speed: int | None = None
+    if speed_arg is not None and speed_arg != "default":
+        try:
+            speed = parse_speed(speed_arg)
+        except NicSpecError as e:
+            die(f"--eth0-speed: {e}")
     if cache == "default":
         cache = ""
     if cache and cache not in DISK_CACHE_MODES:
@@ -3394,6 +3406,11 @@ def cmd_set(args: argparse.Namespace) -> None:
             f"disk cache {vm.disk_cache or 'default'} -> {cache or 'default'}"
         )
         vm.disk_cache = cache
+    if speed_arg is not None and speed != vm.eth0_speed:
+        changes.append(
+            f"eth0 speed {_speed_label(vm.eth0_speed)} -> {_speed_label(speed)}"
+        )
+        vm.eth0_speed = speed
     problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes) or (
         nic_numa_problem(vm.nics, vm.numa_nodes)
     )
@@ -3405,6 +3422,13 @@ def cmd_set(args: argparse.Namespace) -> None:
 
     vm.save()
     print(f"{vm.name}: {', '.join(changes)} (takes effect at next start)")
+
+
+def _speed_label(speed: int | None) -> str:
+    """A stored eth0 speed as `vm set` reports it."""
+    if speed is None:
+        return f"default ({DEFAULT_SPEED})"
+    return str(speed) if speed else "none"
 
 
 # ── doctor ───────────────────────────────────────────────

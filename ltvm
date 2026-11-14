@@ -258,6 +258,11 @@ try:
         complete_vms,
         complete_zfs_versions,
     )
+    from ltvm_pkg.nic_spec import (  # noqa: E402
+        DEFAULT_SPEED,
+        NicSpecError,
+        parse_speed,
+    )
     from ltvm_pkg.shell_completion import (  # noqa: E402
         SHELLS as SHELL_COMPLETION_SHELLS,
     )
@@ -549,6 +554,31 @@ def _update_check_disabled(args: argparse.Namespace) -> bool:
     if getattr(args, "no_update", False):
         return True
     return os.environ.get("LTVM_NO_UPDATE", "") not in ("", "0")
+
+
+def _speed_arg(value: str) -> int:
+    """--eth0-speed's value, as parse_speed reads it."""
+    try:
+        return parse_speed(value)
+    except NicSpecError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
+def _add_eth0_speed_arg(p: argparse.ArgumentParser, where: str = "") -> None:
+    """--eth0-speed, for create and cluster create."""
+    p.add_argument(
+        "--eth0-speed",
+        dest="eth0_speed",
+        type=_speed_arg,
+        default=None,
+        metavar="MBPS",
+        help=(
+            f"Link speed the mgmt NIC (eth0) advertises{where}, in Mbps; "
+            f"0 or 'none' advertises none.  Default {DEFAULT_SPEED}, "
+            "from which LNet's socklnd picks conns_per_peer 4; an extra "
+            "NIC takes speed= in its --nic spec."
+        ),
+    )
 
 
 def _add_numa_dist_args(p: argparse.ArgumentParser, where: str) -> None:
@@ -1533,9 +1563,13 @@ def build_parser() -> argparse.ArgumentParser:
             "omit its 'bdf=' key.  node=N (tcp, softroce) puts the NIC "
             "on guest NUMA node N of --numa-nodes. net= groups NICs on "
             "one LNet network; subnet= and subnet6= choose their IPv4 "
-            "and IPv6 data networks (tcp, softroce only)."
+            "and IPv6 data networks (tcp, softroce only).  speed=MBPS "
+            "(tcp, softroce) is the link speed the NIC advertises, "
+            f"default {DEFAULT_SPEED}; speed=0 or speed=none advertises "
+            "none, as upstream CI's VMs do."
         ),
     )
+    _add_eth0_speed_arg(_vm_create_args)
     _vm_create_args.add_argument(
         "--numa-nodes",
         dest="numa_nodes",
@@ -1881,6 +1915,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="New QEMU cache mode for the data disks; 'default' drops "
         "cache= and leaves QEMU's own (writeback)",
+    )
+    vsetp.add_argument(
+        "--eth0-speed",
+        dest="eth0_speed",
+        default=None,
+        metavar="MBPS",
+        help="New link speed for eth0 in Mbps; 0 or 'none' advertises "
+        f"none, 'default' is ltvm's ({DEFAULT_SPEED})",
     )
     vsetp.set_defaults(func=cmd_vm_set)
 
@@ -2394,6 +2436,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Extra NIC applied to every node; repeat for multiple. "
         "Same syntax as `ltvm create --nic`.",
     )
+    _add_eth0_speed_arg(ccp, " on every node")
     ccp.add_argument(
         "--numa-nodes",
         dest="numa_nodes",
