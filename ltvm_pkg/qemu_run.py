@@ -721,6 +721,68 @@ def _guest_cgroup(vm: VMInfo) -> str | None:
     return f"/user.slice/user-{uid}.slice/user@{uid}.service/app.slice"
 
 
+VHOST_NET = Path("/dev/vhost-net")
+
+
+def vhost_net_setting() -> str:
+    """``auto`` or ``off``: LTVM_VHOST_NET, else /etc/ltvm.conf's
+    ``[network] vhost_net``, else auto."""
+    value = os.environ.get("LTVM_VHOST_NET")
+    if value is None:
+        parser = configparser.ConfigParser()
+        try:
+            parser.read(site_config.path())
+            value = parser.get("network", "vhost_net", fallback="auto")
+        except configparser.Error as e:
+            _warn_site_config(str(e))
+            value = "auto"
+    value = value.strip().lower()
+    if value in ("off", "0", "no", "false"):
+        return "off"
+    if value not in ("auto", "on", "1", "yes", "true", ""):
+        _warn_site_config(
+            f"[network] vhost_net must be auto or off, not {value!r}"
+        )
+    return "auto"
+
+
+def vhost_net_usable(as_user: bool) -> bool:
+    """Whether QEMU can turn on vhost-net, so vhost=on will not stop it.
+
+    QEMU refuses to start when vhost=on cannot be set up, so the device
+    must open read-write for whoever runs QEMU: this user when QEMU
+    runs as the user, root otherwise (then the vhost_net module must be
+    loaded, since root can open the node but gets ENODEV without it).
+    """
+    if vhost_net_setting() == "off" or not VHOST_NET.exists():
+        return False
+    try:
+        fd = os.open(VHOST_NET, os.O_RDWR | os.O_CLOEXEC)
+    except PermissionError:
+        return not as_user and Path("/sys/module/vhost_net").is_dir()
+    except OSError:
+        return False
+    os.close(fd)
+    return True
+
+
+def bridge_netdev(
+    netdev_id: str, tap: str, helper: Path | None, vhost: bool
+) -> str:
+    """The -netdev of a virtio-net NIC on ltvm's bridge (Linux).
+
+    -netdev bridge has no vhost option, but a tap netdev runs the same
+    bridge helper given helper= and br=, so that is the spelling when
+    vhost-net is on.  Without a helper ltvm made the TAP itself.
+    """
+    on = ",vhost=on" if vhost else ""
+    if helper is not None:
+        if vhost:
+            return f"tap,id={netdev_id},helper={helper},br={BRIDGE}{on}"
+        return f"bridge,id={netdev_id},br={BRIDGE},helper={helper}"
+    return f"tap,id={netdev_id},ifname={tap},script=no,downscript=no{on}"
+
+
 def _guest_scope(vm: VMInfo) -> list[str]:
     """A ``systemd-run`` prefix that gives an unprivileged QEMU a scope of its own.
 
@@ -1094,6 +1156,9 @@ def _start_qemu(vm: VMInfo) -> None:
     else:
         cpu_model = "Nehalem"
 
+    # In-kernel virtio-net datapath, where QEMU will be able to use it.
+    vhost = not macos and vhost_net_usable(as_user)
+
     qemu_args = [
         qemu_bin,
         "-name",
@@ -1126,9 +1191,7 @@ def _start_qemu(vm: VMInfo) -> None:
         (
             f"stream,id=net0,addr.type=unix,addr.path={vmnet_socket},server=off"
             if macos
-            else f"bridge,id=net0,br={BRIDGE},helper={helper}"
-            if helper is not None
-            else f"tap,id=net0,ifname={vm.tap},script=no,downscript=no"
+            else bridge_netdev("net0", vm.tap, helper, vhost)
         ),
         "-device",
         f"{net_driver},netdev=net0,mac={vm.mac}",
@@ -1169,14 +1232,8 @@ def _start_qemu(vm: VMInfo) -> None:
                     f"stream,id={_netdev_id},addr.type=unix,"
                     f"addr.path={vmnet_socket},server=off"
                 )
-            elif helper is not None:
-                _netdev_arg = (
-                    f"bridge,id={_netdev_id},br={BRIDGE},helper={helper}"
-                )
             else:
-                _netdev_arg = (
-                    f"tap,id={_netdev_id},ifname={_tap},script=no,downscript=no"
-                )
+                _netdev_arg = bridge_netdev(_netdev_id, _tap, helper, vhost)
             qemu_args += [
                 "-netdev",
                 _netdev_arg,

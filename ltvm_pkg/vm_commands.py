@@ -4145,6 +4145,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                         unregister_ssh_name(sname)
                         print("  fixed: removed ssh config")
 
+    # vhost-net: the in-kernel datapath ltvm's virtio-net NICs use when
+    # QEMU can open /dev/vhost-net.
+    if not is_macos():
+        from . import vhost_net
+
+        vrep = vhost_net.doctor(args.fix, qemu_as_user=rootless.readiness().ok)
+        for line in vrep.lines:
+            print(line)
+        issues += vrep.issues
+        fix_failures += vrep.failures
+
     if issues == 0:
         print("no issues found")
         return EXIT_OK

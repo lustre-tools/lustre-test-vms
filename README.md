@@ -536,6 +536,28 @@ as soon as guests write different data to them. The kernel boots with
 KSM off; `w /sys/kernel/mm/ksm/run - - - - 1` in a file under
 `/etc/tmpfiles.d/` turns it on at every boot.
 
+### vhost-net
+
+On Linux, ltvm's virtio-net NICs use the kernel's vhost-net datapath
+(`vhost=on`) whenever whoever runs QEMU can open `/dev/vhost-net`: the
+user on a host set up for unprivileged VMs (usually through the `kvm`
+group), root otherwise.  Where it cannot, VMs run without it, as
+before.  `ltvm install` loads `vhost_net`, makes it load at boot, and
+gives the `ltvm` group read-write access to the device (a udev rule,
+`/etc/udev/rules.d/70-ltvm-vhost-net.rules`, applied at once), as it
+gives that group the VM directories.  `ltvm doctor` reports the
+module and the device's group and mode against that, and `--fix` sets
+them; a host whose admin blocks the module with a modprobe
+`install ... /bin/false` rule keeps it blocked.  To turn it off for every user:
+
+```ini
+# /etc/ltvm.conf
+[network]
+vhost_net = off
+```
+
+or `LTVM_VHOST_NET=off` for one command.
+
 ### Shared host: hot and cold artifact storage
 
 On a host several people use, keep one artifacts tree for everybody,
