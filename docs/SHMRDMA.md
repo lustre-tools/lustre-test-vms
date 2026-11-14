@@ -57,8 +57,12 @@ ltvm vm shmrdmad [status|start|stop]
   the pinned vCPUs touching it first); `[shmrdma] nodes = N[,M]` in
   /etc/ltvm.conf, or `LTVM_SHMRDMAD_NODES`, pins the daemon to those
   nodes' CPUs when ltvm starts it.  Nothing is placed automatically.
-- **shmnet queues.** A shmnet NIC gets one queue pair per vCPU, up to
-  8, so the guest spreads its flows' receive work over its vCPUs.
+- **shmnet queues.** A shmnet NIC has one queue pair unless given
+  `queues=N` (up to 8): `--nic shmnet:queues=4`.  More queues spread
+  many TCP streams over the guest's vCPUs (the daemon picks a frame's
+  RX queue by flow hash) and help multi-stream iperf3, but on Sookie
+  they slowed socklnd with conns_per_peer=4 from 2.7-3.3 to 2.0-2.4
+  GB/s, so the default stays one.
 - **It is never restarted behind a VM's back.** QEMU's vhost-user
   devices do not reconnect, so a daemon restart breaks every attached
   guest's device until that VM restarts. `ltvm vm shmrdmad stop`
@@ -258,9 +262,8 @@ not the transport.
 then `cluster deploy --mount`: the module took its device at boot,
 lnet.conf came up as `o2ib0(eth0)`, the client mounted
 `192.168.100.230@o2ib:/lustre`, and lnet_selftest wrote 15.7 GB/s (1 MB,
-8 in flight) between the two.  Two `--nic shmnet --host-node 0` VMs
-got two queue pairs each and ran iperf3 at 37.7 Gbit/s with two
-streams.
+8 in flight) between the two.  Two 2-vCPU shmnet VMs on `--host-node 0`
+with two queue pairs each ran iperf3 at 37.7 Gbit/s with two streams.
 
 ### Correctness
 

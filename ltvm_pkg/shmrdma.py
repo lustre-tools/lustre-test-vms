@@ -65,11 +65,6 @@ MODPROBE_CONF = (
     "softdep virtiofs pre: shmrdma\n"
 )
 
-# Queue pairs a shmnet NIC gets: one per vCPU up to this many (the
-# daemon answers VHOST_USER_GET_QUEUE_NUM with 8).  1 turns
-# multiqueue off.
-SHMNET_MAX_QUEUES = 8
-
 DAEMON_CFLAGS = (
     "-O2",
     "-g",

@@ -451,28 +451,38 @@ class TestHostNode:
 
 
 class TestShmnetQueues:
-    def _argv(self, vmdir: Path, sock: Path, vcpus: int) -> str:
+    def _argv(self, vmdir: Path, sock: Path, spec: str) -> str:
         vm = _make_vm(vmdir)
-        vm.vcpus = vcpus
-        vm.nics = [NicSpec(type="shmnet", socket=str(sock))]
+        vm.vcpus = 4
+        vm.nics = [
+            NicSpec.parse(f"shmnet:{sock},{spec}" if spec else f"shmnet:{sock}")
+        ]
         vm.nic_ips = ["172.16.100.50"]
         h = _LaunchHarness()
         vm.save()
         _run_launch(vm, h)
         return " ".join(h.qemu_argv or [])
 
-    def test_one_pair_per_vcpu(self, tmp_vmdir, daemon_socket) -> None:  # noqa: F811
-        joined = self._argv(tmp_vmdir, daemon_socket, 4)
+    def test_single_by_default(self, tmp_vmdir, daemon_socket) -> None:  # noqa: F811
+        joined = self._argv(tmp_vmdir, daemon_socket, "")
+        assert "queues=" not in joined and "mq=on" not in joined
+
+    def test_opt_in(self, tmp_vmdir, daemon_socket) -> None:  # noqa: F811
+        joined = self._argv(tmp_vmdir, daemon_socket, "queues=4")
         assert "chardev=charnet1,queues=4" in joined
         assert "mrg_rxbuf=on,mq=on,vectors=10" in joined
 
-    def test_capped(self, tmp_vmdir, daemon_socket) -> None:  # noqa: F811
-        joined = self._argv(tmp_vmdir, daemon_socket, 32)
-        assert "queues=8" in joined and "vectors=18" in joined
+    @pytest.mark.parametrize("bad", ["0", "9", "x"])
+    def test_bounds(self, bad: str) -> None:
+        with pytest.raises(NicSpecError):
+            NicSpec.parse(f"shmnet:queues={bad}")
 
-    def test_single(self, tmp_vmdir, daemon_socket) -> None:  # noqa: F811
-        joined = self._argv(tmp_vmdir, daemon_socket, 1)
-        assert "queues=" not in joined and "mq=on" not in joined
+    def test_round_trip(self) -> None:
+        spec = NicSpec.parse("shmnet:queues=8")
+        assert str(spec) == "shmnet:queues=8"
+        assert NicSpec.parse(str(spec)).queues == 8
+        with pytest.raises(NicSpecError):
+            NicSpec.parse("tcp:queues=2")
 
 
 def test_daemon_nodes(monkeypatch, tmp_path: Path) -> None:

@@ -1307,9 +1307,10 @@ def _start_qemu(vm: VMInfo) -> None:
             ]
         elif _base_type == "shmnet":
             _sock = shm_socks.pop(1 if vm.shmrdma else 0)
-            # One queue pair per vCPU, up to the daemon's limit, so the
-            # guest spreads flows over its vCPUs.
-            _q = min(vm.vcpus, shmrdma.SHMNET_MAX_QUEUES)
+            # One queue pair unless queues=N: more spread many TCP
+            # streams over the guest's vCPUs, but slowed socklnd with
+            # conns_per_peer=4 on Sookie (2.0-2.4 GB/s against 2.7-3.3).
+            _q = _nic.queues
             _mq = f",queues={_q}" if _q > 1 else ""
             _dev_mq = f",mq=on,vectors={2 * _q + 2}" if _q > 1 else ""
             qemu_args += [

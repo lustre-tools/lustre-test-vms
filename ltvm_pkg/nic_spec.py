@@ -46,6 +46,8 @@ class NicSpec:
     # vhost-user socket of a shmnet NIC's switch; empty is the daemon
     # ltvm runs for this user.
     socket: str = ""
+    # Queue pairs of a shmnet NIC (queues=N).
+    queues: int = 1
 
     @classmethod
     def parse(cls, raw: str) -> NicSpec:
@@ -164,6 +166,19 @@ def socket_path_problem(value: str) -> str | None:
     return None
 
 
+# The most queue pairs shmrdmad gives a shmnet port.
+SHMNET_MAX_QUEUES = 8
+
+
+def _queues(value: str) -> int:
+    """A shmnet NIC's queue pairs, 1 to the daemon's limit."""
+    if not value.isdigit() or not 1 <= int(value) <= SHMNET_MAX_QUEUES:
+        raise NicSpecError(
+            f"--nic shmnet queues={value!r}: expected 1 to {SHMNET_MAX_QUEUES}"
+        )
+    return int(value)
+
+
 def _socket(value: str) -> str:
     """An absolute path to a shmrdmad switch socket."""
     problem = socket_path_problem(value)
@@ -260,6 +275,7 @@ _KEYS: dict[str, _Key] = {
     "subnet": _Key("subnet", ("tcp", "softroce", "shmnet"), _subnet4),
     "subnet6": _Key("subnet6", ("tcp", "softroce", "shmnet"), _subnet6),
     "socket": _Key("socket", ("shmnet",), _socket),
+    "queues": _Key("queues", ("shmnet",), _queues),
 }
 
 # The key a type's first item may give without "key=".

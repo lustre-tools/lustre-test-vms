@@ -1537,7 +1537,8 @@ def build_parser() -> argparse.ArgumentParser:
             "and IPv6 data networks (tcp, softroce, shmnet only).  "
             "'shmnet[:SOCKET]' is a virtio-net NIC on shmrdmad's "
             "host-memory switch instead of the bridge; the guest "
-            "configures it as a tcp NIC (see --shmrdma)."
+            "configures it as a tcp NIC (see --shmrdma), and queues=N "
+            "(1-8) gives it N queue pairs."
         ),
     )
     _vm_create_args.add_argument(
