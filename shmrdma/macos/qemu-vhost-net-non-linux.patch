@@ -1,0 +1,17 @@
+diff --git a/hw/net/vhost_net.c b/hw/net/vhost_net.c
+index 323d117..b0c57ea 100644
+--- a/hw/net/vhost_net.c
++++ b/hw/net/vhost_net.c
+@@ -33,7 +33,12 @@
+ #include "standard-headers/linux/virtio_ring.h"
+ #include "hw/virtio/vhost.h"
+ #include "hw/virtio/virtio-bus.h"
++#ifdef CONFIG_LINUX
+ #include "linux-headers/linux/vhost.h"
++#else
++#include "standard-headers/linux/vhost_types.h"
++#define VHOST_FILE_UNBIND -1
++#endif
+ 
+ void vhost_net_get_features_ex(struct vhost_net *net, uint64_t *features)
+ {
