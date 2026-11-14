@@ -147,12 +147,29 @@ def _bdf(value: str) -> str:
     return value
 
 
+def socket_path_problem(value: str) -> str | None:
+    """Why *value* cannot be a shmrdmad socket path, or None.
+
+    ',' would split QEMU's -chardev options, '|' the NICS= list in the
+    .info file, ':' a --nic spec, and a control character could start
+    a new .info line.
+    """
+    if not value.startswith("/") or any(
+        c in ",|: " or not c.isprintable() for c in value
+    ):
+        return (
+            "absolute path of a shmrdmad socket, without ',', '|', ':', "
+            "blanks or control characters"
+        )
+    return None
+
+
 def _socket(value: str) -> str:
     """An absolute path to a shmrdmad switch socket."""
-    if not value.startswith("/") or any(c in value for c in ",: \t"):
+    problem = socket_path_problem(value)
+    if problem:
         raise NicSpecError(
-            f"--nic shmnet socket {value!r} must be an absolute path "
-            f"without ',', ':' or blanks"
+            f"--nic shmnet socket {value!r}: expected the {problem}"
         )
     return value
 

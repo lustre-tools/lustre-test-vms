@@ -679,6 +679,10 @@ class VMInfo:
     # none.
     host_node: int = -1
 
+    # The shmrdmad sockets the VM's QEMU was last started against,
+    # resolved: which daemon it is attached to, whoever asks.
+    shm_sockets: list[str] = field(default_factory=list)
+
     # Failover pairs (--share-disks / --disks-from).  A VM with
     # share_disks opens its data disks so that one other QEMU can open
     # them too.  A VM with disks_from has no data disks of its own: it
@@ -812,6 +816,7 @@ class VMInfo:
             f"NUMA_DIST={self.numa_dist}\n"
             f"SHMRDMA={self.shmrdma}\n"
             f"HOST_NODE={'' if self.host_node < 0 else self.host_node}\n"
+            f"SHM_SOCKETS={'|'.join(self.shm_sockets)}\n"
             f"SHARE_DISKS={int(self.share_disks)}\n"
             f"DISKS_FROM={self.disks_from}\n"
             f"DISK_DIR={self.disk_dir}\n"
@@ -1003,6 +1008,9 @@ class VMInfo:
             numa_dist=vals.get("NUMA_DIST", ""),
             shmrdma=vals.get("SHMRDMA", ""),
             host_node=int(vals.get("HOST_NODE") or -1),
+            shm_sockets=[
+                s for s in vals.get("SHM_SOCKETS", "").split("|") if s
+            ],
             share_disks=vals.get("SHARE_DISKS", "0") == "1",
             disks_from=vals.get("DISKS_FROM", ""),
             disk_dir=vals.get("DISK_DIR", ""),

@@ -2507,6 +2507,10 @@ int main(int argc, char **argv)
 
 	struct sockaddr_un sa = { .sun_family = AF_UNIX };
 
+	/* The sockets hand out guest RAM: only this user (and root) may
+	 * connect, from the moment they exist.
+	 */
+	umask(077);
 	strncpy(sa.sun_path, g_sock_path, sizeof(sa.sun_path) - 1);
 	unlink(g_sock_path);
 	g_lsock = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
@@ -2515,7 +2519,7 @@ int main(int argc, char **argv)
 		LOG("listen %s: %s", g_sock_path, strerror(errno));
 		return 1;
 	}
-	chmod(g_sock_path, 0777);
+	chmod(g_sock_path, 0600);
 	g_epfd = epoll_create1(EPOLL_CLOEXEC);
 	ep_add(g_lsock, EP_LISTEN, NULL, 0);
 	if (*g_net_sock_path) {
@@ -2529,7 +2533,7 @@ int main(int argc, char **argv)
 			LOG("listen %s: %s", g_net_sock_path, strerror(errno));
 			return 1;
 		}
-		chmod(g_net_sock_path, 0777);
+		chmod(g_net_sock_path, 0600);
 		ep_add(g_lsock_net, EP_LISTEN_NET, NULL, 0);
 		LOG("net switch on %s", g_net_sock_path);
 	}

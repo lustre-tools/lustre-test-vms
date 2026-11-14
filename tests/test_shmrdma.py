@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import socket
+import stat
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -37,7 +39,7 @@ def daemon_socket(tmp_path: Path):
 @pytest.fixture
 def own_daemon(tmp_vmdir: Path):  # noqa: F811
     """ltvm's own daemon, already up: its sockets exist, nothing runs."""
-    d = shmrdma.Daemon("tester", tmp_vmdir / "shmrdma")
+    d = shmrdma.Daemon("tester", os.geteuid(), tmp_vmdir / "shmrdma")
     d.dir.mkdir()
     socks = []
     for path in (d.rdma_socket, d.net_socket):
@@ -109,6 +111,7 @@ def test_launch_hand_run_daemon(
     vm = _make_vm(tmp_vmdir)
     vm.shmrdma = str(daemon_socket)
     h = _LaunchHarness()
+    vm.save()
     _run_launch(vm, h)
     argv = h.qemu_argv or []
     joined = " ".join(argv)
@@ -122,6 +125,7 @@ def test_launch_refuses_without_daemon(tmp_vmdir: Path) -> None:  # noqa: F811
     vm = _make_vm(tmp_vmdir)
     vm.shmrdma = str(tmp_vmdir / "nothing.sock")
     with pytest.raises(SystemExit):
+        vm.save()
         _run_launch(vm, _LaunchHarness())
 
 
@@ -132,6 +136,7 @@ def test_launch_own_daemon(tmp_vmdir: Path, own_daemon) -> None:  # noqa: F811
     vm.nics = [NicSpec.parse("shmnet")]
     vm.nic_ips = ["172.16.100.50"]
     h = _LaunchHarness()
+    vm.save()
     _run_launch(vm, h)
     ensure.assert_called_once()
     argv = h.qemu_argv or []
@@ -142,6 +147,12 @@ def test_launch_own_daemon(tmp_vmdir: Path, own_daemon) -> None:  # noqa: F811
     append = argv[argv.index("-append") + 1]
     assert "fc_nics=tcp" in append
     assert "fc_shmrdma=1" in append
+    # recorded, so whoever asks can tell which daemon it is attached to
+    back = VMInfo.load(vm.name)
+    assert back.shm_sockets == [str(d.rdma_socket), str(d.net_socket)]
+    assert shmrdma.vm_uses(back, d)
+    other = shmrdma.Daemon("other", 4321, tmp_vmdir / "other")
+    assert not shmrdma.vm_uses(back, other)
 
 
 def test_launch_shmnet_only(
@@ -152,6 +163,7 @@ def test_launch_shmnet_only(
     vm.nics = [NicSpec(type="shmnet", socket=str(daemon_socket))]
     vm.nic_ips = ["172.16.100.50"]
     h = _LaunchHarness()
+    vm.save()
     _run_launch(vm, h)
     argv = h.qemu_argv or []
     joined = " ".join(argv)
@@ -196,12 +208,13 @@ def test_daemon_start_status_stop(tmp_vmdir: Path, monkeypatch) -> None:  # noqa
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_vmdir / "cache"))
     with (
         patch("ltvm_pkg.qemu_run._guest_scope", return_value=[]),
-        patch("ltvm_pkg.shmrdma._user", return_value="tester"),
     ):
         d = shmrdma.ensure_daemon()
         try:
-            assert d.dir == tmp_vmdir / "shmrdma"
+            assert d.dir == tmp_vmdir / f"shmrdma-{os.geteuid()}"
+            assert stat.S_IMODE(os.stat(d.dir).st_mode) == 0o700
             assert d.rdma_socket.is_socket() and d.net_socket.is_socket()
+            assert stat.S_IMODE(os.stat(d.rdma_socket).st_mode) == 0o600
             st = shmrdma.status()
             assert st["running"] and st["current"] and st["vms"] == []
             pid = d.pid()
@@ -216,8 +229,9 @@ def test_daemon_start_status_stop(tmp_vmdir: Path, monkeypatch) -> None:  # noqa
 
 
 def test_stop_refuses_with_vms(tmp_vmdir: Path) -> None:  # noqa: F811
-    d = shmrdma.Daemon("tester", tmp_vmdir)
+    d = shmrdma.Daemon("tester", os.geteuid(), tmp_vmdir)
     with (
+        patch("ltvm_pkg.qemu_run._launch_lock") as launch_lock,
         patch("ltvm_pkg.shmrdma.daemon", return_value=d),
         patch.object(shmrdma.Daemon, "pid", return_value=4242),
         patch("ltvm_pkg.shmrdma.attached_vms", return_value=["co1-a"]),
@@ -226,6 +240,135 @@ def test_stop_refuses_with_vms(tmp_vmdir: Path) -> None:  # noqa: F811
         with pytest.raises(RuntimeError, match="co1-a"):
             shmrdma.stop_daemon()
         kill.assert_not_called()
+        # the check runs under the launch lock
+        launch_lock.assert_called_once()
+
+
+class TestPrivateDir:
+    def test_created_private(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        d = shmrdma.run_dir(os.geteuid())
+        assert d == tmp_vmdir / f"shmrdma-{os.geteuid()}"
+        assert stat.S_IMODE(os.lstat(d).st_mode) == 0o700
+
+    def test_not_created_for_status(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        shmrdma.run_dir(os.geteuid(), create=False)
+        assert not (tmp_vmdir / f"shmrdma-{os.geteuid()}").exists()
+
+    def test_loose_mode_tightened(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        d = tmp_vmdir / f"shmrdma-{os.geteuid()}"
+        d.mkdir(mode=0o777)
+        os.chmod(d, 0o777)
+        assert shmrdma.run_dir(os.geteuid()) == d
+        assert stat.S_IMODE(os.lstat(d).st_mode) == 0o700
+
+    def test_planted_symlink_refused(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+        monkeypatch,
+    ) -> None:
+        elsewhere = tmp_vmdir / "elsewhere"
+        elsewhere.mkdir()
+        (tmp_vmdir / f"shmrdma-{os.geteuid()}").symlink_to(elsewhere)
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_vmdir / "state"))
+        d = shmrdma.run_dir(os.geteuid())
+        assert d == tmp_vmdir / "state" / "ltvm" / "shmrdma"
+
+    def test_foreign_owner_refused(self, tmp_vmdir: Path, monkeypatch) -> None:  # noqa: F811
+        d = tmp_vmdir / f"shmrdma-{os.geteuid()}"
+        d.mkdir(mode=0o700)
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_vmdir / "state"))
+        real = os.lstat
+
+        def lstat(path, *a, **k):
+            st = real(path, *a, **k)
+            if Path(path) == d:
+                fake = list(st)
+                fake[stat.ST_UID] = st.st_uid + 1
+                return os.stat_result(fake)
+            return st
+
+        with patch("ltvm_pkg.shmrdma.os.lstat", side_effect=lstat):
+            assert shmrdma.run_dir(os.geteuid()) != d
+
+
+class TestPidFile:
+    def _daemon(self, tmp_path: Path, rec: str) -> shmrdma.Daemon:
+        d = shmrdma.Daemon("tester", os.geteuid(), tmp_path)
+        d.pid_path.write_text(rec)
+        return d
+
+    def test_own_process_with_its_binary(self, tmp_path: Path) -> None:
+        exe = os.readlink("/proc/self/exe")
+        d = self._daemon(tmp_path, f"{os.getpid()} abc {exe}\n")
+        with patch(
+            "ltvm_pkg.shmrdma.Path.read_text", return_value="shmrdmad\n"
+        ):
+            assert d.pid() == os.getpid()
+
+    def test_other_binary_refused(self, tmp_path: Path) -> None:
+        d = self._daemon(tmp_path, f"{os.getpid()} abc /tmp/evil\n")
+        with patch(
+            "ltvm_pkg.shmrdma.Path.read_text", return_value="shmrdmad\n"
+        ):
+            assert d.pid() == 0
+
+    def test_other_uid_refused(self, tmp_path: Path) -> None:
+        exe = os.readlink("/proc/self/exe")
+        d = shmrdma.Daemon("tester", os.geteuid() + 1, tmp_path)
+        d.pid_path.write_text(f"{os.getpid()} abc {exe}\n")
+        with patch(
+            "ltvm_pkg.shmrdma.Path.read_text", return_value="shmrdmad\n"
+        ):
+            assert d.pid() == 0
+
+    def test_symlinked_pid_file_ignored(self, tmp_path: Path) -> None:
+        target = tmp_path / "target"
+        target.write_text(f"{os.getpid()} abc x\n")
+        d = shmrdma.Daemon("tester", os.geteuid(), tmp_path)
+        d.pid_path.symlink_to(target)
+        assert d.pid() == 0
+
+
+def test_root_does_not_start_a_daemon(tmp_vmdir: Path) -> None:  # noqa: F811
+    d = shmrdma.Daemon("tester", os.geteuid() + 1, tmp_vmdir)
+    with (
+        patch("ltvm_pkg.shmrdma.daemon", return_value=d),
+        patch.object(shmrdma.Daemon, "pid", return_value=0),
+        patch("ltvm_pkg.shmrdma.subprocess.Popen") as popen,
+    ):
+        with pytest.raises(RuntimeError, match="as root"):
+            shmrdma.ensure_daemon()
+        popen.assert_not_called()
+
+
+def test_start_timeout_kills(tmp_vmdir: Path) -> None:  # noqa: F811
+    d = shmrdma.Daemon("tester", os.geteuid(), tmp_vmdir)
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.pid = 4242
+    with (
+        patch("ltvm_pkg.shmrdma.daemon", return_value=d),
+        patch("ltvm_pkg.shmrdma.build_daemon", return_value=(Path("/x"), "h")),
+        patch("ltvm_pkg.qemu_run._guest_scope", return_value=[]),
+        patch("ltvm_pkg.shmrdma.subprocess.Popen", return_value=proc),
+        patch("ltvm_pkg.shmrdma.time.monotonic", side_effect=[0, 11]),
+    ):
+        with pytest.raises(RuntimeError, match="did not come up"):
+            shmrdma.ensure_daemon()
+    proc.kill.assert_called_once()
+    assert not d.pid_path.exists()
+
+
+@pytest.mark.parametrize(
+    "bad", ["/a,b", "/a|b", "/a\nNICS=x", "/a\tb", "rel/x", "/a:b"]
+)
+def test_socket_paths_rejected(bad: str) -> None:
+    from ltvm_pkg import vm_commands
+
+    with pytest.raises(NicSpecError):
+        NicSpec.parse(f"shmnet:socket={bad}")
+    with pytest.raises(SystemExit):
+        vm_commands._check_shmrdma_socket(bad)
 
 
 def test_daemon_builds_clean() -> None:
@@ -270,6 +413,7 @@ class TestHostNode:
             patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=binds),
             patch("ltvm_pkg.qemu_run.shutil.which", return_value=numactl),
         ):
+            vm.save()
             _run_launch(vm, h)
         return h.qemu_argv or []
 
@@ -294,6 +438,7 @@ class TestHostNode:
         vm = _make_vm(tmp_vmdir)
         vm.host_node = 999
         with pytest.raises(SystemExit):
+            vm.save()
             _run_launch(vm, _LaunchHarness())
 
     def test_info_round_trip(self, tmp_vmdir: Path) -> None:  # noqa: F811
@@ -312,6 +457,7 @@ class TestShmnetQueues:
         vm.nics = [NicSpec(type="shmnet", socket=str(sock))]
         vm.nic_ips = ["172.16.100.50"]
         h = _LaunchHarness()
+        vm.save()
         _run_launch(vm, h)
         return " ".join(h.qemu_argv or [])
 

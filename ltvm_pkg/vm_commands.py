@@ -707,6 +707,8 @@ _RESOURCE_FLAGS = {
     "disk_dir": "--disk-dir",
     "disk_cache": "--disk-cache",
     "disk_prealloc": "--disk-prealloc",
+    "shmrdma": "--shmrdma",
+    "host_node": "--host-node",
 }
 
 # Flags whose typed spelling differs from the stored one only cosmetically.
@@ -1189,10 +1191,15 @@ def _resolve_os_and_kernel(
 
 def _check_shmrdma_socket(value: str) -> None:
     """--shmrdma takes 'auto' or an absolute socket path."""
-    if value != "auto" and not value.startswith("/"):
+    from .nic_spec import socket_path_problem
+
+    if value == "auto":
+        return
+    problem = socket_path_problem(value)
+    if problem:
         die(
             f"--shmrdma {value!r}: give no value for ltvm's own daemon, or "
-            f"the absolute path of a shmrdmad socket"
+            f"the {problem}"
         )
 
 
@@ -4001,7 +4008,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # shmnet NICs are dead until each VM restarts and starts it again.
     from . import shmrdma
 
-    shm = shmrdma.daemon()
+    shm = shmrdma.daemon(create=False)
     if not shm.pid():
         orphans = []
         for name in VMInfo.all_names():

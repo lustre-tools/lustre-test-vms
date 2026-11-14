@@ -151,7 +151,7 @@ def cmd_vm_shmrdmad(args: argparse.Namespace) -> int:
         elif action == "start":
             shmrdma.ensure_daemon()
         st = shmrdma.status()
-    except RuntimeError as e:
+    except (RuntimeError, OSError) as e:
         return _error(str(e), use_json)
     if use_json:
         print(json.dumps(st))

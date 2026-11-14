@@ -1197,7 +1197,12 @@ def _start_qemu(vm: VMInfo) -> None:
     # shmrdmad must be serving every socket the VM's shmrdma device and
     # shmnet NICs connect to, and must be able to map guest RAM.
     shm_socks = shmrdma.prepare_launch(vm) if vm.shared_ram else []
-    bind_node = vm.host_node if qemu_binds_numa(qemu_bin) else -1
+    if shm_socks != vm.shm_sockets:
+        vm.shm_sockets = list(shm_socks)
+        vm._update_field("SHM_SOCKETS", "|".join(shm_socks))
+    bind_node = (
+        vm.host_node if vm.host_node >= 0 and qemu_binds_numa(qemu_bin) else -1
+    )
     if (vm.shared_ram or bind_node >= 0) and vm.numa_nodes <= 1:
         machine = f"{machine},memory-backend=ram0"
     problem = host_node_problem(vm.host_node)

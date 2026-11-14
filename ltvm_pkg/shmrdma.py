@@ -25,11 +25,15 @@ import hashlib
 import json
 import logging
 import os
+import pwd
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -177,36 +181,80 @@ def image_has_kmod(image: str | Path) -> bool:
 # --- the host daemon --------------------------------------------------
 
 
-def _user() -> str:
-    """The user the daemon is run for: under sudo, the one who typed it."""
+class UnsafeDir(RuntimeError):
+    """A daemon directory someone else owns or has redirected."""
+
+
+def _owner() -> tuple[str, int]:
+    """(user, uid) the daemon belongs to: under sudo, the one who typed it."""
     if os.geteuid() == 0 and os.environ.get("SUDO_USER"):
-        return os.environ["SUDO_USER"]
-    return getpass.getuser()
+        name = os.environ["SUDO_USER"]
+        return name, pwd.getpwnam(name).pw_uid
+    return getpass.getuser(), os.geteuid()
 
 
-def run_dir() -> Path:
-    """Where the daemons' sockets, pids and logs live.
+def _check_private(d: Path, uid: int) -> None:
+    """Refuse *d* unless it is a real directory of *uid* that only it can use."""
+    st = os.lstat(d)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
+        raise UnsafeDir(f"{d} is not a directory owned by uid {uid}")
+    if stat.S_IMODE(st.st_mode) & 0o077:
+        if os.geteuid() != uid and os.geteuid() != 0:
+            raise UnsafeDir(f"{d} is open to other users")
+        os.chmod(d, 0o700, follow_symlinks=False)
 
-    Under the VM directory, which outlives a login and which both a
-    QEMU running as the user and one running as root can reach; a
-    user's own state directory when that is not writable.
-    """
-    d = vm_state.VM_DIR / "shmrdma"
-    try:
-        if not d.is_dir():
-            d.mkdir()
-            # Every user's daemon keeps its files here; sticky, as /tmp.
-            os.chmod(d, 0o3777)
-        if os.access(d, os.W_OK | os.X_OK):
-            return d
-    except OSError:
-        pass
-    state = Path(
-        os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
+
+def _candidate_dirs(uid: int) -> list[Path]:
+    home = Path(pwd.getpwuid(uid).pw_dir)
+    state = (
+        Path(os.environ["XDG_STATE_HOME"])
+        if os.environ.get("XDG_STATE_HOME") and os.geteuid() == uid
+        else home / ".local" / "state"
     )
-    d = state / "ltvm" / "shmrdma"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    return [
+        vm_state.VM_DIR / f"shmrdma-{uid}",
+        state / "ltvm" / "shmrdma",
+    ]
+
+
+def run_dir(uid: int, create: bool = True) -> Path:
+    """The private directory of *uid*'s daemon: sockets, pid, log, lock.
+
+    ``/opt/qemu-vms/shmrdma-<uid>`` (mode 0700, owned by the user), which
+    outlives a login and which both a QEMU running as the user and one
+    running as root reach; the user's state directory when that one
+    cannot be used, or someone else made it first.  With *create*
+    false, the first that exists, or the first candidate.
+    """
+    cands = _candidate_dirs(uid)
+    for d in cands:
+        if not create:
+            if os.path.lexists(d):
+                return d
+            continue
+        try:
+            if d is cands[-1]:
+                d.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                d.mkdir(mode=0o700)
+                if os.geteuid() != uid:
+                    os.chown(d, uid, pwd.getpwuid(uid).pw_gid)
+            except FileExistsError:
+                pass
+            _check_private(d, uid)
+            return d
+        except (OSError, UnsafeDir) as e:
+            log.debug("shmrdmad: not using %s: %s", d, e)
+    if not create:
+        return cands[0]
+    raise RuntimeError(
+        f"no private directory for shmrdmad ({', '.join(map(str, cands))})"
+    )
+
+
+def _open_private(path: Path, flags: int) -> int:
+    """os.open *path* in a checked directory, refusing symlinks."""
+    return os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
 
 
 @dataclass(frozen=True)
@@ -214,52 +262,77 @@ class Daemon:
     """One user's shmrdmad: its files, whether or not it runs."""
 
     user: str
+    uid: int
     dir: Path
 
     @property
     def rdma_socket(self) -> Path:
-        return self.dir / f"{self.user}.rdma.sock"
+        return self.dir / "rdma.sock"
 
     @property
     def net_socket(self) -> Path:
-        return self.dir / f"{self.user}.net.sock"
+        return self.dir / "net.sock"
 
     @property
     def pid_path(self) -> Path:
-        return self.dir / f"{self.user}.pid"
+        return self.dir / "shmrdmad.pid"
 
     @property
     def log_path(self) -> Path:
-        return self.dir / f"{self.user}.log"
+        return self.dir / "shmrdmad.log"
 
     @property
     def lock_path(self) -> Path:
-        return self.dir / f"{self.user}.lock"
+        return self.dir / "shmrdmad.lock"
+
+    def _record(self) -> list[str]:
+        try:
+            fd = _open_private(self.pid_path, os.O_RDONLY)
+        except OSError:
+            return []
+        with os.fdopen(fd) as f:
+            return f.read(256).split()
 
     def pid(self) -> int:
-        """The running daemon's pid, or 0."""
+        """The running daemon's pid, or 0.
+
+        Only a shmrdmad process of this user, running the binary the pid
+        file names, counts: a pid file is no proof of who listens.
+        """
+        rec = self._record()
         try:
-            pid = int(self.pid_path.read_text().split()[0])
+            pid, exe_want = int(rec[0]), rec[2]
+            st = os.stat(f"/proc/{pid}")
             comm = Path(f"/proc/{pid}/comm").read_text().strip()
         except (OSError, ValueError, IndexError):
             return 0
-        return pid if comm == "shmrdmad" else 0
+        if comm != "shmrdmad" or st.st_uid != self.uid:
+            return 0
+        try:
+            exe = os.readlink(f"/proc/{pid}/exe")
+        except OSError:
+            return 0
+        return pid if exe == exe_want else 0
 
     def binary_hash(self) -> str:
         """Source hash the running daemon was built from, or ""."""
-        try:
-            return self.pid_path.read_text().split()[1]
-        except (OSError, IndexError):
-            return ""
+        rec = self._record()
+        return rec[1] if len(rec) > 1 else ""
 
 
-def daemon() -> Daemon:
-    return Daemon(_user(), run_dir())
+def daemon(create: bool = True) -> Daemon:
+    """This user's daemon; *create* false never makes its directory."""
+    user, uid = _owner()
+    return Daemon(user, uid, run_dir(uid, create))
 
 
-def _cache_dir() -> Path:
-    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
-    return Path(base) / "ltvm" / "shmrdmad"
+def _cache_dir(uid: int | None = None) -> Path:
+    uid = os.geteuid() if uid is None else uid
+    if uid == os.geteuid() and os.environ.get("XDG_CACHE_HOME"):
+        base = Path(os.environ["XDG_CACHE_HOME"])
+    else:
+        base = Path(pwd.getpwuid(uid).pw_dir) / ".cache"
+    return base / "ltvm" / "shmrdmad"
 
 
 def build_daemon() -> tuple[Path, str]:
@@ -289,22 +362,19 @@ def build_daemon() -> tuple[Path, str]:
 
 
 def vm_uses(vm: VMInfo, d: Daemon) -> bool:
-    """Whether *vm* is attached to daemon *d*."""
+    """Whether *vm*, as last started, is attached to daemon *d*."""
     socks = {str(d.rdma_socket), str(d.net_socket)}
-    return any(s in socks for s in vm_sockets(vm, d))
+    return any(s in socks for s in vm.shm_sockets)
 
 
-def vm_sockets(vm: VMInfo, d: Daemon | None = None) -> list[str]:
-    """The vhost-user sockets *vm* connects to, ltvm's own resolved."""
-    own = d or daemon()
+def vm_sockets(vm: VMInfo, d: Daemon) -> list[str]:
+    """The vhost-user sockets *vm* connects to, with *d*'s for its own."""
     socks = []
     if vm.shmrdma:
-        socks.append(
-            str(own.rdma_socket) if vm.shmrdma == "auto" else vm.shmrdma
-        )
+        socks.append(str(d.rdma_socket) if vm.shmrdma == "auto" else vm.shmrdma)
     for nic in vm.nics:
         if nic.type == "shmnet":
-            socks.append(nic.socket or str(own.net_socket))
+            socks.append(nic.socket or str(d.net_socket))
     return socks
 
 
@@ -324,11 +394,28 @@ def attached_vms(d: Daemon) -> list[str]:
     return names
 
 
+@contextmanager
+def _daemon_lock(d: Daemon) -> Iterator[None]:
+    fd = _open_private(d.lock_path, os.O_RDWR | os.O_CREAT)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def ensure_daemon() -> Daemon:
     """Start this user's shmrdmad unless it already runs; return it."""
     d = daemon()
-    with open(d.lock_path, "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    if os.geteuid() != d.uid:
+        # Under sudo: use the user's own daemon, never start one as root.
+        if d.pid():
+            return d
+        raise RuntimeError(
+            f"shmrdmad is not running for {d.user}, and ltvm will not start "
+            f"it as root: run `ltvm vm shmrdmad start` as {d.user} first"
+        )
+    with _daemon_lock(d):
         if d.pid():
             if d.binary_hash() != _source_hash(_DAEMON_FILES)[:16]:
                 log.info(
@@ -347,7 +434,10 @@ def ensure_daemon() -> Daemon:
         cpus = daemon_cpus()
         pin = ["taskset", "-c", cpus] if cpus else []
         extra = os.environ.get("LTVM_SHMRDMAD_ARGS", "").split()
-        with open(d.log_path, "a") as logf:
+        logfd = _open_private(
+            d.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        )
+        with os.fdopen(logfd, "a") as logf:
             logf.write(
                 f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} starting {binary}\n"
             )
@@ -368,7 +458,9 @@ def ensure_daemon() -> Daemon:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
-        d.pid_path.write_text(f"{proc.pid} {digest}\n")
+        pidfd = _open_private(d.pid_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+        with os.fdopen(pidfd, "w") as f:
+            f.write(f"{proc.pid} {digest} {binary}\n")
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             if proc.poll() is not None:
@@ -376,6 +468,9 @@ def ensure_daemon() -> Daemon:
             if d.rdma_socket.is_socket() and d.net_socket.is_socket():
                 return d
             time.sleep(0.05)
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
         d.pid_path.unlink(missing_ok=True)
         raise RuntimeError(f"shmrdmad did not come up; see {d.log_path}")
 
@@ -418,31 +513,36 @@ def daemon_cpus() -> str:
 
 def stop_daemon(force: bool = False) -> str:
     """Stop this user's shmrdmad; refuse while VMs use it unless *force*."""
-    d = daemon()
-    pid = d.pid()
-    if not pid:
-        return "shmrdmad is not running"
-    users = attached_vms(d)
-    if users and not force:
-        raise RuntimeError(
-            f"shmrdmad is in use by {', '.join(users)}: their shmrdma "
-            f"devices and shmnet NICs stop working until they restart.  "
-            f"Stop them first, or pass --force"
-        )
-    os.kill(pid, signal.SIGTERM)
-    for _ in range(50):
-        if not d.pid():
-            break
-        time.sleep(0.1)
-    else:
-        os.kill(pid, signal.SIGKILL)
-    for p in (d.pid_path, d.rdma_socket, d.net_socket):
-        p.unlink(missing_ok=True)
+    from .qemu_run import _launch_lock
+
+    d = daemon(create=False)
+    # Under the launch lock: a VM whose launch got past ensure_daemon
+    # has no QEMU pid recorded until that lock is released.
+    with _launch_lock():
+        pid = d.pid()
+        if not pid:
+            return "shmrdmad is not running"
+        users = attached_vms(d)
+        if users and not force:
+            raise RuntimeError(
+                f"shmrdmad is in use by {', '.join(users)}: their shmrdma "
+                f"devices and shmnet NICs stop working until they restart.  "
+                f"Stop them first, or pass --force"
+            )
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(50):
+            if not d.pid():
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(pid, signal.SIGKILL)
+        for p in (d.pid_path, d.rdma_socket, d.net_socket):
+            p.unlink(missing_ok=True)
     return f"stopped shmrdmad (pid {pid})"
 
 
 def status() -> dict[str, object]:
-    d = daemon()
+    d = daemon(create=False)
     pid = d.pid()
     current = _source_hash(_DAEMON_FILES)[:16]
     return {
@@ -466,15 +566,13 @@ def prepare_launch(vm: VMInfo) -> list[str]:
     """
     from .qemu_run import die
 
-    d = daemon()
     needs_own = vm.shmrdma == "auto" or any(
         n.type == "shmnet" and not n.socket for n in vm.nics
     )
-    if needs_own:
-        try:
-            ensure_daemon()
-        except RuntimeError as e:
-            die(f"{vm.name}: {e}")
+    try:
+        d = ensure_daemon() if needs_own else daemon(create=False)
+    except (RuntimeError, OSError) as e:
+        die(f"{vm.name}: {e}")
     socks = vm_sockets(vm, d)
     for s in socks:
         if not Path(s).is_socket():

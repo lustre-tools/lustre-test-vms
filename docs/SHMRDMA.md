@@ -37,10 +37,14 @@ ltvm vm shmrdmad [status|start|stop]
 - **The daemon.** ltvm builds `shmrdmad` with the host's C compiler
   (cached under `~/.cache/ltvm/shmrdmad/<source hash>/`) and runs one
   per user, started when a VM that needs it starts. Its sockets, pid
-  file and log are in `/opt/qemu-vms/shmrdma/<user>.*` (or
-  `~/.local/state/ltvm/shmrdma/` where that is not writable), so it
-  survives logout, and a QEMU running as the user or as root can reach
-  it. It runs in a systemd user scope of its own, like the guests.
+  file and log are in `/opt/qemu-vms/shmrdma-<uid>/`, a 0700 directory
+  of the user's (or `~/.local/state/ltvm/shmrdma/` when that cannot be
+  used), so it survives logout, and a QEMU running as the user or as
+  root can reach it. The sockets are 0600: they hand over guest RAM,
+  so no other user may connect, and ltvm only trusts a daemon that runs
+  as the user from the binary its pid file names. It runs in a systemd
+  user scope of its own, like the guests. Under `sudo ltvm` it uses the
+  user's running daemon but never starts one as root.
   `LTVM_SHMRDMAD_ARGS` passes options (`-w` workers, `-c` copiers, `-p`
   idle spin in us).
 - **Placement.** On a host with several NUMA nodes, where the VMs and
