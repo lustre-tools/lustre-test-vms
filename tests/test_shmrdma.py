@@ -655,6 +655,23 @@ class TestRequirements:
         smc = [r for r in sr.target_checks(t) if "SMC" in r.name][0]
         assert not smc.ok and not smc.hard
 
+    def test_resolve_target_arch(self) -> None:
+        """The target is looked up for --arch, else the host's arch."""
+        from ltvm_pkg import shmrdma_req as sr
+
+        arts = MagicMock(image="/a/img.ext4", kernel="/a/k/vmlinuz")
+        with (
+            patch(
+                "ltvm_pkg.vm_state.resolve_os_artifacts", return_value=arts
+            ) as roa,
+            patch("ltvm_pkg.cli.util.host_arch", return_value="aarch64"),
+        ):
+            t = sr.resolve_target("rocky10-16k", None)
+            assert roa.call_args.kwargs["arch"] == "aarch64"
+            assert t.kernel_dir == Path("/a/k")
+            sr.resolve_target("rocky10", None, arch="x86_64")
+            assert roa.call_args.kwargs["arch"] == "x86_64"
+
     def test_unbuilt_target(self) -> None:
         from ltvm_pkg import shmrdma_req as sr
 

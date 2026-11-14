@@ -4244,6 +4244,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             shm_target,
             getattr(args, "kernel", None),
             getattr(args, "lustre_tree", None),
+            getattr(args, "arch", None),
         )
         found, failed = shmrdma_req.doctor(target, args.fix)
         issues += found

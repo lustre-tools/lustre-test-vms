@@ -61,12 +61,20 @@ class Target:
 
 
 def resolve_target(
-    name: str, kernel: str | None, lustre_tree: str | None = None
+    name: str,
+    kernel: str | None,
+    lustre_tree: str | None = None,
+    arch: str | None = None,
 ) -> Target:
-    """The image and kernel ltvm would create a VM of *name* from."""
+    """The image and kernel ltvm would create a VM of *name* from: for
+    *arch*, or the host's, as ``create`` picks it."""
+    from .cli.util import host_arch
+
     t = Target(name, kernel, lustre_tree)
     try:
-        arts = vm_state.resolve_os_artifacts(name, kernel=kernel)
+        arts = vm_state.resolve_os_artifacts(
+            name, arch=arch or host_arch(), kernel=kernel
+        )
     except (RuntimeError, FileNotFoundError, ValueError, SystemExit) as e:
         t.problem = str(e) or f"no artifacts for {name}"
         return t
