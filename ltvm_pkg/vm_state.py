@@ -667,6 +667,13 @@ class VMInfo:
     # writes it.  Empty is QEMU's default: 10 local, 20 remote.
     numa_dist: str = ""
 
+    # shmrdma (--shmrdma): "auto" for the daemon ltvm runs for this
+    # user, or the vhost-user socket of one run by hand.  Guest RAM is
+    # then a shared memfd that the daemon maps, and the guest gets an
+    # RDMA device through which the daemon copies between guests.
+    # Empty is none.
+    shmrdma: str = ""
+
     # Failover pairs (--share-disks / --disks-from).  A VM with
     # share_disks opens its data disks so that one other QEMU can open
     # them too.  A VM with disks_from has no data disks of its own: it
@@ -717,6 +724,11 @@ class VMInfo:
             self.disk_path(n)
             for n in range(1, self.mdt_disks + self.ost_disks + 1)
         ]
+
+    @property
+    def shared_ram(self) -> bool:
+        """Guest RAM is a shared memfd: a shmrdma device or shmnet NIC."""
+        return bool(self.shmrdma) or any(n.type == "shmnet" for n in self.nics)
 
     def extra_nics(self) -> list[tuple[int, NicSpec, str, str]]:
         """Return ``(index, nic, tap_name, mac)`` tuples for extra NICs.
@@ -793,6 +805,7 @@ class VMInfo:
             f"KERNEL_ARGS={self.kernel_args}\n"
             f"NUMA_NODES={self.numa_nodes}\n"
             f"NUMA_DIST={self.numa_dist}\n"
+            f"SHMRDMA={self.shmrdma}\n"
             f"SHARE_DISKS={int(self.share_disks)}\n"
             f"DISKS_FROM={self.disks_from}\n"
             f"DISK_DIR={self.disk_dir}\n"
@@ -982,6 +995,7 @@ class VMInfo:
             kernel_args=vals.get("KERNEL_ARGS", ""),
             numa_nodes=int(vals.get("NUMA_NODES") or 0),
             numa_dist=vals.get("NUMA_DIST", ""),
+            shmrdma=vals.get("SHMRDMA", ""),
             share_disks=vals.get("SHARE_DISKS", "0") == "1",
             disks_from=vals.get("DISKS_FROM", ""),
             disk_dir=vals.get("DISK_DIR", ""),

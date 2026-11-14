@@ -22,7 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, fields
 
 # The extra-NIC types, in the order the CLI help lists them.
-NIC_TYPES = ("tcp", "softroce", "passthrough")
+NIC_TYPES = ("tcp", "softroce", "passthrough", "shmnet")
 
 
 class NicSpecError(ValueError):
@@ -43,6 +43,9 @@ class NicSpec:
     net: str = ""
     subnet: str = ""
     subnet6: str = ""
+    # vhost-user socket of a shmnet NIC's switch; empty is the daemon
+    # ltvm runs for this user.
+    socket: str = ""
 
     @classmethod
     def parse(cls, raw: str) -> NicSpec:
@@ -89,7 +92,7 @@ class NicSpec:
                 "e.g. --nic passthrough:0000:85:00.1"
             )
         spec = cls(type=nic_type, **values)  # type: ignore[arg-type]
-        expected = "tcp" if nic_type == "tcp" else "o2ib"
+        expected = "tcp" if nic_type in ("tcp", "shmnet") else "o2ib"
         # The LND must agree with the NIC provider used by the guest.
         if spec.net and not spec.net.startswith(expected):
             raise NicSpecError(
@@ -99,13 +102,17 @@ class NicSpec:
 
     def __str__(self) -> str:
         """The canonical spelling, which parse() reads back unchanged."""
-        items = []
+        items: list[str] = []
         positional = _POSITIONAL.get(self.type)
         for key, k in _KEYS.items():
             value = getattr(self, k.field)
             if value == _DEFAULTS[k.field]:
                 continue
-            items.append(str(value) if key == positional else f"{key}={value}")
+            if key == positional:
+                # parse() takes the positional value only first.
+                items.insert(0, str(value))
+            else:
+                items.append(f"{key}={value}")
         return f"{self.type}:{','.join(items)}" if items else self.type
 
     def cmdline_entry(self) -> str:
@@ -119,6 +126,9 @@ class NicSpec:
         """
         if self.bdf:
             return f"{self.type};{self.bdf.replace(':', ';')}"
+        # A shmnet NIC is a plain virtio-net to the guest.
+        if self.type == "shmnet":
+            return "tcp"
         return self.type
 
 
@@ -133,6 +143,16 @@ def _bdf(value: str) -> str:
         raise NicSpecError(
             f"--nic passthrough arg {value!r} is not a valid PCIe BDF "
             f"(expected domain:bus:device.function like 0000:85:00.1)"
+        )
+    return value
+
+
+def _socket(value: str) -> str:
+    """An absolute path to a shmrdmad switch socket."""
+    if not value.startswith("/") or any(c in value for c in ",: \t"):
+        raise NicSpecError(
+            f"--nic shmnet socket {value!r} must be an absolute path "
+            f"without ',', ':' or blanks"
         )
     return value
 
@@ -218,14 +238,15 @@ _KEYS: dict[str, _Key] = {
     "bdf": _Key("bdf", ("passthrough",), _bdf),
     # Not passthrough: the guest sets the node of the NIC it finds as
     # ethN, and a passed-through device need not appear as ethN.
-    "node": _Key("node", ("tcp", "softroce"), _node),
-    "net": _Key("net", ("tcp", "softroce"), _net),
-    "subnet": _Key("subnet", ("tcp", "softroce"), _subnet4),
-    "subnet6": _Key("subnet6", ("tcp", "softroce"), _subnet6),
+    "node": _Key("node", ("tcp", "softroce", "shmnet"), _node),
+    "net": _Key("net", ("tcp", "softroce", "shmnet"), _net),
+    "subnet": _Key("subnet", ("tcp", "softroce", "shmnet"), _subnet4),
+    "subnet6": _Key("subnet6", ("tcp", "softroce", "shmnet"), _subnet6),
+    "socket": _Key("socket", ("shmnet",), _socket),
 }
 
 # The key a type's first item may give without "key=".
-_POSITIONAL: dict[str, str] = {"passthrough": "bdf"}
+_POSITIONAL: dict[str, str] = {"passthrough": "bdf", "shmnet": "socket"}
 
 _DEFAULTS = {f.name: f.default for f in fields(NicSpec)}
 

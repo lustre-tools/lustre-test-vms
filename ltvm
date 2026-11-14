@@ -239,6 +239,7 @@ try:
         cmd_update,
         cmd_validate,
         cmd_vm_set,
+        cmd_vm_shmrdmad,
         cmd_vm_start,
         cmd_vm_stop,
     )
@@ -1533,7 +1534,10 @@ def build_parser() -> argparse.ArgumentParser:
             "omit its 'bdf=' key.  node=N (tcp, softroce) puts the NIC "
             "on guest NUMA node N of --numa-nodes. net= groups NICs on "
             "one LNet network; subnet= and subnet6= choose their IPv4 "
-            "and IPv6 data networks (tcp, softroce only)."
+            "and IPv6 data networks (tcp, softroce, shmnet only).  "
+            "'shmnet[:SOCKET]' is a virtio-net NIC on shmrdmad's "
+            "host-memory switch instead of the bridge; the guest "
+            "configures it as a tcp NIC (see --shmrdma)."
         ),
     )
     _vm_create_args.add_argument(
@@ -1550,6 +1554,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _add_numa_dist_args(_vm_create_args, "for --numa-nodes")
+    _vm_create_args.add_argument(
+        "--shmrdma",
+        dest="shmrdma",
+        nargs="?",
+        const="auto",
+        default="",
+        metavar="SOCKET",
+        help=(
+            "Give the VM a shmrdma device: an RDMA (RoCE) device whose "
+            "transfers to other VMs on this host are one memcpy by "
+            "shmrdmad, and LNet on o2ib over it.  Guest RAM becomes a "
+            "shared memfd.  ltvm builds and starts the daemon for you; "
+            "SOCKET names one you run yourself instead."
+        ),
+    )
     _vm_create_args.add_argument(
         "--kernel-args",
         dest="kernel_args",
@@ -1882,7 +1901,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="New QEMU cache mode for the data disks; 'default' drops "
         "cache= and leaves QEMU's own (writeback)",
     )
+    vsetp.add_argument(
+        "--shmrdma",
+        dest="shmrdma",
+        default=None,
+        metavar="auto|SOCKET|none",
+        help="Add a shmrdma device ('auto' for ltvm's daemon), or "
+        "'none' to drop it",
+    )
     vsetp.set_defaults(func=cmd_vm_set)
+
+    vshp = vm_sub.add_parser(
+        "shmrdmad",
+        parents=[common],
+        help="Show, start or stop this user's shmrdmad (the host daemon "
+        "behind --shmrdma and --nic shmnet)",
+    )
+    vshp.add_argument(
+        "action",
+        nargs="?",
+        default="status",
+        choices=["status", "start", "stop"],
+    )
+    vshp.add_argument(
+        "--force",
+        action="store_true",
+        help="stop it even though running VMs use it (their devices "
+        "stop working until they restart)",
+    )
+    vshp.set_defaults(func=cmd_vm_shmrdmad)
 
     def _vm_no_action(args: argparse.Namespace) -> int:
         vm_parser.print_help()
@@ -2404,6 +2451,16 @@ def build_parser() -> argparse.ArgumentParser:
         "`ltvm create --numa-nodes`",
     )
     _add_numa_dist_args(ccp, "for every node")
+    ccp.add_argument(
+        "--shmrdma",
+        dest="shmrdma",
+        nargs="?",
+        const="auto",
+        default="",
+        metavar="SOCKET",
+        help="A shmrdma device on every node, with LNet on o2ib over it, "
+        "as `ltvm create --shmrdma`",
+    )
     ccp.add_argument(
         "--kernel-args",
         dest="kernel_args",

@@ -133,3 +133,38 @@ def cmd_vm_set(args: argparse.Namespace) -> int:
     from ltvm_pkg.vm_commands import cmd_set as _set
 
     return _vm_call(_set, args, use_json)
+
+
+def cmd_vm_shmrdmad(args: argparse.Namespace) -> int:
+    """Status, start or stop of this user's shmrdmad."""
+    import json
+
+    from ltvm_pkg import shmrdma
+
+    use_json = args.json
+    action = args.action
+    try:
+        if action == "stop":
+            msg = shmrdma.stop_daemon(force=args.force)
+            if not use_json:
+                print(msg)
+        elif action == "start":
+            shmrdma.ensure_daemon()
+        st = shmrdma.status()
+    except RuntimeError as e:
+        return _error(str(e), use_json)
+    if use_json:
+        print(json.dumps(st))
+    elif action != "stop":
+        if not st["running"]:
+            print("shmrdmad: not running (VMs that need it start it)")
+            return EXIT_OK
+        print(f"shmrdmad: running, pid {st['pid']}, user {st['user']}")
+        print(f"  rdma socket: {st['rdma_socket']}")
+        print(f"  net socket:  {st['net_socket']}")
+        print(f"  log:         {st['log']}")
+        if st["current"] is False:
+            print("  built from older sources; stop it once no VM uses it")
+        vms = st["vms"]
+        print(f"  VMs:         {', '.join(vms) if vms else 'none'}")  # type: ignore[arg-type]
+    return EXIT_OK
