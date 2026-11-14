@@ -20,11 +20,13 @@
 #define VNET_F_HOST_TSO6	(1ull << 12)
 #define VNET_F_HOST_ECN		(1ull << 13)
 #define VNET_F_MRG_RXBUF	(1ull << 15)
+#define VNET_F_MQ		(1ull << 22)
 
 #define NET_FEATURES (F_VERSION_1 | F_PROTOCOL_FEATURES | VNET_F_CSUM | \
 		      VNET_F_GUEST_CSUM | VNET_F_GUEST_TSO4 | \
 		      VNET_F_GUEST_TSO6 | VNET_F_GUEST_ECN | VNET_F_HOST_TSO4 | \
-		      VNET_F_HOST_TSO6 | VNET_F_HOST_ECN | VNET_F_MRG_RXBUF)
+		      VNET_F_HOST_TSO6 | VNET_F_HOST_ECN | VNET_F_MRG_RXBUF | \
+		      F_RING_INDIRECT_DESC | F_RING_EVENT_IDX | VNET_F_MQ)
 
 #define VNET_HDR_F_NEEDS_CSUM	1
 #define VNET_HDR_GSO_NONE	0
@@ -33,7 +35,9 @@
 #define VNET_HDR_GSO_ECN	0x80
 #define VRING_USED_F_NO_NOTIFY	1
 
-enum { NETQ_RX = 0, NETQ_TX = 1 };
+/* queue pair qi is RX vq 2qi and TX vq 2qi + 1 */
+#define NET_RXQ(qi)	(2 * (qi))
+#define NET_TXQ(qi)	(2 * (qi) + 1)
 
 struct vnet_hdr {
 	uint8_t flags;
@@ -45,23 +49,34 @@ struct vnet_hdr {
 	uint16_t num_buffers;
 } __attribute__((packed));
 
+struct netport;
+
+/* one TX queue of a port: the unit a worker serves */
+struct netq {
+	struct netport *p;
+	int qi;
+	struct worker *w;	/* NULL while the queue is not served */
+	uint64_t stall_since;
+};
+
 struct netport {
 	struct vdev *dev;
 	uint8_t mac[6];
 	bool mac_known;
-	bool attached;		/* on the switch and a worker */
-	pthread_spinlock_t rx_lock;
-	struct worker *w;
-	uint64_t stall_since;
+	bool attached;		/* on the switch */
+	pthread_spinlock_t rx_lock[NET_MAX_QP];
+	struct netq q[NET_MAX_QP];
 	uint64_t tx_pkts, tx_bytes, rx_pkts, rx_bytes, drops;
 	struct netport *next;
 };
 
+#define STAT_ADD(x, v)	__atomic_add_fetch(&(x), (v), __ATOMIC_RELAXED)
+
 static struct netport *g_ports;		/* changed under wlock */
 
-static struct vdev *port_dev(struct netport *p)
+static struct vdev *netq_dev(struct netq *nq)
 {
-	return p->dev;
+	return nq->p->dev;
 }
 static uint64_t g_net_stall_ns = 2000000;
 
@@ -76,12 +91,29 @@ struct seg {
 static int vq_chain(struct vdev *d, struct vq *q, uint16_t head, bool writable,
 		    struct seg *segs, int max, uint64_t *total)
 {
+	struct vring_desc *tab = q->desc;
+	uint32_t num = q->num;
 	uint16_t i = head;
 	int n = 0;
 
 	*total = 0;
-	for (int guard = 0; guard < (int)q->num; guard++) {
-		struct vring_desc *de = &q->desc[i % q->num];
+	for (uint32_t guard = 0; guard < num; guard++) {
+		struct vring_desc *de = &tab[i % num];
+
+		if (de->flags & VRING_DESC_F_INDIRECT) {
+			/* one indirect table per chain, at its head */
+			if (tab != q->desc || de->len < sizeof(*de) ||
+			    de->len % sizeof(*de))
+				return -1;
+			tab = gpa_range(d, de->addr, de->len);
+			if (!tab)
+				return -1;
+			num = de->len / sizeof(*de);
+			i = 0;
+			guard = (uint32_t)-1;
+			continue;
+		}
+
 		bool w = de->flags & VRING_DESC_F_WRITE;
 
 		if (w == writable && de->len) {
@@ -159,11 +191,36 @@ enum { DLV_OK, DLV_NOBUF, DLV_DROP };
  * Copy one frame into dp's RX buffers.  src is positioned at the
  * start of the frame.  The cursor is restored on return.
  */
-static int net_deliver(struct netport *dp, const struct vnet_hdr *th,
+static uint16_t *vq_avail_event(struct vq *q)
+{
+	return (uint16_t *)&q->used->ring[q->num];
+}
+
+/* ask the guest to kick when it next adds RX buffers */
+static void net_want_rx_kick(struct vq *q)
+{
+	if (q->event_idx)
+		REL(vq_avail_event(q), q->last_avail);
+	else
+		REL(&q->used->flags, 0);
+	FENCE();
+}
+
+/* RX queues the destination guest has running: 1..NET_MAX_QP, or 0 */
+static int net_rx_queues(struct netport *dp)
+{
+	int n = 0;
+
+	while (n < NET_MAX_QP && vq_ready(&dp->dev->vq[NET_RXQ(n)]))
+		n++;
+	return n;
+}
+
+static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 		       struct cursor *src0, uint64_t len)
 {
 	struct vdev *d = dp->dev;
-	struct vq *q = &d->vq[NETQ_RX];
+	struct vq *q = &d->vq[NET_RXQ(rqi)];
 	struct {
 		uint16_t head;
 		int first, nsegs;
@@ -188,7 +245,7 @@ static int net_deliver(struct netport *dp, const struct vnet_hdr *th,
 	    !(d->features & VNET_F_GUEST_CSUM))
 		return DLV_DROP;
 
-	pthread_spin_lock(&dp->rx_lock);
+	pthread_spin_lock(&dp->rx_lock[rqi]);
 	uint16_t ai = ACQ(&q->avail->idx);
 	uint16_t idx = q->last_avail;
 
@@ -197,13 +254,15 @@ static int net_deliver(struct netport *dp, const struct vnet_hdr *th,
 		int n;
 
 		if (idx == ai || nb == 64 || ns + MAX_SEGS > MAX_SEGS * 2) {
-			pthread_spin_unlock(&dp->rx_lock);
+			if (idx == ai)
+				net_want_rx_kick(q);
+			pthread_spin_unlock(&dp->rx_lock[rqi]);
 			return idx == ai ? DLV_NOBUF : DLV_DROP;
 		}
 		bufs[nb].head = q->avail->ring[idx % q->num];
 		n = vq_chain(d, q, bufs[nb].head, true, segs + ns, MAX_SEGS, &cap);
 		if (n <= 0) {
-			pthread_spin_unlock(&dp->rx_lock);
+			pthread_spin_unlock(&dp->rx_lock[rqi]);
 			return DLV_DROP;
 		}
 		bufs[nb].first = ns;
@@ -236,9 +295,11 @@ static int net_deliver(struct netport *dp, const struct vnet_hdr *th,
 	q->last_avail = idx;
 	q->used_idx += nb;
 	REL(&q->used->idx, q->used_idx);
-	dp->rx_pkts++;
-	dp->rx_bytes += len;
-	pthread_spin_unlock(&dp->rx_lock);
+	if (!q->event_idx && !q->used->flags)
+		REL(&q->used->flags, VRING_USED_F_NO_NOTIFY);
+	STAT_ADD(dp->rx_pkts, 1);
+	STAT_ADD(dp->rx_bytes, len);
+	pthread_spin_unlock(&dp->rx_lock[rqi]);
 	FENCE();
 	vq_signal(q);
 	return DLV_OK;
@@ -252,11 +313,23 @@ static struct netport *port_by_mac(const uint8_t *mac)
 	return NULL;
 }
 
-/* process up to budget transmitted frames; returns frames handled */
-static int net_tx_process(struct netport *p, int budget, bool *stalled)
+/* deliver to dp on the RX queue matching the sender's TX queue */
+static int net_send_to(struct netport *dp, int qi, const struct vnet_hdr *h,
+		       struct cursor *frame, uint64_t flen)
 {
+	int nq = net_rx_queues(dp);
+
+	if (!nq)
+		return DLV_DROP;
+	return net_deliver(dp, qi % nq, h, frame, flen);
+}
+
+/* process up to budget transmitted frames; returns frames handled */
+static int net_tx_process(struct netq *nq, int budget, bool *stalled)
+{
+	struct netport *p = nq->p;
 	struct vdev *d = p->dev;
-	struct vq *q = &d->vq[NETQ_TX];
+	struct vq *q = &d->vq[NET_TXQ(nq->qi)];
 	int done = 0;
 
 	if (d->dead || !vq_ready(q))
@@ -292,40 +365,42 @@ static int net_tx_process(struct netport *p, int budget, bool *stalled)
 			if (eth[0] & 1) {
 				for (struct netport *o = g_ports; o; o = o->next)
 					if (o != p && o->attached)
-						net_deliver(o, &h, &frame, flen);
+						net_send_to(o, nq->qi, &h, &frame,
+							    flen);
 				rc = DLV_OK;
 			} else {
 				struct netport *dp = port_by_mac(eth);
 
 				if (dp && dp != p && dp->attached) {
-					rc = net_deliver(dp, &h, &frame, flen);
+					rc = net_send_to(dp, nq->qi, &h, &frame,
+							 flen);
 				} else if (!dp) {
 					for (struct netport *o = g_ports; o;
 					     o = o->next)
 						if (o != p && o->attached)
-							net_deliver(o, &h, &frame,
-								    flen);
+							net_send_to(o, nq->qi, &h,
+								    &frame, flen);
 					rc = DLV_OK;
 				}
 			}
 			if (rc == DLV_NOBUF) {
 				uint64_t t = now_ns();
 
-				if (!p->stall_since)
-					p->stall_since = t;
-				if (t - p->stall_since < g_net_stall_ns) {
+				if (!nq->stall_since)
+					nq->stall_since = t;
+				if (t - nq->stall_since < g_net_stall_ns) {
 					*stalled = true;
 					break;
 				}
 			}
 			if (rc != DLV_OK)
-				p->drops++;
-			p->tx_pkts++;
-			p->tx_bytes += flen;
+				STAT_ADD(p->drops, 1);
+			STAT_ADD(p->tx_pkts, 1);
+			STAT_ADD(p->tx_bytes, flen);
 		} else {
-			p->drops++;
+			STAT_ADD(p->drops, 1);
 		}
-		p->stall_since = 0;
+		nq->stall_since = 0;
 		q->last_avail++;
 		vq_push_used(q, head, 0);
 		done++;
@@ -337,47 +412,82 @@ static int net_tx_process(struct netport *p, int budget, bool *stalled)
 	return done;
 }
 
-static bool net_has_work(struct netport *p)
+static bool net_has_work(struct netq *nq)
 {
-	struct vq *q = &p->dev->vq[NETQ_TX];
+	struct vq *q = &nq->p->dev->vq[NET_TXQ(nq->qi)];
 
-	return !p->dev->dead && vq_ready(q) &&
+	return !nq->p->dev->dead && vq_ready(q) &&
 	       q->last_avail != ACQ(&q->avail->idx);
 }
 
-static void net_set_notify(struct netport *p, bool want_kicks)
+static void net_set_notify(struct netq *nq, bool want_kicks)
 {
-	struct vq *q = &p->dev->vq[NETQ_TX];
+	struct vq *q = &nq->p->dev->vq[NET_TXQ(nq->qi)];
 
-	if (vq_ready(q))
+	if (!vq_ready(q))
+		return;
+	if (q->event_idx) {
+		/* a stale avail_event behind avail->idx asks for no kick */
+		if (want_kicks)
+			REL(vq_avail_event(q), q->last_avail);
+	} else {
 		REL(&q->used->flags, want_kicks ? 0 : VRING_USED_F_NO_NOTIFY);
+	}
+}
+
+/* caller holds wlock */
+static void netq_serve(struct netq *nq)
+{
+	struct vdev *d = netq_dev(nq);
+	struct worker *best = &g_workers[0];
+
+	if (nq->w || !nq->p->attached ||
+	    !vq_ready(&d->vq[NET_TXQ(nq->qi)]))
+		return;
+	for (int i = 1; i < g_nworkers; i++)
+		if (g_workers[i].nqps + g_workers[i].nnq <
+		    best->nqps + best->nnq)
+			best = &g_workers[i];
+	if (best->nnq == best->nqcap) {
+		best->nqcap = best->nqcap ? best->nqcap * 2 : 8;
+		best->nqs = realloc(best->nqs, best->nqcap * sizeof(*best->nqs));
+	}
+	best->nqs[best->nnq++] = nq;
+	worker_watch(best, d->vq[NET_TXQ(nq->qi)].kickfd);
+	nq->w = best;
+	/* we poll RX avail when delivering: no RX kicks wanted */
+	if (vq_ready(&d->vq[NET_RXQ(nq->qi)]) &&
+	    !d->vq[NET_RXQ(nq->qi)].event_idx)
+		REL(&d->vq[NET_RXQ(nq->qi)].used->flags,
+		    VRING_USED_F_NO_NOTIFY);
+	net_set_notify(nq, ACQ(&best->sleeping));
+}
+
+/* caller holds wlock */
+static void netq_unserve(struct netq *nq)
+{
+	struct worker *w = nq->w;
+
+	if (!w)
+		return;
+	for (int i = 0; i < w->nnq; i++)
+		if (w->nqs[i] == nq) {
+			w->nqs[i] = w->nqs[--w->nnq];
+			break;
+		}
+	nq->w = NULL;
 }
 
 /* caller holds wlock */
 static void net_attach(struct vdev *d)
 {
 	struct netport *p = d->port;
-	struct worker *best = &g_workers[0];
 
 	if (p->attached)
 		return;
-	for (int i = 1; i < g_nworkers; i++)
-		if (g_workers[i].nqps + g_workers[i].nports <
-		    best->nqps + best->nports)
-			best = &g_workers[i];
-	if (best->nports == best->pcap) {
-		best->pcap = best->pcap ? best->pcap * 2 : 8;
-		best->ports = realloc(best->ports,
-				      best->pcap * sizeof(*best->ports));
-	}
-	best->ports[best->nports++] = p;
-	worker_watch(best, d->vq[NETQ_TX].kickfd);
-	p->w = best;
 	p->attached = true;
-	/* we poll RX avail when delivering: no RX kicks wanted */
-	if (vq_ready(&d->vq[NETQ_RX]))
-		REL(&d->vq[NETQ_RX].used->flags, VRING_USED_F_NO_NOTIFY);
-	net_set_notify(p, ACQ(&best->sleeping));
+	for (int i = 0; i < NET_MAX_QP; i++)
+		netq_serve(&p->q[i]);
 	LOG("dev%d: net port up, features 0x%" PRIx64, d->id, d->features);
 }
 
@@ -385,16 +495,11 @@ static void net_attach(struct vdev *d)
 static void net_detach(struct vdev *d)
 {
 	struct netport *p = d->port;
-	struct worker *w = p->w;
 
 	if (!p->attached)
 		return;
-	for (int i = 0; i < w->nports; i++)
-		if (w->ports[i] == p) {
-			w->ports[i] = w->ports[--w->nports];
-			break;
-		}
-	p->w = NULL;
+	for (int i = 0; i < NET_MAX_QP; i++)
+		netq_unserve(&p->q[i]);
 	p->attached = false;
 	p->mac_known = false;
 }
@@ -404,7 +509,11 @@ static void net_port_new(struct vdev *d)
 	struct netport *p = calloc(1, sizeof(*p));
 
 	p->dev = d;
-	pthread_spin_init(&p->rx_lock, 0);
+	for (int i = 0; i < NET_MAX_QP; i++) {
+		pthread_spin_init(&p->rx_lock[i], 0);
+		p->q[i].p = p;
+		p->q[i].qi = i;
+	}
 	d->port = p;
 	wlock();
 	p->next = g_ports;
@@ -423,7 +532,8 @@ static void net_port_free(struct vdev *d)
 			*pp = p->next;
 			break;
 		}
-	pthread_spin_destroy(&p->rx_lock);
+	for (int i = 0; i < NET_MAX_QP; i++)
+		pthread_spin_destroy(&p->rx_lock[i]);
 	free(p);
 	d->port = NULL;
 }

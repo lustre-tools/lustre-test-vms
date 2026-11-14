@@ -100,6 +100,11 @@ enum {
 
 #define F_VERSION_1		(1ull << 32)
 #define F_PROTOCOL_FEATURES	(1ull << 30)
+#define F_RING_INDIRECT_DESC	(1ull << 28)
+#define F_RING_EVENT_IDX	(1ull << 29)
+
+#define NET_MAX_QP		8	/* virtio-net queue pairs per port */
+#define MAX_VQS			(2 * NET_MAX_QP)
 #define PF_MQ			(1ull << 0)
 #define PF_REPLY_ACK		(1ull << 3)
 
@@ -153,6 +158,7 @@ struct vring_desc {
 };
 #define VRING_DESC_F_NEXT	1
 #define VRING_DESC_F_WRITE	2
+#define VRING_DESC_F_INDIRECT	4
 #define VRING_AVAIL_F_NO_INTERRUPT 1
 
 struct vring_avail {
@@ -194,6 +200,9 @@ struct vq {
 	int callfd;
 	bool enabled;
 	bool started;
+	bool event_idx;		/* VIRTIO_RING_F_EVENT_IDX negotiated */
+	bool signalled_valid;
+	uint16_t signalled_used;
 };
 
 struct ring {
@@ -260,7 +269,8 @@ struct qp {
 };
 
 struct netport;
-static struct vdev *port_dev(struct netport *p);
+struct netq;
+static struct vdev *netq_dev(struct netq *nq);
 
 enum { KIND_RDMA, KIND_NET };
 
@@ -277,7 +287,7 @@ struct vdev {
 	/* old mappings kept until teardown: cached pointers may use them */
 	int nold;
 	struct mapping old[64];
-	struct vq vq[SHMRDMA_NUM_VQS];
+	struct vq vq[MAX_VQS];
 	pthread_spinlock_t evq_lock;	/* event vq + EQ */
 
 	bool initialized;
@@ -306,8 +316,8 @@ struct worker {
 	int sleeping;
 	struct qp **qps;
 	int nqps, cap;
-	struct netport **ports;
-	int nports, pcap;
+	struct netq **nqs;
+	int nnq, nqcap;
 };
 
 /* ---------------------------------------------------------------- */
@@ -358,8 +368,8 @@ static void wake_workers_for(struct vdev *d)
 			pthread_mutex_lock(&w->mtx);
 			for (int j = 0; j < w->nqps && !mine; j++)
 				mine = w->qps[j]->dev == d;
-			for (int j = 0; j < w->nports && !mine; j++)
-				mine = port_dev(w->ports[j]) == d;
+			for (int j = 0; j < w->nnq && !mine; j++)
+				mine = netq_dev(w->nqs[j]) == d;
 			pthread_mutex_unlock(&w->mtx);
 		}
 		if (mine)
@@ -438,8 +448,19 @@ static void vq_signal(struct vq *q)
 
 	if (q->callfd < 0)
 		return;
-	if (ACQ(&q->avail->flags) & VRING_AVAIL_F_NO_INTERRUPT)
+	if (q->event_idx) {
+		uint16_t ev = ACQ(&q->avail->ring[q->num]);
+		uint16_t old = q->signalled_used, new = q->used_idx;
+		bool valid = q->signalled_valid;
+
+		q->signalled_used = new;
+		q->signalled_valid = true;
+		/* vring_need_event() */
+		if (valid && (uint16_t)(new - ev - 1) >= (uint16_t)(new - old))
+			return;
+	} else if (ACQ(&q->avail->flags) & VRING_AVAIL_F_NO_INTERRUPT) {
 		return;
+	}
 	(void)!write(q->callfd, &one, 8);
 }
 
@@ -1451,8 +1472,8 @@ static void *worker_main(void *arg)
 		pthread_mutex_lock(&w->mtx);
 		for (int i = 0; i < w->nqps; i++)
 			did += qp_process(w->qps[i], 32, &stalled);
-		for (int i = 0; i < w->nports; i++)
-			did += net_tx_process(w->ports[i], 64, &stalled);
+		for (int i = 0; i < w->nnq; i++)
+			did += net_tx_process(w->nqs[i], 64, &stalled);
 		pthread_mutex_unlock(&w->mtx);
 
 		uint64_t t = now_ns();
@@ -1474,13 +1495,13 @@ static void *worker_main(void *arg)
 		__atomic_store_n(&w->sleeping, 1, __ATOMIC_SEQ_CST);
 		for (int i = 0; i < w->nqps; i++)
 			REL(&w->qps[i]->rec->need_kick, 1);
-		for (int i = 0; i < w->nports; i++)
-			net_set_notify(w->ports[i], true);
+		for (int i = 0; i < w->nnq; i++)
+			net_set_notify(w->nqs[i], true);
 		FENCE();
 		for (int i = 0; i < w->nqps && !work; i++)
 			work = qp_has_work(w->qps[i]);
-		for (int i = 0; i < w->nports && !work; i++)
-			work = net_has_work(w->ports[i]);
+		for (int i = 0; i < w->nnq && !work; i++)
+			work = net_has_work(w->nqs[i]);
 		pthread_mutex_unlock(&w->mtx);
 
 		if (!work) {
@@ -1496,8 +1517,8 @@ static void *worker_main(void *arg)
 		pthread_mutex_lock(&w->mtx);
 		for (int i = 0; i < w->nqps; i++)
 			REL(&w->qps[i]->rec->need_kick, 0);
-		for (int i = 0; i < w->nports; i++)
-			net_set_notify(w->ports[i], false);
+		for (int i = 0; i < w->nnq; i++)
+			net_set_notify(w->nqs[i], false);
 		pthread_mutex_unlock(&w->mtx);
 		idle_since = now_ns();
 	}
@@ -1510,8 +1531,8 @@ static void worker_add_qp(struct qp *qp)
 	struct worker *best = &g_workers[0];
 
 	for (int i = 1; i < g_nworkers; i++)
-		if (g_workers[i].nqps + g_workers[i].nports <
-		    best->nqps + best->nports)
+		if (g_workers[i].nqps + g_workers[i].nnq <
+		    best->nqps + best->nnq)
 			best = &g_workers[i];
 	if (best->nqps == best->cap) {
 		best->cap = best->cap ? best->cap * 2 : 16;
@@ -1973,7 +1994,7 @@ static void dev_destroy(struct vdev *d)
 			break;
 		}
 	wunlock();
-	for (int i = 0; i < SHMRDMA_NUM_VQS; i++) {
+	for (int i = 0; i < MAX_VQS; i++) {
 		vq_stop(d, i);
 		if (d->vq[i].callfd >= 0)
 			close(d->vq[i].callfd);
@@ -2122,10 +2143,11 @@ static int handle_msg(struct vdev *d)
 	}
 	case VU_SET_FEATURES:
 		d->features = pl->u64;
+		for (int i = 0; i < MAX_VQS; i++)
+			d->vq[i].event_idx = d->features & F_RING_EVENT_IDX;
 		break;
 	case VU_GET_PROTOCOL_FEATURES: {
-		uint64_t f = d->kind == KIND_NET ? PF_REPLY_ACK :
-			     PF_MQ | PF_REPLY_ACK;
+		uint64_t f = PF_MQ | PF_REPLY_ACK;
 
 		rc = vu_reply(d, h.request, &f, 8);
 		need_ack = false;
@@ -2135,7 +2157,8 @@ static int handle_msg(struct vdev *d)
 		d->pfeatures = pl->u64;
 		break;
 	case VU_GET_QUEUE_NUM: {
-		uint64_t qn = SHMRDMA_NUM_VQS;
+		uint64_t qn = d->kind == KIND_NET ? NET_MAX_QP :
+			      SHMRDMA_NUM_VQS;
 
 		rc = vu_reply(d, h.request, &qn, 8);
 		need_ack = false;
@@ -2155,12 +2178,12 @@ static int handle_msg(struct vdev *d)
 		if (set_mem_table(d, &pl->mem, fds, nfds))
 			ack = 1;
 		nfds = 0;
-		for (int i = 0; i < SHMRDMA_NUM_VQS; i++)
+		for (int i = 0; i < MAX_VQS; i++)
 			if (d->vq[i].num && d->vq[i].desc_ua)
 				vq_map(d, &d->vq[i]);
 		break;
 	case VU_SET_VRING_NUM:
-		if (pl->state.index >= SHMRDMA_NUM_VQS) {
+		if (pl->state.index >= MAX_VQS) {
 			ack = 1;
 			break;
 		}
@@ -2169,7 +2192,7 @@ static int handle_msg(struct vdev *d)
 	case VU_SET_VRING_ADDR: {
 		struct vq *q;
 
-		if (pl->addr.index >= SHMRDMA_NUM_VQS) {
+		if (pl->addr.index >= MAX_VQS) {
 			ack = 1;
 			break;
 		}
@@ -2185,17 +2208,18 @@ static int handle_msg(struct vdev *d)
 		break;
 	}
 	case VU_SET_VRING_BASE:
-		if (pl->state.index >= SHMRDMA_NUM_VQS) {
+		if (pl->state.index >= MAX_VQS) {
 			ack = 1;
 			break;
 		}
 		d->vq[pl->state.index].last_avail = pl->state.num;
 		d->vq[pl->state.index].used_idx = pl->state.num;
+		d->vq[pl->state.index].signalled_valid = false;
 		break;
 	case VU_GET_VRING_BASE: {
 		struct vu_state st = pl->state;
 
-		if (st.index >= SHMRDMA_NUM_VQS)
+		if (st.index >= MAX_VQS)
 			break;
 		wlock();
 		if (d->port)
@@ -2218,7 +2242,7 @@ static int handle_msg(struct vdev *d)
 		int fd = (pl->u64 & VU_VRING_NOFD) || nfds < 1 ? -1 : fds[0];
 
 		nfds = 0;
-		if (idx >= SHMRDMA_NUM_VQS) {
+		if (idx >= MAX_VQS) {
 			if (fd >= 0)
 				close(fd);
 			ack = 1;
@@ -2245,9 +2269,17 @@ static int handle_msg(struct vdev *d)
 			q->kickfd = fd;
 			if (fd >= 0) {
 				bool doorbell = d->kind == KIND_NET ?
-					idx == NETQ_TX : idx == SHMRDMA_VQ_DOORBELL;
+					idx & 1 : idx == SHMRDMA_VQ_DOORBELL;
 
-				if (doorbell) {
+				if (doorbell && d->kind == KIND_NET) {
+					/* its worker, if the queue is served */
+					wlock();
+					struct worker *w = d->port->q[idx / 2].w;
+
+					if (w)
+						worker_watch(w, fd);
+					wunlock();
+				} else if (doorbell) {
 					/* workers already serving d watch it */
 					for (int i = 0; i < g_nworkers; i++) {
 						struct worker *w = &g_workers[i];
@@ -2256,8 +2288,6 @@ static int handle_msg(struct vdev *d)
 						pthread_mutex_lock(&w->mtx);
 						for (int j = 0; j < w->nqps; j++)
 							mine |= w->qps[j]->dev == d;
-						for (int j = 0; j < w->nports; j++)
-							mine |= port_dev(w->ports[j]) == d;
 						pthread_mutex_unlock(&w->mtx);
 						if (mine)
 							worker_watch(w, fd);
@@ -2271,12 +2301,13 @@ static int handle_msg(struct vdev *d)
 				q->enabled = true;
 			/* catch anything posted before we listened */
 			if (d->kind == KIND_NET) {
-				if (d->vq[NETQ_RX].started &&
-				    d->vq[NETQ_TX].started) {
-					wlock();
+				wlock();
+				if (d->vq[NET_RXQ(0)].started &&
+				    d->vq[NET_TXQ(0)].started)
 					net_attach(d);
-					wunlock();
-				}
+				if (d->port->attached)
+					netq_serve(&d->port->q[idx / 2]);
+				wunlock();
 			} else if (idx == SHMRDMA_VQ_CTRL) {
 				ctrl_process(d);
 			}
@@ -2284,7 +2315,7 @@ static int handle_msg(struct vdev *d)
 		break;
 	}
 	case VU_SET_VRING_ENABLE:
-		if (pl->state.index >= SHMRDMA_NUM_VQS) {
+		if (pl->state.index >= MAX_VQS) {
 			ack = 1;
 			break;
 		}
@@ -2292,8 +2323,18 @@ static int handle_msg(struct vdev *d)
 		if (d->kind == KIND_RDMA &&
 		    pl->state.index == SHMRDMA_VQ_CTRL && pl->state.num)
 			ctrl_process(d);
-		if (d->kind == KIND_NET && pl->state.num)
-			wake_workers_for(d);
+		if (d->kind == KIND_NET) {
+			struct netq *nq = &d->port->q[pl->state.index / 2];
+
+			wlock();
+			if (pl->state.num)
+				netq_serve(nq);
+			else if (pl->state.index & 1)
+				netq_unserve(nq);
+			wunlock();
+			if (pl->state.num)
+				wake_workers_for(d);
+		}
 		break;
 	case VU_SET_LOG_BASE:
 	case VU_SET_LOG_FD:
@@ -2323,7 +2364,7 @@ static void accept_conn(int lsock, int kind)
 	d->id = g_next_dev_id++;
 	d->sock = s;
 	d->kind = kind;
-	for (int i = 0; i < SHMRDMA_NUM_VQS; i++) {
+	for (int i = 0; i < MAX_VQS; i++) {
 		d->vq[i].kickfd = -1;
 		d->vq[i].callfd = -1;
 	}
@@ -2347,7 +2388,7 @@ static void on_kick(struct vdev *d, int idx)
 		return;
 	if (d->kind == KIND_NET) {
 		/* TX: frames to send; RX: buffers for a stalled sender */
-		if (idx == NETQ_TX)
+		if (idx & 1)
 			wake_workers_for(d);
 		else
 			wake_workers();
