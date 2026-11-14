@@ -69,11 +69,16 @@ class TestSharedRam:
     def test_plain(self) -> None:
         args = qemu_run.smp_args(4, 4096, 0, shared=True)
         assert args[:4] == ["-smp", "4", "-m", "4096"]
-        assert "memory-backend-memfd,id=ram0,size=4096M,share=on" in args
+        assert (
+            f"{shmrdma.SHARED_RAM_BACKEND},id=ram0,size=4096M,share=on" in args
+        )
 
     def test_numa_nodes_are_shared(self) -> None:
         joined = " ".join(qemu_run.smp_args(4, 4096, 2, shared=True))
-        assert "memory-backend-memfd,id=numa0,size=2048M,share=on" in joined
+        assert (
+            f"{shmrdma.SHARED_RAM_BACKEND},id=numa0,size=2048M,share=on"
+            in joined
+        )
         assert "memory-backend-ram" not in joined
 
     def test_unshared_is_unchanged(self) -> None:
@@ -177,7 +182,7 @@ def test_launch_shmnet_only(
     _run_launch(vm, h)
     argv = h.qemu_argv or []
     joined = " ".join(argv)
-    assert "memory-backend-memfd,id=ram0" in joined
+    assert f"{shmrdma.SHARED_RAM_BACKEND},id=ram0" in joined
     assert f"socket,id=charnet1,path={daemon_socket}" in joined
     assert "vhost-user-fs-pci" not in joined
     assert "fc_shmrdma" not in argv[argv.index("-append") + 1]
@@ -302,34 +307,72 @@ class TestPrivateDir:
 
 
 class TestPidFile:
-    def _daemon(self, tmp_path: Path, rec: str) -> shmrdma.Daemon:
-        d = shmrdma.Daemon("tester", os.geteuid(), tmp_path)
+    EXE = "/opt/ltvm/cache/shmrdmad"
+
+    def _daemon(
+        self, tmp_path: Path, rec: str, uid: int = -1
+    ) -> shmrdma.Daemon:
+        d = shmrdma.Daemon("tester", os.geteuid() if uid < 0 else uid, tmp_path)
         d.pid_path.write_text(rec)
         return d
 
+    def _proc(self, uid: int, exe: str):
+        return patch(
+            "ltvm_pkg.shmrdma._proc_owner_exe", return_value=(uid, exe)
+        )
+
     def test_own_process_with_its_binary(self, tmp_path: Path) -> None:
-        exe = os.readlink("/proc/self/exe")
-        d = self._daemon(tmp_path, f"{os.getpid()} abc {exe}\n")
-        with patch(
-            "ltvm_pkg.shmrdma.Path.read_text", return_value="shmrdmad\n"
-        ):
+        d = self._daemon(tmp_path, f"{os.getpid()} abc {self.EXE}\n")
+        with self._proc(os.geteuid(), self.EXE):
             assert d.pid() == os.getpid()
 
     def test_other_binary_refused(self, tmp_path: Path) -> None:
         d = self._daemon(tmp_path, f"{os.getpid()} abc /tmp/evil\n")
-        with patch(
-            "ltvm_pkg.shmrdma.Path.read_text", return_value="shmrdmad\n"
-        ):
+        with self._proc(os.geteuid(), self.EXE):
+            assert d.pid() == 0
+
+    def test_not_shmrdmad_refused(self, tmp_path: Path) -> None:
+        d = self._daemon(tmp_path, f"{os.getpid()} abc /usr/bin/python3\n")
+        with self._proc(os.geteuid(), "/usr/bin/python3"):
             assert d.pid() == 0
 
     def test_other_uid_refused(self, tmp_path: Path) -> None:
-        exe = os.readlink("/proc/self/exe")
-        d = shmrdma.Daemon("tester", os.geteuid() + 1, tmp_path)
-        d.pid_path.write_text(f"{os.getpid()} abc {exe}\n")
-        with patch(
-            "ltvm_pkg.shmrdma.Path.read_text", return_value="shmrdmad\n"
-        ):
+        d = self._daemon(
+            tmp_path, f"{os.getpid()} abc {self.EXE}\n", os.geteuid() + 1
+        )
+        with self._proc(os.geteuid(), self.EXE):
             assert d.pid() == 0
+
+    def test_gone_process(self, tmp_path: Path) -> None:
+        d = self._daemon(tmp_path, f"{os.getpid()} abc {self.EXE}\n")
+        with self._proc(-1, ""):
+            assert d.pid() == 0
+
+    def test_proc_owner_exe_self(self) -> None:
+        import sys
+
+        uid, exe = shmrdma._proc_owner_exe(os.getpid())
+        assert uid == os.geteuid()
+        assert Path(exe).resolve() == Path(sys.executable).resolve()
+
+    def test_proc_owner_exe_ps(self) -> None:
+        r = subprocess.CompletedProcess(
+            [], 0, stdout="  501 /Users/x/My Cache/shmrdmad\n", stderr=""
+        )
+        with (
+            patch("ltvm_pkg.shmrdma._LINUX", False),
+            patch("ltvm_pkg.shmrdma.subprocess.run", return_value=r),
+        ):
+            assert shmrdma._proc_owner_exe(1) == (
+                501,
+                "/Users/x/My Cache/shmrdmad",
+            )
+        gone = subprocess.CompletedProcess([], 1, stdout="", stderr="")
+        with (
+            patch("ltvm_pkg.shmrdma._LINUX", False),
+            patch("ltvm_pkg.shmrdma.subprocess.run", return_value=gone),
+        ):
+            assert shmrdma._proc_owner_exe(1) == (-1, "")
 
     def test_symlinked_pid_file_ignored(self, tmp_path: Path) -> None:
         target = tmp_path / "target"
@@ -410,7 +453,7 @@ class TestHostNode:
     def test_shared_and_bound(self) -> None:
         args = qemu_run.smp_args(2, 2048, 0, shared=True, host_node=0)
         assert (
-            "memory-backend-memfd,id=ram0,size=2048M,share=on,"
+            f"{shmrdma.SHARED_RAM_BACKEND},id=ram0,size=2048M,share=on,"
             "host-nodes=0,policy=bind" in args
         )
 
@@ -621,16 +664,19 @@ class TestRequirements:
 
         helps = {
             "device": 'name "vhost-user-fs-pci", bus PCI',
-            "object": "memory-backend-memfd\n",
-            "netdev": "vhost-user\n",
+            "object": f"{shmrdma.SHARED_RAM_BACKEND}\n",
         }
         with (
             patch("ltvm_pkg.shmrdma_req._qemu_help", side_effect=helps.get),
+            patch(
+                "ltvm_pkg.shmrdma_req._qemu_has_vhost_user_netdev",
+                return_value=True,
+            ),
             patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=False),
         ):
             reqs = {r.name: r for r in sr.host_checks()}
         assert reqs["QEMU vhost-user-fs-pci"].ok
-        assert reqs["QEMU memory-backend-memfd"].ok
+        assert reqs[f"QEMU {shmrdma.SHARED_RAM_BACKEND}"].ok
         assert reqs["QEMU vhost-user netdev"].ok
         with (
             patch("ltvm_pkg.shmrdma_req._qemu_help", return_value=""),
@@ -638,7 +684,31 @@ class TestRequirements:
         ):
             reqs = {r.name: r for r in sr.host_checks()}
         assert not reqs["QEMU vhost-user-fs-pci"].ok
+        assert not reqs["QEMU vhost-user netdev"].ok
         assert reqs["NUMA memory binding"].ok
+
+    def test_vhost_user_netdev_probe(self) -> None:
+        """Help lists vhost-user even where it is not built in."""
+        from ltvm_pkg import shmrdma_req as sr
+
+        def run(err: str) -> subprocess.CompletedProcess:
+            return subprocess.CompletedProcess([], 1, stdout="", stderr=err)
+
+        built = run('-netdev vhost-user,...: chardev "ltvm-probe" not found')
+        missing = run(
+            "network backend 'vhost-user' is not compiled into this binary"
+        )
+        with patch(
+            "ltvm_pkg.shmrdma_req._qemu_help", return_value="vhost-user\n"
+        ):
+            with patch(
+                "ltvm_pkg.shmrdma_req.subprocess.run", return_value=built
+            ):
+                assert sr._qemu_has_vhost_user_netdev()
+            with patch(
+                "ltvm_pkg.shmrdma_req.subprocess.run", return_value=missing
+            ):
+                assert not sr._qemu_has_vhost_user_netdev()
 
     def test_doctor_fixes(self, capsys) -> None:
         from ltvm_pkg import shmrdma_req as sr

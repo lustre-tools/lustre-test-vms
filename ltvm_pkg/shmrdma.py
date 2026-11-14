@@ -30,6 +30,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -49,8 +50,17 @@ log = logging.getLogger(__name__)
 
 SRC_DIR = Path(__file__).resolve().parent.parent / "shmrdma"
 
+# Guest RAM QEMU can hand to shmrdmad: a memfd on Linux, POSIX shm
+# (shm_open) elsewhere.
+# (Through a variable: mypy evaluates sys.platform tests.)
+_LINUX = sys.platform.startswith("linux")
+SHARED_RAM_BACKEND = "memory-backend-memfd" if _LINUX else "memory-backend-shm"
+
 _DAEMON_FILES = (
     "daemon/shmrdmad.c",
+    "daemon/plat.h",
+    "daemon/plat_linux.h",
+    "daemon/plat_macos.h",
     "daemon/shmnet.c",
     "include/shmrdma_abi.h",
 )
@@ -299,15 +309,10 @@ class Daemon:
         rec = self._record()
         try:
             pid, exe_want = int(rec[0]), rec[2]
-            st = os.stat(f"/proc/{pid}")
-            comm = Path(f"/proc/{pid}/comm").read_text().strip()
-        except (OSError, ValueError, IndexError):
+        except (ValueError, IndexError):
             return 0
-        if comm != "shmrdmad" or st.st_uid != self.uid:
-            return 0
-        try:
-            exe = os.readlink(f"/proc/{pid}/exe")
-        except OSError:
+        uid, exe = _proc_owner_exe(pid)
+        if Path(exe).name != "shmrdmad" or uid != self.uid:
             return 0
         return pid if exe == exe_want else 0
 
@@ -315,6 +320,32 @@ class Daemon:
         """Source hash the running daemon was built from, or ""."""
         rec = self._record()
         return rec[1] if len(rec) > 1 else ""
+
+
+def _proc_owner_exe(pid: int) -> tuple[int, str]:
+    """(uid, executable path) of *pid*, or (-1, "") if it is gone."""
+    if _LINUX:
+        try:
+            uid = os.stat(f"/proc/{pid}").st_uid
+            comm = Path(f"/proc/{pid}/comm").read_text().strip()
+            exe = os.readlink(f"/proc/{pid}/exe")
+        except OSError:
+            return -1, ""
+        # comm, not the path, names a process that exec'd elsewhere
+        return (uid, exe) if comm == Path(exe).name else (-1, "")
+    # macOS: no /proc; ps prints the full executable path as comm
+    try:
+        r = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "uid=", "-o", "comm="],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        uid_s, exe = r.stdout.strip().split(None, 1)
+        return int(uid_s), exe
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return -1, ""
 
 
 def daemon(create: bool = True) -> Daemon:

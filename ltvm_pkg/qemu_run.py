@@ -540,12 +540,12 @@ def smp_args(
     is the stored distance table (numa_dist.format_matrix); empty leaves
     QEMU's 10/20 default.
 
-    *shared* backs guest RAM with a shared memfd, which a vhost-user
-    backend (shmrdmad) can map.  *host_node* binds guest RAM to that
-    host NUMA node.  Either makes, without NUMA nodes, the backend
-    ``ram0``, which -machine must name.
+    *shared* backs guest RAM with a shared memfd (POSIX shm on macOS),
+    which a vhost-user backend (shmrdmad) can map.  *host_node* binds
+    guest RAM to that host NUMA node.  Either makes, without NUMA nodes,
+    the backend ``ram0``, which -machine must name.
     """
-    backend = "memory-backend-memfd" if shared else "memory-backend-ram"
+    backend = shmrdma.SHARED_RAM_BACKEND if shared else "memory-backend-ram"
     share = ",share=on" if shared else ""
     if host_node >= 0:
         share += f",host-nodes={host_node},policy=bind"

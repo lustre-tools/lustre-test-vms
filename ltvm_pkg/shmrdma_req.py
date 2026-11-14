@@ -75,11 +75,22 @@ def resolve_target(
     return t
 
 
+def _host_qemu() -> str:
+    """The QEMU this host's native guests run on (aarch64 on a Mac)."""
+    import platform
+
+    arch = platform.machine()
+    arch = {"arm64": "aarch64", "amd64": "x86_64"}.get(arch, arch)
+    return vm_state.qemu_binary_for_arch(arch)
+
+
 def _qemu_help(what: str) -> str:
-    qemu = vm_state.qemu_binary_for_arch("x86_64")
+    qemu = _host_qemu()
     try:
         r = subprocess.run(
-            [qemu, f"-{what}", "help"],
+            # aarch64 QEMU has no default machine and answers
+            # -netdev help only once one is named
+            [qemu, "-M", "none", f"-{what}", "help"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -88,6 +99,33 @@ def _qemu_help(what: str) -> str:
     except (OSError, subprocess.TimeoutExpired):
         return ""
     return r.stdout
+
+
+def _qemu_has_vhost_user_netdev() -> bool:
+    """Whether QEMU was built with vhost-user.  ``-netdev help`` lists
+    vhost-user even in a build without it (Homebrew's, on macOS), so
+    ask for one: a build with it complains about the chardev instead."""
+    if "vhost-user" not in _qemu_help("netdev"):
+        return False
+    try:
+        r = subprocess.run(
+            [
+                _host_qemu(),
+                "-M",
+                "none",
+                "-display",
+                "none",
+                "-netdev",
+                "vhost-user,id=probe,chardev=ltvm-probe",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return "not compiled" not in r.stderr
 
 
 def install_packages(*pkgs: str) -> None:
@@ -143,8 +181,8 @@ def host_checks() -> list[Req]:
     )
     devices = _qemu_help("device")
     objects = _qemu_help("object")
-    netdevs = _qemu_help("netdev")
-    qemu = vm_state.qemu_binary_for_arch("x86_64")
+    qemu = _host_qemu()
+    backend = shmrdma.SHARED_RAM_BACKEND
     reinstall = "reinstall ltvm's QEMU: `sudo ltvm setup --qemu --force`"
     reqs.append(
         Req(
@@ -157,9 +195,9 @@ def host_checks() -> list[Req]:
     )
     reqs.append(
         Req(
-            "QEMU memory-backend-memfd",
+            f"QEMU {backend}",
             frozenset({SHMRDMA, SHMNET}),
-            "memory-backend-memfd" in objects,
+            backend in objects,
             qemu,
             how=reinstall,
         )
@@ -168,7 +206,7 @@ def host_checks() -> list[Req]:
         Req(
             "QEMU vhost-user netdev",
             frozenset({SHMNET}),
-            "vhost-user" in netdevs,
+            _qemu_has_vhost_user_netdev(),
             qemu,
             how=reinstall,
         )
