@@ -635,6 +635,9 @@ def check_prerequisites(host: HostInfo) -> None:
         "tar": "tar",
         "make": "make",
         "gcc": "gcc",
+        # --host-node binds guest memory with numactl when ltvm's QEMU
+        # was built without libnuma (shmrdma_req).
+        "numactl": "numactl",
         "ip": "iproute2" if host.pkg_mgr == "apt" else "iproute",
         "fakeroot": "fakeroot",
         "mke2fs": "e2fsprogs",

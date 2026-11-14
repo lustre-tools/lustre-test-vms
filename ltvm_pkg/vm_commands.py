@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from . import numa_dist, rootless, vm_claim
+from . import numa_dist, rootless, shmrdma_req, vm_claim
 from .deploy import configure_test_disks, premount_cleanup_script
 from .host_setup import is_macos
 from .nic_guest import wait_for_layout as guest_nic_layout
@@ -1183,8 +1183,21 @@ def _resolve_os_and_kernel(
         )
     kver = meta["kernel_version"]
 
-    if getattr(args, "shmrdma", ""):
-        _check_shmrdma_image(image, os_target, explicit_kernel)
+    feats = shmrdma_req.features_of(
+        getattr(args, "shmrdma", "") or "",
+        extra_nic_types or [],
+        getattr(args, "host_node", -1),
+    )
+    if feats:
+        target = shmrdma_req.Target(
+            os_target,
+            explicit_kernel or None,
+            image=Path(image),
+            kernel_dir=Path(kernel).parent,
+        )
+        why = shmrdma_req.refusal(feats, target)
+        if why:
+            die(why)
 
     return os_arts, image, kernel, kver, os_target, variant
 
@@ -1205,16 +1218,12 @@ def _check_shmrdma_socket(value: str) -> None:
 
 def _check_shmrdma_image(image: str, target: str, kernel: str) -> None:
     """Refuse --shmrdma on an image built without the guest module."""
-    from . import shmrdma
-
-    if shmrdma.image_has_kmod(image):
-        return
-    k = f" --kernel {kernel}" if kernel else ""
-    die(
-        f"--shmrdma: the image {image} has no shmrdma guest module.  "
-        f"Images built by this ltvm include it where it builds; rebuild "
-        f"with `ltvm build image {target}{k}`"
+    t = shmrdma_req.Target(
+        target, kernel or None, image=Path(image), kernel_dir=Path(image).parent
     )
+    why = shmrdma_req.refusal({shmrdma_req.SHMRDMA}, t)
+    if why:
+        die(why)
 
 
 def _validate_create_bounds(
@@ -4227,6 +4236,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     if args.fix:
                         unregister_ssh_name(sname)
                         print("  fixed: removed ssh config")
+
+    # --shmrdma [TARGET]: what the shmrdma family needs (shmrdma_req).
+    shm_target = getattr(args, "shmrdma", None)
+    if shm_target:
+        target = shmrdma_req.resolve_target(
+            shm_target,
+            getattr(args, "kernel", None),
+            getattr(args, "lustre_tree", None),
+        )
+        found, failed = shmrdma_req.doctor(target, args.fix)
+        issues += found
+        fix_failures += failed
 
     if issues == 0:
         print("no issues found")

@@ -505,8 +505,9 @@ on one node with `--host-node N` (memory bound there, QEMU on its
 CPUs), and the daemon with `[shmrdma] nodes = N` in /etc/ltvm.conf:
 placement alone made a 3-4x difference on Sookie.  Shared-memory VMs
 cannot be merged by KSM, so they cost their
-full RAM on the host.  An image without the guest module (a fetched
-one) is refused: `ltvm build image <target>`.  docs/SHMRDMA.md has the
+full RAM on the host.  When something it needs is missing (a fetched
+image has no guest module, for one), create refuses and says to run
+`ltvm doctor --fix --shmrdma <target>`, which installs and builds it.  docs/SHMRDMA.md has the
 detail.
 
 ```bash

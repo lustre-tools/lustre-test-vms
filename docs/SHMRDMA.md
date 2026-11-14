@@ -96,6 +96,28 @@ ltvm vm shmrdmad [status|start|stop]
   Shared memfd memory also gets no transparent huge pages unless the
   host's `shmem_enabled` allows them.
 
+## Requirements
+
+`ltvm doctor --shmrdma [TARGET] [--kernel K]` checks everything these
+features need and `--fix` sets up what it can.  `create` and `start`
+refuse a VM whose features lack one, naming what is missing and that
+command; they never build anything themselves.
+
+| requirement | needed by | fixed by `doctor --fix` |
+|---|---|---|
+| a C compiler (shmrdmad is built on the host) | shmrdma, shmnet | installs gcc |
+| QEMU with vhost-user-fs-pci | shmrdma | no: `sudo ltvm setup --qemu --force` |
+| QEMU with memory-backend-memfd | shmrdma, shmnet | no: as above |
+| QEMU with the vhost-user netdev | shmnet | no: as above |
+| a private runtime directory for the daemon | shmrdma, shmnet | creates it |
+| taskset | --host-node | installs util-linux |
+| QEMU with libnuma, or numactl (optional: pinned vCPUs place most memory anyway) | --host-node | installs numactl |
+| TARGET's image built with the guest module (a fetched one is not) | shmrdma | `ltvm build image` |
+| TARGET's kernel built with SMC (optional: without it SMC falls back to TCP) | SMC | `ltvm build kernel` with `--lustre-tree`, then the image |
+
+`ltvm install` installs gcc and numactl with its other prerequisites.
+The daemon's node list (`[shmrdma] nodes`), when set, is checked too.
+
 ## SMC sockets over shmrdma
 
 SMC-R moves a TCP connection's data over RDMA once both ends agree on

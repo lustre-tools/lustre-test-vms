@@ -1196,6 +1196,20 @@ def _start_qemu(vm: VMInfo) -> None:
 
     # shmrdmad must be serving every socket the VM's shmrdma device and
     # shmnet NICs connect to, and must be able to map guest RAM.
+    from . import shmrdma_req
+
+    feats = shmrdma_req.features_of(vm.shmrdma, vm.nics, vm.host_node)
+    if feats:
+        target = shmrdma_req.Target(
+            vm.os_id or "this target",
+            image=Path(vm.image) if vm.image else None,
+            kernel_dir=kernel.parent,
+        )
+        why = shmrdma_req.refusal(
+            feats, target if vm.shmrdma and vm.image else None
+        )
+        if why:
+            die(f"{vm.name}: {why}")
     shm_socks = shmrdma.prepare_launch(vm) if vm.shared_ram else []
     if shm_socks != vm.shm_sockets:
         vm.shm_sockets = list(shm_socks)

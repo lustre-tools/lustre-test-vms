@@ -25,6 +25,16 @@ from tests.test_qemu_run import (  # noqa: F401
 )
 
 
+@pytest.fixture(autouse=True)
+def _requirements_met(request):
+    """Launch tests build QEMU args; TestRequirements checks the gate."""
+    if request.node.get_closest_marker("requirements"):
+        yield
+        return
+    with patch("ltvm_pkg.shmrdma_req.refusal", return_value=None):
+        yield
+
+
 @pytest.fixture
 def daemon_socket(tmp_path: Path):
     """A listening unix socket standing in for a hand-run shmrdmad."""
@@ -534,3 +544,142 @@ def test_guest_files_feed_image_hash(tmp_path: Path) -> None:
         f.write("# changed\n")
     with patch("ltvm_pkg.shmrdma.SRC_DIR", src):
         assert tc.input_hash("image") != before
+
+
+@pytest.mark.requirements
+class TestRequirements:
+    def _req(self, name, feats, ok, hard=True, fix=None):
+        from ltvm_pkg import shmrdma_req as sr
+
+        return sr.Req(name, frozenset(feats), ok, "detail", fix=fix, hard=hard)
+
+    def test_nothing_asked(self) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        with patch("ltvm_pkg.shmrdma_req.host_checks") as hc:
+            assert sr.refusal(set()) is None
+            hc.assert_not_called()
+
+    def test_only_the_asked_features_refuse(self) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        reqs = [
+            self._req("cc", {sr.SHMRDMA, sr.SHMNET}, False),
+            self._req("numactl", {sr.HOST_NODE}, False, hard=False),
+            self._req("taskset", {sr.HOST_NODE}, True),
+        ]
+        with patch("ltvm_pkg.shmrdma_req.host_checks", return_value=reqs):
+            assert sr.refusal({sr.HOST_NODE}) is None
+            why = sr.refusal({sr.SHMNET})
+        assert why is not None
+        assert "--nic shmnet" in why and "cc: detail" in why
+        assert "numactl" not in why
+        assert "ltvm doctor --fix --shmrdma" in why
+
+    def test_target_in_the_fix_command(self, tmp_path: Path) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        t = sr.Target(
+            "rocky10",
+            "6.12-rhel10.2",
+            image=tmp_path / "x.ext4",
+            kernel_dir=tmp_path,
+        )
+        with patch("ltvm_pkg.shmrdma_req.host_checks", return_value=[]):
+            why = sr.refusal({sr.SHMRDMA, sr.SMC}, t)
+        assert why is not None
+        assert "image has the shmrdma guest module" in why
+        # SMC is never a refusal
+        assert "SMC" not in why
+        assert (
+            "ltvm doctor --fix --shmrdma rocky10 --kernel 6.12-rhel10.2" in why
+        )
+
+    def test_image_and_smc_checks(self, tmp_path: Path) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        (tmp_path / "meta.json").write_text(json.dumps({"shmrdma_kmod": True}))
+        (tmp_path / "build-tree").mkdir()
+        (tmp_path / "build-tree" / ".config").write_text("#\nCONFIG_SMC=m\n")
+        t = sr.Target("rocky10", image=tmp_path / "x.ext4", kernel_dir=tmp_path)
+        assert all(r.ok for r in sr.target_checks(t))
+        (tmp_path / "build-tree" / ".config").write_text(
+            "# CONFIG_SMC is not set\n"
+        )
+        smc = [r for r in sr.target_checks(t) if "SMC" in r.name][0]
+        assert not smc.ok and not smc.hard
+
+    def test_unbuilt_target(self) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        t = sr.Target("rocky10", problem="No kernel matching 'x'\nRun: ...")
+        (r,) = sr.target_checks(t)
+        assert not r.ok and r.detail == "No kernel matching 'x'"
+
+    def test_host_checks_read_qemu(self) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        helps = {
+            "device": 'name "vhost-user-fs-pci", bus PCI',
+            "object": "memory-backend-memfd\n",
+            "netdev": "vhost-user\n",
+        }
+        with (
+            patch("ltvm_pkg.shmrdma_req._qemu_help", side_effect=helps.get),
+            patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=False),
+        ):
+            reqs = {r.name: r for r in sr.host_checks()}
+        assert reqs["QEMU vhost-user-fs-pci"].ok
+        assert reqs["QEMU memory-backend-memfd"].ok
+        assert reqs["QEMU vhost-user netdev"].ok
+        with (
+            patch("ltvm_pkg.shmrdma_req._qemu_help", return_value=""),
+            patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=True),
+        ):
+            reqs = {r.name: r for r in sr.host_checks()}
+        assert not reqs["QEMU vhost-user-fs-pci"].ok
+        assert reqs["NUMA memory binding"].ok
+
+    def test_doctor_fixes(self, capsys) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        fixed = []
+        reqs = [
+            self._req(
+                "cc", {sr.SHMRDMA}, False, fix=lambda: fixed.append("cc")
+            ),
+            self._req("qemu", {sr.SHMRDMA}, False),
+            self._req("numa", {sr.HOST_NODE}, False, hard=False),
+            self._req("ok", {sr.SHMRDMA}, True),
+        ]
+        t = sr.Target("rocky10")
+        with (
+            patch("ltvm_pkg.shmrdma_req.host_checks", return_value=reqs),
+            patch("ltvm_pkg.shmrdma_req.target_checks", return_value=[]),
+        ):
+            assert sr.doctor(t, fix=False) == (2, 0)
+            assert fixed == []
+            assert sr.doctor(t, fix=True) == (2, 1)
+        assert fixed == ["cc"]
+        out = capsys.readouterr().out
+        assert "cannot fix automatically" in out
+
+    def test_launch_refuses(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        vm = _make_vm(tmp_vmdir)
+        vm.host_node = 0
+        vm.save()
+        with (
+            patch("ltvm_pkg.shmrdma_req.refusal", return_value="needs numactl"),
+            pytest.raises(SystemExit),
+        ):
+            _run_launch(vm, _LaunchHarness())
+
+
+def test_install_wants_numactl() -> None:
+    import inspect
+
+    from ltvm_pkg import host_setup
+
+    assert '"numactl": "numactl"' in inspect.getsource(
+        host_setup.check_prerequisites
+    )

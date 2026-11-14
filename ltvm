@@ -264,6 +264,7 @@ try:
     )
     from ltvm_pkg.vm_cluster import IP_FAMILIES  # noqa: E402
     from ltvm_pkg.vm_state import (  # noqa: E402
+        DEFAULT_TARGET,
         DISK_CACHE_MODES,
         DISK_PREALLOC_MODES,
     )
@@ -1971,6 +1972,29 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Fix issues automatically",
+    )
+    _doc_shm = sp.add_argument(
+        "--shmrdma",
+        nargs="?",
+        const=DEFAULT_TARGET,
+        default=None,
+        metavar="TARGET",
+        help="Also check what --shmrdma, --nic shmnet, --host-node and "
+        "SMC need on this host and in TARGET's image and kernel "
+        f"(default {DEFAULT_TARGET}); with --fix, install and build it",
+    )
+    _doc_shm.completer = complete_targets  # type: ignore[attr-defined]
+    sp.add_argument(
+        "--kernel",
+        default=None,
+        help="With --shmrdma: the kernel of TARGET to check",
+    )
+    sp.add_argument(
+        "--lustre-tree",
+        dest="lustre_tree",
+        default=None,
+        help="With --shmrdma --fix: the Lustre tree a kernel rebuild "
+        "(for SMC) takes its patches from",
     )
     sp.set_defaults(func=cmd_doctor)
 
