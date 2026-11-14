@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import configparser
 import fcntl
+import functools
 import math
 import os
 import pwd
@@ -477,6 +478,34 @@ def host_node_cpus(node: int) -> str:
         )
     except OSError:
         return ""
+
+
+@functools.cache
+def qemu_binds_numa(qemu_bin: str) -> bool:
+    """Whether *qemu_bin* can bind memory backends to host nodes.
+
+    host-nodes= needs a QEMU built with libnuma; without it QEMU
+    refuses to start ("NUMA node binding are not supported").
+    """
+    try:
+        r = subprocess.run(
+            ["ldd", qemu_bin], capture_output=True, text=True, check=False
+        )
+    except OSError:
+        return False
+    return "libnuma" in r.stdout
+
+
+def host_node_prefix(node: int, qemu_binds: bool) -> list[str]:
+    """The command that runs QEMU on host node *node*'s CPUs.
+
+    When QEMU cannot bind its memory itself, numactl binds it from
+    outside if the host has it; otherwise the vCPU threads, pinned to
+    the node, still fault guest memory in there first.
+    """
+    if not qemu_binds and shutil.which("numactl"):
+        return ["numactl", f"--cpunodebind={node}", f"--membind={node}"]
+    return ["taskset", "-c", host_node_cpus(node)]
 
 
 def host_node_problem(node: int) -> str | None:
@@ -1168,7 +1197,8 @@ def _start_qemu(vm: VMInfo) -> None:
     # shmrdmad must be serving every socket the VM's shmrdma device and
     # shmnet NICs connect to, and must be able to map guest RAM.
     shm_socks = shmrdma.prepare_launch(vm) if vm.shared_ram else []
-    if (vm.shared_ram or vm.host_node >= 0) and vm.numa_nodes <= 1:
+    bind_node = vm.host_node if qemu_binds_numa(qemu_bin) else -1
+    if (vm.shared_ram or bind_node >= 0) and vm.numa_nodes <= 1:
         machine = f"{machine},memory-backend=ram0"
     problem = host_node_problem(vm.host_node)
     if problem:
@@ -1188,7 +1218,7 @@ def _start_qemu(vm: VMInfo) -> None:
             vm.numa_nodes,
             vm.numa_dist,
             shared=vm.shared_ram,
-            host_node=vm.host_node,
+            host_node=bind_node,
         ),
         "-kernel",
         str(kernel),
@@ -1320,9 +1350,7 @@ def _start_qemu(vm: VMInfo) -> None:
     if vm.host_node >= 0:
         # QEMU's threads inherit the affinity across -daemonize.
         qemu_args = [
-            "taskset",
-            "-c",
-            host_node_cpus(vm.host_node),
+            *host_node_prefix(vm.host_node, bind_node >= 0),
             *qemu_args,
         ]
 

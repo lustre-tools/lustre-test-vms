@@ -261,17 +261,34 @@ class TestHostNode:
             "host-nodes=0,policy=bind" in args
         )
 
-    def test_launch_pins(self, tmp_vmdir: Path) -> None:  # noqa: F811
-        vm = _make_vm(tmp_vmdir)
+    def _launch(self, vmdir: Path, binds: bool, numactl: str | None):
+        vm = _make_vm(vmdir)
         vm.host_node = 1
         h = _LaunchHarness()
         with (
             patch("ltvm_pkg.qemu_run.host_node_cpus", return_value="8-15"),
+            patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=binds),
+            patch("ltvm_pkg.qemu_run.shutil.which", return_value=numactl),
         ):
             _run_launch(vm, h)
-        argv = h.qemu_argv or []
+        return h.qemu_argv or []
+
+    def test_qemu_binds(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        argv = self._launch(tmp_vmdir, True, "/usr/bin/numactl")
         assert argv[:3] == ["taskset", "-c", "8-15"]
         assert argv[argv.index("-machine") + 1].endswith(",memory-backend=ram0")
+        assert "host-nodes=1,policy=bind" in " ".join(argv)
+
+    def test_numactl_binds(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        argv = self._launch(tmp_vmdir, False, "/usr/bin/numactl")
+        assert argv[:3] == ["numactl", "--cpunodebind=1", "--membind=1"]
+        assert "host-nodes" not in " ".join(argv)
+
+    def test_cpus_only(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        argv = self._launch(tmp_vmdir, False, None)
+        assert argv[:3] == ["taskset", "-c", "8-15"]
+        assert "host-nodes" not in " ".join(argv)
+        assert "memory-backend=ram0" not in " ".join(argv)
 
     def test_launch_refuses_missing_node(self, tmp_vmdir: Path) -> None:  # noqa: F811
         vm = _make_vm(tmp_vmdir)
