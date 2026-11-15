@@ -1554,3 +1554,21 @@ class TestKmodCache:
         finally:
             kdir.chmod(0o755)
         podman.assert_not_called()
+
+
+def test_vm_set_checks_the_vms_kernel_dir(tmp_path: Path) -> None:
+    from ltvm_pkg import vm_commands
+
+    vm = VMInfo(
+        name="co1-a",
+        ip="192.168.100.50",
+        image=str(tmp_path / "images" / "base.ext4"),
+        kernel=str(tmp_path / "kernels" / "k1" / "vmlinuz"),
+    )
+    with (
+        patch("ltvm_pkg.shmrdma.vm_has_kmod", return_value=True),
+        patch("ltvm_pkg.shmrdma_req.refusal", return_value=None) as refusal,
+    ):
+        vm_commands._check_shmrdma_image(vm, "auto")
+    t = refusal.call_args.args[1]
+    assert t.kernel_dir == tmp_path / "kernels" / "k1"

@@ -1231,7 +1231,7 @@ def _check_shmrdma_image(vm: VMInfo, shm: str) -> None:
     t = shmrdma_req.Target(
         vm.os_id,
         image=Path(vm.image),
-        kernel_dir=Path(vm.image).parent,
+        kernel_dir=Path(vm.kernel).parent,
         arch=vm.arch or None,
         has_kmod=shmrdma.vm_has_kmod(vm),
     )
