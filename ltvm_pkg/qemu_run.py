@@ -976,6 +976,10 @@ def launch_qemu(vm: VMInfo, *, wait_seconds: int = 0) -> None:
         except RuntimeError as e:
             die(str(e))
 
+    # Outside the launch lock, which every user's starts share: the
+    # daemon may have to be built first.
+    _shmrdma_preflight(vm)
+
     deadline = time.monotonic() + wait_seconds
     waited = False
     while True:
@@ -1001,6 +1005,35 @@ def launch_qemu(vm: VMInfo, *, wait_seconds: int = 0) -> None:
             )
             waited = True
         time.sleep(min(_MEMORY_POLL_SECONDS, remaining))
+
+
+def _shmrdma_preflight(vm: VMInfo) -> None:
+    """Refuse *vm* if the host or its image lacks what its shmrdma
+    device, shmnet NICs or --host-node need, and start ltvm's shmrdmad
+    for it if it uses that one."""
+    from . import shmrdma_req
+
+    feats = shmrdma_req.features_of(vm.shmrdma, vm.nics, vm.host_node)
+    if not feats:
+        return
+    if not vm.kernel:
+        die(f"VM '{vm.name}' has no kernel path set — recreate with --target")
+    target = shmrdma_req.Target(
+        vm.os_id or "this target",
+        image=Path(vm.image) if vm.image else None,
+        kernel_dir=Path(vm.kernel).parent,
+        arch=vm.arch or None,
+        has_kmod=shmrdma.vm_has_kmod(vm) if vm.shmrdma else None,
+    )
+    why = shmrdma_req.refusal(
+        feats,
+        target if vm.shmrdma and vm.image else None,
+        arch=vm.arch or None,
+    )
+    if why:
+        die(f"{vm.name}: {why}")
+    if vm.shared_ram:
+        shmrdma.start_for(vm)
 
 
 # An NMI injected from the host (`ltvm vm nmi`) panics into kdump with
@@ -1131,27 +1164,7 @@ def _start_qemu(vm: VMInfo) -> None:
         die(f"VM '{vm.name}' has no kernel path set — recreate with --target")
     kernel = Path(vm.kernel)
 
-    # shmrdmad must be serving every socket the VM's shmrdma device and
-    # shmnet NICs connect to, and must be able to map guest RAM.
-    from . import shmrdma_req
-
-    feats = shmrdma_req.features_of(vm.shmrdma, vm.nics, vm.host_node)
-    if feats:
-        target = shmrdma_req.Target(
-            vm.os_id or "this target",
-            image=Path(vm.image) if vm.image else None,
-            kernel_dir=kernel.parent,
-            arch=vm.arch or None,
-            has_kmod=shmrdma.vm_has_kmod(vm) if vm.shmrdma else None,
-        )
-        why = shmrdma_req.refusal(
-            feats,
-            target if vm.shmrdma and vm.image else None,
-            arch=vm.arch or None,
-        )
-        if why:
-            die(f"{vm.name}: {why}")
-    shm_socks = shmrdma.prepare_launch(vm) if vm.shared_ram else []
+    shm_socks = shmrdma.verify_sockets(vm) if vm.shared_ram else []
     if shm_socks != vm.shm_sockets:
         vm.shm_sockets = list(shm_socks)
         vm._update_field("SHM_SOCKETS", "|".join(shm_socks))

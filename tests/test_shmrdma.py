@@ -185,6 +185,47 @@ def test_launch_own_daemon(tmp_vmdir: Path, own_daemon) -> None:  # noqa: F811
     assert not shmrdma.vm_uses(back, other)
 
 
+def test_daemon_starts_outside_the_launch_lock(
+    tmp_vmdir: Path,  # noqa: F811
+    own_daemon,
+) -> None:
+    """A daemon build must not stall every other user's VM starts."""
+    from contextlib import contextmanager
+
+    d, ensure = own_daemon
+    held = []
+
+    @contextmanager
+    def lock():
+        held.append(True)
+        try:
+            yield
+        finally:
+            held.pop()
+
+    ensure.side_effect = lambda: (held and pytest.fail("lock held"), d)[1]
+    vm = _make_vm(tmp_vmdir)
+    vm.shmrdma = "auto"
+    vm.save()
+    with patch("ltvm_pkg.qemu_run._launch_lock", lock):
+        _run_launch(vm, _LaunchHarness())
+    ensure.assert_called_once()
+
+
+def test_sockets_gone_by_the_lock_refuse(
+    tmp_vmdir: Path,  # noqa: F811
+    own_daemon,
+) -> None:
+    """A daemon stopped between the start and the lock is refused."""
+    d, ensure = own_daemon
+    ensure.side_effect = lambda: (d.rdma_socket.unlink(), d)[1]
+    vm = _make_vm(tmp_vmdir)
+    vm.shmrdma = "auto"
+    vm.save()
+    with pytest.raises(SystemExit):
+        _run_launch(vm, _LaunchHarness())
+
+
 def test_launch_shmnet_only(
     tmp_vmdir: Path,  # noqa: F811
     daemon_socket: Path,

@@ -628,8 +628,8 @@ def stop_daemon(force: bool = False) -> str:
     from .qemu_run import _launch_lock
 
     d = daemon(create=False)
-    # Under the launch lock: a VM whose launch got past ensure_daemon
-    # has no QEMU pid recorded until that lock is released.  Then the
+    # Under the launch lock: a VM whose launch found the sockets there
+    # (verify_sockets) has no QEMU pid recorded until it is released.  Then the
     # daemon's lock, in the order a launch takes them, so a `vm shmrdmad
     # start` cannot slip a new daemon in before the files are removed.
     with _launch_lock():
@@ -679,19 +679,34 @@ def status() -> dict[str, object]:
     }
 
 
-def prepare_launch(vm: VMInfo) -> list[str]:
-    """Make sure every socket *vm* needs is served; return them.
+def _needs_own(vm: VMInfo) -> bool:
+    return vm.shmrdma == "auto" or any(
+        n.type == "shmnet" and not n.socket for n in vm.nics
+    )
 
-    ltvm's own daemon is started on demand.  A socket given by hand
-    belongs to a daemon run by hand, so it must already be there.
+
+def start_for(vm: VMInfo) -> None:
+    """Start ltvm's own daemon if *vm* uses it and it is not running."""
+    from .qemu_run import die
+
+    if not _needs_own(vm):
+        return
+    try:
+        ensure_daemon()
+    except (RuntimeError, OSError) as e:
+        die(f"{vm.name}: {e}")
+
+
+def verify_sockets(vm: VMInfo) -> list[str]:
+    """Every socket *vm* connects to, each checked to be listening.
+
+    Run under the launch lock, after ``start_for``: a socket given by
+    hand belongs to a daemon run by hand, so it must already be there.
     """
     from .qemu_run import die
 
-    needs_own = vm.shmrdma == "auto" or any(
-        n.type == "shmnet" and not n.socket for n in vm.nics
-    )
     try:
-        d = ensure_daemon() if needs_own else daemon(create=False)
+        d = daemon(create=False)
     except (RuntimeError, OSError) as e:
         die(f"{vm.name}: {e}")
     socks = vm_sockets(vm, d)
