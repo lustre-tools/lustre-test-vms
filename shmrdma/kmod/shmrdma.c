@@ -36,6 +36,13 @@ MODULE_PARM_DESC(netdev, "netdev whose IP addresses give the GIDs");
 #define SHMRDMA_NEVBUF		8
 #define SHMRDMA_CQE_SIZE	32
 
+#ifndef HAVE_VIRTIO_RESET_DEVICE
+static inline void virtio_reset_device(struct virtio_device *vdev)
+{
+	vdev->config->reset(vdev);
+}
+#endif
+
 struct shmrdma_dev {
 	struct ib_device ibdev;
 	struct virtio_device *vdev;
