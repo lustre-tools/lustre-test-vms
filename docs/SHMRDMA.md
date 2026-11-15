@@ -76,9 +76,11 @@ ltvm vm shmrdmad [status|start|stop]
 - **The guest module** is built per kernel in the target's build
   container and baked into the image (`/lib/modules/<kver>/extra/`,
   with `softdep virtiofs pre: shmrdma` in modprobe.d), so it is there
-  at boot. It builds for the rocky9 (5.14-rhel9.x) and rocky10
-  (6.12-rhel10.x) kernels. Where it does not build, the image build
-  warns and goes on, and `create --shmrdma` refuses that image. Fetched
+  at boot. It builds for every target's kernel, EL8's 4.18 through
+  mainline. A kernel with virtiofs built in (Debian's) binds the device
+  first, which the softdep cannot prevent, so the boot hook moves it
+  to shmrdma. Where the module does not build, the image build warns
+  and goes on, and `create --shmrdma` refuses that image. Fetched
   images predate it: rebuild with `ltvm build image <target>`.
 - **LNet.** `--shmrdma` adds `fc_shmrdma=1` to the guest's command
   line, and the boot-time lnet.conf emitter then puts eth0 on `o2ib`
