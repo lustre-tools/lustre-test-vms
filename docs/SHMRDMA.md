@@ -36,14 +36,19 @@ ltvm vm shmrdmad [status|start|stop]
 ```
 
 - **The daemon.** ltvm builds `shmrdmad` with the host's C compiler
-  (cached under `~/.cache/ltvm/shmrdmad/<source hash>/`) and runs one
+  (cached under `~/.cache/ltvm/shmrdmad/<hash of sources and flags>/`,
+  and rebuilt when the compiler found differs) and runs one
   per user, started when a VM that needs it starts. Its sockets, pid
   file and log are in `/opt/qemu-vms/shmrdma-<uid>/`, a 0700 directory
   of the user's (or `~/.local/state/ltvm/shmrdma/` when that cannot be
   used), so it survives logout, and a QEMU running as the user or as
   root can reach it. The sockets are 0600: they hand over guest RAM,
   so no other user may connect, and ltvm only trusts a daemon that runs
-  as the user from the binary its pid file names. It runs in a systemd
+  as the user from the binary its pid file names. A QEMU run through
+  sudo is not held back by the mode, so ltvm also refuses a socket that
+  is not the VM owner's (or root's), and on a classic host, where QEMU
+  runs as root, a socket root cannot reach (a root-squashed NFS home
+  holding the fallback directory). It runs in a systemd
   user scope of its own, like the guests. Under `sudo ltvm` it uses the
   user's running daemon but never starts one as root.
   `LTVM_SHMRDMAD_ARGS` passes options (`-w` workers, `-c` copiers, `-p`
@@ -93,11 +98,13 @@ ltvm vm shmrdmad [status|start|stop]
   guest's device until that VM restarts. `ltvm vm shmrdmad stop`
   refuses while running VMs use it (`--force` overrides), and a daemon
   built from older sources keeps running until stopped; `status` says
-  so. `ltvm doctor` reports running VMs whose daemon is gone.
+  so. `ltvm doctor` reports running VMs whose daemon is gone or was
+  replaced since they started.
 - **A daemon of your own.** `--shmrdma SOCKET` and `--nic
   shmnet:SOCKET` connect to a daemon you run yourself
   (`shmrdmad -s RDMA_SOCKET -n NET_SOCKET`); ltvm does not start it,
-  and a start refuses while nothing listens there.
+  and a start refuses while nothing listens there.  A socket path must
+  be shorter than 108 bytes (104 on macOS).
 - **The guest module** is built per kernel in the target's build
   container and baked into the image (`/lib/modules/<kver>/extra/`,
   with `softdep virtiofs pre: shmrdma` in modprobe.d), so it is there

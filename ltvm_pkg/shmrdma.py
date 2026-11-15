@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import vm_state
+from .nic_spec import sun_path_problem
 from .paths import load_meta_safe
 
 if TYPE_CHECKING:
@@ -151,6 +152,9 @@ def build_kmod(tc: TargetConfig, kernel: str | None, kver: str) -> Path | None:
         meta = load_meta_safe(d / "meta.json") or {}
         return meta.get("input_hash") == want and (d / "shmrdma.ko").is_file()
 
+    def usable(d: Path) -> bool:
+        return fresh(d) and (d != shared or _untrusted(shared, kdir) is None)
+
     if fresh(shared):
         why = _untrusted(shared, kdir)
         if why is None:
@@ -166,7 +170,11 @@ def build_kmod(tc: TargetConfig, kernel: str | None, kver: str) -> Path | None:
     ours = _shared_is_ours(shared, kdir)
     out = shared if ours else user
     try:
-        ko = _build_kmod_into(tc, build_tree, kver, want, out)
+        with _kmod_lock(out):
+            # another image build of this kernel may have built it meanwhile
+            if usable(out):
+                return out / "shmrdma.ko"
+            ko = _build_kmod_into(tc, build_tree, kver, want, out)
     except OSError as e:
         log.warning(
             "shmrdma.ko could not be built into %s (%s); the image will "
@@ -183,12 +191,40 @@ def build_kmod(tc: TargetConfig, kernel: str | None, kver: str) -> Path | None:
     return ko
 
 
+@contextmanager
+def _kmod_lock(out: Path) -> Iterator[None]:
+    """Serialize builds into one module dir; the lock sits beside it."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(
+        out.parent / f".{out.name}.lock",
+        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o644,
+    )
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _publish(path: Path, data: bytes) -> None:
+    """Replace *path* whole: an image build may be copying the old one."""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def _build_kmod_into(
     tc: TargetConfig, build_tree: Path, kver: str, want: str, out: Path
 ) -> Path | None:
     out.mkdir(parents=True, exist_ok=True)
     ko = out / "shmrdma.ko"
-    ko.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="shmrdma-kmod-") as tmp:
         src = Path(tmp)
         for rel in KMOD_FILES:
@@ -222,9 +258,12 @@ def _build_kmod_into(
                 tail,
             )
             return None
-        shutil.copy2(built, ko)
-    (out / "meta.json").write_text(
-        json.dumps({"kernel": kver, "input_hash": want}, indent=2) + "\n"
+        _publish(ko, built.read_bytes())
+    _publish(
+        out / "meta.json",
+        (
+            json.dumps({"kernel": kver, "input_hash": want}, indent=2) + "\n"
+        ).encode(),
     )
     return ko
 
@@ -442,6 +481,12 @@ class Daemon:
         rec = self._record()
         return rec[1] if len(rec) > 1 else ""
 
+    def identity(self) -> str:
+        """``pid:start`` of the running daemon, or "": a pid can be reused."""
+        pid = self.pid()
+        start = _proc_start(pid) if pid else ""
+        return f"{pid}:{start}" if start else ""
+
 
 def _proc_info(pid: int) -> tuple[int, str, str]:
     """(uid, command name, executable path) of *pid*; (-1, "", "") if gone."""
@@ -469,10 +514,50 @@ def _proc_info(pid: int) -> tuple[int, str, str]:
         return -1, "", ""
 
 
+def _proc_start(pid: int) -> str:
+    """When *pid* started, in the system's own units, or "" if gone."""
+    if _LINUX:
+        try:
+            stat_line = Path(f"/proc/{pid}/stat").read_text()
+        except OSError:
+            return ""
+        # comm may hold spaces and parentheses: fields follow the last ')'
+        fields = stat_line.rsplit(")", 1)[-1].split()
+        return fields[19] if len(fields) > 19 else ""
+    try:
+        r = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return "_".join(r.stdout.split())
+
+
 def daemon(create: bool = True) -> Daemon:
     """This user's daemon; *create* false never makes its directory."""
     user, uid = _owner()
     return Daemon(user, uid, run_dir(uid, create))
+
+
+def _vm_uid(vm: VMInfo) -> int | None:
+    try:
+        return os.stat(vm.info_path).st_uid
+    except OSError:
+        return None
+
+
+def daemon_for(vm: VMInfo, create: bool = False) -> Daemon:
+    """The daemon *vm*'s ``auto`` sockets name: its owner's, whoever runs
+    ltvm.  A VM root owns (a classic ``sudo ltvm cluster create``) uses
+    the invoking user's."""
+    uid = _vm_uid(vm)
+    if uid is None or uid in (0, _owner()[1]):
+        return daemon(create)
+    return Daemon(pwd.getpwuid(uid).pw_name, uid, run_dir(uid, create))
 
 
 def _cache_dir(uid: int | None = None) -> Path:
@@ -484,13 +569,37 @@ def _cache_dir(uid: int | None = None) -> Path:
     return base / "ltvm" / "shmrdmad"
 
 
-def build_daemon() -> tuple[Path, str]:
-    """The shmrdmad binary for the current sources, building it if needed."""
-    digest = _source_hash(_DAEMON_FILES)[:16]
-    out = _cache_dir() / digest / "shmrdmad"
-    if out.is_file():
-        return out, digest
+def daemon_digest() -> str:
+    """What the daemon binary is built from: its sources and flags."""
+    h = hashlib.sha256(_source_hash(_DAEMON_FILES).encode())
+    h.update("\0".join(DAEMON_CFLAGS).encode())
+    return h.hexdigest()[:16]
+
+
+def _compiler() -> str | None:
     cc = os.environ.get("CC") or shutil.which("cc") or shutil.which("gcc")
+    if not cc:
+        return None
+    return os.path.realpath(shutil.which(cc) or cc)
+
+
+def build_daemon() -> tuple[Path, str]:
+    """The shmrdmad binary for the current sources, building it if needed.
+
+    A cached binary built by another compiler than the one found now is
+    rebuilt; with no compiler at all, the cached one is used.
+    """
+    digest = daemon_digest()
+    out = _cache_dir() / digest / "shmrdmad"
+    stamp = out.with_name("cc")
+    cc = _compiler()
+    if out.is_file():
+        try:
+            built_by = stamp.read_text().strip()
+        except OSError:
+            built_by = ""
+        if cc is None or built_by == cc:
+            return out, digest
     if not cc:
         raise RuntimeError(
             "shmrdmad is built on the host and needs a C compiler: install gcc"
@@ -507,13 +616,14 @@ def build_daemon() -> tuple[Path, str]:
         tmp.unlink(missing_ok=True)
         raise RuntimeError(f"building shmrdmad failed:\n{r.stderr.strip()}")
     tmp.replace(out)
+    stamp.write_text(cc + "\n")
     return out, digest
 
 
 def daemon_needs_compiler() -> bool:
     """Whether starting this user's daemon would compile it: no binary
     is cached for the current sources and none runs."""
-    if (_cache_dir() / _source_hash(_DAEMON_FILES)[:16] / "shmrdmad").is_file():
+    if (_cache_dir() / daemon_digest() / "shmrdmad").is_file():
         return False
     try:
         return not daemon(create=False).pid()
@@ -544,10 +654,14 @@ def attached_vms(d: Daemon) -> list[str]:
     Anyone can write a socket path into a ``.info`` of their own, so
     another user's VM never counts.
     """
+    return [vm.name for vm in _attached(d)]
+
+
+def _attached(d: Daemon) -> list[VMInfo]:
     from .qemu_run import is_running
     from .vm_state import VMInfo, VMNotFound
 
-    names = []
+    vms = []
     for name in VMInfo.all_names():
         try:
             vm = VMInfo.load(name)
@@ -557,8 +671,8 @@ def attached_vms(d: Daemon) -> list[str]:
         if owner not in (d.uid, 0):
             continue
         if vm.shared_ram and vm_uses(vm, d) and is_running(vm):
-            names.append(name)
-    return names
+            vms.append(vm)
+    return vms
 
 
 @contextmanager
@@ -573,9 +687,14 @@ def _daemon_lock(d: Daemon) -> Iterator[None]:
         os.close(fd)
 
 
-def ensure_daemon() -> Daemon:
-    """Start this user's shmrdmad unless it already runs; return it."""
-    d = daemon()
+def ensure_daemon(d: Daemon | None = None) -> Daemon:
+    """Start *d*, by default this user's shmrdmad, unless it already
+    runs; return it."""
+    d = d or daemon()
+    for s in (d.rdma_socket, d.net_socket):
+        problem = sun_path_problem(str(s))
+        if problem:
+            raise RuntimeError(f"shmrdmad cannot listen there: {problem}")
     if os.geteuid() != d.uid:
         # Under sudo: use the user's own daemon, never start one as root.
         if d.pid():
@@ -586,7 +705,7 @@ def ensure_daemon() -> Daemon:
         )
     with _daemon_lock(d):
         if d.pid():
-            if d.binary_hash() != _source_hash(_DAEMON_FILES)[:16]:
+            if d.binary_hash() != daemon_digest():
                 log.info(
                     "shmrdmad (pid %d) predates the current sources; it "
                     "keeps running until `ltvm vm shmrdmad stop`",
@@ -603,6 +722,12 @@ def ensure_daemon() -> Daemon:
 
         scope = _guest_scope(VMInfo(name=f"shmrdmad-{d.user}", ip=""))
         cpus = daemon_cpus()
+        if cpus and not shutil.which("taskset"):
+            log.warning(
+                "shmrdmad nodes are set but taskset is missing; unpinned "
+                "(install util-linux)"
+            )
+            cpus = ""
         pin = ["taskset", "-c", cpus] if cpus else []
         extra = os.environ.get("LTVM_SHMRDMAD_ARGS", "").split()
         argv = [
@@ -733,7 +858,7 @@ def _stop_locked(d: Daemon, force: bool) -> str:
 def status() -> dict[str, object]:
     d = daemon(create=False)
     pid = d.pid()
-    current = _source_hash(_DAEMON_FILES)[:16]
+    current = daemon_digest()
     return {
         "running": bool(pid),
         "cpus": daemon_cpus(),
@@ -760,25 +885,90 @@ def start_for(vm: VMInfo) -> None:
     if not _needs_own(vm):
         return
     try:
-        ensure_daemon()
-    except (RuntimeError, OSError) as e:
+        ensure_daemon(daemon_for(vm, create=True))
+    except (RuntimeError, OSError, KeyError) as e:
         die(f"{vm.name}: {e}")
 
 
 def verify_sockets(vm: VMInfo) -> list[str]:
-    """Every socket *vm* connects to, each checked to be listening.
+    """Every socket *vm* connects to, each checked to be listening and to
+    belong to the VM's owner (or root).
 
     Run under the launch lock, after ``start_for``: a socket given by
     hand belongs to a daemon run by hand, so it must already be there.
+    A QEMU run through sudo is not held back by a socket's 0600 mode,
+    so the owner is checked here.
     """
     from .qemu_run import die
 
     try:
-        d = daemon(create=False)
-    except (RuntimeError, OSError) as e:
+        d = daemon_for(vm)
+    except (RuntimeError, OSError, KeyError) as e:
         die(f"{vm.name}: {e}")
+    owner = _vm_uid(vm)
+    allowed = {0, d.uid if owner in (None, 0) else owner}
     socks = vm_sockets(vm, d)
     for s in socks:
-        if not Path(s).is_socket():
+        problem = sun_path_problem(s)
+        if problem:
+            die(f"{vm.name}: {problem}")
+        try:
+            st = os.lstat(s)
+        except PermissionError:
+            die(
+                f"{vm.name}: uid {os.geteuid()} cannot reach {s} (a "
+                f"root-squashed NFS home?)"
+            )
+        except OSError:
+            st = None
+        if st is None or not stat.S_ISSOCK(st.st_mode):
             die(f"{vm.name} needs shmrdmad, but nothing listens on {s}")
+        if st.st_uid not in allowed:
+            die(
+                f"{vm.name}: {s} belongs to uid {st.st_uid}, not to the "
+                f"VM's owner: another user's daemon would map its RAM"
+            )
     return socks
+
+
+def daemon_identity(vm: VMInfo, socks: list[str]) -> str:
+    """Which ltvm daemon *vm* reaches through *socks*, or "" for none."""
+    try:
+        d = daemon_for(vm)
+    except (RuntimeError, OSError, KeyError):
+        return ""
+    if not {str(d.rdma_socket), str(d.net_socket)} & set(socks):
+        return ""
+    return d.identity()
+
+
+def check_root_reach(vm: VMInfo, socks: list[str]) -> None:
+    """Refuse when a QEMU started through sudo could not open *socks*:
+    root is squashed on an NFS home, where the daemon's directory falls
+    back to on a classic host."""
+    from .priv import sudo_run
+    from .qemu_run import die
+
+    if os.geteuid() == 0 or not _LINUX:
+        return
+    for s in socks:
+        r = sudo_run(["stat", "-c", "%F", s], check=False, quiet=True)
+        if r.returncode != 0 and "Permission denied" in (r.stderr or ""):
+            die(
+                f"{vm.name}: QEMU runs as root on this host, and root "
+                f"cannot reach {s} (a root-squashed NFS home?).  Run "
+                f"`sudo ltvm install` so QEMU runs as you, or run "
+                f"shmrdmad by hand with sockets root can reach and pass "
+                f"them with --shmrdma SOCKET / --nic shmnet:SOCKET"
+            )
+
+
+def orphaned_vms(d: Daemon) -> list[str]:
+    """Running VMs of *d*'s user attached to a daemon at *d*'s sockets
+    that is no longer running: stopped, or replaced by another."""
+    now = d.identity()
+    return [
+        vm.name
+        for vm in _attached(d)
+        if not now or (vm.shm_daemon and vm.shm_daemon != now)
+    ]

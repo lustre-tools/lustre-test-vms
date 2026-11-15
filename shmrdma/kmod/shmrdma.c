@@ -117,6 +117,7 @@ struct shmrdma_cq {
 	struct shmrdma_ring ring;
 	u32 cons;
 	bool ring_bad;		/* the backend's producer ran past the ring */
+	bool err_seen;		/* its CQ error was reported, under eq_lock */
 	/* QPs sending and receiving on this CQ, under lock */
 	struct list_head sq_qps, rq_qps;
 };
@@ -132,6 +133,7 @@ struct shmrdma_qp {
 	u32 sq_prod, rq_prod;
 	u32 max_send_sge, max_recv_sge, max_inline;
 	bool sig_all;
+	bool fatal_seen;	/* its QP_FATAL was reported, under eq_lock */
 	struct mutex state_lock;
 	struct ib_qp_attr attr;
 	u8 dgid[16];
@@ -251,8 +253,9 @@ static void shmrdma_fatal_work(struct work_struct *work)
 
 	mutex_lock(&dev->ctrl_mutex);
 	shmrdma_reset_locked(dev);
-	send = !dev->fatal_sent && READ_ONCE(dev->registered);
-	dev->fatal_sent = true;
+	send = !dev->fatal_sent && dev->registered;
+	if (send)
+		dev->fatal_sent = true;
 	mutex_unlock(&dev->ctrl_mutex);
 	if (send)
 		ib_dispatch_event(&ev);
@@ -396,32 +399,52 @@ static bool shmrdma_cq_has_qps(struct shmrdma_cq *cq)
 }
 
 /* caller holds eq_lock, which destroy_cq and destroy_qp take to erase */
-static void shmrdma_eqe(struct shmrdma_dev *dev, u32 n, u32 type)
+static void shmrdma_qp_fatal(struct shmrdma_dev *dev, struct shmrdma_qp *qp)
 {
 	struct ib_event ev = { .device = &dev->ibdev };
+
+	if (qp->fatal_seen)
+		return;
+	qp->fatal_seen = true;
+	WRITE_ONCE(qp->attr.qp_state, IB_QPS_ERR);
+	if (qp->ibqp.event_handler) {
+		ev.event = IB_EVENT_QP_FATAL;
+		ev.element.qp = &qp->ibqp;
+		qp->ibqp.event_handler(&ev, qp->ibqp.qp_context);
+	}
+}
+
+static void shmrdma_cq_err(struct shmrdma_dev *dev, struct shmrdma_cq *cq)
+{
+	struct ib_event ev = { .device = &dev->ibdev };
+
+	if (cq->err_seen)
+		return;
+	cq->err_seen = true;
+	dev_err(&dev->vdev->dev, "cq %u overflowed\n", cq->cqn);
+	if (cq->ibcq.event_handler) {
+		ev.event = IB_EVENT_CQ_ERR;
+		ev.element.cq = &cq->ibcq;
+		cq->ibcq.event_handler(&ev, cq->ibcq.cq_context);
+	}
+}
+
+/* caller holds eq_lock */
+static void shmrdma_eqe(struct shmrdma_dev *dev, u32 n, u32 type)
+{
 	struct shmrdma_qp *qp;
 	struct shmrdma_cq *cq;
 
 	switch (type) {
 	case SHMRDMA_EQE_QP_FATAL:
 		qp = xa_load(&dev->qps, n);
-		if (!qp)
-			return;
-		WRITE_ONCE(qp->attr.qp_state, IB_QPS_ERR);
-		if (qp->ibqp.event_handler) {
-			ev.event = IB_EVENT_QP_FATAL;
-			ev.element.qp = &qp->ibqp;
-			qp->ibqp.event_handler(&ev, qp->ibqp.qp_context);
-		}
+		if (qp)
+			shmrdma_qp_fatal(dev, qp);
 		return;
 	case SHMRDMA_EQE_CQ_ERR:
 		cq = xa_load(&dev->cqs, n);
-		dev_err(&dev->vdev->dev, "cq %u overflowed\n", n);
-		if (cq && cq->ibcq.event_handler) {
-			ev.event = IB_EVENT_CQ_ERR;
-			ev.element.cq = &cq->ibcq;
-			cq->ibcq.event_handler(&ev, cq->ibcq.cq_context);
-		}
+		if (cq)
+			shmrdma_cq_err(dev, cq);
 		return;
 	}
 	/* not to a CQ ib_free_cq may be freeing, or one not set up yet: the
@@ -458,12 +481,19 @@ static bool shmrdma_eq_process(struct shmrdma_dev *dev)
 		}
 		if (lost) {
 			struct shmrdma_cq *cq;
+			struct shmrdma_qp *qp;
 			unsigned long i;
 
-			/* any CQ may have an event that never came */
-			xa_for_each(&dev->cqs, i, cq)
+			/* any CQ or QP may have an event that never came */
+			xa_for_each(&dev->qps, i, qp)
+				if (READ_ONCE(qp->rec->fatal))
+					shmrdma_qp_fatal(dev, qp);
+			xa_for_each(&dev->cqs, i, cq) {
+				if (READ_ONCE(cq->rec->err))
+					shmrdma_cq_err(dev, cq);
 				if (shmrdma_cq_pending(dev, cq))
 					shmrdma_cq_comp(cq);
+			}
 		}
 		while (dev->eq_cons != prod) {
 			struct shmrdma_eqe *e =
@@ -1080,7 +1110,7 @@ static int shmrdma_create_qp(struct ib_qp *ibqp,
 	cmd.create_qp.pdn = to_spd(ibqp->pd)->pdn;
 	ring_desc(&qp->sq, &cmd.create_qp.sq);
 	ring_desc(&qp->rq, &cmd.create_qp.rq);
-	rc = xa_err(xa_store_irq(&dev->qps, qpn, qp, GFP_KERNEL));
+	rc = xa_insert_irq(&dev->qps, qpn, qp, GFP_KERNEL);
 	if (rc)
 		goto err_rq;
 	shmrdma_cq_link(qp->scq, &qp->scq_node, &qp->scq->sq_qps);
@@ -1213,6 +1243,13 @@ static int shmrdma_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 	if (mask & IB_QP_STATE) {
 		qp->attr.qp_state = next;
 		qp->attr.cur_qp_state = next;
+		if (next == IB_QPS_RESET) {
+			unsigned long flags;
+
+			spin_lock_irqsave(&dev->eq_lock, flags);
+			qp->fatal_seen = false;
+			spin_unlock_irqrestore(&dev->eq_lock, flags);
+		}
 	}
 	rc = 0;
 out:
@@ -1848,7 +1885,12 @@ static int shmrdma_probe(struct virtio_device *vdev)
 		dev_err(&vdev->dev, "ib_register_device: %d\n", rc);
 		goto err_reset;
 	}
+	mutex_lock(&dev->ctrl_mutex);
 	dev->registered = true;
+	/* a fatal error while ib_register_device ran was not reported */
+	if (dev->broken)
+		schedule_work(&dev->fatal_work);
+	mutex_unlock(&dev->ctrl_mutex);
 	dev_info(&vdev->dev, "%s on %s, backend dev%llu\n",
 		 dev_name(&dev->ibdev.dev), netdev, resp.val);
 	return 0;
@@ -1884,13 +1926,18 @@ static void shmrdma_remove(struct virtio_device *vdev)
 {
 	struct shmrdma_dev *dev = vdev->priv;
 	struct shmrdma_cmd cmd = { .cmd = SHMRDMA_CMD_RESET };
+	bool registered;
 
 	if (dev->nb_registered)
 		unregister_netdevice_notifier(&dev->nb);
-	if (dev->registered) {
+	/* no fatal event may be dispatched while or after it unregisters */
+	mutex_lock(&dev->ctrl_mutex);
+	registered = dev->registered;
+	dev->registered = false;
+	mutex_unlock(&dev->ctrl_mutex);
+	flush_work(&dev->fatal_work);
+	if (registered)
 		ib_unregister_device(&dev->ibdev);
-		WRITE_ONCE(dev->registered, false);
-	}
 	shmrdma_cmd(dev, &cmd, NULL);
 	mutex_lock(&dev->ctrl_mutex);
 	shmrdma_reset_locked(dev);

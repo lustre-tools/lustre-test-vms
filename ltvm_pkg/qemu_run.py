@@ -1165,9 +1165,13 @@ def _start_qemu(vm: VMInfo) -> None:
     kernel = Path(vm.kernel)
 
     shm_socks = shmrdma.verify_sockets(vm) if vm.shared_ram else []
-    if shm_socks != vm.shm_sockets:
+    shm_daemon = shmrdma.daemon_identity(vm, shm_socks)
+    if shm_socks != vm.shm_sockets or shm_daemon != vm.shm_daemon:
         vm.shm_sockets = list(shm_socks)
-        vm._update_field("SHM_SOCKETS", "|".join(shm_socks))
+        vm.shm_daemon = shm_daemon
+        vm._update_fields(
+            {"SHM_SOCKETS": "|".join(shm_socks), "SHM_DAEMON": shm_daemon}
+        )
     problem = host_node_problem(vm.host_node)
     if problem:
         die(f"{vm.name}: {problem}")
@@ -1191,6 +1195,8 @@ def _start_qemu(vm: VMInfo) -> None:
         if ready.ok:
             helper = ready.helper
             as_user = True
+    if shm_socks and not as_user:
+        shmrdma.check_root_reach(vm, shm_socks)
     vmnet_socket: str | None = None
     if macos:
         vmnet_socket = str(socket_vmnet_socket_path())

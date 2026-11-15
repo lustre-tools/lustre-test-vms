@@ -17,7 +17,9 @@ which keeps the spelling ltvm has always accepted, and the one older
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, fields
 
@@ -154,6 +156,17 @@ def _bdf(value: str) -> str:
     return value
 
 
+# sizeof(sockaddr_un.sun_path), which a socket path must be shorter than
+SUN_PATH_SIZE = 108 if sys.platform.startswith("linux") else 104
+
+
+def sun_path_problem(path: str) -> str | None:
+    """Why *path* is too long to bind or connect to, or None."""
+    if len(os.fsencode(path)) >= SUN_PATH_SIZE:
+        return f"socket path {path} is not shorter than {SUN_PATH_SIZE} bytes"
+    return None
+
+
 def socket_path_problem(value: str) -> str | None:
     """Why *value* cannot be a shmrdmad socket path, or None.
 
@@ -168,6 +181,8 @@ def socket_path_problem(value: str) -> str | None:
             "absolute path of a shmrdmad socket, without ',', '|', ':', "
             "blanks or control characters"
         )
+    if sun_path_problem(value):
+        return f"absolute path of a shmrdmad socket, shorter than {SUN_PATH_SIZE} bytes"
     return None
 
 
