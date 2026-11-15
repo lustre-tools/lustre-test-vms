@@ -2098,18 +2098,26 @@ static void ctrl_process(struct vdev *d)
 		size_t got = 0;
 		uint8_t *rp = NULL;
 		uint32_t rl = 0;
-		uint16_t i = head;
-		int guard = 0;
+		uint32_t i = head;
+		bool bad = false;
 
 		memset(&cmd, 0, sizeof(cmd));
 		q->last_avail++;
-		for (;;) {
-			/* one read: the length checked is the length used */
-			struct vring_desc de = q->desc[i % q->num];
-			uint8_t *p = gpa_range(d, de.addr, de.len);
-
-			if (!p)
+		for (int guard = 0;; guard++) {
+			if (i >= q->num || guard == 16) {
+				bad = true;
 				break;
+			}
+
+			/* one read: the length checked is the length used */
+			struct vring_desc de = q->desc[i];
+			uint8_t *p = (de.flags & VRING_DESC_F_INDIRECT) ? NULL :
+				     gpa_range(d, de.addr, de.len);
+
+			if (!p) {
+				bad = true;
+				break;
+			}
 			if (de.flags & VRING_DESC_F_WRITE) {
 				if (!rp) {
 					rp = p;
@@ -2123,9 +2131,16 @@ static void ctrl_process(struct vdev *d)
 				memcpy((uint8_t *)&cmd + got, p, n);
 				got += n;
 			}
-			if (!(de.flags & VRING_DESC_F_NEXT) || ++guard > 16)
+			if (!(de.flags & VRING_DESC_F_NEXT))
 				break;
 			i = de.next;
+		}
+		if (bad) {
+			/* the guest times out and resets the device */
+			LOG("dev%d: ctrl vq chain at head %u is invalid", d->id,
+			    head);
+			q->broken = true;
+			break;
 		}
 		resp.status = do_cmd(d, &cmd, &resp);
 		if (resp.status)

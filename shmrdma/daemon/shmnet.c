@@ -102,26 +102,31 @@ static int vq_chain(struct vdev *d, struct vq *q, uint16_t head, bool writable,
 {
 	struct vring_desc *tab = q->desc;
 	uint32_t num = q->num;
-	uint16_t i = head;
+	uint32_t i = head;
+	bool indirect = false;
 	int n = 0;
 
 	*total = 0;
-	for (uint32_t guard = 0; guard < num; guard++) {
+	/* a direct chain, then at most one indirect table: 2 * num steps */
+	for (uint32_t guard = 0; guard < 2 * q->num; guard++) {
+		if (i >= num)
+			return -1;
+
 		/* one read of the guest's descriptor, checked and used as read */
-		struct vring_desc de = tab[i % num];
+		struct vring_desc de = tab[i];
 
 		if (de.flags & VRING_DESC_F_INDIRECT) {
-			/* one indirect table per chain, at its head, and no
-			 * longer than the queue (virtio 1.x 2.7.5.3.1) */
-			if (tab != q->desc || de.len < sizeof(de) ||
+			/* one indirect table per chain, no longer than the
+			 * queue (virtio 1.x 2.7.5.3.1) */
+			if (indirect || de.len < sizeof(de) ||
 			    de.len % sizeof(de) || de.len / sizeof(de) > q->num)
 				return -1;
 			tab = gpa_range(d, de.addr, de.len);
 			if (!tab)
 				return -1;
+			indirect = true;
 			num = de.len / sizeof(de);
 			i = 0;
-			guard = (uint32_t)-1;
 			continue;
 		}
 
