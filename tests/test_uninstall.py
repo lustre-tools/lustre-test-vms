@@ -19,7 +19,13 @@ from unittest.mock import patch
 
 import pytest
 
-from ltvm_pkg import host_firewall, host_setup, host_uninstall, rootless
+from ltvm_pkg import (
+    host_firewall,
+    host_setup,
+    host_uninstall,
+    rootless,
+    shmrdma,
+)
 from ltvm_pkg.host_uninstall import Choices, Survey
 
 # conftest stubs this for every test; the survey reads the real one.
@@ -95,6 +101,7 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeSudo:
     vm_dir = root / "opt/qemu-vms"
     qemu = root / "opt/qemu"
     m = monkeypatch.setattr
+    m(shmrdma, "_state_home", lambda uid: home / ".local/state")
     m(host_uninstall, "VM_DIR", vm_dir)
     m(host_uninstall, "_DEFAULT_VM_DIR", vm_dir)
     m(host_uninstall, "QEMU_PREFIX", qemu)
@@ -604,6 +611,23 @@ def test_shmrdma_daemons_stopped(
     assert all(d != theirs for d, _ in direct)
     assert host.ran(sys.executable, "-I", "-c")
     assert [c[-2:] for c in host.calls] == [[str(theirs), str(me + 1)]]
+
+
+def test_shmrdma_home_dir_removed(
+    host: FakeSudo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The daemon's directory in the home goes even when the state
+    directory is elsewhere."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    stopped: list[Path] = []
+    monkeypatch.setattr(
+        shmrdma, "stop_dir", lambda d, uid: stopped.append(d) or None
+    )
+    home_dir = shmrdma._candidate_dirs(os.geteuid())[1]
+    _touch(home_dir / "shmrdmad.log")
+    assert host_uninstall._shmrdma_daemons() == f"{home_dir} (removed)"
+    assert stopped == [home_dir]
+    assert not home_dir.exists()
 
 
 def test_root_shmrdmad_stop_ignores_the_working_directory(
