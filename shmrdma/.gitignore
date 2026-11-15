@@ -1,0 +1,9 @@
+/daemon/shmrdmad
+/daemon/*.o
+/kmod/*.o
+/kmod/*.ko
+/kmod/*.mod
+/kmod/*.mod.c
+/kmod/.*.cmd
+/kmod/Module.symvers
+/kmod/modules.order
