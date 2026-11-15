@@ -617,7 +617,8 @@ def _shmrdma_daemons() -> str | None:
     """Stop the shmrdmad of every user with a directory in VM_DIR, and
     the invoking user's own anywhere, when its pid file vouches for it:
     it runs detached, and would outlive its sockets, VM_DIR and the
-    VMs.  Another user's daemon in their home directory is left."""
+    VMs.  The invoking user's directory in their home goes too.  Another
+    user's daemon in their home directory is left."""
     from . import shmrdma
 
     me = os.geteuid()
@@ -628,14 +629,20 @@ def _shmrdma_daemons() -> str | None:
             if n.isdigit():
                 dirs.append((d, int(n)))
     try:
-        dirs += [(d, me) for d in shmrdma._candidate_dirs(me)[1:]]
+        homes = shmrdma._candidate_dirs(me)[1:]
     except RuntimeError:
-        pass
+        homes = []
+    dirs += [(d, me) for d in homes]
     root = Path(__file__).resolve().parent.parent
     stopped = []
     for d, uid in dirs:
         if uid == me:
             what = shmrdma.stop_dir(d, uid)
+            # outside VM_DIR and, with $XDG_STATE_HOME set, outside the
+            # state directory: nothing else removes it
+            if d in homes and shmrdma._is_users_dir(d, me):
+                _user_rm_tree(d)
+                what = what or "removed"
         else:
             r = sudo_run(
                 [

@@ -1363,12 +1363,19 @@ static bool make_grh(uint8_t *out, const uint8_t *sgid, const uint8_t *dgid,
 	}
 }
 
+/* the active MTU the guest module reports for the port */
+#define UD_MTU		4096
+
 static int exec_ud_send(struct qp *qp, struct shmrdma_sq_wqe *w,
 			const struct shmrdma_sge *sge)
 {
 	struct vdev *pd = dev_by_gid(w->ud.dgid);
 	struct qp *peer;
+	uint64_t len = (w->flags & SHMRDMA_WQE_INLINE) ? w->send.inline_len :
+			sg_total(sge, w->num_sge);
 
+	if (len > UD_MTU)
+		return WC_LOC_LEN_ERR;
 	/* a source GID that is not ours would forge another VM's MADs */
 	if (!dev_has_gid(qp->dev, w->ud.sgid)) {
 		DBG("dev%d qp%u: UD drop, source GID not the device's",
@@ -1384,8 +1391,6 @@ static int exec_ud_send(struct qp *qp, struct shmrdma_sq_wqe *w,
 	if (peer->type != SHMRDMA_QPT_GSI && peer->qkey != w->ud.qkey)
 		return WC_SUCCESS;
 
-	uint64_t len = (w->flags & SHMRDMA_WQE_INLINE) ? w->send.inline_len :
-			sg_total(sge, w->num_sge);
 	struct shmrdma_cqe c = {0};
 	int rc = WC_SUCCESS;
 

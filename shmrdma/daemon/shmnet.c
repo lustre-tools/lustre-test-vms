@@ -403,6 +403,7 @@ static void rx_starve(struct netport *dp)
 	}
 }
 
+static void cur_skip(struct cursor *c, uint64_t len);
 static int net_deliver_segs(struct netport *dp, int rqi,
 			    const struct vnet_hdr *th,
 			    const struct cursor *src0, uint64_t len);
@@ -500,6 +501,8 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 	uint16_t nbufs;
 	bool fill = false;
 	int rc, fd;
+	uint8_t hb[NET_HDR_MAX];
+	uint32_t hlen = 0;
 
 	if (d->dead || !vq_ready(q) || q->broken)
 		return DLV_DROP;
@@ -522,8 +525,7 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 	    (gso == VNET_HDR_GSO_TCPV6 && !(d->features & VNET_F_GUEST_TSO6)))
 		return net_deliver_segs(dp, rqi, th, src0, len);
 	if (gso != VNET_HDR_GSO_NONE) {
-		uint8_t hb[NET_HDR_MAX];
-		uint32_t l3, l4, hlen;
+		uint32_t l3, l4;
 		bool v6;
 
 		if (net_parse_tcp(src0, len, gso, hb, &l3, &l4, &hlen, &v6) ||
@@ -557,7 +559,12 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 
 	cur_write(&dst, &h, sizeof(h));
 	body = dst;
-	net_copy(&dst, &src, len);
+	/* the headers the checks passed, not the sender's live copy */
+	if (hlen) {
+		cur_write(&dst, hb, hlen);
+		cur_skip(&src, hlen);
+	}
+	net_copy(&dst, &src, len - hlen);
 	if (fill)
 		net_fill_csum(body, len, th);
 	rx_put(&t);
@@ -1160,16 +1167,8 @@ static void netq_serve(struct netq *nq)
 		    best->nqps + best->nnq)
 			best = &g_workers[i];
 	if (best->nnq == best->nqcap) {
-		int cap = best->nqcap ? best->nqcap * 2 : 8;
-		struct netq **nqs = realloc(best->nqs, cap * sizeof(*nqs));
-
-		if (!nqs) {
-			LOG("dev%d: no memory to serve net queue %d", d->id,
-			    nq->qi);
-			return;
-		}
-		best->nqs = nqs;
-		best->nqcap = cap;
+		LOG("dev%d: no room to serve net queue %d", d->id, nq->qi);
+		return;
 	}
 	best->nqs[best->nnq++] = nq;
 	worker_watch(best, d->vq[NET_TXQ(nq->qi)].kickfd);
@@ -1232,9 +1231,29 @@ static void net_detach(struct vdev *d)
 static int net_port_new(struct vdev *d)
 {
 	struct netport *p = calloc(1, sizeof(*p));
+	int need = NET_MAX_QP;
 
 	if (!p)
 		return -1;
+	wlock();
+	for (struct netport *o = g_ports; o; o = o->next)
+		need += NET_MAX_QP;
+	/* netq_serve cannot fail: room for every port's queues */
+	for (int i = 0; i < g_nworkers; i++) {
+		struct worker *w = &g_workers[i];
+		struct netq **nqs;
+
+		if (w->nqcap >= need)
+			continue;
+		nqs = realloc(w->nqs, need * sizeof(*nqs));
+		if (!nqs) {
+			wunlock();
+			free(p);
+			return -1;
+		}
+		w->nqs = nqs;
+		w->nqcap = need;
+	}
 	p->dev = d;
 	for (int i = 0; i < NET_MAX_QP; i++) {
 		plat_spin_init(&p->rx_lock[i]);
@@ -1242,7 +1261,6 @@ static int net_port_new(struct vdev *d)
 		p->q[i].qi = i;
 	}
 	d->port = p;
-	wlock();
 	p->next = g_ports;
 	g_ports = p;
 	wunlock();

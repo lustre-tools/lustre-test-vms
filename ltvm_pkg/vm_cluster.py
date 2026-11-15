@@ -1154,7 +1154,11 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     # with the nodes, whose targets differ.
     problem = (
         host_node_problem(host_node)
-        or (shared_numa_problem(numa_nodes) if shared_ram else None)
+        or (
+            shared_numa_problem(numa_nodes, arch or host_arch())
+            if shared_ram
+            else None
+        )
         or shmrdma_req.refusal(
             shmrdma_req.features_of(shmrdma_flag, nic_specs, host_node),
             arch=arch or host_arch(),

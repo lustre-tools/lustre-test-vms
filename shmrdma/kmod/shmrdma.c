@@ -458,7 +458,8 @@ static void shmrdma_eqe(struct shmrdma_dev *dev, u32 n, u32 type)
 	switch (type) {
 	case SHMRDMA_EQE_QP_FATAL:
 		qp = xa_load(&dev->qps, n);
-		if (qp)
+		/* an event raised before a RESET the daemon has since done */
+		if (qp && READ_ONCE(qp->rec->fatal))
 			shmrdma_qp_fatal(dev, qp);
 		return;
 	case SHMRDMA_EQE_CQ_ERR:

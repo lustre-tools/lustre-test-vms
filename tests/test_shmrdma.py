@@ -174,7 +174,7 @@ def test_stop_dir_only_what_the_pid_file_vouches_for(tmp_path: Path) -> None:
     link = tmp_path / "link"
     link.symlink_to(d)
     with (
-        patch.object(shmrdma.Daemon, "pid", side_effect=[4321, 0]),
+        patch.object(shmrdma.Daemon, "pid", side_effect=[4321, 4321, 0]),
         patch("ltvm_pkg.shmrdma._pidfd_open", return_value=None),
         patch("ltvm_pkg.shmrdma.os.kill") as kill,
     ):
@@ -964,6 +964,48 @@ def test_start_timeout_kills(tmp_vmdir: Path) -> None:  # noqa: F811
     assert not d.pid_path.exists()
 
 
+def test_start_interrupted_before_pid_file_kills(
+    tmp_vmdir: Path,  # noqa: F811
+) -> None:
+    """A daemon left without a pid file could never be stopped."""
+    d = shmrdma.Daemon("tester", os.geteuid(), tmp_vmdir)
+    proc = MagicMock()
+    proc.pid = 4242
+    with (
+        patch("ltvm_pkg.shmrdma.daemon", return_value=d),
+        patch("ltvm_pkg.shmrdma.build_daemon", return_value=(Path("/x"), "h")),
+        patch("ltvm_pkg.qemu_run._guest_scope", return_value=[]),
+        patch("ltvm_pkg.shmrdma.subprocess.Popen", return_value=proc),
+        patch(
+            "ltvm_pkg.shmrdma.os.fdopen",
+            side_effect=[open(os.devnull, "a"), KeyboardInterrupt],
+        ),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        shmrdma.ensure_daemon()
+    proc.kill.assert_called_once()
+    proc.wait.assert_called_once()
+    assert not d.pid_path.exists()
+
+
+def test_stop_removes_files_only_in_the_owners_dir(tmp_path: Path) -> None:
+    """The files go through the directory itself, never a symlink to one,
+    and only from a directory the daemon's user owns."""
+    real = tmp_path / "real"
+    real.mkdir()
+    names = ("shmrdmad.pid", "rdma.sock", "net.sock", "shmrdmad.log")
+    for n in names:
+        (real / n).write_text("")
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    shmrdma._remove_files(shmrdma.Daemon("t", os.geteuid(), link))
+    assert sorted(p.name for p in real.iterdir()) == sorted(names)
+    shmrdma._remove_files(shmrdma.Daemon("t", os.geteuid() + 1, real))
+    assert sorted(p.name for p in real.iterdir()) == sorted(names)
+    shmrdma._remove_files(shmrdma.Daemon("t", os.geteuid(), real))
+    assert [p.name for p in real.iterdir()] == ["shmrdmad.log"]
+
+
 def test_pid_file_names_the_resolved_binary(
     tmp_vmdir: Path,  # noqa: F811
 ) -> None:
@@ -1003,7 +1045,7 @@ def test_stop_kills_only_the_daemon(tmp_vmdir: Path) -> None:  # noqa: F811
     """No SIGKILL for a pid the daemon gave up after the last look."""
     d = shmrdma.Daemon("tester", os.geteuid(), tmp_vmdir)
     with (
-        patch.object(shmrdma.Daemon, "pid", side_effect=[4242] * 51 + [0]),
+        patch.object(shmrdma.Daemon, "pid", side_effect=[4242] * 52 + [0]),
         patch("ltvm_pkg.shmrdma.attached_vms", return_value=[]),
         patch("ltvm_pkg.shmrdma._pidfd_open", return_value=None),
         patch("ltvm_pkg.shmrdma.time.sleep"),
@@ -1021,6 +1063,21 @@ class _Vouched:
 
     def pid(self) -> int:
         return self.pids.pop(0)
+
+
+def test_kill_by_pid_rechecks_before_signalling() -> None:
+    """Without a pidfd, a pid no longer vouched for gets no signal, and a
+    daemon gone before the signal lands is stopped."""
+    with patch("ltvm_pkg.shmrdma.os.kill") as kill:
+        shmrdma._kill_by_pid(_Vouched(0), 4242)  # type: ignore[arg-type]
+    kill.assert_not_called()
+    with patch(
+        "ltvm_pkg.shmrdma.os.kill", side_effect=ProcessLookupError
+    ) as kill:
+        shmrdma._kill_by_pid(_Vouched(4242), 4242)  # type: ignore[arg-type]
+    assert [c.args for c in kill.call_args_list] == [
+        (4242, shmrdma.signal.SIGTERM)
+    ]
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="pidfds are Linux's")
@@ -1082,7 +1139,7 @@ def test_stop_holds_the_daemon_lock(tmp_vmdir: Path) -> None:  # noqa: F811
     with (
         patch("ltvm_pkg.qemu_run._launch_lock"),
         patch("ltvm_pkg.shmrdma.daemon", return_value=d),
-        patch.object(shmrdma.Daemon, "pid", side_effect=[4242, 4242, 0]),
+        patch.object(shmrdma.Daemon, "pid", side_effect=[4242, 4242, 4242, 0]),
         patch("ltvm_pkg.shmrdma.attached_vms", return_value=[]),
         patch("ltvm_pkg.shmrdma._pidfd_open", return_value=None),
         patch("ltvm_pkg.shmrdma.os.kill", side_effect=kill),
