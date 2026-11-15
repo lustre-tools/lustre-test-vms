@@ -16,7 +16,7 @@ import pytest
 
 from ltvm_pkg import qemu_run
 from ltvm_pkg.nic_spec import NicSpec
-from ltvm_pkg.qemu_run import NMI_PANIC_ARGS
+from ltvm_pkg.qemu_run import KVM_TICK_ARGS, NMI_PANIC_ARGS
 from ltvm_pkg.vm_state import VMInfo
 
 
@@ -52,6 +52,12 @@ def tmp_vmdir(tmp_path: Path) -> Path:
         patch("ltvm_pkg.vm_state.OVERLAYS", overlays),
     ):
         yield tmp_path
+
+
+def _x86_args() -> str:
+    """What ltvm appends for an x86_64 guest on this host."""
+    kvm = "accel=kvm" in qemu_run.qemu_machine_for_arch("x86_64")
+    return NMI_PANIC_ARGS + (KVM_TICK_ARGS if kvm else "")
 
 
 def _make_vm(
@@ -391,7 +397,7 @@ class TestLaunchQemuCommand:
         _run_launch(vm, h)
         append = h.qemu_args[h.qemu_args.index("-append") + 1]
         assert append.endswith(
-            f" fc_nics=tcp{NMI_PANIC_ARGS} quiet crashkernel=1G kasan_multi_shot"
+            f" fc_nics=tcp{_x86_args()} quiet crashkernel=1G kasan_multi_shot"
         )
 
     def test_no_kernel_args_leaves_cmdline_as_before(
@@ -401,7 +407,7 @@ class TestLaunchQemuCommand:
         h = _LaunchHarness()
         _run_launch(vm, h)
         append = h.qemu_args[h.qemu_args.index("-append") + 1]
-        assert append.endswith(f" fc_name=co1-single{NMI_PANIC_ARGS} quiet")
+        assert append.endswith(f" fc_name=co1-single{_x86_args()} quiet")
 
     def test_boots_quiet_before_the_users_args(self, tmp_vmdir: Path) -> None:
         """The kernel's boot log stays off the serial console, but a
@@ -424,6 +430,50 @@ class TestLaunchQemuCommand:
         append = h.qemu_args[h.qemu_args.index("-append") + 1]
         assert " unknown_nmi_panic " in append
         assert "sysctl.kernel.panic_on_unrecovered_nmi=1" in append
+
+    @pytest.mark.parametrize(
+        "machine,ticks",
+        [
+            ("q35,accel=kvm", True),
+            ("q35,accel=tcg", False),
+            ("q35,accel=hvf", False),
+        ],
+    )
+    def test_kvm_guest_boots_with_a_periodic_tick(
+        self, tmp_vmdir: Path, machine: str, ticks: bool
+    ) -> None:
+        """nohz=off on x86 KVM only: measured there, and under TCG or
+        HVF a 1000 Hz tick per vCPU is a different cost."""
+        vm = _make_vm(tmp_vmdir)
+        h = _LaunchHarness()
+        with patch.object(
+            qemu_run, "qemu_machine_for_arch", return_value=machine
+        ):
+            _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        assert (" nohz=off" in append) == ticks
+
+    def test_users_nohz_comes_after_ltvms(self, tmp_vmdir: Path) -> None:
+        """--kernel-args nohz=on wins, since the last nohz= does."""
+        vm = _make_vm(tmp_vmdir)
+        vm.kernel_args = "nohz=on"
+        h = _LaunchHarness()
+        with patch.object(
+            qemu_run, "qemu_machine_for_arch", return_value="q35,accel=kvm"
+        ):
+            _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        assert append.index(" nohz=off") < append.index(" nohz=on")
+
+    def test_aarch64_gets_no_tick_args(self, tmp_vmdir: Path) -> None:
+        vm = _make_vm(tmp_vmdir, arch="aarch64")
+        h = _LaunchHarness()
+        with patch.object(
+            qemu_run, "qemu_machine_for_arch", return_value="virt,accel=kvm"
+        ):
+            _run_launch(vm, h)
+        append = h.qemu_args[h.qemu_args.index("-append") + 1]
+        assert "nohz" not in append
 
     def test_fc_nic_ips_carry_no_prefix(self, tmp_vmdir: Path) -> None:
         """fc_nic_ips= stays bare dotted quads.  An image older than
