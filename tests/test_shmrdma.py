@@ -853,7 +853,11 @@ def test_daemon_rebuilt_for_another_compiler(
         monkeypatch.setenv("CC", "")
         with patch("ltvm_pkg.shmrdma.shutil.which", return_value=None):
             assert shmrdma.build_daemon() == (out, digest)
-    assert calls == [str(tmp_path / "gcc"), str(tmp_path / "clang")]
+    # build_daemon records the compiler's real path; /tmp is a symlink on macOS
+    assert calls == [
+        str((tmp_path / "gcc").resolve()),
+        str((tmp_path / "clang").resolve()),
+    ]
     with patch("ltvm_pkg.shmrdma.DAEMON_CFLAGS", ("-O0",)):
         assert shmrdma.daemon_digest() != digest
 
