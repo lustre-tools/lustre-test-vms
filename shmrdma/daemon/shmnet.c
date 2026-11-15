@@ -116,8 +116,7 @@ static int vq_chain(struct vdev *d, struct vq *q, uint16_t head, bool writable,
 		if (i >= num)
 			return -1;
 
-		/* one read of the guest's descriptor, checked and used as read */
-		struct vring_desc de = tab[i];
+		struct vring_desc de = desc_load(&tab[i]);
 
 		if (de.flags & VRING_DESC_F_INDIRECT) {
 			/* one indirect table per chain, no longer than the
@@ -297,7 +296,7 @@ static int rx_take(struct rxtake *t, uint64_t need, struct cursor *dst,
 		}
 		if (t->nb == RX_MAX_BUFS || t->ns + MAX_SEGS > RX_MAX_BUFS * 2)
 			return DLV_DROP;
-		t->head[t->nb] = q->avail->ring[t->idx % q->num];
+		t->head[t->nb] = RLX(&q->avail->ring[t->idx % q->num]);
 		n = vq_chain(t->d, q, t->head[t->nb], true, t->segs + t->ns,
 			     MAX_SEGS, &cap);
 		if (n <= 0)
@@ -872,7 +871,7 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 			break;
 		}
 
-		uint16_t head = q->avail->ring[q->last_avail % q->num];
+		uint16_t head = RLX(&q->avail->ring[q->last_avail % q->num]);
 		struct seg segs[MAX_SEGS];
 		uint64_t total;
 		int n = vq_chain(d, q, head, false, segs, MAX_SEGS, &total);

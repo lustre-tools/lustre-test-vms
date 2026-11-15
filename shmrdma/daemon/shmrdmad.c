@@ -150,6 +150,23 @@ struct vring_avail {
 	uint16_t ring[];
 };
 
+/*
+ * Guest memory changes under us: what is checked must be what is used,
+ * so a descriptor or ring entry is read once, field by field, into a
+ * copy the compiler may not reload from the guest.
+ */
+static inline struct vring_desc desc_load(const struct vring_desc *p)
+{
+	struct vring_desc d = {
+		.addr = RLX(&p->addr),
+		.len = RLX(&p->len),
+		.flags = RLX(&p->flags),
+		.next = RLX(&p->next),
+	};
+
+	return d;
+}
+
 struct vring_used_elem {
 	uint32_t id;
 	uint32_t len;
@@ -294,6 +311,7 @@ struct vdev {
 	struct cq *cqs[SHMRDMA_MAX_CQ];
 	struct mr **mrs;		/* SHMRDMA_MAX_MR pointers */
 	uint32_t ring_pages;		/* in every ring of the device */
+	uint32_t mr_pages;		/* page list entries of its MRs, mr_lock */
 	/* Workers register, invalidate and translate MRs concurrently;
 	 * freeing one needs wlock. */
 	plat_spinlock_t mr_lock;
@@ -546,7 +564,7 @@ static void dev_send_irq(struct vdev *d)
 		d->irq_pending = true;
 		return;
 	}
-	uint16_t head = q->avail->ring[q->last_avail % q->num];
+	uint16_t head = RLX(&q->avail->ring[q->last_avail % q->num]);
 
 	q->last_avail++;
 	d->irq_pending = false;
@@ -642,7 +660,7 @@ _Static_assert(offsetof(struct shmrdma_sq_wqe, send.inline_len) ==
 static uint32_t rq_nsge(const struct qp *qp, const struct shmrdma_rq_wqe *rw)
 {
 	uint32_t fit = (qp->rq.esz - sizeof(*rw)) / sizeof(rw->sge[0]);
-	uint32_t n = rw->num_sge;
+	uint32_t n = RLX(&rw->num_sge);
 
 	if (n > fit)
 		n = fit;
@@ -1383,6 +1401,9 @@ static int deliver_recv(struct qp *qp, struct qp *peer,
 	return rc;
 }
 
+/* 32 MB of MR page lists per device */
+#define DEV_MR_PAGES	(1u << 22)
+
 static int exec_reg_mr(struct qp *qp, struct shmrdma_sq_wqe *w)
 {
 	struct vdev *d = qp->dev;
@@ -1410,12 +1431,20 @@ static int exec_reg_mr(struct qp *qp, struct shmrdma_sq_wqe *w)
 	if (w->reg.npages > mr->cap) {
 		/* a FastReg MR's page list is sized once, at its first use */
 		uint32_t cap = w->reg.npages < 64 ? 64 : w->reg.npages;
-		uint64_t *np = realloc(mr->pages, cap * sizeof(*np));
+		uint64_t *np;
 
+		if (cap - mr->cap > DEV_MR_PAGES - d->mr_pages) {
+			plat_spin_unlock(&d->mr_lock);
+			LOG("dev%d qp%u: MR page lists past %u entries, refused",
+			    d->id, qp->qpn, DEV_MR_PAGES);
+			return WC_LOC_QP_OP_ERR;
+		}
+		np = realloc(mr->pages, cap * sizeof(*np));
 		if (!np) {
 			plat_spin_unlock(&d->mr_lock);
 			return WC_GENERAL_ERR;
 		}
+		d->mr_pages += cap - mr->cap;
 		mr->pages = np;
 		mr->cap = cap;
 	}
@@ -1835,8 +1864,10 @@ static int ring_setup(struct vdev *d, struct ring *r,
 	if (!r->pages)
 		return -ENOMEM;
 	for (uint32_t i = 0; i < rd->npages; i++) {
-		r->pages[i] = gpa_range(d, pl[i], 4096);
-		if (!r->pages[i] || (pl[i] & 4095)) {
+		uint64_t gpa = RLX(&pl[i]);
+
+		r->pages[i] = gpa_range(d, gpa, 4096);
+		if (!r->pages[i] || (gpa & 4095)) {
 			free(r->pages);
 			r->pages = NULL;
 			return -EFAULT;
@@ -1897,6 +1928,7 @@ static void dev_reset_state(struct vdev *d)
 			d->mrs[i] = NULL;
 		}
 	}
+	d->mr_pages = 0;
 	memset(d->gid_valid, 0, sizeof(d->gid_valid));
 	d->initialized = false;
 	d->shared = NULL;
@@ -2106,10 +2138,11 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		if (qpn >= SHMRDMA_MAX_QP || !(qp = d->qps[qpn]))
 			return -EINVAL;
 		wlock();
+		/* other QPs' cached peers may name this one */
 		if (c->modify_qp.mask & SHMRDMA_MQ_DEST) {
 			memcpy(qp->dgid, c->modify_qp.dgid, 16);
 			qp->dqpn = c->modify_qp.dest_qpn;
-			qp->peer_gen = 0;
+			__atomic_add_fetch(&g_gen, 1, __ATOMIC_SEQ_CST);
 		}
 		if (c->modify_qp.mask & SHMRDMA_MQ_QKEY)
 			qp->qkey = c->modify_qp.qkey;
@@ -2164,8 +2197,10 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		if (idx >= SHMRDMA_MAX_MR || !d->mrs)
 			return -EINVAL;
 		wlock();
-		if (d->mrs[idx])
+		if (d->mrs[idx]) {
+			d->mr_pages -= d->mrs[idx]->cap;
 			free(d->mrs[idx]->pages);
+		}
 		free(d->mrs[idx]);
 		d->mrs[idx] = NULL;
 		wunlock();
@@ -2196,7 +2231,7 @@ static void ctrl_process(struct vdev *d)
 		return;
 	}
 	while (q->last_avail != ai) {
-		uint16_t head = q->avail->ring[q->last_avail % q->num];
+		uint16_t head = RLX(&q->avail->ring[q->last_avail % q->num]);
 		struct shmrdma_cmd cmd;
 		struct shmrdma_resp resp = {0};
 		size_t got = 0;
@@ -2213,8 +2248,7 @@ static void ctrl_process(struct vdev *d)
 				break;
 			}
 
-			/* one read: the length checked is the length used */
-			struct vring_desc de = q->desc[i];
+			struct vring_desc de = desc_load(&q->desc[i]);
 			uint8_t *p = (de.flags & VRING_DESC_F_INDIRECT) ? NULL :
 				     gpa_range(d, de.addr, de.len);
 
