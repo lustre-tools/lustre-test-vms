@@ -152,7 +152,7 @@ static int vq_chain(struct vdev *d, struct vq *q, uint16_t head, bool writable,
 		if (de.flags & VRING_DESC_F_INDIRECT) {
 			/* one indirect table per chain, no longer than the
 			 * queue (virtio 1.x 2.7.5.3.1) */
-			if (indirect || de.len < sizeof(de) ||
+			if (indirect || de.len < sizeof(de) || (de.addr & 15) ||
 			    de.len % sizeof(de) || de.len / sizeof(de) > q->num)
 				return -1;
 			tab = gpa_range(d, de.addr, de.len);
@@ -256,6 +256,16 @@ static void vq_set_broken(struct vdev *d, struct vq *q, uint16_t ai)
 	q->broken = true;
 }
 
+/* an RX buffer that can never be filled would hold the ring's head for
+ * good: stop the queue until SET_VRING_BASE, as for a bad avail idx */
+static void vq_set_broken_buf(struct vdev *d, struct vq *q, uint16_t head)
+{
+	if (!q->broken)
+		GLOG(d, "dev%d: net vq%d RX buffer %u is not usable", d->id,
+		    (int)(q - d->vq), head);
+	q->broken = true;
+}
+
 static uint16_t *vq_avail_event(struct vq *q)
 {
 	return (uint16_t *)&q->used->ring[q->num];
@@ -332,8 +342,10 @@ static int rx_take(struct rxtake *t, uint64_t need, struct cursor *dst,
 		t->head[t->nb] = RLX(&q->avail->ring[t->idx % q->num]);
 		n = vq_chain(t->d, q, t->head[t->nb], true, t->segs + t->ns,
 			     MAX_SEGS, &cap);
-		if (n <= 0)
+		if (n <= 0) {
+			vq_set_broken_buf(t->d, q, t->head[t->nb]);
 			return DLV_DROP;
+		}
 		t->len[t->nb] = need - got < cap ? need - got : cap;
 		t->ns += n;
 		t->nb++;

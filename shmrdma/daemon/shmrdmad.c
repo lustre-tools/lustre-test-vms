@@ -1532,7 +1532,8 @@ static int exec_reg_mr(struct qp *qp, struct shmrdma_sq_wqe *w)
 	mr->access = w->reg.access;
 	mr->pdn = qp->pdn;
 	mr->fpo = w->ex & ((1u << w->reg.page_shift) - 1);
-	memcpy(mr->pages, pl, w->reg.npages * 8ull);
+	if (w->reg.npages)
+		memcpy(mr->pages, pl, w->reg.npages * 8ull);
 	REL(&mr->valid, true);
 	plat_spin_unlock(&d->mr_lock);
 	return WC_SUCCESS;
@@ -1951,7 +1952,7 @@ static int ring_setup(struct vdev *d, struct ring *r,
 	if (!rd->entries || (rd->entries & (rd->entries - 1)) ||
 	    rd->entries > max_entries ||
 	    !rd->entry_size || (rd->entry_size & (rd->entry_size - 1)) ||
-	    rd->entry_size > 4096 ||
+	    rd->entry_size > 4096 || (rd->pages_gpa & 7) ||
 	    rd->npages != ((uint64_t)rd->entries * rd->entry_size + 4095) / 4096)
 		return -EINVAL;
 	uint64_t *pl = gpa_range(d, rd->pages_gpa, rd->npages * 8ull);
@@ -3117,6 +3118,22 @@ int main(int argc, char **argv)
 	}
 	if (g_nworkers < 1)
 		g_nworkers = 1;
+	if (g_nworkers > 256)
+		g_nworkers = 256;
+	if (g_ncopiers < 0)
+		g_ncopiers = 0;
+	if (g_ncopiers > 256)
+		g_ncopiers = 256;
+	{
+		struct sockaddr_un sa;
+
+		if (strlen(g_sock_path) >= sizeof(sa.sun_path) ||
+		    strlen(g_net_sock_path) >= sizeof(sa.sun_path)) {
+			LOG("socket paths must be shorter than %zu bytes",
+			    sizeof(sa.sun_path));
+			return 2;
+		}
+	}
 	plat_init();
 	plat_spin_init(&g_mac_lock);
 
@@ -3155,7 +3172,7 @@ int main(int argc, char **argv)
 	 * connect, from the moment they exist.
 	 */
 	umask(077);
-	strncpy(sa.sun_path, g_sock_path, sizeof(sa.sun_path) - 1);
+	memcpy(sa.sun_path, g_sock_path, strlen(g_sock_path));
 	unlink(g_sock_path);
 	g_lsock = plat_unix_socket();
 	if (bind(g_lsock, (struct sockaddr *)&sa, sizeof(sa)) ||
@@ -3169,7 +3186,7 @@ int main(int argc, char **argv)
 	if (*g_net_sock_path) {
 		struct sockaddr_un na = { .sun_family = AF_UNIX };
 
-		strncpy(na.sun_path, g_net_sock_path, sizeof(na.sun_path) - 1);
+		memcpy(na.sun_path, g_net_sock_path, strlen(g_net_sock_path));
 		unlink(g_net_sock_path);
 		g_lsock_net = plat_unix_socket();
 		if (bind(g_lsock_net, (struct sockaddr *)&na, sizeof(na)) ||
