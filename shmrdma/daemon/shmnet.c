@@ -309,6 +309,76 @@ static int net_deliver_segs(struct netport *dp, int rqi,
 			    const struct vnet_hdr *th,
 			    const struct cursor *src0, uint64_t len);
 
+#define NET_MAX_SPANS	160
+
+/* the pieces of a len-byte copy between two cursors, or -1 */
+static int cur_spans(struct cursor d, struct cursor s, uint64_t len,
+		     struct copy_span *out, int max)
+{
+	int n = 0;
+
+	while (len && d.i < d.n && s.i < s.n) {
+		uint64_t dl = d.s[d.i].len - d.off;
+		uint64_t sl = s.s[s.i].len - s.off;
+		uint64_t k = len < dl ? len : dl;
+
+		if (k > sl)
+			k = sl;
+		if (n == max)
+			return -1;
+		out[n].dst = d.s[d.i].p + d.off;
+		out[n].src = s.s[s.i].p + s.off;
+		out[n].len = k;
+		n++;
+		len -= k;
+		d.off += k;
+		s.off += k;
+		if (d.off == d.s[d.i].len) {
+			d.i++;
+			d.off = 0;
+		}
+		if (s.off == s.s[s.i].len) {
+			s.i++;
+			s.off = 0;
+		}
+	}
+	return n;
+}
+
+/* the frame being sent has more queued behind it on its TX queue */
+static __thread bool t_net_backlog;
+
+/*
+ * Copy a frame's payload into RX buffers, with streaming stores from
+ * g_net_nt_min.  When frames are queued behind it, a frame of two
+ * g_net_part_min parts or more is split over the copiers.  Every part
+ * is done and fenced on return, so the caller may publish the used
+ * ring.
+ */
+static void net_copy(struct cursor *dst, struct cursor *src, uint64_t len)
+{
+	uint32_t n = g_ncopiers && t_net_backlog ? len / g_net_part_min : 0;
+
+	if (len < g_net_nt_min) {
+		cur_copy(dst, src, len);
+		return;
+	}
+	if (n >= 2) {
+		struct copy_span sp[NET_MAX_SPANS];
+		struct copy_job j = { .spans = sp, .len = len };
+
+		j.nspans = cur_spans(*dst, *src, len, sp, NET_MAX_SPANS);
+		if (j.nspans > 0) {
+			j.nparts = n > (uint32_t)g_ncopiers + 1 ?
+				   (uint32_t)g_ncopiers + 1 : n;
+			cp_run(&j);
+			return;
+		}
+	}
+	cur_copy_nt(dst, src, len, true);
+	plat_nt_fence();
+}
+
 /*
  * Copy one frame into dp's RX buffers.  src is positioned at the
  * start of the frame.  The cursor is restored on return.
@@ -352,13 +422,7 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 	struct cursor src = *src0;
 
 	cur_write(&dst, &h, sizeof(h));
-	if (len >= g_net_nt_min) {
-		/* the guest may read the frame once used->idx moves */
-		cur_copy_nt(&dst, &src, len, true);
-		plat_nt_fence();
-	} else {
-		cur_copy(&dst, &src, len);
-	}
+	net_copy(&dst, &src, len);
 	rx_put(&t);
 	STAT_ADD(dp->rx_pkts, 1);
 	STAT_ADD(dp->rx_bytes, len);
@@ -735,6 +799,8 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 		int n = vq_chain(d, q, head, false, segs, MAX_SEGS, &total);
 		struct vnet_hdr h;
 		uint8_t eth[12];
+
+		t_net_backlog = (uint16_t)(ai - q->last_avail) > 1;
 
 		if (n > 0 && total >= sizeof(h) + 14) {
 			struct cursor c = { .s = segs, .n = n };
