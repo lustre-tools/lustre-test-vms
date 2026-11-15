@@ -536,6 +536,9 @@ def refusal(
     arch = arch or (t.arch if t is not None else None)
     reqs = host_checks(arch) + (target_checks(t) if t is not None else [])
     missing = [r for r in reqs if r.hard and not r.ok and r.needed_by(feats)]
+    running = _root_daemon_check() if OWN_DAEMON in feats else None
+    if running is not None and not running.ok:
+        missing.append(running)
     if not missing:
         return None
     flags = {
@@ -549,8 +552,29 @@ def refusal(
         target = f" {t.name}" + (f" --kernel {t.kernel}" if t.kernel else "")
     lines = [f"{asked} needs what this host does not have yet:"]
     lines += [f"  {r.name}: {r.detail}" for r in missing]
-    lines.append(f"run `ltvm doctor --fix --shmrdma{target}` to set it up")
+    if any(r is not running for r in missing):
+        lines.append(f"run `ltvm doctor --fix --shmrdma{target}` to set it up")
     return "\n".join(lines)
+
+
+def _root_daemon_check() -> Req | None:
+    """Under sudo, still root (a classic host): ltvm will not start the
+    user's daemon as root, so it must be running already.  None when
+    this process is the daemon's owner."""
+    try:
+        d = shmrdma.daemon(create=False)
+    except (KeyError, OSError, RuntimeError) as e:
+        return Req("shmrdmad running", frozenset({OWN_DAEMON}), False, str(e))
+    if os.geteuid() == d.uid:
+        return None
+    how = f"run `ltvm vm shmrdmad start` as {d.user} first"
+    return Req(
+        "shmrdmad running",
+        frozenset({OWN_DAEMON}),
+        bool(d.pid()),
+        f"not running for {d.user}, and ltvm will not start it as root: " + how,
+        how=how,
+    )
 
 
 def _current_has_kmod(t: Target) -> bool:

@@ -895,6 +895,29 @@ class TestRequirements:
         assert "numactl" not in why
         assert "ltvm doctor --fix --shmrdma" in why
 
+    def test_root_needs_the_users_daemon_running(self, tmp_path: Path) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        d = shmrdma.Daemon("alice", os.geteuid() + 1, tmp_path)
+        with (
+            patch("ltvm_pkg.shmrdma_req.host_checks", return_value=[]),
+            patch("ltvm_pkg.shmrdma.daemon", return_value=d),
+        ):
+            why = sr.refusal({sr.SHMRDMA, sr.OWN_DAEMON})
+            assert why is not None
+            assert "ltvm vm shmrdmad start` as alice" in why
+            assert "doctor --fix" not in why
+            # a hand-run daemon's socket needs nothing of ltvm's
+            assert sr.refusal({sr.SHMRDMA}) is None
+            with patch.object(shmrdma.Daemon, "pid", return_value=42):
+                assert sr.refusal({sr.SHMRDMA, sr.OWN_DAEMON}) is None
+        own = shmrdma.Daemon("me", os.geteuid(), tmp_path)
+        with (
+            patch("ltvm_pkg.shmrdma_req.host_checks", return_value=[]),
+            patch("ltvm_pkg.shmrdma.daemon", return_value=own),
+        ):
+            assert sr.refusal({sr.OWN_DAEMON}) is None
+
     def test_target_in_the_fix_command(self, tmp_path: Path) -> None:
         from ltvm_pkg import shmrdma_req as sr
 
