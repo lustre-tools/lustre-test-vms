@@ -1037,6 +1037,7 @@ static void netq_unserve(struct netq *nq)
 			w->nqs[i] = w->nqs[--w->nnq];
 			break;
 		}
+	worker_unwatch(w, netq_dev(nq)->vq[NET_TXQ(nq->qi)].kickfd);
 	nq->w = NULL;
 }
 

@@ -249,6 +249,8 @@ struct qp {
 	struct worker *w;
 	uint64_t stall_since;
 	bool fatal_sent;
+	/* set by other workers; the owner moves the QP to error */
+	int err_req;
 	/* stats */
 	uint64_t tx_bytes, tx_wr;
 };
@@ -398,6 +400,23 @@ static void worker_watch(struct worker *w, int fd)
 		return;
 	if (plat_poller_add(w->epfd, fd, (void *)(intptr_t)fd, true))
 		LOG("worker%d: watch fd %d: %s", w->idx, fd, strerror(errno));
+}
+
+static void worker_unwatch(struct worker *w, int fd)
+{
+	if (fd < 0 || PLAT_NOTIFIER_DRAIN)
+		return;
+	plat_poller_del(w->epfd, fd);
+}
+
+/*
+ * Before closing a kick fd: a watch lives as long as the file, which
+ * QEMU still holds, not as long as our fd.
+ */
+static void worker_unwatch_all(int fd)
+{
+	for (int i = 0; i < g_nworkers; i++)
+		worker_unwatch(&g_workers[i], fd);
 }
 
 /* ---------------------------------------------------------------- */
@@ -554,6 +573,22 @@ static void dev_raise_eq(struct vdev *d, uint32_t cqn, uint32_t type)
 /* ---------------------------------------------------------------- */
 /* completion queues                                                */
 
+static void qp_err_req(struct qp *qp);
+
+/* a CQE was lost: tell the guest, and fail every QP that uses the CQ */
+static void cq_overflow(struct cq *cq)
+{
+	struct vdev *d = cq->dev;
+
+	dev_raise_eq(d, cq->cqn, SHMRDMA_EQE_CQ_ERR);
+	for (int i = 0; i < SHMRDMA_MAX_QP; i++) {
+		struct qp *qp = d->qps[i];
+
+		if (qp && (qp->scq == cq || qp->rcq == cq))
+			qp_err_req(qp);
+	}
+}
+
 static void cq_post(struct cq *cq, const struct shmrdma_cqe *cqe, bool solicited)
 {
 	bool event = false;
@@ -562,11 +597,15 @@ static void cq_post(struct cq *cq, const struct shmrdma_cqe *cqe, bool solicited
 	uint32_t cons = ACQ(&cq->rec->cons);
 
 	if (cq->prod - cons >= cq->ring.entries) {
-		if (!cq->overflowed)
+		bool first = !cq->overflowed;
+
+		if (first)
 			LOG("dev%d cq%u overflow (prod %u cons %u)",
 			    cq->dev->id, cq->cqn, cq->prod, cons);
 		cq->overflowed = true;
 		plat_spin_unlock(&cq->lock);
+		if (first)
+			cq_overflow(cq);
 		return;
 	}
 	memcpy(ring_entry(&cq->ring, cq->prod), cqe, sizeof(*cqe));
@@ -1053,15 +1092,26 @@ static struct qp *qp_peer(struct qp *qp)
 	return p;
 }
 
+/* only qp's own worker, or a wlock holder; others use qp_err_req() */
 static void qp_to_err(struct qp *qp)
 {
 	if (qp->state != QPS_ERR) {
-		qp->state = QPS_ERR;
+		REL(&qp->state, QPS_ERR);
 		if (!qp->fatal_sent) {
 			qp->fatal_sent = true;
 			dev_raise_eq(qp->dev, qp->qpn, SHMRDMA_EQE_QP_FATAL);
 		}
 	}
+}
+
+/* any worker: have qp's owner move it to error */
+static void qp_err_req(struct qp *qp)
+{
+	struct worker *w = qp->w;
+
+	__atomic_store_n(&qp->err_req, 1, __ATOMIC_SEQ_CST);
+	if (w && __atomic_load_n(&w->sleeping, __ATOMIC_SEQ_CST))
+		plat_notifier_signal(w->evfd_w);
 }
 
 static void qp_flush_rq(struct qp *qp)
@@ -1092,9 +1142,21 @@ enum { EX_DONE, EX_STALL };
 
 static bool peer_ok(struct qp *qp, struct qp *peer)
 {
-	return peer && !peer->dev->dead &&
-	       (peer->state == QPS_RTR || peer->state == QPS_RTS) &&
+	uint32_t st = peer ? RLX(&peer->state) : QPS_ERR;
+
+	return peer && !peer->dev->dead && (st == QPS_RTR || st == QPS_RTS) &&
 	       peer->type == SHMRDMA_QPT_RC && peer->dqpn == qp->qpn;
+}
+
+/* a receive producer past the ring; caller holds qp->rq_lock */
+static bool rq_bad(struct qp *qp, uint32_t prod)
+{
+	if (prod - qp->rq_cons <= qp->rq.entries)
+		return false;
+	LOG("dev%d qp%u: rq producer %u is %u past consumer, ring holds %u",
+	    qp->dev->id, qp->qpn, prod, prod - qp->rq_cons, qp->rq.entries);
+	qp_err_req(qp);
+	return true;
 }
 
 /* build the 40-byte RoCEv2 header area a UD receive starts with */
@@ -1154,7 +1216,7 @@ static int exec_ud_send(struct qp *qp, struct shmrdma_sq_wqe *w,
 		return WC_SUCCESS;	/* dropped, as on a wire */
 	peer = pd->qps[w->ud.dqpn];
 	if (!peer || peer->type == SHMRDMA_QPT_RC ||
-	    (peer->state != QPS_RTR && peer->state != QPS_RTS))
+	    (RLX(&peer->state) != QPS_RTR && RLX(&peer->state) != QPS_RTS))
 		return WC_SUCCESS;
 	if (peer->type != SHMRDMA_QPT_GSI && peer->qkey != w->ud.qkey)
 		return WC_SUCCESS;
@@ -1167,7 +1229,7 @@ static int exec_ud_send(struct qp *qp, struct shmrdma_sq_wqe *w,
 	plat_spin_lock(&peer->rq_lock);
 	uint32_t prod = ACQ(&peer->rec->rq_prod);
 
-	if (peer->rq_cons == prod) {
+	if (peer->rq_cons == prod || rq_bad(peer, prod)) {
 		plat_spin_unlock(&peer->rq_lock);
 		DBG("dev%d qp%u: UD drop, no recv on dev%d qp%u", qp->dev->id,
 		    qp->qpn, pd->id, peer->qpn);
@@ -1236,6 +1298,10 @@ static int deliver_recv(struct qp *qp, struct qp *peer,
 	plat_spin_lock(&peer->rq_lock);
 	uint32_t prod = ACQ(&peer->rec->rq_prod);
 
+	if (rq_bad(peer, prod)) {
+		plat_spin_unlock(&peer->rq_lock);
+		return WC_REM_OP_ERR;
+	}
 	if (peer->rq_cons == prod) {
 		plat_spin_unlock(&peer->rq_lock);
 		return -1;
@@ -1307,7 +1373,7 @@ static int deliver_recv(struct qp *qp, struct qp *peer,
 	plat_spin_unlock(&peer->rq_lock);
 	cq_post(peer->rcq, &c, w->flags & SHMRDMA_WQE_SOLICITED);
 	if (c.status != WC_SUCCESS)
-		qp_to_err(peer);
+		qp_err_req(peer);
 	return rc;
 }
 
@@ -1358,6 +1424,13 @@ static int exec_reg_mr(struct qp *qp, struct shmrdma_sq_wqe *w)
 	REL(&mr->valid, true);
 	plat_spin_unlock(&d->mr_lock);
 	return WC_SUCCESS;
+}
+
+static bool op_takes_inline(uint32_t op)
+{
+	return op == SHMRDMA_OP_SEND || op == SHMRDMA_OP_SEND_IMM ||
+	       op == SHMRDMA_OP_SEND_INV || op == SHMRDMA_OP_RDMA_WRITE ||
+	       op == SHMRDMA_OP_RDMA_WRITE_IMM;
 }
 
 static bool msg_too_long(const struct shmrdma_sq_wqe *w,
@@ -1495,6 +1568,9 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 
 	if (qp->dev->dead)
 		return 0;
+	if (RLX(&qp->err_req) && __atomic_exchange_n(&qp->err_req, 0,
+						     __ATOMIC_SEQ_CST))
+		qp_to_err(qp);
 
 	if (qp->state == QPS_ERR) {
 		uint32_t rp = ACQ(&qp->rec->rq_prod);
@@ -1546,7 +1622,8 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 				opc = SHMRDMA_WC_LOCAL_INV; break;
 			}
 		} else if ((w->flags & SHMRDMA_WQE_INLINE) &&
-			   qp->type != SHMRDMA_QPT_RC) {
+			   (qp->type != SHMRDMA_QPT_RC ||
+			    !op_takes_inline(w->opcode))) {
 			/* a UD WQE's address fields hold the inline length */
 			st = WC_LOC_QP_OP_ERR;
 		} else if ((w->flags & SHMRDMA_WQE_INLINE) &&
@@ -1593,6 +1670,8 @@ static bool qp_has_work(struct qp *qp)
 {
 	if (qp->dev->dead)
 		return false;
+	if (__atomic_load_n(&qp->err_req, __ATOMIC_SEQ_CST))
+		return true;
 	if (qp->state == QPS_ERR && ACQ(&qp->rec->rq_prod) != qp->rq_cons)
 		return true;
 	if ((qp->state != QPS_RTS && qp->state != QPS_ERR &&
@@ -1701,12 +1780,18 @@ static void worker_del_qp(struct qp *qp)
 {
 	struct worker *w = qp->w;
 
+	bool other = false;
+
 	for (int i = 0; i < w->nqps; i++) {
 		if (w->qps[i] == qp) {
 			w->qps[i] = w->qps[--w->nqps];
 			break;
 		}
 	}
+	for (int i = 0; i < w->nqps && !other; i++)
+		other = w->qps[i]->dev == qp->dev;
+	if (!other)
+		worker_unwatch(w, qp->dev->vq[SHMRDMA_VQ_DOORBELL].kickfd);
 	qp->w = NULL;
 }
 
@@ -2024,6 +2109,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 				REL(&qp->rec->sq_cons, qp->sq_cons);
 				REL(&qp->rec->rq_cons, qp->rq_cons);
 				qp->fatal_sent = false;
+				qp->err_req = 0;
 			}
 			qp->state = ns;
 			qp->stall_since = 0;
@@ -2198,6 +2284,7 @@ static void vq_stop(struct vdev *d, int idx)
 	q->started = false;
 	if (q->kickfd >= 0) {
 		ep_del(q->kickfd);
+		worker_unwatch_all(q->kickfd);
 		close(q->kickfd);
 		q->kickfd = -1;
 	}
@@ -2531,6 +2618,7 @@ static int handle_msg(struct vdev *d)
 		} else {
 			if (q->kickfd >= 0) {
 				ep_del(q->kickfd);
+				worker_unwatch_all(q->kickfd);
 				close(q->kickfd);
 			}
 			q->kickfd = fd;

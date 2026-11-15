@@ -102,6 +102,7 @@ struct shmrdma_eqe {
 enum {
 	SHMRDMA_EQE_COMP = 0,
 	SHMRDMA_EQE_QP_FATAL = 1,	/* cqn holds the qpn */
+	SHMRDMA_EQE_CQ_ERR = 2,		/* overflowed: its QPs go to error */
 };
 
 /* Per-QP doorbell record, 128 bytes; records are at least 8-aligned. */
