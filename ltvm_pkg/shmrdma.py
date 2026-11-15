@@ -41,7 +41,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from . import vm_state
 from .nic_spec import socket_path_problem, sun_path_problem
@@ -743,6 +743,34 @@ def _daemon_lock(d: Daemon) -> Iterator[None]:
         os.close(fd)
 
 
+def _spawn_deferring_sigint(
+    argv: list[str], **kw: Any
+) -> subprocess.Popen[bytes]:
+    """Popen, with a SIGINT that arrives while it runs raised only once it
+    has returned, so the caller always holds the child it must kill.
+
+    A handler, not a blocked mask: exec resets the handler in the child,
+    but a blocked mask would be inherited by the daemon.
+    """
+    import threading
+
+    if threading.current_thread() is not threading.main_thread():
+        return subprocess.Popen(argv, **kw)
+    pending: list[int] = []
+    old = signal.signal(
+        signal.SIGINT, lambda signum, frame: pending.append(signum)
+    )
+    try:
+        proc: subprocess.Popen[bytes] = subprocess.Popen(argv, **kw)
+    finally:
+        signal.signal(signal.SIGINT, old)
+    if pending:
+        proc.kill()
+        proc.wait()
+        raise KeyboardInterrupt
+    return proc
+
+
 def ensure_daemon(d: Daemon | None = None) -> Daemon:
     """Start *d*, by default this user's shmrdmad, unless it already
     runs; return it."""
@@ -812,7 +840,7 @@ def ensure_daemon(d: Daemon | None = None) -> Daemon:
                     )
                     logf.flush()
                     logged = os.fstat(logf.fileno()).st_size
-                    proc = subprocess.Popen(
+                    proc = _spawn_deferring_sigint(
                         [*prefix, *argv],
                         stdin=subprocess.DEVNULL,
                         stdout=logf,

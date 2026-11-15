@@ -988,6 +988,26 @@ def test_start_interrupted_before_pid_file_kills(
     assert not d.pid_path.exists()
 
 
+def test_sigint_during_popen_kills_the_child() -> None:
+    """A Ctrl-C while Popen is still running (the child already exec'd)
+    must not leave the child behind."""
+    proc = MagicMock()
+
+    def popen(*args: object, **kw: object) -> MagicMock:
+        os.kill(os.getpid(), signal.SIGINT)
+        return proc
+
+    before = signal.getsignal(signal.SIGINT)
+    with (
+        patch("ltvm_pkg.shmrdma.subprocess.Popen", side_effect=popen),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        shmrdma._spawn_deferring_sigint(["x"])
+    proc.kill.assert_called_once()
+    proc.wait.assert_called_once()
+    assert signal.getsignal(signal.SIGINT) is before
+
+
 def test_stop_removes_files_only_in_the_owners_dir(tmp_path: Path) -> None:
     """The files go through the directory itself, never a symlink to one,
     and only from a directory the daemon's user owns."""

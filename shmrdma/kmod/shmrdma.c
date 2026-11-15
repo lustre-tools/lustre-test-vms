@@ -1340,17 +1340,22 @@ static int shmrdma_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 	if (mask & IB_QP_MAX_DEST_RD_ATOMIC)
 		qp->attr.max_dest_rd_atomic = attr->max_dest_rd_atomic;
 	if (mask & IB_QP_STATE) {
-		qp->attr.qp_state = next;
-		qp->attr.cur_qp_state = next;
 		if (next == IB_QPS_RESET) {
 			unsigned long flags;
 
+			/* a QP_FATAL handler already past its rec->fatal check
+			 * must not set ERR after this */
 			spin_lock_irqsave(&dev->eq_lock, flags);
+			qp->attr.qp_state = next;
+			qp->attr.cur_qp_state = next;
 			qp->fatal_seen = false;
 			spin_unlock_irqrestore(&dev->eq_lock, flags);
 			shmrdma_cq_clean(qp->scq, qp, false);
 			if (qp->rcq != qp->scq)
 				shmrdma_cq_clean(qp->rcq, qp, false);
+		} else {
+			qp->attr.qp_state = next;
+			qp->attr.cur_qp_state = next;
 		}
 	}
 	rc = 0;
