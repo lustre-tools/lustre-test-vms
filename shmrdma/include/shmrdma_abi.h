@@ -15,10 +15,15 @@
 #ifndef SHMRDMA_ABI_H
 #define SHMRDMA_ABI_H
 
-#if defined(__linux__) || defined(__KERNEL__)
+#ifdef __KERNEL__
 #include <linux/types.h>
+#include <linux/stddef.h>
+#elif defined(__linux__)
+#include <linux/types.h>
+#include <stddef.h>
 #else
 /* the host daemon on macOS: the same fixed-width types */
+#include <stddef.h>
 #include <stdint.h>
 typedef uint8_t __u8;
 typedef uint16_t __u16;
@@ -34,7 +39,7 @@ typedef int32_t __s32;
  */
 #define SHMRDMA_VIRTIO_ID	26	/* VIRTIO_ID_FS */
 #define SHMRDMA_TAG		"shmrdma"
-#define SHMRDMA_ABI_VERSION	1
+#define SHMRDMA_ABI_VERSION	2
 
 enum {
 	SHMRDMA_VQ_CTRL = 0,	/* guest -> host commands, host replies */
@@ -57,6 +62,7 @@ enum {
 #define SHMRDMA_MAX_CQE		(1 << 20)
 #define SHMRDMA_MAX_SGE		16
 #define SHMRDMA_GRH_BYTES	40
+#define SHMRDMA_MAX_MSG		0x80000000u	/* port max_msg_sz */
 
 /*
  * A ring: entries of entry_size bytes in pages listed at pages_gpa.
@@ -194,6 +200,7 @@ struct shmrdma_sq_wqe {
 			__u32 inline_len;
 		} send;
 	};
+	__u64 pad2;
 	struct shmrdma_sge sge[];
 };
 
@@ -322,8 +329,25 @@ enum {
 
 struct shmrdma_resp {
 	__s32 status;		/* 0 or -errno */
-	__u32 pad;
+	__u32 abi;		/* INIT: the backend's SHMRDMA_ABI_VERSION */
 	__u64 val;
 };
+
+#define SHMRDMA_ABI_SIZE(t, n) \
+	_Static_assert(sizeof(struct t) == (n), #t " size is ABI")
+
+SHMRDMA_ABI_SIZE(shmrdma_ring_desc, 24);
+SHMRDMA_ABI_SIZE(shmrdma_dev_shared, 128);
+SHMRDMA_ABI_SIZE(shmrdma_eqe, 8);
+SHMRDMA_ABI_SIZE(shmrdma_qp_rec, 128);
+SHMRDMA_ABI_SIZE(shmrdma_cq_rec, 128);
+SHMRDMA_ABI_SIZE(shmrdma_sge, 16);
+SHMRDMA_ABI_SIZE(shmrdma_sq_wqe, SHMRDMA_WQE_HDR);
+SHMRDMA_ABI_SIZE(shmrdma_rq_wqe, 16);
+SHMRDMA_ABI_SIZE(shmrdma_cqe, 32);
+SHMRDMA_ABI_SIZE(shmrdma_cmd, 128);
+SHMRDMA_ABI_SIZE(shmrdma_resp, 16);
+_Static_assert(offsetof(struct shmrdma_sq_wqe, sge) == SHMRDMA_WQE_HDR,
+	       "SGEs start after the 64-byte WQE header");
 
 #endif

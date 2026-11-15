@@ -1722,6 +1722,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 
 	switch (c->cmd) {
 	case SHMRDMA_CMD_INIT: {
+		r->abi = SHMRDMA_ABI_VERSION;
 		if (c->init.abi != SHMRDMA_ABI_VERSION)
 			return -EPROTO;
 		uint32_t n = c->init.eq_entries;

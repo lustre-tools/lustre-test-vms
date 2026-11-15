@@ -163,7 +163,7 @@ static void shmrdma_ctrl_cb(struct virtqueue *vq)
 }
 
 static int shmrdma_cmd(struct shmrdma_dev *dev, struct shmrdma_cmd *cmd,
-		       u64 *val)
+		       struct shmrdma_resp *resp)
 {
 	struct scatterlist out, in, *sgs[2];
 	unsigned int len;
@@ -198,8 +198,10 @@ static int shmrdma_cmd(struct shmrdma_dev *dev, struct shmrdma_cmd *cmd,
 			break;
 	}
 	rc = dev->respbuf->status;
-	if (val)
-		*val = dev->respbuf->val;
+	if (rc > 0 || rc < -MAX_ERRNO)
+		rc = -EIO;
+	if (resp)
+		*resp = *dev->respbuf;
 out:
 	mutex_unlock(&dev->ctrl_mutex);
 	return rc;
@@ -358,7 +360,7 @@ static int shmrdma_query_port(struct ib_device *ibdev, u32 port,
 	attr->active_mtu = IB_MTU_4096;
 	attr->gid_tbl_len = SHMRDMA_MAX_GID;
 	attr->port_cap_flags = IB_PORT_CM_SUP;
-	attr->max_msg_sz = 0x80000000;
+	attr->max_msg_sz = SHMRDMA_MAX_MSG;
 	attr->pkey_tbl_len = 1;
 	attr->active_width = IB_WIDTH_4X;
 	attr->active_speed = IB_SPEED_NDR;
@@ -1297,10 +1299,10 @@ static int shmrdma_probe(struct virtio_device *vdev)
 #endif
 	struct virtqueue *vqs[SHMRDMA_NUM_VQS];
 	struct shmrdma_cmd cmd = { .cmd = SHMRDMA_CMD_INIT };
+	struct shmrdma_resp resp = { 0 };
 	struct shmrdma_dev *dev;
 	struct net_device *ndev;
 	struct scatterlist sg;
-	u64 val;
 	int rc, i;
 
 	char tag[sizeof_field(struct virtio_fs_config, tag) + 1] = "";
@@ -1368,9 +1370,12 @@ static int shmrdma_probe(struct virtio_device *vdev)
 	cmd.init.shared_gpa = virt_to_phys(dev->shared);
 	cmd.init.eq_gpa = virt_to_phys(dev->eq);
 	WRITE_ONCE(dev->shared->eq_armed, 1);
-	rc = shmrdma_cmd(dev, &cmd, &val);
+	rc = shmrdma_cmd(dev, &cmd, &resp);
+	if (!rc && resp.abi != SHMRDMA_ABI_VERSION)
+		rc = -EPROTO;
 	if (rc) {
-		dev_err(&vdev->dev, "backend init failed: %d\n", rc);
+		dev_err(&vdev->dev, "backend init failed: %d (ABI %u, backend %u)\n",
+			rc, SHMRDMA_ABI_VERSION, resp.abi);
 		goto err_reset;
 	}
 
@@ -1401,7 +1406,7 @@ static int shmrdma_probe(struct virtio_device *vdev)
 	}
 	dev->registered = true;
 	dev_info(&vdev->dev, "%s on %s, backend dev%llu\n",
-		 dev_name(&dev->ibdev.dev), netdev, val);
+		 dev_name(&dev->ibdev.dev), netdev, resp.val);
 	return 0;
 
 err_reset:
