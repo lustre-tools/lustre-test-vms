@@ -391,6 +391,13 @@ static void worker_watch(struct worker *w, int fd)
 /* ---------------------------------------------------------------- */
 /* guest memory                                                     */
 
+static void unmap_all(struct mapping *m, int n)
+{
+	for (int i = 0; i < n; i++)
+		if (m[i].map_base)
+			munmap(m[i].map_base, m[i].map_len);
+}
+
 /* hva of gpa, and how many bytes are contiguous from there */
 static inline uint8_t *gpa_hva(struct vdev *d, uint64_t gpa, uint64_t *avail)
 {
@@ -990,6 +997,14 @@ static struct vdev *dev_by_gid(const uint8_t *gid)
 	return NULL;
 }
 
+static bool dev_has_gid(const struct vdev *d, const uint8_t *gid)
+{
+	for (int i = 0; i < SHMRDMA_MAX_GID; i++)
+		if (d->gid_valid[i] && !memcmp(d->gids[i], gid, 16))
+			return true;
+	return false;
+}
+
 static struct qp *qp_peer(struct qp *qp)
 {
 	uint64_t gen = ACQ(&g_gen);
@@ -1103,6 +1118,12 @@ static int exec_ud_send(struct qp *qp, struct shmrdma_sq_wqe *w,
 	struct vdev *pd = dev_by_gid(w->ud.dgid);
 	struct qp *peer;
 
+	/* a source GID that is not ours would forge another VM's MADs */
+	if (!dev_has_gid(qp->dev, w->ud.sgid)) {
+		DBG("dev%d qp%u: UD drop, source GID not the device's",
+		    qp->dev->id, qp->qpn);
+		return WC_SUCCESS;
+	}
 	if (!pd || w->ud.dqpn >= SHMRDMA_MAX_QP)
 		return WC_SUCCESS;	/* dropped, as on a wire */
 	peer = pd->qps[w->ud.dqpn];
@@ -1138,7 +1159,7 @@ static int exec_ud_send(struct qp *qp, struct shmrdma_sq_wqe *w,
 	c.flags = SHMRDMA_CQE_GRH;
 
 	struct sg_iter dst = { .dev = pd, .sge = rsge, .nsge = rn,
-			       .need_access = 0 };
+			       .need_access = SHMRDMA_ACC_LOCAL_WRITE };
 	uint8_t grh[SHMRDMA_GRH_BYTES];
 
 	make_grh(grh, w->ud.sgid, w->ud.dgid, len);
@@ -1211,7 +1232,8 @@ static int deliver_recv(struct qp *qp, struct qp *peer,
 			rc = WC_REM_INV_REQ_ERR;
 		} else {
 			struct sg_iter dst = { .dev = peer->dev, .sge = rsge,
-					       .nsge = rn };
+					       .nsge = rn,
+					       .need_access = SHMRDMA_ACC_LOCAL_WRITE };
 
 			if (w->flags & SHMRDMA_WQE_INLINE) {
 				if (sg_copy_in(&dst, (const uint8_t *)w->sge,
@@ -1410,7 +1432,8 @@ static int exec_wqe(struct qp *qp, struct shmrdma_sq_wqe *w,
 				       .remote = true,
 				       .need_access = SHMRDMA_ACC_REMOTE_READ };
 		struct sg_iter dst = { .dev = qp->dev, .sge = sge,
-				       .nsge = w->num_sge };
+				       .nsge = w->num_sge,
+				       .need_access = SHMRDMA_ACC_LOCAL_WRITE };
 
 		if (len && sg_copy_par(&dst, &src, len))
 			return dst.err ? dst.err : src.err;
@@ -1740,6 +1763,8 @@ static void dev_reset_state(struct vdev *d)
 	d->initialized = false;
 	d->shared = NULL;
 	d->eq = NULL;
+	unmap_all(d->old, d->nold);
+	d->nold = 0;
 	d->eq_prod = 0;
 	d->irq_pending = false;
 	__atomic_add_fetch(&g_gen, 1, __ATOMIC_SEQ_CST);
@@ -1797,6 +1822,15 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		if (c->gid.index >= SHMRDMA_MAX_GID)
 			return -EINVAL;
 		wlock();
+		/* a GID names one device: taking another's takes its traffic */
+		for (struct vdev *o = g_devs; o; o = o->next) {
+			if (o == d || o->dead || !dev_has_gid(o, c->gid.gid))
+				continue;
+			wunlock();
+			gid_str(c->gid.gid, gs, sizeof(gs));
+			LOG("dev%d: gid %s is dev%d's, refused", d->id, gs, o->id);
+			return -EEXIST;
+		}
 		memcpy(d->gids[c->gid.index], c->gid.gid, 16);
 		d->gid_valid[c->gid.index] = true;
 		__atomic_add_fetch(&g_gen, 1, __ATOMIC_SEQ_CST);
@@ -2088,13 +2122,6 @@ static void ep_del(int fd)
 	plat_poller_del(g_epfd, fd);
 }
 
-static void unmap_all(struct mapping *m, int n)
-{
-	for (int i = 0; i < n; i++)
-		if (m[i].map_base)
-			munmap(m[i].map_base, m[i].map_len);
-}
-
 static void vq_stop(struct vdev *d, int idx)
 {
 	struct vq *q = &d->vq[idx];
@@ -2152,6 +2179,7 @@ static int vu_reply(struct vdev *d, uint32_t req, const void *p, uint32_t sz)
 
 static int vq_map(struct vdev *d, struct vq *q);
 
+/* closes every fd it is given */
 static int set_mem_table(struct vdev *d, struct vu_memtab *mt, int *fds, int nfds)
 {
 	struct mapping nm[VU_MAX_REGIONS];
@@ -2159,6 +2187,8 @@ static int set_mem_table(struct vdev *d, struct vu_memtab *mt, int *fds, int nfd
 	if (mt->nregions > VU_MAX_REGIONS || (int)mt->nregions != nfds) {
 		LOG("dev%d: bad mem table (%u regions, %d fds)", d->id,
 		    mt->nregions, nfds);
+		for (int i = 0; i < nfds; i++)
+			close(fds[i]);
 		return -1;
 	}
 	memset(nm, 0, sizeof(nm));
@@ -2173,6 +2203,8 @@ static int set_mem_table(struct vdev *d, struct vu_memtab *mt, int *fds, int nfd
 			LOG("dev%d: mmap region %u: %s", d->id, i,
 			    strerror(errno));
 			unmap_all(nm, i);
+			for (uint32_t j = i + 1; j < mt->nregions; j++)
+				close(fds[j]);
 			return -1;
 		}
 		nm[i].gpa = r->gpa;
@@ -2185,12 +2217,19 @@ static int set_mem_table(struct vdev *d, struct vu_memtab *mt, int *fds, int nfd
 		    d->id, i, r->gpa, r->size);
 	}
 	wlock();
-	if (d->nold + d->nmap <= (int)(sizeof(d->old) / sizeof(d->old[0]))) {
+	if (!d->initialized) {
+		/* only the vrings point into the maps, and they move below */
+		unmap_all(d->map, d->nmap);
+	} else if (d->nold + d->nmap <= (int)(sizeof(d->old) / sizeof(d->old[0]))) {
+		/* QPs, CQs and the EQ keep pointers into the current maps */
 		memcpy(&d->old[d->nold], d->map, d->nmap * sizeof(d->map[0]));
 		d->nold += d->nmap;
 	} else {
-		LOG("dev%d: too many mem table changes, unmapping", d->id);
-		unmap_all(d->map, d->nmap);
+		wunlock();
+		LOG("dev%d: too many mem table changes while in use, refused",
+		    d->id);
+		unmap_all(nm, mt->nregions);
+		return -1;
 	}
 	memcpy(d->map, nm, sizeof(nm));
 	d->nmap = mt->nregions;
@@ -2226,27 +2265,36 @@ static int handle_msg(struct vdev *d)
 	ssize_t n;
 	int rc = 0;
 
+	if (!pl)
+		return -1;
 	n = plat_recvmsg(d->sock, &mh);
 	if (n <= 0) {
-		free(pl);
-		return -1;
-	}
-	if (n != sizeof(h)) {
-		LOG("dev%d: short header", d->id);
 		free(pl);
 		return -1;
 	}
 	for (struct cmsghdr *cm = CMSG_FIRSTHDR(&mh); cm;
 	     cm = CMSG_NXTHDR(&mh, cm)) {
 		if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_RIGHTS) {
-			nfds = (cm->cmsg_len - CMSG_LEN(0)) / sizeof(int);
-			memcpy(fds, CMSG_DATA(cm), nfds * sizeof(int));
+			int k = (cm->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+			int *in = (int *)CMSG_DATA(cm);
+
+			for (int i = 0; i < k; i++) {
+				if (nfds < VU_MAX_REGIONS)
+					fds[nfds++] = in[i];
+				else
+					close(in[i]);
+			}
 		}
+	}
+	if (n != sizeof(h)) {
+		LOG("dev%d: short header", d->id);
+		rc = -1;
+		goto out;
 	}
 	if (h.size > sizeof(*pl)) {
 		LOG("dev%d: oversized message %u", d->id, h.size);
-		free(pl);
-		return -1;
+		rc = -1;
+		goto out;
 	}
 	if (h.size) {
 		size_t got = 0;
@@ -2254,8 +2302,8 @@ static int handle_msg(struct vdev *d)
 		while (got < h.size) {
 			n = recv(d->sock, pl->raw + got, h.size - got, 0);
 			if (n <= 0) {
-				free(pl);
-				return -1;
+				rc = -1;
+				goto out;
 			}
 			got += n;
 		}
@@ -2384,7 +2432,8 @@ static int handle_msg(struct vdev *d)
 		uint32_t idx = pl->u64 & 0xff;
 		int fd = (pl->u64 & VU_VRING_NOFD) || nfds < 1 ? -1 : fds[0];
 
-		nfds = 0;
+		if (fd >= 0)
+			fds[0] = -1;
 		if (idx >= MAX_VQS) {
 			if (fd >= 0)
 				close(fd);
@@ -2495,10 +2544,12 @@ static int handle_msg(struct vdev *d)
 			ack = 1;
 		break;
 	}
-	for (int i = 0; i < nfds; i++)
-		close(fds[i]);
 	if (need_ack && rc == 0)
 		rc = vu_reply(d, h.request, &ack, 8);
+out:
+	for (int i = 0; i < nfds; i++)
+		if (fds[i] >= 0)
+			close(fds[i]);
 	free(pl);
 	return rc;
 }
