@@ -292,6 +292,8 @@ static int net_rx_queues(struct netport *dp)
 }
 
 #define RX_MAX_BUFS	512
+/* smaller RX buffers would make each delivery walk the whole ring */
+#define RX_MIN_BUF	256
 
 /* RX buffers taken from one queue and not yet handed back */
 struct rxtake {
@@ -342,7 +344,7 @@ static int rx_take(struct rxtake *t, uint64_t need, struct cursor *dst,
 		t->head[t->nb] = RLX(&q->avail->ring[t->idx % q->num]);
 		n = vq_chain(t->d, q, t->head[t->nb], true, t->segs + t->ns,
 			     MAX_SEGS, &cap);
-		if (n <= 0) {
+		if (n <= 0 || cap < RX_MIN_BUF) {
 			vq_set_broken_buf(t->d, q, t->head[t->nb]);
 			return DLV_DROP;
 		}
@@ -406,6 +408,11 @@ static int net_deliver_segs(struct netport *dp, int rqi,
 			    const struct cursor *src0, uint64_t len);
 static void net_fill_csum(struct cursor frame, uint64_t len,
 			  const struct vnet_hdr *h);
+static int net_parse_tcp(const struct cursor *src0, uint64_t len, uint8_t gso,
+			 uint8_t *hb, uint32_t *l3p, uint32_t *l4p,
+			 uint32_t *hlenp, bool *v6p);
+
+#define NET_HDR_MAX	192
 
 #define NET_MAX_SPANS	160
 
@@ -514,6 +521,17 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 	if ((gso == VNET_HDR_GSO_TCPV4 && !(d->features & VNET_F_GUEST_TSO4)) ||
 	    (gso == VNET_HDR_GSO_TCPV6 && !(d->features & VNET_F_GUEST_TSO6)))
 		return net_deliver_segs(dp, rqi, th, src0, len);
+	if (gso != VNET_HDR_GSO_NONE) {
+		uint8_t hb[NET_HDR_MAX];
+		uint32_t l3, l4, hlen;
+		bool v6;
+
+		if (net_parse_tcp(src0, len, gso, hb, &l3, &l4, &hlen, &v6) ||
+		    !(h.flags & VNET_HDR_F_NEEDS_CSUM) || h.csum_start != l4 ||
+		    h.csum_offset != 16)
+			return DLV_DROP;
+		h.hdr_len = hlen;
+	}
 	if ((h.flags & VNET_HDR_F_NEEDS_CSUM) &&
 	    !(d->features & VNET_F_GUEST_CSUM)) {
 		if (gso != VNET_HDR_GSO_NONE)
@@ -717,7 +735,55 @@ static void put_be32(uint8_t *p, uint32_t v)
 #define TCP_FIN		0x01
 #define TCP_PSH		0x08
 #define TCP_CWR		0x80
-#define NET_HDR_MAX	192
+
+/*
+ * Find the IP and TCP headers of a TCP frame of len bytes from src0,
+ * copying the first NET_HDR_MAX bytes into hb.  A GSO frame must be TCP
+ * over the IP version gso names.  0, or -1 for anything else.
+ */
+static int net_parse_tcp(const struct cursor *src0, uint64_t len, uint8_t gso,
+			 uint8_t *hb, uint32_t *l3p, uint32_t *l4p,
+			 uint32_t *hlenp, bool *v6p)
+{
+	uint32_t n = len < NET_HDR_MAX ? len : NET_HDR_MAX;
+	uint32_t l3 = 14, l4, hlen;
+	struct cursor c = *src0;
+	uint16_t et;
+	bool v6;
+
+	cur_read(&c, hb, n);
+	if (n < 14)
+		return -1;
+	et = get_be16(hb + 12);
+	while ((et == 0x8100 || et == 0x88a8) && l3 + 4 <= n) {
+		et = get_be16(hb + l3 + 2);
+		l3 += 4;
+	}
+	if (et == 0x0800 && l3 + 20 <= n && hb[l3] >> 4 == 4 &&
+	    (hb[l3] & 15) >= 5 && hb[l3 + 9] == 6) {
+		v6 = false;
+		l4 = l3 + (hb[l3] & 15) * 4;
+	} else if (et == 0x86dd && l3 + 40 <= n && hb[l3] >> 4 == 6 &&
+		   hb[l3 + 6] == 6) {
+		v6 = true;
+		l4 = l3 + 40;
+	} else {
+		return -1;
+	}
+	if (gso != VNET_HDR_GSO_NONE &&
+	    gso != (v6 ? VNET_HDR_GSO_TCPV6 : VNET_HDR_GSO_TCPV4))
+		return -1;
+	if (l4 + 20 > n || hb[l4 + 12] >> 4 < 5)
+		return -1;
+	hlen = l4 + (hb[l4 + 12] >> 4) * 4;
+	if (hlen > n)
+		return -1;
+	*l3p = l3;
+	*l4p = l4;
+	*hlenp = hlen;
+	*v6p = v6;
+	return 0;
+}
 
 /*
  * Deliver a TCP frame to a port that cannot take it as it is: a GSO
@@ -735,39 +801,12 @@ static int net_deliver_segs(struct netport *dp, int rqi,
 	uint8_t gso = th->gso_type & ~VNET_HDR_GSO_ECN;
 	bool partial = d->features & VNET_F_GUEST_CSUM;
 	uint8_t hb[NET_HDR_MAX];
-	uint32_t n = len < sizeof(hb) ? len : sizeof(hb);
-	uint32_t l3 = 14, l4, hlen;
-	struct cursor c = *src0;
+	uint32_t l3, l4, hlen;
+	struct cursor c;
 	struct rxtake t;
-	uint16_t et;
 	bool v6;
 
-	cur_read(&c, hb, n);
-	if (n < 14)
-		goto bad;
-	et = get_be16(hb + 12);
-	while ((et == 0x8100 || et == 0x88a8) && l3 + 4 <= n) {
-		et = get_be16(hb + l3 + 2);
-		l3 += 4;
-	}
-	if (et == 0x0800 && l3 + 20 <= n && hb[l3] >> 4 == 4 &&
-	    (hb[l3] & 15) >= 5 && hb[l3 + 9] == 6) {
-		v6 = false;
-		l4 = l3 + (hb[l3] & 15) * 4;
-	} else if (et == 0x86dd && l3 + 40 <= n && hb[l3] >> 4 == 6 &&
-		   hb[l3 + 6] == 6) {
-		v6 = true;
-		l4 = l3 + 40;
-	} else {
-		goto bad;
-	}
-	if (gso != VNET_HDR_GSO_NONE &&
-	    gso != (v6 ? VNET_HDR_GSO_TCPV6 : VNET_HDR_GSO_TCPV4))
-		goto bad;
-	if (l4 + 20 > n || hb[l4 + 12] >> 4 < 5)
-		goto bad;
-	hlen = l4 + (hb[l4 + 12] >> 4) * 4;
-	if (hlen > n)
+	if (net_parse_tcp(src0, len, gso, hb, &l3, &l4, &hlen, &v6))
 		goto bad;
 
 	uint64_t payload = len - hlen;
@@ -781,6 +820,8 @@ static int net_deliver_segs(struct netport *dp, int rqi,
 	else
 		nseg = (payload + mss - 1) / mss;
 	if (nseg > RX_MAX_BUFS)
+		goto bad;
+	if (hlen - l3 - (v6 ? 40 : 0) + (mss < payload ? mss : payload) > 65535)
 		goto bad;
 
 	uint32_t seq0 = get_be32(hb + l4 + 4);
@@ -1074,6 +1115,8 @@ drop:
 		q->last_avail++;
 		vq_push_used(q, head, 0);
 		done++;
+		if (__atomic_load_n(&g_wwait, __ATOMIC_SEQ_CST))
+			break;
 	}
 	if (done)
 		vq_signal(q);
