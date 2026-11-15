@@ -332,11 +332,23 @@ static uint64_t g_net_nt_min = 16 << 10;	/* the same for shmnet frames */
 static uint64_t g_net_part_min = 30 << 10;	/* split frames into these */
 static int g_lsock;
 
+static int g_wwait;	/* wlock() is waiting for the workers' mutexes */
+
 /* writer lock: hold every worker's mutex */
 static void wlock(void)
 {
+	__atomic_add_fetch(&g_wwait, 1, __ATOMIC_SEQ_CST);
 	for (int i = 0; i < g_nworkers; i++)
 		pthread_mutex_lock(&g_workers[i].mtx);
+	__atomic_sub_fetch(&g_wwait, 1, __ATOMIC_SEQ_CST);
+}
+
+/* a worker that has just unlocked: mutexes are not fair, so let a
+ * waiting wlock() have this one before taking it again */
+static void worker_yield(void)
+{
+	while (__atomic_load_n(&g_wwait, __ATOMIC_SEQ_CST))
+		cpu_relax();
 }
 
 static void wunlock(void)
@@ -439,12 +451,19 @@ static void *uaddr_hva(struct vdev *d, uint64_t ua, uint64_t len)
 /* ---------------------------------------------------------------- */
 /* virtqueues                                                       */
 
-static void vq_signal(struct vq *q)
+/*
+ * The call fd to signal for the used entries just published, or -1.
+ * Call it under whatever serialises publishing on q: the decision and
+ * signalled_used must move with the used index, or two publishers can
+ * each decide the other signals.  Signalling the fd may come after.
+ */
+static int vq_need_signal(struct vq *q)
 {
 	int fd = RLX(&q->callfd);
 
 	if (fd < 0)
-		return;
+		return -1;
+	FENCE();
 	if (q->event_idx) {
 		uint16_t ev = ACQ(&q->avail->ring[q->num]);
 		uint16_t old = q->signalled_used, new = q->used_idx;
@@ -454,11 +473,19 @@ static void vq_signal(struct vq *q)
 		q->signalled_valid = true;
 		/* vring_need_event() */
 		if (valid && (uint16_t)(new - ev - 1) >= (uint16_t)(new - old))
-			return;
+			return -1;
 	} else if (ACQ(&q->avail->flags) & VRING_AVAIL_F_NO_INTERRUPT) {
-		return;
+		return -1;
 	}
-	plat_notifier_signal(fd);
+	return fd;
+}
+
+static void vq_signal(struct vq *q)
+{
+	int fd = vq_need_signal(q);
+
+	if (fd >= 0)
+		plat_notifier_signal(fd);
 }
 
 static void vq_push_used(struct vq *q, uint32_t head, uint32_t len)
@@ -502,7 +529,6 @@ static void dev_send_irq(struct vdev *d)
 	q->last_avail++;
 	d->irq_pending = false;
 	vq_push_used(q, head, 0);
-	FENCE();
 	vq_signal(q);
 }
 
@@ -1508,6 +1534,7 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 			w->num_sge = (qp->sq.esz - SHMRDMA_WQE_HDR) / 16;
 
 		if (qp->state == QPS_ERR) {
+			qp->stall_since = 0;
 			st = WC_WR_FLUSH_ERR;
 			switch (w->opcode) {
 			case SHMRDMA_OP_RDMA_WRITE:
@@ -1563,12 +1590,16 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 	return done;
 }
 
+/* work qp_process() would do now; a stalled QP waits for the poll timeout */
 static bool qp_has_work(struct qp *qp)
 {
 	if (qp->dev->dead)
 		return false;
 	if (qp->state == QPS_ERR && ACQ(&qp->rec->rq_prod) != qp->rq_cons)
 		return true;
+	if ((qp->state != QPS_RTS && qp->state != QPS_ERR &&
+	     qp->state != QPS_SQD && qp->state != QPS_SQE) || qp->stall_since)
+		return false;
 	return ACQ(&qp->rec->sq_prod) != qp->sq_cons;
 }
 
@@ -1589,6 +1620,7 @@ static void *worker_main(void *arg)
 		for (int i = 0; i < w->nnq; i++)
 			did += net_tx_process(w->nqs[i], 64, &stalled);
 		pthread_mutex_unlock(&w->mtx);
+		worker_yield();
 
 		uint64_t t = now_ns();
 
@@ -1617,6 +1649,7 @@ static void *worker_main(void *arg)
 		for (int i = 0; i < w->nnq && !work; i++)
 			work = net_has_work(w->nqs[i]);
 		pthread_mutex_unlock(&w->mtx);
+		worker_yield();
 
 		if (!work) {
 			struct plat_event evs[16];
@@ -1635,6 +1668,7 @@ static void *worker_main(void *arg)
 		for (int i = 0; i < w->nnq; i++)
 			net_set_notify(w->nqs[i], false);
 		pthread_mutex_unlock(&w->mtx);
+		worker_yield();
 		idle_since = now_ns();
 	}
 	return NULL;
@@ -1979,6 +2013,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 				qp->fatal_sent = false;
 			}
 			qp->state = ns;
+			qp->stall_since = 0;
 			if (ns == QPS_ERR)
 				qp_flush_rq(qp);
 			__atomic_add_fetch(&g_gen, 1, __ATOMIC_SEQ_CST);
@@ -2088,10 +2123,8 @@ static void ctrl_process(struct vdev *d)
 		vq_push_used(q, head, rp ? sizeof(resp) : 0);
 		any = true;
 	}
-	if (any) {
-		FENCE();
+	if (any)
 		vq_signal(q);
-	}
 }
 
 /* ---------------------------------------------------------------- */

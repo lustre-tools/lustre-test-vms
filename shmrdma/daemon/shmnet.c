@@ -214,7 +214,7 @@ static uint16_t *vq_avail_event(struct vq *q)
 static void net_want_rx_kick(struct vq *q)
 {
 	if (q->event_idx)
-		REL(vq_avail_event(q), q->last_avail);
+		REL(vq_avail_event(q), ACQ(&q->avail->idx));
 	else
 		REL(&q->used->flags, 0);
 	FENCE();
@@ -397,7 +397,7 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 	struct vnet_hdr h = *th;
 	uint8_t gso = h.gso_type & ~VNET_HDR_GSO_ECN;
 	uint16_t nbufs;
-	int rc;
+	int rc, fd;
 
 	if (d->dead || !vq_ready(q))
 		return DLV_DROP;
@@ -435,9 +435,10 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 	rx_put(&t);
 	STAT_ADD(dp->rx_pkts, 1);
 	STAT_ADD(dp->rx_bytes, len);
+	fd = vq_need_signal(q);
 	plat_spin_unlock(&dp->rx_lock[rqi]);
-	FENCE();
-	vq_signal(q);
+	if (fd >= 0)
+		plat_notifier_signal(fd);
 	return DLV_OK;
 }
 
@@ -715,9 +716,11 @@ static int net_deliver_segs(struct netport *dp, int rqi,
 	STAT_ADD(dp->rx_bytes, bytes);
 	if (gso != VNET_HDR_GSO_NONE)
 		STAT_ADD(dp->rx_segs, nseg);
+	int fd = vq_need_signal(q);
+
 	plat_spin_unlock(&dp->rx_lock[rqi]);
-	FENCE();
-	vq_signal(q);
+	if (fd >= 0)
+		plat_notifier_signal(fd);
 	return DLV_OK;
 bad:
 	STAT_ADD(dp->rx_seg_drops, 1);
@@ -884,10 +887,8 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 		vq_push_used(q, head, 0);
 		done++;
 	}
-	if (done) {
-		FENCE();
+	if (done)
 		vq_signal(q);
-	}
 	return done;
 }
 
