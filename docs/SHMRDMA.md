@@ -279,7 +279,20 @@ o2iblnd notices a dead peer. A send that finds no receive posted waits
 Moving a QP to error flushes its outstanding work requests, which
 o2iblnd waits for before destroying the connection. A guest reset or VM
 exit tears down that VM's state in the daemon, with all worker threads
-stopped.
+stopped.  A CQ that overflows raises a CQ error event and moves its QPs
+to error.
+
+**When the daemon stops answering.** A control command with no reply
+after 30 s makes the guest reset its own device: QEMU forwards the
+reset to the daemon and waits for it, so once the reset returns the
+daemon has dropped every QP, CQ and MR of that VM and no longer touches
+its memory.  The guest then completes everything outstanding, and
+anything posted later, with a flush error in software (as mlx5 does
+after an internal error), reports the port down, and raises a fatal
+device event, so ULP teardown such as `lnetctl net del` finishes.  The
+device stays dead until the module is reloaded or the VM reboots.  A
+daemon that is merely paused costs nothing until a control command
+times out: data traffic needs none.
 
 **shmnet** is the same daemon on a second socket. QEMU uses `-netdev
 vhost-user` with a standard `virtio-net-pci` (mergeable RX buffers,
