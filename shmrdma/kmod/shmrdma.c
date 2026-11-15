@@ -984,7 +984,12 @@ static int shmrdma_poll_cq(struct ib_cq *ibcq, int num, struct ib_wc *wc)
 		struct ib_wc *w = &wc[n];
 
 		cq->cons++;
+		/* a QP of another CQ is freed once out of the xarray */
+		xa_lock(&dev->qps);
 		qp = xa_load(&dev->qps, e->qpn);
+		if (qp && qp->scq != cq && qp->rcq != cq)
+			qp = NULL;
+		xa_unlock(&dev->qps);
 		if (!qp)
 			continue;
 		memset(w, 0, sizeof(*w));
