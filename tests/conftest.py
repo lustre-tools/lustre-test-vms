@@ -125,9 +125,11 @@ def _isolate_user_state(
     # probe and list real podman volumes from tests that mock only the
     # build's own podman run.  Telling build_volumes it is not on a Mac
     # covers all of them; tests/test_build_volumes.py turns it back on.
-    from ltvm_pkg import build_volumes
+    from ltvm_pkg import build_volumes, shmrdma
 
     monkeypatch.setattr(build_volumes, "is_macos", lambda: False)
+    # shmrdmad's fallback directory is under the passwd home, not XDG.
+    monkeypatch.setattr(shmrdma, "_state_home", lambda uid: root / "state")
     monkeypatch.delenv("LTVM_MACOS_BUILD_VOLUMES", raising=False)
     monkeypatch.delenv("LTVM_PODMAN_AUTOSTOP", raising=False)
     monkeypatch.delenv("LTVM_PODMAN_IDLE_STOP", raising=False)

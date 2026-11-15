@@ -301,16 +301,16 @@ def _check_private(d: Path, uid: int) -> None:
             os.close(fd)
 
 
+def _state_home(uid: int) -> Path:
+    # Not $XDG_STATE_HOME: sudo drops it, and root must look where the
+    # user put the daemon.
+    return Path(pwd.getpwuid(uid).pw_dir) / ".local" / "state"
+
+
 def _candidate_dirs(uid: int) -> list[Path]:
-    home = Path(pwd.getpwuid(uid).pw_dir)
-    state = (
-        Path(os.environ["XDG_STATE_HOME"])
-        if os.environ.get("XDG_STATE_HOME") and os.geteuid() == uid
-        else home / ".local" / "state"
-    )
     return [
         vm_state.VM_DIR / f"shmrdma-{uid}",
-        state / "ltvm" / "shmrdma",
+        _state_home(uid) / "ltvm" / "shmrdma",
     ]
 
 

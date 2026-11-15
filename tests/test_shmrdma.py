@@ -27,6 +27,8 @@ from tests.test_qemu_run import (  # noqa: F401
     tmp_vmdir,
 )
 
+_REAL_STATE_HOME = shmrdma._state_home
+
 # sun_path holds 104 bytes on macOS, 108 on Linux; the tests' sockets
 # go at most this far below tmp_path (shmrdma-<uid>/rdma.sock).
 _SOCKET_SUFFIX_MAX = 32
@@ -419,14 +421,18 @@ class TestPrivateDir:
         elsewhere = tmp_vmdir / "elsewhere"
         elsewhere.mkdir()
         (tmp_vmdir / f"shmrdma-{os.geteuid()}").symlink_to(elsewhere)
-        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_vmdir / "state"))
+        monkeypatch.setattr(
+            shmrdma, "_state_home", lambda uid: tmp_vmdir / "state"
+        )
         d = shmrdma.run_dir(os.geteuid())
         assert d == tmp_vmdir / "state" / "ltvm" / "shmrdma"
 
     def test_foreign_owner_refused(self, tmp_vmdir: Path, monkeypatch) -> None:  # noqa: F811
         d = tmp_vmdir / f"shmrdma-{os.geteuid()}"
         d.mkdir(mode=0o700)
-        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_vmdir / "state"))
+        monkeypatch.setattr(
+            shmrdma, "_state_home", lambda uid: tmp_vmdir / "state"
+        )
         real = os.lstat
 
         def lstat(path, *a, **k):
@@ -443,7 +449,9 @@ class TestPrivateDir:
             assert shmrdma.run_dir(os.geteuid(), create=False) != d
 
     def test_live_daemon_wins(self, tmp_vmdir: Path, monkeypatch) -> None:  # noqa: F811
-        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_vmdir / "state"))
+        monkeypatch.setattr(
+            shmrdma, "_state_home", lambda uid: tmp_vmdir / "state"
+        )
         first = tmp_vmdir / f"shmrdma-{os.geteuid()}"
         state = tmp_vmdir / "state" / "ltvm" / "shmrdma"
         first.mkdir(mode=0o700)
@@ -455,6 +463,16 @@ class TestPrivateDir:
         with patch.object(shmrdma.Daemon, "pid", pid):
             assert shmrdma.run_dir(os.geteuid()) == state
             assert shmrdma.run_dir(os.geteuid(), create=False) == state
+
+    def test_root_and_user_agree_on_the_state_dir(self, monkeypatch) -> None:
+        monkeypatch.setattr(shmrdma, "_state_home", _REAL_STATE_HOME)
+        monkeypatch.setenv("XDG_STATE_HOME", "/elsewhere")
+        uid = os.geteuid()
+        mine = shmrdma._candidate_dirs(uid)
+        with patch("ltvm_pkg.shmrdma.os.geteuid", return_value=uid + 1):
+            assert shmrdma._candidate_dirs(uid) == mine
+        home = Path(shmrdma.pwd.getpwuid(uid).pw_dir)
+        assert mine[1] == home / ".local/state/ltvm/shmrdma"
 
     def test_root_never_creates(self, tmp_vmdir: Path) -> None:  # noqa: F811
         uid = os.geteuid()
