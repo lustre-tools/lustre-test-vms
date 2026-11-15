@@ -461,6 +461,16 @@ def is_running(vm: VMInfo) -> bool:
 SHMRDMAD_MAX_REGIONS = 8
 
 
+def shared_numa_problem(nodes: int) -> str | None:
+    """Why shmrdmad cannot map a VM of *nodes* NUMA nodes, or None."""
+    if nodes + 1 > SHMRDMAD_MAX_REGIONS:
+        return (
+            f"--numa-nodes {nodes} with --shmrdma or a shmnet NIC: "
+            f"shmrdmad maps at most {SHMRDMAD_MAX_REGIONS - 1} nodes"
+        )
+    return None
+
+
 def numa_problem(
     vcpus: int, mem: int, nodes: int, shared: bool = False
 ) -> str | None:
@@ -469,11 +479,8 @@ def numa_problem(
         return f"--numa-nodes must be >= 0 (got {nodes})"
     if nodes <= 1:
         return None
-    if shared and nodes + 1 > SHMRDMAD_MAX_REGIONS:
-        return (
-            f"--numa-nodes {nodes} with --shmrdma or a shmnet NIC: "
-            f"shmrdmad maps at most {SHMRDMAD_MAX_REGIONS - 1} nodes"
-        )
+    if shared and (problem := shared_numa_problem(nodes)):
+        return problem
     if vcpus % nodes:
         return f"--numa-nodes {nodes} must divide the {vcpus} vCPUs evenly"
     if mem // nodes < 128:
@@ -1118,6 +1125,39 @@ def _start_qemu(vm: VMInfo) -> None:
             "the limit is 2047 bytes"
         )
 
+    # Every refusal comes before the TAPs below: nothing removes them
+    # if launch dies before QEMU starts.
+    if not vm.kernel:
+        die(f"VM '{vm.name}' has no kernel path set — recreate with --target")
+    kernel = Path(vm.kernel)
+
+    # shmrdmad must be serving every socket the VM's shmrdma device and
+    # shmnet NICs connect to, and must be able to map guest RAM.
+    from . import shmrdma_req
+
+    feats = shmrdma_req.features_of(vm.shmrdma, vm.nics, vm.host_node)
+    if feats:
+        target = shmrdma_req.Target(
+            vm.os_id or "this target",
+            image=Path(vm.image) if vm.image else None,
+            kernel_dir=kernel.parent,
+            arch=vm.arch or None,
+        )
+        why = shmrdma_req.refusal(
+            feats,
+            target if vm.shmrdma and vm.image else None,
+            arch=vm.arch or None,
+        )
+        if why:
+            die(f"{vm.name}: {why}")
+    shm_socks = shmrdma.prepare_launch(vm) if vm.shared_ram else []
+    if shm_socks != vm.shm_sockets:
+        vm.shm_sockets = list(shm_socks)
+        vm._update_field("SHM_SOCKETS", "|".join(shm_socks))
+    problem = host_node_problem(vm.host_node)
+    if problem:
+        die(f"{vm.name}: {problem}")
+
     # Recreate TAP and flush any stale ARP entry for this IP.  Also
     # tear down any extra-NIC TAPs from a previous launch so ``ltvm
     # start`` on a VM created with ``--nic tcp`` doesn't leak TAPs
@@ -1232,10 +1272,6 @@ def _start_qemu(vm: VMInfo) -> None:
                 f"{str(_nic)!r} on VM {vm.name!r}"
             )
 
-    if not vm.kernel:
-        die(f"VM '{vm.name}' has no kernel path set — recreate with --target")
-    kernel = Path(vm.kernel)
-
     import platform as _platform
 
     arch = vm.arch
@@ -1275,34 +1311,11 @@ def _start_qemu(vm: VMInfo) -> None:
     else:
         cpu_model = "Nehalem"
 
-    # shmrdmad must be serving every socket the VM's shmrdma device and
-    # shmnet NICs connect to, and must be able to map guest RAM.
-    from . import shmrdma_req
-
-    feats = shmrdma_req.features_of(vm.shmrdma, vm.nics, vm.host_node)
-    if feats:
-        target = shmrdma_req.Target(
-            vm.os_id or "this target",
-            image=Path(vm.image) if vm.image else None,
-            kernel_dir=kernel.parent,
-        )
-        why = shmrdma_req.refusal(
-            feats, target if vm.shmrdma and vm.image else None
-        )
-        if why:
-            die(f"{vm.name}: {why}")
-    shm_socks = shmrdma.prepare_launch(vm) if vm.shared_ram else []
-    if shm_socks != vm.shm_sockets:
-        vm.shm_sockets = list(shm_socks)
-        vm._update_field("SHM_SOCKETS", "|".join(shm_socks))
     bind_node = (
         vm.host_node if vm.host_node >= 0 and qemu_binds_numa(qemu_bin) else -1
     )
     if (vm.shared_ram or bind_node >= 0) and vm.numa_nodes <= 1:
         machine = f"{machine},memory-backend=ram0"
-    problem = host_node_problem(vm.host_node)
-    if problem:
-        die(f"{vm.name}: {problem}")
     # In-kernel virtio-net datapath, where QEMU will be able to use it.
     vhost = not macos and vhost_net_usable(as_user)
 

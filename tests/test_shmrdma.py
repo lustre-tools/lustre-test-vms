@@ -351,6 +351,20 @@ class TestPrivateDir:
         assert shmrdma.run_dir(os.geteuid()) == d
         assert stat.S_IMODE(os.lstat(d).st_mode) == 0o700
 
+    def test_loose_mode_tightened_without_lchmod(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+    ) -> None:
+        """glibc before 2.32 (EL8) has no chmod that refuses symlinks."""
+        d = tmp_vmdir / f"shmrdma-{os.geteuid()}"
+        d.mkdir()
+        os.chmod(d, 0o755)
+        with patch(
+            "ltvm_pkg.shmrdma.os.chmod", side_effect=NotImplementedError
+        ):
+            assert shmrdma.run_dir(os.geteuid()) == d
+        assert stat.S_IMODE(os.lstat(d).st_mode) == 0o700
+
     def test_planted_symlink_refused(
         self,
         tmp_vmdir: Path,  # noqa: F811
@@ -493,6 +507,17 @@ class TestPidFile:
         ):
             assert shmrdma._proc_info(1) == (-1, "", "")
 
+    def test_symlinked_cache_dir(self, tmp_path: Path) -> None:
+        """/proc names the resolved binary; a pid file may not."""
+        real = tmp_path / "real"
+        real.mkdir()
+        (real / "shmrdmad").write_text("")
+        (tmp_path / "link").symlink_to(real)
+        exe = tmp_path / "link" / "shmrdmad"
+        d = self._daemon(tmp_path, f"{os.getpid()} abc {exe}\n")
+        with self._proc(os.geteuid(), str(real / "shmrdmad")):
+            assert d.pid() == os.getpid()
+
     def test_symlinked_pid_file_ignored(self, tmp_path: Path) -> None:
         target = tmp_path / "target"
         target.write_text(f"{os.getpid()} abc x\n")
@@ -529,6 +554,69 @@ def test_start_timeout_kills(tmp_vmdir: Path) -> None:  # noqa: F811
             shmrdma.ensure_daemon()
     proc.kill.assert_called_once()
     assert not d.pid_path.exists()
+
+
+def test_pid_file_names_the_resolved_binary(
+    tmp_vmdir: Path,  # noqa: F811
+) -> None:
+    real = tmp_vmdir / "real"
+    real.mkdir()
+    (real / "shmrdmad").write_text("")
+    (tmp_vmdir / "cache").symlink_to(real)
+    d = shmrdma.Daemon("tester", os.geteuid(), tmp_vmdir)
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.pid = 4242
+    recorded = []
+
+    def popen(*a, **k):
+        return proc
+
+    def sleep(_s: float) -> None:
+        recorded.append(d.pid_path.read_text())
+        raise RuntimeError("stop here")
+
+    with (
+        patch("ltvm_pkg.shmrdma.daemon", return_value=d),
+        patch(
+            "ltvm_pkg.shmrdma.build_daemon",
+            return_value=(tmp_vmdir / "cache" / "shmrdmad", "h"),
+        ),
+        patch("ltvm_pkg.qemu_run._guest_scope", return_value=[]),
+        patch("ltvm_pkg.shmrdma.subprocess.Popen", side_effect=popen),
+        patch("ltvm_pkg.shmrdma.time.sleep", side_effect=sleep),
+        pytest.raises(RuntimeError, match="stop here"),
+    ):
+        shmrdma.ensure_daemon()
+    assert recorded == [f"4242 h {(real / 'shmrdmad').resolve()}\n"]
+
+
+def test_stop_holds_the_daemon_lock(tmp_vmdir: Path) -> None:  # noqa: F811
+    """A `vm shmrdmad start` waits until stop has removed the files."""
+    import fcntl
+
+    d = shmrdma.Daemon("tester", os.geteuid(), tmp_vmdir)
+    held = []
+
+    def kill(pid: int, sig: int) -> None:
+        fd = os.open(d.lock_path, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held.append(False)
+        except BlockingIOError:
+            held.append(True)
+        finally:
+            os.close(fd)
+
+    with (
+        patch("ltvm_pkg.qemu_run._launch_lock"),
+        patch("ltvm_pkg.shmrdma.daemon", return_value=d),
+        patch.object(shmrdma.Daemon, "pid", side_effect=[4242, 4242, 0]),
+        patch("ltvm_pkg.shmrdma.attached_vms", return_value=[]),
+        patch("ltvm_pkg.shmrdma.os.kill", side_effect=kill),
+    ):
+        assert shmrdma.stop_daemon() == "stopped shmrdmad (pid 4242)"
+    assert held == [True]
 
 
 @pytest.mark.parametrize(
@@ -826,7 +914,10 @@ class TestRequirements:
             "object": f"{shmrdma.SHARED_RAM_BACKEND}\n",
         }
         with (
-            patch("ltvm_pkg.shmrdma_req._qemu_help", side_effect=helps.get),
+            patch(
+                "ltvm_pkg.shmrdma_req._qemu_help",
+                side_effect=lambda what, qemu=None: helps[what],
+            ),
             patch(
                 "ltvm_pkg.shmrdma_req._qemu_has_vhost_user_netdev",
                 return_value=True,
@@ -905,6 +996,86 @@ class TestRequirements:
         ):
             _run_launch(vm, _LaunchHarness())
 
+    def test_launch_refuses_before_taps(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        """On a classic host a refusal leaves no TAP behind."""
+        vm = _make_vm(tmp_vmdir, arch="aarch64")
+        vm.shmrdma = "auto"
+        vm.save()
+        h = _LaunchHarness()
+        with (
+            patch(
+                "ltvm_pkg.qemu_run.rootless.readiness",
+                return_value=MagicMock(ok=False),
+            ),
+            patch(
+                "ltvm_pkg.shmrdma_req.refusal", return_value="needs gcc"
+            ) as refusal,
+            pytest.raises(SystemExit),
+        ):
+            _run_launch(vm, h)
+        assert not any("tuntap" in c for c in h.run_calls)
+        # the QEMU checked is the one this VM's arch runs on
+        assert refusal.call_args.kwargs["arch"] == "aarch64"
+
+    def test_checks_probe_the_guest_arch_qemu(self) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        probed = []
+
+        def qemu_help(what: str, qemu: str | None = None) -> str:
+            probed.append(qemu)
+            return ""
+
+        with (
+            patch("ltvm_pkg.shmrdma_req._qemu_help", side_effect=qemu_help),
+            patch(
+                "ltvm_pkg.shmrdma_req._qemu_has_vhost_user_netdev",
+                side_effect=lambda qemu=None: probed.append(qemu) or False,
+            ),
+            patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=False),
+            patch("ltvm_pkg.host_setup.is_macos", return_value=False),
+            patch(
+                "ltvm_pkg.vm_state.qemu_binary_for_arch",
+                side_effect=lambda a: f"/q/qemu-system-{a}",
+            ),
+        ):
+            reqs = {r.name: r for r in sr.host_checks("riscv64")}
+        assert set(probed) == {"/q/qemu-system-riscv64"}
+        assert reqs["QEMU vhost-user-fs-pci"].detail == "/q/qemu-system-riscv64"
+
+    def test_cross_arch_on_macos_has_no_fix(self) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        other = "x86_64" if sr._native_arch() != "x86_64" else "aarch64"
+        with (
+            patch("ltvm_pkg.host_setup.is_macos", return_value=True),
+            patch("ltvm_pkg.shmrdma_req._qemu_help", return_value=""),
+            patch(
+                "ltvm_pkg.shmrdma_req._qemu_has_vhost_user_netdev",
+                return_value=False,
+            ),
+        ):
+            reqs = {r.name: r for r in sr.host_checks(other)}
+        fs = reqs["QEMU vhost-user-fs-pci"]
+        assert fs.fix is None and "native guests only" in fs.how
+
+    def test_hand_given_sockets_need_no_build(self) -> None:
+        """A daemon run by hand needs no compiler or run dir here."""
+        from ltvm_pkg import shmrdma_req as sr
+
+        own = NicSpec.parse("shmnet")
+        hand = NicSpec.parse("shmnet:socket=/run/x.sock")
+        assert sr.OWN_DAEMON in sr.features_of("auto", [], -1)
+        assert sr.OWN_DAEMON in sr.features_of("", [own], -1)
+        assert sr.OWN_DAEMON not in sr.features_of("/run/r.sock", [hand], -1)
+        reqs = [
+            self._req("C compiler for shmrdmad", {sr.OWN_DAEMON}, False),
+            self._req("QEMU vhost-user netdev", {sr.SHMNET}, True),
+        ]
+        with patch("ltvm_pkg.shmrdma_req.host_checks", return_value=reqs):
+            assert sr.refusal(sr.features_of("", [hand], -1)) is None
+            assert sr.refusal(sr.features_of("", [own], -1)) is not None
+
 
 def test_install_wants_numactl() -> None:
     import inspect
@@ -929,3 +1100,45 @@ def test_cluster_create_refuses_a_swallowed_spec(capsys) -> None:
     create.assert_not_called()
     out = capsys.readouterr()
     assert "put --shmrdma after" in out.out + out.err
+
+
+@pytest.mark.parametrize(
+    "flags, refused",
+    [
+        (["--shmrdma"], "refusal"),
+        (["--host-node", "0"], "host_node_problem"),
+        (["--shmrdma", "--numa-nodes", "16"], "shmrdmad maps at most"),
+    ],
+)
+def test_cluster_create_refuses_before_any_node(
+    tmp_path: Path, capsys, flags: list[str], refused: str
+) -> None:
+    """What every node would refuse alike is refused once, up front."""
+    from ltvm_pkg import vm_cluster
+    from tests.test_cluster_cli import _ns
+
+    ns = _ns("create", "co2", "mgs+mds+oss:co2-srv:3", *flags)
+    with (
+        patch("ltvm_pkg.rootless.ready", return_value=True),
+        patch.object(vm_cluster, "SOCKETS", tmp_path),
+        patch(
+            "ltvm_pkg.vm_cluster.host_node_problem",
+            side_effect=lambda n: "host_node_problem" if n >= 0 else None,
+        ),
+        patch(
+            "ltvm_pkg.shmrdma_req.refusal",
+            side_effect=lambda f, **k: (
+                "refusal"
+                if "--shmrdma" in flags and "--numa-nodes" not in flags
+                else None
+            ),
+        ),
+        patch.object(vm_cluster, "_create_one_node") as create,
+        patch.object(vm_cluster, "_require_cluster_memory") as memory,
+    ):
+        rc = ns.func(ns)
+    assert rc != 0
+    create.assert_not_called()
+    memory.assert_not_called()
+    out = capsys.readouterr()
+    assert refused in out.out + out.err

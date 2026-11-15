@@ -23,6 +23,9 @@ SHMRDMA = "shmrdma"  # --shmrdma
 SHMNET = "shmnet"  # --nic shmnet
 HOST_NODE = "host-node"  # --host-node
 SMC = "smc"  # SMC sockets over the device (not a flag; never refuses)
+# ltvm's own shmrdmad, which it builds and runs: --shmrdma or a shmnet
+# NIC without a socket given by hand.  Not a flag of its own.
+OWN_DAEMON = "shmrdmad"
 
 # Host packages the features need, by the command that proves them.
 # `ltvm install` installs these with its other prerequisites.
@@ -59,6 +62,7 @@ class Target:
     lustre_tree: str | None = None
     image: Path | None = None
     kernel_dir: Path | None = None
+    arch: str | None = None
     problem: str = ""
     extra: dict[str, str] = field(default_factory=dict)
 
@@ -73,11 +77,10 @@ def resolve_target(
     *arch*, or the host's, as ``create`` picks it."""
     from .cli.util import host_arch
 
-    t = Target(name, kernel, lustre_tree)
+    arch = arch or host_arch()
+    t = Target(name, kernel, lustre_tree, arch=arch)
     try:
-        arts = vm_state.resolve_os_artifacts(
-            name, arch=arch or host_arch(), kernel=kernel
-        )
+        arts = vm_state.resolve_os_artifacts(name, arch=arch, kernel=kernel)
     except (RuntimeError, FileNotFoundError, ValueError, SystemExit) as e:
         t.problem = str(e) or f"no artifacts for {name}"
         return t
@@ -86,17 +89,20 @@ def resolve_target(
     return t
 
 
-def _host_qemu() -> str:
-    """The QEMU this host's native guests run on (aarch64 on a Mac)."""
+def _native_arch() -> str:
     import platform
 
     arch = platform.machine()
-    arch = {"arm64": "aarch64", "amd64": "x86_64"}.get(arch, arch)
-    return vm_state.qemu_binary_for_arch(arch)
+    return {"arm64": "aarch64", "amd64": "x86_64"}.get(arch, arch)
 
 
-def _qemu_help(what: str) -> str:
-    qemu = _host_qemu()
+def _qemu(arch: str | None = None) -> str:
+    """The QEMU a guest of *arch* runs on (the host's arch if None)."""
+    return vm_state.qemu_binary_for_arch(arch or _native_arch())
+
+
+def _qemu_help(what: str, qemu: str | None = None) -> str:
+    qemu = qemu or _qemu()
     try:
         r = subprocess.run(
             # aarch64 QEMU has no default machine and answers
@@ -112,16 +118,17 @@ def _qemu_help(what: str) -> str:
     return r.stdout
 
 
-def _qemu_has_vhost_user_netdev() -> bool:
+def _qemu_has_vhost_user_netdev(qemu: str | None = None) -> bool:
     """Whether QEMU was built with vhost-user.  ``-netdev help`` lists
     vhost-user even in a build without it (Homebrew's, on macOS), so
     ask for one: a build with it complains about the chardev instead."""
-    if "vhost-user" not in _qemu_help("netdev"):
+    qemu = qemu or _qemu()
+    if "vhost-user" not in _qemu_help("netdev", qemu):
         return False
     try:
         r = subprocess.run(
             [
-                _host_qemu(),
+                qemu,
                 "-M",
                 "none",
                 "-display",
@@ -176,29 +183,36 @@ def _kernel_has_smc(kernel_dir: Path) -> bool | None:
     return "\nCONFIG_SMC=m" in text or "\nCONFIG_SMC=y" in text
 
 
-def host_checks() -> list[Req]:
-    """What the host itself needs."""
+def host_checks(arch: str | None = None) -> list[Req]:
+    """What the host itself needs, for guests of *arch* (the host's if
+    None): each arch has its own QEMU."""
     reqs = []
     cc = os.environ.get("CC") or shutil.which("cc") or shutil.which("gcc")
     reqs.append(
         Req(
             "C compiler for shmrdmad",
-            frozenset({SHMRDMA, SHMNET}),
+            frozenset({OWN_DAEMON}),
             bool(cc),
             cc or "no cc or gcc on PATH",
             fix=lambda: install_packages("gcc"),
             how="install gcc",
         )
     )
-    devices = _qemu_help("device")
-    objects = _qemu_help("object")
-    qemu = _host_qemu()
+    qemu = _qemu(arch)
+    devices = _qemu_help("device", qemu)
+    objects = _qemu_help("object", qemu)
     backend = shmrdma.SHARED_RAM_BACKEND
     reinstall = "reinstall ltvm's QEMU: `sudo ltvm setup --qemu --force`"
     qemu_fix: Callable[[], None] | None = None
     from .host_setup import is_macos
 
-    if is_macos():
+    if is_macos() and (arch or _native_arch()) != _native_arch():
+        reinstall = (
+            f"ltvm's QEMU for macOS runs native guests only; Homebrew's "
+            f"qemu-system-{arch} has no vhost-user: use a "
+            f"{_native_arch()} target"
+        )
+    elif is_macos():
         # Homebrew's QEMU has no vhost-user; ltvm publishes one that does
         from .host_setup import install_qemu_macos_vhost
 
@@ -228,7 +242,7 @@ def host_checks() -> list[Req]:
         Req(
             "QEMU vhost-user netdev",
             frozenset({SHMNET}),
-            _qemu_has_vhost_user_netdev(),
+            _qemu_has_vhost_user_netdev(qemu),
             qemu,
             fix=qemu_fix,
             how=reinstall,
@@ -285,7 +299,7 @@ def host_checks() -> list[Req]:
         reqs.append(
             Req(
                 "shmrdmad CPU nodes",
-                frozenset({SHMRDMA, SHMNET}),
+                frozenset({OWN_DAEMON}),
                 not bad,
                 f"nodes {nodes}"
                 + (f"; {bad} have no CPUs here" if bad else ""),
@@ -339,7 +353,7 @@ def _run_dir_check() -> Req:
 
     return Req(
         "shmrdmad runtime directory",
-        frozenset({SHMRDMA, SHMNET}),
+        frozenset({OWN_DAEMON}),
         ok,
         detail,
         fix=fix,
@@ -443,20 +457,28 @@ def features_of(shmrdma_flag: str, nics: list, host_node: int) -> set[str]:
         feats |= {SHMRDMA, SMC}
     if any(n.type == "shmnet" for n in nics):
         feats.add(SHMNET)
+    if shmrdma_flag == "auto" or any(
+        n.type == "shmnet" and not n.socket for n in nics
+    ):
+        feats.add(OWN_DAEMON)
     if host_node >= 0:
         feats.add(HOST_NODE)
     return feats
 
 
-def refusal(feats: set[str], t: Target | None = None) -> str | None:
+def refusal(
+    feats: set[str], t: Target | None = None, arch: str | None = None
+) -> str | None:
     """One message naming what *feats* lack here, or None if nothing.
 
     Only hard requirements of a requested feature refuse; *t* adds the
-    image and kernel checks.  Never builds anything.
+    image and kernel checks.  *arch* (else *t*'s, else the host's) picks
+    the QEMU checked.  Never builds anything.
     """
     if not feats:
         return None
-    reqs = host_checks() + (target_checks(t) if t is not None else [])
+    arch = arch or (t.arch if t is not None else None)
+    reqs = host_checks(arch) + (target_checks(t) if t is not None else [])
     missing = [r for r in reqs if r.hard and not r.ok and r.needed_by(feats)]
     if not missing:
         return None
@@ -491,7 +513,7 @@ def doctor(t: Target, fix: bool) -> tuple[int, int]:
     """
     issues = failures = 0
     print(f"shmrdma, shmnet, --host-node and SMC ({t.name}):")
-    for r in host_checks() + target_checks(t):
+    for r in host_checks(t.arch) + target_checks(t):
         feats = ", ".join(sorted(r.features))
         if r.ok:
             print(f"  ok       {r.name} ({feats}): {r.detail}")
