@@ -290,7 +290,8 @@ class TestReplaceable:
         d.mkdir()
         d.chmod(0o777)
         why = shmrdma.replaceable(str(d / "s.sock"), {0, os.geteuid()})
-        assert why == f"{d} is writable by other users"
+        # paths are reported resolved; /tmp is a symlink on macOS
+        assert why == f"{d.resolve()} is writable by other users"
         d.chmod(0o1777)
         assert shmrdma.replaceable(str(d / "s.sock"), {0, os.geteuid()}) is None
 
