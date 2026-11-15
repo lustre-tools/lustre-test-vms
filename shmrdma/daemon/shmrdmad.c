@@ -186,6 +186,7 @@ struct vq {
 	bool event_idx;		/* VIRTIO_RING_F_EVENT_IDX negotiated */
 	bool signalled_valid;
 	uint16_t signalled_used;
+	bool broken;		/* guest index past the ring; stopped until reset */
 };
 
 struct ring {
@@ -287,6 +288,7 @@ struct vdev {
 	struct qp *qps[SHMRDMA_MAX_QP];
 	struct cq *cqs[SHMRDMA_MAX_CQ];
 	struct mr **mrs;		/* SHMRDMA_MAX_MR pointers */
+	uint32_t ring_pages;		/* in every ring of the device */
 	/* Workers register, invalidate and translate MRs concurrently;
 	 * freeing one needs wlock. */
 	plat_spinlock_t mr_lock;
@@ -472,11 +474,19 @@ static void dev_send_irq(struct vdev *d)
 {
 	struct vq *q = &d->vq[SHMRDMA_VQ_EVENT];
 
-	if (!vq_ready(q)) {
+	uint16_t ai;
+
+	if (!vq_ready(q) || q->broken) {
 		d->irq_pending = true;
 		return;
 	}
-	if (q->last_avail == ACQ(&q->avail->idx)) {
+	ai = ACQ(&q->avail->idx);
+	if ((uint16_t)(ai - q->last_avail) > q->num) {
+		LOG("dev%d: event vq avail %u is past %u", d->id, ai,
+		    q->last_avail);
+		q->broken = true;
+	}
+	if (q->broken || q->last_avail == ai) {
 		d->irq_pending = true;
 		return;
 	}
@@ -602,7 +612,7 @@ static struct mr *dev_mr(struct vdev *d, uint32_t key)
 
 /*
  * The next contiguous host chunk, at most max bytes.  Returns length,
- * 0 at the end, or -1 on error (it->err set).
+ * or -1 on error (it->err set), running out of SGEs included.
  */
 static int64_t sg_next(struct sg_iter *it, uint64_t max, uint8_t **out)
 {
@@ -610,8 +620,10 @@ static int64_t sg_next(struct sg_iter *it, uint64_t max, uint8_t **out)
 		it->idx++;
 		it->off = 0;
 	}
-	if (it->idx >= it->nsge)
-		return 0;
+	if (it->idx >= it->nsge) {
+		it->err = it->remote ? WC_REM_ACCESS_ERR : WC_LOC_LEN_ERR;
+		return -1;
+	}
 
 	const struct shmrdma_sge *s = &it->sge[it->idx];
 	uint64_t left = s->length - it->off;
@@ -702,12 +714,12 @@ static int sg_copy_nt(struct sg_iter *dst, struct sg_iter *src, uint64_t len,
 	while (len) {
 		if (!sl) {
 			sl = sg_next(src, len, &sp);
-			if (sl <= 0)
+			if (sl < 0)
 				return -1;
 		}
 		if (!dl) {
 			dl = sg_next(dst, len, &dp);
-			if (dl <= 0)
+			if (dl < 0)
 				return -1;
 		}
 		uint64_t n = sl < dl ? sl : dl;
@@ -741,7 +753,7 @@ static int sg_copy_in(struct sg_iter *dst, const uint8_t *src, uint64_t len)
 		uint8_t *dp;
 		int64_t dl = sg_next(dst, len, &dp);
 
-		if (dl <= 0)
+		if (dl < 0)
 			return -1;
 		memcpy(dp, src, dl);
 		src += dl;
@@ -1302,6 +1314,13 @@ static int exec_reg_mr(struct qp *qp, struct shmrdma_sq_wqe *w)
 	return WC_SUCCESS;
 }
 
+static bool msg_too_long(const struct shmrdma_sq_wqe *w,
+			 const struct shmrdma_sge *sge)
+{
+	return !(w->flags & SHMRDMA_WQE_INLINE) &&
+	       sg_total(sge, w->num_sge) > SHMRDMA_MAX_MSG;
+}
+
 static int exec_wqe(struct qp *qp, struct shmrdma_sq_wqe *w,
 		    const struct shmrdma_sge *sge, uint32_t *opc)
 {
@@ -1313,6 +1332,8 @@ static int exec_wqe(struct qp *qp, struct shmrdma_sq_wqe *w,
 	case SHMRDMA_OP_SEND_IMM:
 	case SHMRDMA_OP_SEND_INV:
 		*opc = SHMRDMA_WC_SEND;
+		if (msg_too_long(w, sge))
+			return WC_LOC_LEN_ERR;
 		if (qp->type != SHMRDMA_QPT_RC)
 			return exec_ud_send(qp, w, sge);
 		peer = qp_peer(qp);
@@ -1331,6 +1352,8 @@ static int exec_wqe(struct qp *qp, struct shmrdma_sq_wqe *w,
 		*opc = SHMRDMA_WC_RDMA_WRITE;
 		if (qp->type != SHMRDMA_QPT_RC)
 			return WC_LOC_QP_OP_ERR;
+		if (msg_too_long(w, sge))
+			return WC_LOC_LEN_ERR;
 		peer = qp_peer(qp);
 		if (!peer_ok(qp, peer))
 			return WC_RETRY_EXC_ERR;
@@ -1375,6 +1398,8 @@ static int exec_wqe(struct qp *qp, struct shmrdma_sq_wqe *w,
 		*opc = SHMRDMA_WC_RDMA_READ;
 		if (qp->type != SHMRDMA_QPT_RC)
 			return WC_LOC_QP_OP_ERR;
+		if (msg_too_long(w, sge))
+			return WC_LOC_LEN_ERR;
 		peer = qp_peer(qp);
 		if (!peer_ok(qp, peer))
 			return WC_RETRY_EXC_ERR;
@@ -1627,18 +1652,24 @@ static void worker_del_qp(struct qp *qp)
 /* ---------------------------------------------------------------- */
 /* control commands                                                 */
 
+/* 4 GB of rings per device: the daemon holds a pointer per page */
+#define DEV_RING_PAGES	(1u << 20)
+
 static int ring_setup(struct vdev *d, struct ring *r,
-		      const struct shmrdma_ring_desc *rd)
+		      const struct shmrdma_ring_desc *rd, uint32_t max_entries)
 {
 	if (!rd->entries || (rd->entries & (rd->entries - 1)) ||
+	    rd->entries > max_entries ||
 	    !rd->entry_size || (rd->entry_size & (rd->entry_size - 1)) ||
 	    rd->entry_size > 4096 ||
-	    (uint64_t)rd->entries * rd->entry_size > (uint64_t)rd->npages * 4096)
+	    rd->npages != ((uint64_t)rd->entries * rd->entry_size + 4095) / 4096)
 		return -EINVAL;
 	uint64_t *pl = gpa_range(d, rd->pages_gpa, rd->npages * 8ull);
 
 	if (!pl)
 		return -EFAULT;
+	if (rd->npages > DEV_RING_PAGES - d->ring_pages)
+		return -ENOMEM;
 	r->pages = calloc(rd->npages, sizeof(*r->pages));
 	if (!r->pages)
 		return -ENOMEM;
@@ -1653,13 +1684,23 @@ static int ring_setup(struct vdev *d, struct ring *r,
 	r->entries = rd->entries;
 	r->esz = rd->entry_size;
 	r->npages = rd->npages;
+	d->ring_pages += r->npages;
 	return 0;
+}
+
+static void ring_free(struct vdev *d, struct ring *r)
+{
+	if (!r->pages)
+		return;
+	d->ring_pages -= r->npages;
+	free(r->pages);
+	r->pages = NULL;
 }
 
 static void qp_free(struct qp *qp)
 {
-	free(qp->sq.pages);
-	free(qp->rq.pages);
+	ring_free(qp->dev, &qp->sq);
+	ring_free(qp->dev, &qp->rq);
 	plat_spin_destroy(&qp->rq_lock);
 	free(qp);
 }
@@ -1682,7 +1723,7 @@ static void dev_reset_state(struct vdev *d)
 
 		if (!cq)
 			continue;
-		free(cq->ring.pages);
+		ring_free(d, &cq->ring);
 		plat_spin_destroy(&cq->lock);
 		free(cq);
 		d->cqs[i] = NULL;
@@ -1715,6 +1756,9 @@ static void gid_str(const uint8_t *g, char *buf, size_t n)
 			 g[0], g[1], g[2], g[3], g[12], g[13], g[14], g[15]);
 }
 
+/* records hold atomics, which fault on aarch64 unless aligned */
+#define REC_OK(gpa)	(!((gpa) & 7))
+
 static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		  struct shmrdma_resp *r)
 {
@@ -1729,7 +1773,8 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 
 		if (!n || (n & (n - 1)))
 			return -EINVAL;
-		void *sh = gpa_range(d, c->init.shared_gpa, sizeof(*d->shared));
+		void *sh = REC_OK(c->init.shared_gpa) ?
+			   gpa_range(d, c->init.shared_gpa, sizeof(*d->shared)) : NULL;
 		void *eq = gpa_range(d, c->init.eq_gpa, n * sizeof(struct shmrdma_eqe));
 
 		if (!sh || !eq)
@@ -1779,18 +1824,19 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 			return -ENOMEM;
 		cq->dev = d;
 		cq->cqn = cqn;
-		cq->rec = gpa_range(d, c->create_cq.rec_gpa, sizeof(*cq->rec));
+		cq->rec = REC_OK(c->create_cq.rec_gpa) ?
+			  gpa_range(d, c->create_cq.rec_gpa, sizeof(*cq->rec)) : NULL;
 		if (!cq->rec) {
 			free(cq);
 			return -EFAULT;
 		}
-		rc = ring_setup(d, &cq->ring, &c->create_cq.ring);
+		rc = ring_setup(d, &cq->ring, &c->create_cq.ring, SHMRDMA_MAX_CQE);
 		if (rc) {
 			free(cq);
 			return rc;
 		}
-		if (cq->ring.esz < sizeof(struct shmrdma_cqe)) {
-			free(cq->ring.pages);
+		if (cq->ring.esz != sizeof(struct shmrdma_cqe)) {
+			ring_free(d, &cq->ring);
 			free(cq);
 			return -EINVAL;
 		}
@@ -1817,7 +1863,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 			}
 		d->cqs[cqn] = NULL;
 		wunlock();
-		free(cq->ring.pages);
+		ring_free(d, &cq->ring);
 		plat_spin_destroy(&cq->lock);
 		free(cq);
 		return 0;
@@ -1841,18 +1887,20 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		qp->state = QPS_RESET;
 		qp->scq = d->cqs[sc];
 		qp->rcq = d->cqs[rcn];
-		qp->rec = gpa_range(d, c->create_qp.rec_gpa, sizeof(*qp->rec));
+		qp->rec = REC_OK(c->create_qp.rec_gpa) ?
+			  gpa_range(d, c->create_qp.rec_gpa, sizeof(*qp->rec)) : NULL;
 		if (!qp->rec) {
 			free(qp);
 			return -EFAULT;
 		}
-		rc = ring_setup(d, &qp->sq, &c->create_qp.sq);
+		rc = ring_setup(d, &qp->sq, &c->create_qp.sq, SHMRDMA_MAX_QP_WR);
 		if (!rc)
-			rc = ring_setup(d, &qp->rq, &c->create_qp.rq);
+			rc = ring_setup(d, &qp->rq, &c->create_qp.rq,
+					SHMRDMA_MAX_QP_WR);
 		if (rc || qp->sq.esz < SHMRDMA_WQE_HDR ||
 		    qp->rq.esz < sizeof(struct shmrdma_rq_wqe)) {
-			free(qp->sq.pages);
-			free(qp->rq.pages);
+			ring_free(d, &qp->sq);
+			ring_free(d, &qp->rq);
 			free(qp);
 			return rc ? rc : -EINVAL;
 		}
@@ -1950,10 +1998,18 @@ static void ctrl_process(struct vdev *d)
 {
 	struct vq *q = &d->vq[SHMRDMA_VQ_CTRL];
 	bool any = false;
+	uint16_t ai;
 
-	if (!vq_ready(q))
+	if (!vq_ready(q) || q->broken)
 		return;
-	while (q->last_avail != ACQ(&q->avail->idx)) {
+	ai = ACQ(&q->avail->idx);
+	if ((uint16_t)(ai - q->last_avail) > q->num) {
+		LOG("dev%d: ctrl vq avail %u is past %u", d->id, ai,
+		    q->last_avail);
+		q->broken = true;
+		return;
+	}
+	while (q->last_avail != ai) {
 		uint16_t head = q->avail->ring[q->last_avail % q->num];
 		struct shmrdma_cmd cmd;
 		struct shmrdma_resp resp = {0};
@@ -2148,9 +2204,12 @@ static int set_mem_table(struct vdev *d, struct vu_memtab *mt, int *fds, int nfd
 
 static int vq_map(struct vdev *d, struct vq *q)
 {
-	q->desc = uaddr_hva(d, q->desc_ua, 16ull * q->num);
-	q->avail = uaddr_hva(d, q->avail_ua, 6 + 2ull * q->num);
-	q->used = uaddr_hva(d, q->used_ua, 6 + 8ull * q->num);
+	bool aligned = !(q->desc_ua & 15) && !(q->avail_ua & 1) &&
+		       !(q->used_ua & 3);
+
+	q->desc = aligned ? uaddr_hva(d, q->desc_ua, 16ull * q->num) : NULL;
+	q->avail = aligned ? uaddr_hva(d, q->avail_ua, 6 + 2ull * q->num) : NULL;
+	q->used = aligned ? uaddr_hva(d, q->used_ua, 6 + 8ull * q->num) : NULL;
 	return (q->desc && q->avail && q->used) ? 0 : -1;
 }
 
@@ -2256,13 +2315,22 @@ static int handle_msg(struct vdev *d)
 			ack = 1;
 		nfds = 0;
 		break;
-	case VU_SET_VRING_NUM:
-		if (pl->state.index >= MAX_VQS) {
+	case VU_SET_VRING_NUM: {
+		struct vq *q;
+
+		if (pl->state.index >= MAX_VQS || !pl->state.num ||
+		    pl->state.num > 32768) {
 			ack = 1;
 			break;
 		}
-		d->vq[pl->state.index].num = pl->state.num;
+		q = &d->vq[pl->state.index];
+		wlock();
+		q->num = pl->state.num;
+		if (q->desc_ua && vq_map(d, q))
+			ack = 1;
+		wunlock();
 		break;
+	}
 	case VU_SET_VRING_ADDR: {
 		struct vq *q;
 
@@ -2289,6 +2357,7 @@ static int handle_msg(struct vdev *d)
 		d->vq[pl->state.index].last_avail = pl->state.num;
 		d->vq[pl->state.index].used_idx = pl->state.num;
 		d->vq[pl->state.index].signalled_valid = false;
+		d->vq[pl->state.index].broken = false;
 		break;
 	case VU_GET_VRING_BASE: {
 		struct vu_state st = pl->state;

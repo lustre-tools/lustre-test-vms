@@ -229,8 +229,9 @@ static int ring_alloc(struct shmrdma_ring *r, u32 entries, u32 esz)
 
 	r->entries = entries;
 	r->esz = esz;
-	/* the ABI's 4 KB ring pages, several per page on 16K/64K kernels */
-	r->npages = bytes >> SHMRDMA_RING_PAGE_SHIFT;
+	/* the ABI's 4 KB ring pages the entries span, several per page on
+	 * 16K/64K kernels */
+	r->npages = DIV_ROUND_UP((size_t)entries * esz, SHMRDMA_RING_PAGE_SIZE);
 	r->buf = vzalloc(bytes);
 	if (!r->buf)
 		return -ENOMEM;
@@ -467,7 +468,7 @@ static int shmrdma_create_cq(struct ib_cq *ibcq,
 	u32 entries;
 	int rc;
 
-	if (attr->flags || attr->cqe < 1 || attr->cqe > SHMRDMA_MAX_CQE)
+	if (attr->flags || attr->cqe < 1 || attr->cqe >= SHMRDMA_MAX_CQE)
 		return -EINVAL;
 	entries = roundup_pow_of_two(attr->cqe + 1);
 	rc = ida_alloc_range(&dev->cqn_ida, 0, SHMRDMA_MAX_CQ - 1,

@@ -36,6 +36,8 @@
 #define VNET_HDR_GSO_TCPV6	4
 #define VNET_HDR_GSO_ECN	0x80
 #define VRING_USED_F_NO_NOTIFY	1
+/* the largest frame a guest may send: a 64 KB GSO frame and its headers */
+#define NET_MAX_FRAME		(65536 + 14 + 4)
 
 /* queue pair qi is RX vq 2qi and TX vq 2qi + 1 */
 #define NET_RXQ(qi)	(2 * (qi))
@@ -804,17 +806,20 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 		struct seg segs[MAX_SEGS];
 		uint64_t total;
 		int n = vq_chain(d, q, head, false, segs, MAX_SEGS, &total);
-		struct vnet_hdr h;
+		/* without VERSION_1 or MRG_RXBUF the header has no num_buffers */
+		uint32_t hlen = d->features & (F_VERSION_1 | VNET_F_MRG_RXBUF) ?
+				sizeof(struct vnet_hdr) : 10;
+		struct vnet_hdr h = { 0 };
 		uint8_t eth[12];
 
 		t_net_backlog = (uint16_t)(ai - q->last_avail) > 1;
 
-		if (n > 0 && total >= sizeof(h) + 14) {
+		if (n > 0 && total >= hlen + 14 && total <= hlen + NET_MAX_FRAME) {
 			struct cursor c = { .s = segs, .n = n };
 			struct cursor frame;
-			uint64_t flen = total - sizeof(h);
+			uint64_t flen = total - hlen;
 
-			cur_read(&c, &h, sizeof(h));
+			cur_read(&c, &h, hlen);
 			frame = c;
 			cur_read(&c, eth, 12);
 			if (!p->mac_known || memcmp(p->mac, eth + 6, 6)) {

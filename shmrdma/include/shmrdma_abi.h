@@ -65,9 +65,11 @@ enum {
 #define SHMRDMA_MAX_MSG		0x80000000u	/* port max_msg_sz */
 
 /*
- * A ring: entries of entry_size bytes in pages listed at pages_gpa.
- * Ring pages are 4 KB whatever the guest's page size: a 16 KB or 64 KB
- * page kernel lists each 4 KB piece of its pages.
+ * A ring: entries of entry_size bytes in pages listed at pages_gpa,
+ * exactly the pages the entries span.  Ring pages are 4 KB whatever the
+ * guest's page size: a 16 KB or 64 KB page kernel lists each 4 KB piece
+ * of its pages.  At most SHMRDMA_MAX_CQE entries in a CQ and
+ * SHMRDMA_MAX_QP_WR in a work queue.
  */
 #define SHMRDMA_RING_PAGE_SHIFT	12
 #define SHMRDMA_RING_PAGE_SIZE	(1u << SHMRDMA_RING_PAGE_SHIFT)
@@ -102,7 +104,7 @@ enum {
 	SHMRDMA_EQE_QP_FATAL = 1,	/* cqn holds the qpn */
 };
 
-/* Per-QP doorbell record, 128 bytes, 64-aligned. */
+/* Per-QP doorbell record, 128 bytes; records are at least 8-aligned. */
 struct shmrdma_qp_rec {
 	/* written by the guest */
 	__u32 sq_prod;
