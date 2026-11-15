@@ -147,6 +147,23 @@ def test_install_qemu_macos_always_adds_ours() -> None:
     ours.assert_called_once_with(force=False)
 
 
+def test_install_goes_on_without_ours() -> None:
+    """A failed download of ltvm's QEMU warns; install and update go on."""
+    with (
+        patch.object(hs, "_qemu_installed_version", return_value="10.2.2"),
+        patch.object(
+            hs,
+            "install_qemu_macos_vhost",
+            side_effect=RuntimeError("Failed to download"),
+        ),
+        patch.object(hs, "log") as log,
+    ):
+        hs.install_qemu_macos()
+    msg = log.warning.call_args.args[0] % log.warning.call_args.args[1:]
+    assert "Failed to download" in msg
+    assert "doctor --fix --shmrdma" in msg
+
+
 def test_doctor_fix_on_macos() -> None:
     from ltvm_pkg import shmrdma_req as sr
 

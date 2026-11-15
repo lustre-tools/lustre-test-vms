@@ -434,11 +434,17 @@ QEMU passes it via `-kernel`.
 
 The shmrdma guest driver (`shmrdma/kmod/`) is built per kernel in the
 build container (`ltvm_pkg/shmrdma.py`, cached under
-`kernels/<k>/shmrdma/`) and copied into `/lib/modules/<kver>/extra/`
+`kernels/<k>/shmrdma/`, or `~/.cache/ltvm/shmrdma/` for a user who does
+not own the kernel, by ZFS's ownership rules) and copied into `/lib/modules/<kver>/extra/`
 in the final stage; its sources are an image hash input.  A kernel it
 does not build for gets an image without it (`shmrdma_kmod: false` in
-meta.json), which `create --shmrdma` refuses.  docs/SHMRDMA.md covers
-the daemon and the device.
+meta.json), which `create --shmrdma` refuses; so does an image that
+installs MOFED's kmods, which replace the ib_core the module is built
+against.  meta.json's `shmrdma_kmod_images` says which versioned image
+files have it, and a fetch carries the old entries over; a VM records
+its own file's answer as `SHMRDMA_KMOD` in its `.info` at create, which
+start and `vm set --shmrdma` check (an older VM adopts a yes from the
+meta).  docs/SHMRDMA.md covers the daemon and the device.
 
 ### Image files are never replaced
 

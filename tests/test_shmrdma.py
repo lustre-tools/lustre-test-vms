@@ -27,12 +27,16 @@ from tests.test_qemu_run import (  # noqa: F401
     tmp_vmdir,
 )
 
+# sun_path holds 104 bytes on macOS, 108 on Linux; the tests' sockets
+# go at most this far below tmp_path (shmrdma-<uid>/rdma.sock).
+_SOCKET_SUFFIX_MAX = 32
+
 
 @pytest.fixture
 def tmp_path(tmp_path: Path) -> Iterator[Path]:
-    """A short directory on macOS, which caps unix socket paths at 104
-    bytes: pytest's own there are already longer."""
-    if sys.platform != "darwin":
+    """A short directory when pytest's own would leave no room for a
+    unix socket path: on macOS always, on Linux in a deep workspace."""
+    if len(str(tmp_path)) + _SOCKET_SUFFIX_MAX < 104:
         yield tmp_path
         return
     d = Path(tempfile.mkdtemp(prefix="ltvm-", dir="/tmp"))
@@ -185,6 +189,47 @@ def test_launch_own_daemon(tmp_vmdir: Path, own_daemon) -> None:  # noqa: F811
     assert not shmrdma.vm_uses(back, other)
 
 
+def test_daemon_starts_outside_the_launch_lock(
+    tmp_vmdir: Path,  # noqa: F811
+    own_daemon,
+) -> None:
+    """A daemon build must not stall every other user's VM starts."""
+    from contextlib import contextmanager
+
+    d, ensure = own_daemon
+    held = []
+
+    @contextmanager
+    def lock():
+        held.append(True)
+        try:
+            yield
+        finally:
+            held.pop()
+
+    ensure.side_effect = lambda: (held and pytest.fail("lock held"), d)[1]
+    vm = _make_vm(tmp_vmdir)
+    vm.shmrdma = "auto"
+    vm.save()
+    with patch("ltvm_pkg.qemu_run._launch_lock", lock):
+        _run_launch(vm, _LaunchHarness())
+    ensure.assert_called_once()
+
+
+def test_sockets_gone_by_the_lock_refuse(
+    tmp_vmdir: Path,  # noqa: F811
+    own_daemon,
+) -> None:
+    """A daemon stopped between the start and the lock is refused."""
+    d, ensure = own_daemon
+    ensure.side_effect = lambda: (d.rdma_socket.unlink(), d)[1]
+    vm = _make_vm(tmp_vmdir)
+    vm.shmrdma = "auto"
+    vm.save()
+    with pytest.raises(SystemExit):
+        _run_launch(vm, _LaunchHarness())
+
+
 def test_launch_shmnet_only(
     tmp_vmdir: Path,  # noqa: F811
     daemon_socket: Path,
@@ -215,6 +260,7 @@ NEW_IMG = "base-20261101T000000-bbbbbb.ext4"
 
 
 def _image_dir(tmp_path: Path, meta: dict) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     for name in (OLD_IMG, NEW_IMG):
         (tmp_path / name).write_bytes(b"")
     (tmp_path / "current.ext4").symlink_to(NEW_IMG)
@@ -929,6 +975,7 @@ class TestRequirements:
         assert reqs["QEMU vhost-user-fs-pci"].ok
         assert reqs[f"QEMU {shmrdma.SHARED_RAM_BACKEND}"].ok
         assert reqs["QEMU vhost-user netdev"].ok
+        sr._caps_cache().unlink()  # another QEMU
         with (
             patch("ltvm_pkg.shmrdma_req._qemu_help", return_value=""),
             patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=True),
@@ -938,6 +985,93 @@ class TestRequirements:
         assert not reqs["QEMU vhost-user-fs-pci"].ok
         assert not reqs["QEMU vhost-user netdev"].ok
         assert reqs["NUMA memory binding"].ok
+
+    def test_qemu_probed_once_per_binary(self, tmp_path: Path) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        qemu = tmp_path / "qemu"
+        qemu.write_text("v1")
+        helps = {"device": '"vhost-user-fs-pci"', "object": ""}
+        with (
+            patch(
+                "ltvm_pkg.shmrdma_req._qemu_help",
+                side_effect=lambda what, q=None: helps[what],
+            ) as qh,
+            patch(
+                "ltvm_pkg.shmrdma_req._qemu_has_vhost_user_netdev",
+                return_value=True,
+            ),
+            patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=False),
+        ):
+            first = sr._qemu_caps(str(qemu))
+            assert first["vhost-user-fs-pci"]
+            assert qh.call_count == 2
+            assert sr._qemu_caps(str(qemu)) == first
+            assert qh.call_count == 2
+            # a reinstalled QEMU is probed again
+            qemu.write_text("v2, longer")
+            sr._qemu_caps(str(qemu))
+            assert qh.call_count == 4
+
+    def test_failed_probe_not_cached(self, tmp_path: Path) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        qemu = tmp_path / "qemu"
+        qemu.write_text("v1")
+        with (
+            patch("ltvm_pkg.shmrdma_req._qemu_help", return_value="") as qh,
+            patch(
+                "ltvm_pkg.shmrdma_req._qemu_has_vhost_user_netdev",
+                return_value=False,
+            ),
+            patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=False),
+        ):
+            sr._qemu_caps(str(qemu))
+            sr._qemu_caps(str(qemu))
+        assert qh.call_count == 4
+        assert not sr._caps_cache().exists()
+
+    def test_compiler_not_needed_once_built(self, tmp_path: Path) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        def cc_check() -> sr.Req:
+            with (
+                patch("ltvm_pkg.shmrdma_req.shutil.which", return_value=None),
+                patch.dict(os.environ, {"CC": ""}),
+                patch("ltvm_pkg.shmrdma_req._qemu_caps") as caps,
+            ):
+                caps.return_value.__getitem__.return_value = True
+                return {r.name: r for r in sr.host_checks()}[
+                    "C compiler for shmrdmad"
+                ]
+
+        d = shmrdma.Daemon("tester", os.geteuid(), tmp_path / "d")
+        with patch("ltvm_pkg.shmrdma.daemon", return_value=d):
+            assert not cc_check().ok
+            binary = (
+                shmrdma._cache_dir()
+                / shmrdma._source_hash(shmrdma._DAEMON_FILES)[:16]
+                / "shmrdmad"
+            )
+            binary.parent.mkdir(parents=True)
+            binary.write_text("")
+            r = cc_check()
+        assert r.ok and "none needed" in r.detail
+
+    def test_compiler_not_needed_while_running(self, tmp_path: Path) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        d = MagicMock()
+        d.pid.return_value = 4321
+        with (
+            patch("ltvm_pkg.shmrdma.daemon", return_value=d),
+            patch("ltvm_pkg.shmrdma_req.shutil.which", return_value=None),
+            patch.dict(os.environ, {"CC": ""}),
+            patch("ltvm_pkg.shmrdma_req._qemu_caps") as caps,
+        ):
+            caps.return_value.__getitem__.return_value = True
+            reqs = {r.name: r for r in sr.host_checks()}
+        assert reqs["C compiler for shmrdmad"].ok
 
     def test_vhost_user_netdev_probe(self) -> None:
         """Help lists vhost-user even where it is not built in."""
@@ -1142,3 +1276,216 @@ def test_cluster_create_refuses_before_any_node(
     memory.assert_not_called()
     out = capsys.readouterr()
     assert refused in out.out + out.err
+
+
+class TestImageLines:
+    def _lines(self, tmp_path: Path, **kw) -> tuple[list[str], MagicMock]:
+        from ltvm_pkg.image_build import _shmrdma_lines
+
+        ko = tmp_path / "built.ko"
+        ko.write_bytes(b"ko")
+        inject = tmp_path / "inject"
+        inject.mkdir()
+        with patch("ltvm_pkg.shmrdma.build_kmod", return_value=ko) as build:
+            args = {"cross": False, "mofed": False, **kw}
+            return (
+                _shmrdma_lines(MagicMock(), "k", "5.14.0", inject, **args),
+                build,
+            )
+
+    def test_baked_in(self, tmp_path: Path) -> None:
+        lines, _ = self._lines(tmp_path)
+        assert "COPY shmrdma/shmrdma.ko /lib/modules/5.14.0/extra/" in lines
+        assert (tmp_path / "inject" / "shmrdma" / "shmrdma.ko").is_file()
+
+    def test_left_out_over_mofed_kmods(self, tmp_path: Path) -> None:
+        lines, build = self._lines(tmp_path, mofed=True)
+        assert lines == []
+        build.assert_not_called()
+
+    def test_left_out_of_a_cross_build(self, tmp_path: Path) -> None:
+        lines, build = self._lines(tmp_path, cross=True)
+        assert lines == []
+        build.assert_not_called()
+
+
+class TestVMKmodRecord:
+    def test_round_trip(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        vm = _make_vm(tmp_vmdir)
+        vm.save()
+        assert VMInfo.load(vm.name).shmrdma_kmod is None
+        for has in (True, False):
+            vm.shmrdma_kmod = has
+            vm.save()
+            assert VMInfo.load(vm.name).shmrdma_kmod is has
+
+    def test_record_wins_over_the_image_meta(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+        tmp_path: Path,
+    ) -> None:
+        d = _image_dir(tmp_path / "img", {"shmrdma_kmod": True})
+        vm = _make_vm(tmp_vmdir)
+        vm.image = str(d / OLD_IMG)
+        vm.shmrdma_kmod = True
+        vm.save()
+        # a fetch replaced meta.json: it no longer names OLD_IMG
+        assert not shmrdma.image_has_kmod(vm.image)
+        assert shmrdma.vm_has_kmod(vm)
+
+    def test_older_vm_adopts_a_yes(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+        tmp_path: Path,
+    ) -> None:
+        d = _image_dir(tmp_path / "img", {"shmrdma_kmod": True})
+        vm = _make_vm(tmp_vmdir)
+        vm.image = str(d / NEW_IMG)
+        vm.save()
+        assert shmrdma.vm_has_kmod(vm)
+        assert VMInfo.load(vm.name).shmrdma_kmod is True
+
+    def test_older_vm_never_records_a_no(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+        tmp_path: Path,
+    ) -> None:
+        d = _image_dir(tmp_path / "img", {"shmrdma_kmod": True})
+        vm = _make_vm(tmp_vmdir)
+        vm.image = str(d / OLD_IMG)
+        vm.save()
+        assert not shmrdma.vm_has_kmod(vm)
+        assert VMInfo.load(vm.name).shmrdma_kmod is None
+
+    def test_target_takes_the_record(self, tmp_path: Path) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        _image_dir(tmp_path, {"shmrdma_kmod": True})
+        t = sr.Target(
+            "rocky10",
+            image=tmp_path / OLD_IMG,
+            kernel_dir=tmp_path,
+            has_kmod=True,
+        )
+        kmod = [r for r in sr.target_checks(t) if "module" in r.name][0]
+        assert kmod.ok
+        t.has_kmod = None
+        kmod = [r for r in sr.target_checks(t) if "module" in r.name][0]
+        assert not kmod.ok
+
+
+class TestFetchKeepsKmodImages:
+    def _fetch(self, out: Path, fetched_meta: dict) -> Path:
+        from ltvm_pkg.image_store import LEGACY
+        from ltvm_pkg.release_package import _install_fetched_images
+
+        staging = out / ".ltvm-fetch-image-x"
+        sd = staging / "rocky9" / "x86_64" / "images" / "5.14"
+        sd.mkdir(parents=True)
+        (sd / LEGACY).write_bytes(b"fetched")
+        (sd / "meta.json").write_text(json.dumps(fetched_meta))
+        _install_fetched_images(staging, out)
+        return out / "rocky9" / "x86_64" / "images" / "5.14"
+
+    def test_older_files_carried(self, tmp_path: Path) -> None:
+        from ltvm_pkg.image_store import current_image
+
+        out = tmp_path / "artifacts"
+        d = _image_dir(
+            out / "rocky9" / "x86_64" / "images" / "5.14",
+            {
+                "shmrdma_kmod": False,
+                "shmrdma_kmod_images": {OLD_IMG: True, NEW_IMG: False},
+            },
+        )
+        self._fetch(out, {"shmrdma_kmod": True, "new": 1})
+        cur = current_image(d)
+        assert cur is not None and cur.name not in (OLD_IMG, NEW_IMG)
+        meta = json.loads((d / "meta.json").read_text())
+        assert meta["new"] == 1
+        assert meta["shmrdma_kmod_images"] == {
+            OLD_IMG: True,
+            NEW_IMG: False,
+            cur.name: True,
+        }
+        assert shmrdma.image_has_kmod(d / OLD_IMG)
+        assert shmrdma.image_has_kmod(cur)
+
+    def test_older_flag_names_the_old_current(self, tmp_path: Path) -> None:
+        out = tmp_path / "artifacts"
+        d = _image_dir(
+            out / "rocky9" / "x86_64" / "images" / "5.14",
+            {"shmrdma_kmod": True},
+        )
+        self._fetch(out, {"shmrdma_kmod": False})
+        assert shmrdma.image_has_kmod(d / NEW_IMG)
+        assert not shmrdma.image_has_kmod(d / "current.ext4")
+
+    def test_publishers_map_replaced(self, tmp_path: Path) -> None:
+        from ltvm_pkg.image_store import current_image
+
+        out = tmp_path / "artifacts"
+        d = self._fetch(
+            out,
+            {"shmrdma_kmod": True, "shmrdma_kmod_images": {"theirs": True}},
+        )
+        cur = current_image(d)
+        assert cur is not None
+        meta = json.loads((d / "meta.json").read_text())
+        assert meta["shmrdma_kmod_images"] == {cur.name: True}
+
+
+class TestKmodCache:
+    @pytest.fixture
+    def tc(self, tmp_path: Path) -> MagicMock:
+        kdir = tmp_path / "kernels" / "6.12"
+        (kdir / "build-tree").mkdir(parents=True)
+        (kdir / "meta.json").write_text('{"input_hash": "k"}')
+        tc = MagicMock()
+        tc.name, tc.arch, tc.container_tag = "rocky10", "x86_64", "tag"
+        tc.kernel_output_dir.return_value = kdir
+        tc.meta_path.return_value = kdir / "meta.json"
+        return tc
+
+    @pytest.fixture
+    def podman(self) -> Iterator[MagicMock]:
+        def run(cmd, **kw):
+            src = Path(cmd[cmd.index("-v", 6) + 1].split(":")[0])
+            (src / "kmod" / "shmrdma.ko").write_bytes(b"ko")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch("ltvm_pkg.shmrdma.subprocess.run", side_effect=run) as r:
+            yield r
+
+    def test_owner_builds_into_the_kernel_dir(self, tc, podman) -> None:
+        ko = shmrdma.build_kmod(tc, None, "6.12.0")
+        assert ko == shmrdma.kmod_dir(tc) / "shmrdma.ko"
+        assert shmrdma.build_kmod(tc, None, "6.12.0") == ko
+        assert podman.call_count == 1
+
+    def test_others_build_their_own(self, tc, podman) -> None:
+        with patch("ltvm_pkg.zfs_build._shared_is_ours", return_value=False):
+            ko = shmrdma.build_kmod(tc, None, "6.12.0")
+        assert ko == shmrdma.user_kmod_dir(tc) / "shmrdma.ko"
+        assert not shmrdma.kmod_dir(tc).exists()
+
+    def test_untrusted_shared_module_ignored(self, tc, podman) -> None:
+        shmrdma.build_kmod(tc, None, "6.12.0")
+        with (
+            patch("ltvm_pkg.zfs_build._untrusted", return_value="planted"),
+            patch("ltvm_pkg.zfs_build._shared_is_ours", return_value=False),
+        ):
+            ko = shmrdma.build_kmod(tc, None, "6.12.0")
+        assert ko == shmrdma.user_kmod_dir(tc) / "shmrdma.ko"
+        assert podman.call_count == 2
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root writes anywhere")
+    def test_unwritable_kernel_dir_warns(self, tc, podman) -> None:
+        kdir = tc.kernel_output_dir.return_value
+        kdir.chmod(0o555)
+        try:
+            with patch("ltvm_pkg.zfs_build._shared_is_ours", return_value=True):
+                assert shmrdma.build_kmod(tc, None, "6.12.0") is None
+        finally:
+            kdir.chmod(0o755)
+        podman.assert_not_called()

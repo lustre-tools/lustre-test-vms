@@ -1114,9 +1114,10 @@ def build_image(
             # These provide MOFED's mlx5_core / ib_core / rdma_cm symbol
             # versions, which Lustre's ko2iblnd was linked against in
             # the build container.
-            if mofed_kmods_dir is not None and any(
+            mofed_rpms = mofed_kmods_dir is not None and any(
                 mofed_kmods_dir.glob("*.rpm")
-            ):
+            )
+            if mofed_kmods_dir is not None and mofed_rpms:
                 kmod_dest = inject_dir / "mofed-kmods"
                 kmod_dest.mkdir(exist_ok=True)
                 for rpm in mofed_kmods_dir.glob("*.rpm"):
@@ -1134,41 +1135,17 @@ def build_image(
                     "RUN rpm -ivh --nodeps --force /tmp/mofed-kmods/*.rpm "
                     "&& rm -rf /tmp/mofed-kmods"
                 )
-            # The shmrdma guest driver (see ltvm_pkg/shmrdma.py), when it
-            # builds for this kernel.  Not for a cross build: the build
-            # container runs the target's arch.
-            if kver and not cross:
-                from .shmrdma import (
-                    GUEST_FILES,
-                    MODPROBE_CONF,
-                    SRC_DIR,
-                    build_kmod,
-                )
-
-                shm_ko = build_kmod(target_config, kernel, kver)
-                if shm_ko is not None:
-                    shm_dest = inject_dir / "shmrdma"
-                    shm_dest.mkdir(exist_ok=True)
-                    shutil.copy2(shm_ko, shm_dest / "shmrdma.ko")
-                    (shm_dest / "shmrdma.conf").write_text(MODPROBE_CONF)
-                    lines.append(
-                        f"COPY shmrdma/shmrdma.ko /lib/modules/{kver}/extra/"
-                    )
-                    lines.append(
-                        "COPY shmrdma/shmrdma.conf /etc/modprobe.d/shmrdma.conf"
-                    )
-                    # rc.local runs the boot hook for fc_shmrdma=1.
-                    names = []
-                    for rel in GUEST_FILES:
-                        name = Path(rel).name
-                        shutil.copy2(SRC_DIR / rel, shm_dest / name)
-                        names.append(f"/usr/local/sbin/{name}")
-                        lines.append(
-                            f"COPY shmrdma/{name} /usr/local/sbin/{name}"
-                        )
-                    lines.append(f"RUN chmod 0755 {' '.join(names)}")
-                    shmrdma_kmod = True
             if kver:
+                shm_lines = _shmrdma_lines(
+                    target_config,
+                    kernel,
+                    kver,
+                    inject_dir,
+                    cross=cross,
+                    mofed=mofed_rpms,
+                )
+                lines.extend(shm_lines)
+                shmrdma_kmod = bool(shm_lines)
                 lines.append(f"RUN ldconfig && depmod -a {kver}")
             else:
                 # No kernel.release file available; fall back to whatever
@@ -1298,6 +1275,54 @@ def build_image(
 
     log.info("Image built: %s (%.0f MiB, %.0fs)", image_path, size_mb, elapsed)
     return image_path
+
+
+def _shmrdma_lines(
+    target_config: TargetConfig,
+    kernel: str | None,
+    kver: str,
+    inject_dir: Path,
+    cross: bool,
+    mofed: bool,
+) -> list[str]:
+    """Dockerfile lines baking the shmrdma guest driver into the image,
+    staged in *inject_dir*; none when it is left out.
+
+    Not for a cross build: the build container runs the target's arch.
+    Not over MOFED's kmods either: they replace the ib_core it is built
+    against.
+    """
+    if cross:
+        return []
+    if mofed:
+        log.warning(
+            "shmrdma.ko is left out of this image: MOFED's kmods replace "
+            "the in-tree ib_core it is built against, so create --shmrdma "
+            "will refuse it"
+        )
+        return []
+    from .shmrdma import GUEST_FILES, MODPROBE_CONF, SRC_DIR, build_kmod
+
+    shm_ko = build_kmod(target_config, kernel, kver)
+    if shm_ko is None:
+        return []
+    shm_dest = inject_dir / "shmrdma"
+    shm_dest.mkdir(exist_ok=True)
+    shutil.copy2(shm_ko, shm_dest / "shmrdma.ko")
+    (shm_dest / "shmrdma.conf").write_text(MODPROBE_CONF)
+    lines = [
+        f"COPY shmrdma/shmrdma.ko /lib/modules/{kver}/extra/",
+        "COPY shmrdma/shmrdma.conf /etc/modprobe.d/shmrdma.conf",
+    ]
+    # rc.local runs the boot hook for fc_shmrdma=1.
+    names = []
+    for rel in GUEST_FILES:
+        name = Path(rel).name
+        shutil.copy2(SRC_DIR / rel, shm_dest / name)
+        names.append(f"/usr/local/sbin/{name}")
+        lines.append(f"COPY shmrdma/{name} /usr/local/sbin/{name}")
+    lines.append(f"RUN chmod 0755 {' '.join(names)}")
+    return lines
 
 
 def _compute_image_size_mb_from_tar(tarball: Path) -> int:

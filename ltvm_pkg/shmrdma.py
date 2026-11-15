@@ -119,25 +119,75 @@ def _kmod_input_hash(kver: str, kernel_hash: str) -> str:
     return h.hexdigest()
 
 
+def user_kmod_dir(tc: TargetConfig, kernel: str | None = None) -> Path:
+    """The per-user fallback for :func:`kmod_dir`, as ZFS has."""
+    from .zfs_build import user_cache_root
+
+    kdir = tc.kernel_output_dir(kernel)
+    return user_cache_root() / "shmrdma" / tc.name / str(tc.arch) / kdir.name
+
+
 def build_kmod(tc: TargetConfig, kernel: str | None, kver: str) -> Path | None:
     """shmrdma.ko for *kernel*, built if missing or stale.
 
-    Returns None, with a warning, when it cannot be built: the image is
-    then built without it, and ``create --shmrdma`` refuses that image.
+    The kernel artifact's owner builds into it, anyone else into
+    :func:`user_kmod_dir`, by the rules ZFS follows (zfs_build): a
+    shared module is used only when nobody but that owner could have
+    written it.  Returns None, with a warning, when it cannot be built:
+    the image is then built without it, and ``create --shmrdma``
+    refuses that image.
     """
-    out = kmod_dir(tc, kernel)
-    ko = out / "shmrdma.ko"
-    build_tree = tc.kernel_output_dir(kernel) / "build-tree"
+    from .zfs_build import _no_more_writable_than, _shared_is_ours, _untrusted
+
+    kdir = tc.kernel_output_dir(kernel)
+    shared = kmod_dir(tc, kernel)
+    user = user_kmod_dir(tc, kernel)
+    build_tree = kdir / "build-tree"
     kmeta = load_meta_safe(tc.meta_path("kernel", kernel)) or {}
     kh = kmeta.get("input_hash")
     want = _kmod_input_hash(kver, kh if isinstance(kh, str) else "")
-    meta = load_meta_safe(out / "meta.json") or {}
-    if meta.get("input_hash") == want and ko.is_file():
-        return ko
+
+    def fresh(d: Path) -> bool:
+        meta = load_meta_safe(d / "meta.json") or {}
+        return meta.get("input_hash") == want and (d / "shmrdma.ko").is_file()
+
+    if fresh(shared):
+        why = _untrusted(shared, kdir)
+        if why is None:
+            return shared / "shmrdma.ko"
+        log.warning(
+            "shmrdma: ignoring the shared module in %s: %s", shared, why
+        )
+    if fresh(user):
+        return user / "shmrdma.ko"
     if not build_tree.is_dir():
         log.warning("shmrdma: no kernel build tree at %s", build_tree)
         return None
+    ours = _shared_is_ours(shared, kdir)
+    out = shared if ours else user
+    try:
+        ko = _build_kmod_into(tc, build_tree, kver, want, out)
+    except OSError as e:
+        log.warning(
+            "shmrdma.ko could not be built into %s (%s); the image will "
+            "not have it, and create --shmrdma will refuse it",
+            out,
+            e,
+        )
+        return None
+    if ours:
+        try:
+            _no_more_writable_than(out, kdir)
+        except OSError:
+            pass
+    return ko
+
+
+def _build_kmod_into(
+    tc: TargetConfig, build_tree: Path, kver: str, want: str, out: Path
+) -> Path | None:
     out.mkdir(parents=True, exist_ok=True)
+    ko = out / "shmrdma.ko"
     ko.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="shmrdma-kmod-") as tmp:
         src = Path(tmp)
@@ -198,6 +248,24 @@ def image_has_kmod(image: str | Path) -> bool:
         and cur.name == path.name
         and bool(meta.get("shmrdma_kmod"))
     )
+
+
+def vm_has_kmod(vm: VMInfo) -> bool:
+    """Whether *vm*'s image has shmrdma.ko, by the VM's own record.
+
+    A VM created before the record asks the image's meta.json, and
+    records a yes, which a later fetch or build cannot then lose.
+    """
+    if vm.shmrdma_kmod is not None:
+        return vm.shmrdma_kmod
+    has = bool(vm.image) and image_has_kmod(vm.image)
+    if has:
+        try:
+            vm._update_fields({"SHMRDMA_KMOD": 1}, noninteractive=True)
+            vm.shmrdma_kmod = True
+        except (OSError, RuntimeError, vm_state.VMNotFound):
+            pass
+    return has
 
 
 # --- the host daemon --------------------------------------------------
@@ -442,6 +510,17 @@ def build_daemon() -> tuple[Path, str]:
     return out, digest
 
 
+def daemon_needs_compiler() -> bool:
+    """Whether starting this user's daemon would compile it: no binary
+    is cached for the current sources and none runs."""
+    if (_cache_dir() / _source_hash(_DAEMON_FILES)[:16] / "shmrdmad").is_file():
+        return False
+    try:
+        return not daemon(create=False).pid()
+    except (OSError, RuntimeError, KeyError):
+        return True
+
+
 def vm_uses(vm: VMInfo, d: Daemon) -> bool:
     """Whether *vm*, as last started, is attached to daemon *d*."""
     socks = {str(d.rdma_socket), str(d.net_socket)}
@@ -610,8 +689,8 @@ def stop_daemon(force: bool = False) -> str:
     from .qemu_run import _launch_lock
 
     d = daemon(create=False)
-    # Under the launch lock: a VM whose launch got past ensure_daemon
-    # has no QEMU pid recorded until that lock is released.  Then the
+    # Under the launch lock: a VM whose launch found the sockets there
+    # (verify_sockets) has no QEMU pid recorded until it is released.  Then the
     # daemon's lock, in the order a launch takes them, so a `vm shmrdmad
     # start` cannot slip a new daemon in before the files are removed.
     with _launch_lock():
@@ -661,19 +740,34 @@ def status() -> dict[str, object]:
     }
 
 
-def prepare_launch(vm: VMInfo) -> list[str]:
-    """Make sure every socket *vm* needs is served; return them.
+def _needs_own(vm: VMInfo) -> bool:
+    return vm.shmrdma == "auto" or any(
+        n.type == "shmnet" and not n.socket for n in vm.nics
+    )
 
-    ltvm's own daemon is started on demand.  A socket given by hand
-    belongs to a daemon run by hand, so it must already be there.
+
+def start_for(vm: VMInfo) -> None:
+    """Start ltvm's own daemon if *vm* uses it and it is not running."""
+    from .qemu_run import die
+
+    if not _needs_own(vm):
+        return
+    try:
+        ensure_daemon()
+    except (RuntimeError, OSError) as e:
+        die(f"{vm.name}: {e}")
+
+
+def verify_sockets(vm: VMInfo) -> list[str]:
+    """Every socket *vm* connects to, each checked to be listening.
+
+    Run under the launch lock, after ``start_for``: a socket given by
+    hand belongs to a daemon run by hand, so it must already be there.
     """
     from .qemu_run import die
 
-    needs_own = vm.shmrdma == "auto" or any(
-        n.type == "shmnet" and not n.socket for n in vm.nics
-    )
     try:
-        d = ensure_daemon() if needs_own else daemon(create=False)
+        d = daemon(create=False)
     except (RuntimeError, OSError) as e:
         die(f"{vm.name}: {e}")
     socks = vm_sockets(vm, d)

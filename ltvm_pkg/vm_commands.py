@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from . import numa_dist, rootless, shmrdma_req, vm_claim
+from . import numa_dist, rootless, shmrdma, shmrdma_req, vm_claim
 from .deploy import configure_test_disks, premount_cleanup_script
 from .host_setup import is_macos
 from .nic_guest import wait_for_layout as guest_nic_layout
@@ -918,6 +918,7 @@ def _allocate_and_persist_vm(
             created=int(time.time()),
             base_image=base_name,
             image_id=_image_id(image),
+            shmrdma_kmod=shmrdma.image_has_kmod(image),
             os_id=os_id,
             kver=kver,
             arch=os_arts.arch,
@@ -1232,6 +1233,7 @@ def _check_shmrdma_image(vm: VMInfo, shm: str) -> None:
         image=Path(vm.image),
         kernel_dir=Path(vm.image).parent,
         arch=vm.arch or None,
+        has_kmod=shmrdma.vm_has_kmod(vm),
     )
     why = shmrdma_req.refusal(shmrdma_req.features_of(shm, [], -1), t)
     if why:
@@ -4062,8 +4064,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     # Running VMs whose shmrdmad is gone: their shmrdma device and
     # shmnet NICs are dead until each VM restarts and starts it again.
-    from . import shmrdma
-
     shm = shmrdma.daemon(create=False)
     if not shm.pid():
         orphans = []

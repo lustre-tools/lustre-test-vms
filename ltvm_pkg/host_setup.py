@@ -635,9 +635,6 @@ def check_prerequisites(host: HostInfo) -> None:
         "tar": "tar",
         "make": "make",
         "gcc": "gcc",
-        # --host-node binds guest memory with numactl when ltvm's QEMU
-        # was built without libnuma (shmrdma_req).
-        "numactl": "numactl",
         "ip": "iproute2" if host.pkg_mgr == "apt" else "iproute",
         "fakeroot": "fakeroot",
         "mke2fs": "e2fsprogs",
@@ -656,8 +653,12 @@ def check_prerequisites(host: HostInfo) -> None:
         needed["grub-install" if host.pkg_mgr == "apt" else "grub2-install"] = (
             "grub-pc-bin" if host.pkg_mgr == "apt" else "grub2-pc"
         )
+    # Installed, but only warned about when they do not install.
+    # --host-node binds guest memory with numactl when ltvm's QEMU was
+    # built without libnuma (shmrdma_req), and works without it.
+    optional = {"numactl": "numactl"}
     missing = []
-    for cmd, pkg in needed.items():
+    for cmd, pkg in {**needed, **optional}.items():
         if not shutil.which(cmd):
             missing.append(pkg)
     if missing:
@@ -677,6 +678,13 @@ def check_prerequisites(host: HostInfo) -> None:
             for cmd, pkg in needed.items()
             if pkg in missing and not shutil.which(cmd)
         ]
+        for cmd, pkg in optional.items():
+            if pkg in missing and not shutil.which(cmd):
+                log.warning(
+                    "%s did not install; --host-node places guest memory "
+                    "less exactly without it",
+                    cmd,
+                )
         if still_missing:
             raise RuntimeError(
                 "required tool(s) still missing after install: "
@@ -2189,7 +2197,15 @@ def install_qemu_macos(force: bool = False) -> None:
         log.info("QEMU %s already installed", existing)
     else:
         _install_brew_qemu_macos()
-    install_qemu_macos_vhost(force=force)
+    try:
+        install_qemu_macos_vhost(force=force)
+    except (RuntimeError, OSError, subprocess.CalledProcessError) as e:
+        log.warning(
+            "ltvm's QEMU for macOS was not installed, so --shmrdma and "
+            "--nic shmnet are unavailable until `ltvm doctor --fix "
+            "--shmrdma` installs it:\n%s",
+            e,
+        )
 
 
 def _install_brew_qemu_macos() -> None:
