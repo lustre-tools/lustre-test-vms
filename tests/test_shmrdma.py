@@ -2042,6 +2042,19 @@ class TestRequirements:
         assert qh.call_count == 4
         assert not sr._caps_cache().exists()
 
+    def test_no_builds_under_sudo(self, monkeypatch) -> None:
+        """doctor --fix under sudo does not build as root."""
+        from ltvm_pkg import shmrdma_req as sr
+
+        monkeypatch.setenv("SUDO_USER", "tester")
+        with (
+            patch("ltvm_pkg.shmrdma_req.os.geteuid", return_value=0),
+            patch("ltvm_pkg.shmrdma_req.subprocess.run") as run,
+            pytest.raises(RuntimeError, match="as tester, without sudo"),
+        ):
+            sr._ltvm("build", "image", "rocky9")
+        run.assert_not_called()
+
     def test_timed_out_probe_not_cached(self, tmp_path: Path) -> None:
         """A probe that timed out is not taken for a QEMU without it."""
         from ltvm_pkg import shmrdma_req as sr

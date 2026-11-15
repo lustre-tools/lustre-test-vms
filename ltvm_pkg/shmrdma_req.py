@@ -234,6 +234,12 @@ def install_packages(*pkgs: str) -> None:
 
 def _ltvm(*args: str) -> None:
     """Run an ltvm command as a subprocess, its output to the user."""
+    user = os.environ.get("SUDO_USER")
+    if os.geteuid() == 0 and user:
+        raise RuntimeError(
+            f"`ltvm {' '.join(args[:2])}` would run as root: run "
+            f"`ltvm doctor --shmrdma --fix` as {user}, without sudo"
+        )
     script = Path(__file__).resolve().parent.parent / "ltvm"
     r = subprocess.run([sys.executable, str(script), *args], check=False)
     if r.returncode != 0:
