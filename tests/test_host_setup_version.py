@@ -29,7 +29,19 @@ def record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A record path with nothing in it: a host installed before this."""
     path = tmp_path / "lib" / "host-setup.json"
     monkeypatch.setenv("LTVM_HOST_SETUP_RECORD", str(path))
+    _launcher(tmp_path, monkeypatch, hsv.this_script())
     return path
+
+
+def _launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: Path
+) -> Path:
+    """An installed launcher, as ``ltvm install`` writes it, for *script*."""
+    link = tmp_path / "bin" / "ltvm"
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.write_text(f"#!/bin/sh\nexec '/usr/bin/python3' '{script}' \"$@\"\n")
+    monkeypatch.setattr(hsv, "LAUNCHER", link)
+    return link
 
 
 @pytest.fixture
@@ -343,6 +355,57 @@ class TestDoctor:
         with patch.object(update_check, "run_install", return_value=False):
             assert vm_commands._check_host_setup_version(fix=True) == (1, 1)
         assert "FAILED: run" in capsys.readouterr().out
+
+
+class TestInstalledCopy:
+    def test_wrapper(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _launcher(tmp_path, monkeypatch, tmp_path / "wt" / "ltvm")
+        assert hsv.installed_script() == (tmp_path / "wt" / "ltvm").resolve()
+        assert not hsv.is_installed_copy()
+
+    def test_symlink(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        link = tmp_path / "ltvm"
+        link.symlink_to(hsv.this_script())
+        monkeypatch.setattr(hsv, "LAUNCHER", link)
+        assert hsv.is_installed_copy()
+
+    def test_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(hsv, "LAUNCHER", tmp_path / "missing")
+        assert hsv.installed_script() is None
+        assert not hsv.is_installed_copy()
+
+    def test_doctor_fix_leaves_other_checkout(
+        self,
+        record: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _launcher(tmp_path, monkeypatch, tmp_path / "main" / "ltvm")
+        with patch.object(update_check, "run_install") as ri:
+            assert vm_commands._check_host_setup_version(fix=True) == (0, 0)
+        ri.assert_not_called()
+        out = capsys.readouterr().out
+        assert "so doctor leaves it" in out
+        assert str(hsv.this_script()) in out
+
+    def test_no_notice_from_other_checkout(
+        self,
+        record: Path,
+        state: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _launcher(tmp_path, monkeypatch, tmp_path / "main" / "ltvm")
+        hsv.maybe_notify()
+        assert capsys.readouterr().err == ""
 
 
 class TestMainNotice:
