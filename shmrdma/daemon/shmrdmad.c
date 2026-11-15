@@ -1321,7 +1321,7 @@ static bool rq_bad(struct qp *qp, uint32_t prod)
 }
 
 /* build the 40-byte RoCEv2 header area a UD receive starts with */
-static void make_grh(uint8_t *out, const uint8_t *sgid, const uint8_t *dgid,
+static bool make_grh(uint8_t *out, const uint8_t *sgid, const uint8_t *dgid,
 		     uint32_t paylen)
 {
 	static const uint8_t v4pfx[12] = { 0,0,0,0,0,0,0,0,0,0,0xff,0xff };
@@ -1347,6 +1347,7 @@ static void make_grh(uint8_t *out, const uint8_t *sgid, const uint8_t *dgid,
 		sum = ~sum & 0xffff;
 		ip[10] = sum >> 8;
 		ip[11] = sum & 0xff;
+		return true;
 	} else {
 		/* IPv6 header: version 6, payload len, next hdr UDP */
 		uint32_t plen = 8 + 12 + paylen + 4;
@@ -1358,6 +1359,7 @@ static void make_grh(uint8_t *out, const uint8_t *sgid, const uint8_t *dgid,
 		out[7] = 64;
 		memcpy(out + 8, sgid, 16);
 		memcpy(out + 24, dgid, 16);
+		return false;
 	}
 }
 
@@ -1411,9 +1413,12 @@ static int exec_ud_send(struct qp *qp, struct shmrdma_sq_wqe *w,
 			       .need_access = SHMRDMA_ACC_LOCAL_WRITE };
 	uint8_t grh[SHMRDMA_GRH_BYTES];
 
-	make_grh(grh, w->ud.sgid, w->ud.dgid, len);
-	if (grh[20] == 0x45)
+	if (make_grh(grh, w->ud.sgid, w->ud.dgid, len))
 		c.flags |= SHMRDMA_CQE_IPV4;
+	if (w->opcode == SHMRDMA_OP_SEND_IMM) {
+		c.flags |= SHMRDMA_CQE_IMM;
+		c.ex = w->ex;
+	}
 
 	if (sg_total(rsge, rn) < len + SHMRDMA_GRH_BYTES) {
 		c.status = WC_LOC_LEN_ERR;

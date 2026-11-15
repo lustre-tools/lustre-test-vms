@@ -22,6 +22,7 @@
 #include <linux/idr.h>
 #include <linux/xarray.h>
 #include <linux/virtio_fs.h>
+#include <linux/dma-mapping.h>
 #include <net/addrconf.h>
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_mad.h>
@@ -84,6 +85,8 @@ struct shmrdma_dev {
 	struct ida cqn_ida;
 	u32 next_cqn;
 	struct ida mr_ida;
+	u32 next_mrn;
+	atomic_t mr_variant;
 	struct ida pdn_ida;
 
 	struct ib_device_attr attr;
@@ -118,6 +121,7 @@ struct shmrdma_cq {
 	u32 cons;
 	bool ring_bad;		/* the backend's producer ran past the ring */
 	bool err_seen;		/* its CQ error was reported, under eq_lock */
+	struct work_struct ev_work;
 	/* QPs sending and receiving on this CQ, under lock */
 	struct list_head sq_qps, rq_qps;
 };
@@ -134,6 +138,7 @@ struct shmrdma_qp {
 	u32 max_send_sge, max_recv_sge, max_inline;
 	bool sig_all;
 	bool fatal_seen;	/* its QP_FATAL was reported, under eq_lock */
+	struct work_struct ev_work;
 	struct mutex state_lock;
 	struct ib_qp_attr attr;
 	u8 dgid[16];
@@ -398,35 +403,50 @@ static bool shmrdma_cq_has_qps(struct shmrdma_cq *cq)
 	return any;
 }
 
+/* handlers run in process context; destroy cancels the work */
+static void shmrdma_qp_ev_work(struct work_struct *work)
+{
+	struct shmrdma_qp *qp = container_of(work, struct shmrdma_qp, ev_work);
+	struct ib_event ev = {
+		.device = qp->ibqp.device,
+		.event = IB_EVENT_QP_FATAL,
+		.element.qp = &qp->ibqp,
+	};
+
+	qp->ibqp.event_handler(&ev, qp->ibqp.qp_context);
+}
+
+static void shmrdma_cq_ev_work(struct work_struct *work)
+{
+	struct shmrdma_cq *cq = container_of(work, struct shmrdma_cq, ev_work);
+	struct ib_event ev = {
+		.device = cq->ibcq.device,
+		.event = IB_EVENT_CQ_ERR,
+		.element.cq = &cq->ibcq,
+	};
+
+	cq->ibcq.event_handler(&ev, cq->ibcq.cq_context);
+}
+
 /* caller holds eq_lock, which destroy_cq and destroy_qp take to erase */
 static void shmrdma_qp_fatal(struct shmrdma_dev *dev, struct shmrdma_qp *qp)
 {
-	struct ib_event ev = { .device = &dev->ibdev };
-
 	if (qp->fatal_seen)
 		return;
 	qp->fatal_seen = true;
 	WRITE_ONCE(qp->attr.qp_state, IB_QPS_ERR);
-	if (qp->ibqp.event_handler) {
-		ev.event = IB_EVENT_QP_FATAL;
-		ev.element.qp = &qp->ibqp;
-		qp->ibqp.event_handler(&ev, qp->ibqp.qp_context);
-	}
+	if (qp->ibqp.event_handler)
+		schedule_work(&qp->ev_work);
 }
 
 static void shmrdma_cq_err(struct shmrdma_dev *dev, struct shmrdma_cq *cq)
 {
-	struct ib_event ev = { .device = &dev->ibdev };
-
 	if (cq->err_seen)
 		return;
 	cq->err_seen = true;
 	dev_err(&dev->vdev->dev, "cq %u overflowed\n", cq->cqn);
-	if (cq->ibcq.event_handler) {
-		ev.event = IB_EVENT_CQ_ERR;
-		ev.element.cq = &cq->ibcq;
-		cq->ibcq.event_handler(&ev, cq->ibcq.cq_context);
-	}
+	if (cq->ibcq.event_handler)
+		schedule_work(&cq->ev_work);
 }
 
 /* caller holds eq_lock */
@@ -696,7 +716,8 @@ static int shmrdma_destroy_ah(struct ib_ah *ibah, u32 flags)
 /*
  * Round robin from *next, not lowest free.  A QPN freed just now is
  * still in the peer CM's timewait, which rejects a reconnect that reuses
- * it; a CQN freed just now may still have an EQE on its way.
+ * it; a CQN freed just now may still have an EQE on its way; an MR index
+ * freed just now may still be in a peer's rkey.
  */
 static int ida_alloc_rr(struct ida *ida, u32 *next, u32 min, u32 max)
 {
@@ -741,6 +762,7 @@ static int shmrdma_create_cq(struct ib_cq *ibcq,
 	spin_lock_init(&cq->lock);
 	INIT_LIST_HEAD(&cq->sq_qps);
 	INIT_LIST_HEAD(&cq->rq_qps);
+	INIT_WORK(&cq->ev_work, shmrdma_cq_ev_work);
 	cq->rec = kzalloc(sizeof(*cq->rec), GFP_KERNEL);
 	if (!cq->rec) {
 		rc = -ENOMEM;
@@ -765,6 +787,7 @@ err_xa:
 	spin_lock_irqsave(&dev->eq_lock, flags);
 	xa_erase(&dev->cqs, cq->cqn);
 	spin_unlock_irqrestore(&dev->eq_lock, flags);
+	cancel_work_sync(&cq->ev_work);
 err_ring:
 	ring_free(&cq->ring);
 err_rec:
@@ -786,10 +809,11 @@ static int shmrdma_destroy_cq(struct ib_cq *ibcq, struct ib_udata *udata)
 	rc = shmrdma_cmd(dev, &cmd, NULL);
 	if (rc)
 		shmrdma_destroy_failed(dev, "destroy cq", cq->cqn, rc);
-	/* no completion handler may run after this */
+	/* no completion or event handler may run after this */
 	spin_lock_irqsave(&dev->eq_lock, flags);
 	xa_erase(&dev->cqs, cq->cqn);
 	spin_unlock_irqrestore(&dev->eq_lock, flags);
+	cancel_work_sync(&cq->ev_work);
 	ring_free(&cq->ring);
 	kfree(cq->rec);
 	ida_free(&dev->cqn_ida, cq->cqn);
@@ -1134,6 +1158,7 @@ static int shmrdma_create_qp(struct ib_qp *ibqp,
 	spin_lock_init(&qp->sq_lock);
 	spin_lock_init(&qp->rq_lock);
 	mutex_init(&qp->state_lock);
+	INIT_WORK(&qp->ev_work, shmrdma_qp_ev_work);
 	qp->sig_all = init->sq_sig_type == IB_SIGNAL_ALL_WR;
 	qp->max_send_sge = (sq_esz - SHMRDMA_WQE_HDR) / 16;
 	if (qp->max_send_sge > SHMRDMA_MAX_SGE)
@@ -1395,6 +1420,7 @@ static void shmrdma_qp_erase(struct shmrdma_dev *dev, struct shmrdma_qp *qp)
 	if (qp->rcq != qp->scq)
 		shmrdma_cq_clean(qp->rcq, qp, true);
 	spin_unlock_irqrestore(&dev->eq_lock, flags);
+	cancel_work_sync(&qp->ev_work);
 }
 
 static int shmrdma_destroy_qp(struct ib_qp *ibqp, struct ib_udata *udata)
@@ -1673,7 +1699,7 @@ static struct ib_mr *shmrdma_alloc_mr(struct ib_pd *pd, enum ib_mr_type type,
 		kfree(mr);
 		return ERR_PTR(-ENOMEM);
 	}
-	rc = ida_alloc_range(&dev->mr_ida, 1, SHMRDMA_MAX_MR - 1, GFP_KERNEL);
+	rc = ida_alloc_rr(&dev->mr_ida, &dev->next_mrn, 1, SHMRDMA_MAX_MR - 1);
 	if (rc < 0) {
 		kfree(mr->pages);
 		kfree(mr);
@@ -1681,8 +1707,9 @@ static struct ib_mr *shmrdma_alloc_mr(struct ib_pd *pd, enum ib_mr_type type,
 	}
 	mr->index = rc;
 	mr->max_pages = max_num_sg;
-	mr->ibmr.lkey = mr->index << 8;
-	mr->ibmr.rkey = mr->index << 8;
+	mr->ibmr.lkey = mr->index << 8 |
+			(u8)atomic_inc_return(&dev->mr_variant);
+	mr->ibmr.rkey = mr->ibmr.lkey;
 	return &mr->ibmr;
 }
 
@@ -1831,6 +1858,30 @@ static int shmrdma_netdev_event(struct notifier_block *nb,
 	return NOTIFY_DONE;
 }
 
+/*
+ * The backend reads every address a ULP posts as a guest physical one,
+ * so a DMA mapping must be the identity: no IOMMU, no bounce buffers.
+ */
+static int shmrdma_check_dma(struct device *dma)
+{
+	struct page *pg = alloc_page(GFP_KERNEL);
+	dma_addr_t a;
+	int rc = 0;
+
+	if (!pg)
+		return -ENOMEM;
+	a = dma_map_page(dma, pg, 0, PAGE_SIZE, DMA_BIDIRECTIONAL);
+	if (dma_mapping_error(dma, a)) {
+		rc = -EIO;
+	} else {
+		if (a != page_to_phys(pg))
+			rc = -EOPNOTSUPP;
+		dma_unmap_page(dma, a, PAGE_SIZE, DMA_BIDIRECTIONAL);
+	}
+	__free_page(pg);
+	return rc;
+}
+
 static int shmrdma_probe(struct virtio_device *vdev)
 {
 #ifdef HAVE_VIRTQUEUE_INFO
@@ -1864,6 +1915,13 @@ static int shmrdma_probe(struct virtio_device *vdev)
 			   sizeof(tag) - 1);
 	if (strcmp(tag, SHMRDMA_TAG))
 		return -ENODEV;
+	rc = shmrdma_check_dma(vdev->dev.parent);
+	if (rc) {
+		dev_err(&vdev->dev,
+			"DMA addresses are not guest physical (IOMMU or bounce buffers): rc = %d\n",
+			rc);
+		return rc;
+	}
 
 	ndev = dev_get_by_name(&init_net, netdev);
 	if (!ndev) {
