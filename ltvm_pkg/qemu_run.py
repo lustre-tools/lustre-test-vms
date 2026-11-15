@@ -457,30 +457,31 @@ def is_running(vm: VMInfo) -> bool:
 
 
 # shmrdmad maps at most this many guest RAM regions (VU_MAX_REGIONS).
-# Shared RAM is one memfd per NUMA node, and on x86 the node holding
-# the 32-bit PCI hole gives two regions.
+# Shared RAM is one memfd per NUMA node.  On x86 the 32-bit PCI hole
+# and the VGA hole at 0xa0000 each split a node, for two more regions.
 SHMRDMAD_MAX_REGIONS = 8
 
 
-def shared_numa_problem(nodes: int) -> str | None:
+def shared_numa_problem(nodes: int, arch: str = "x86_64") -> str | None:
     """Why shmrdmad cannot map a VM of *nodes* NUMA nodes, or None."""
-    if nodes + 1 > SHMRDMAD_MAX_REGIONS:
+    most = SHMRDMAD_MAX_REGIONS - (2 if arch in ("x86_64", "amd64") else 1)
+    if nodes > most:
         return (
             f"--numa-nodes {nodes} with --shmrdma or a shmnet NIC: "
-            f"shmrdmad maps at most {SHMRDMAD_MAX_REGIONS - 1} nodes"
+            f"shmrdmad maps at most {most} nodes on {arch}"
         )
     return None
 
 
 def numa_problem(
-    vcpus: int, mem: int, nodes: int, shared: bool = False
+    vcpus: int, mem: int, nodes: int, shared: bool = False, arch: str = "x86_64"
 ) -> str | None:
     """Why *nodes* NUMA nodes cannot split this VM, or None if they can."""
     if nodes < 0:
         return f"--numa-nodes must be >= 0 (got {nodes})"
     if nodes <= 1:
         return None
-    if shared and (problem := shared_numa_problem(nodes)):
+    if shared and (problem := shared_numa_problem(nodes, arch)):
         return problem
     if vcpus % nodes:
         return f"--numa-nodes {nodes} must divide the {vcpus} vCPUs evenly"

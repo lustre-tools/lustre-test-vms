@@ -974,7 +974,9 @@ def _allocate_and_persist_vm(
             disk_prealloc=getattr(args, "disk_prealloc", "") or "",
             eth0_speed=getattr(args, "eth0_speed", None),
         )
-        problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes, vm.shared_ram)
+        problem = numa_problem(
+            vm.vcpus, vm.mem, vm.numa_nodes, vm.shared_ram, vm.arch
+        )
         if problem:
             die(problem)
 
@@ -3526,9 +3528,9 @@ def cmd_set(args: argparse.Namespace) -> None:
             f"eth0 speed {_speed_label(vm.eth0_speed)} -> {_speed_label(speed)}"
         )
         vm.eth0_speed = speed
-    problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes, vm.shared_ram) or (
-        nic_numa_problem(vm.nics, vm.numa_nodes)
-    )
+    problem = numa_problem(
+        vm.vcpus, vm.mem, vm.numa_nodes, vm.shared_ram, vm.arch
+    ) or (nic_numa_problem(vm.nics, vm.numa_nodes))
     if problem:
         die(problem)
     if not changes:
