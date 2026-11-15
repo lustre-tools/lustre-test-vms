@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -315,6 +316,28 @@ def test_kmod_sources_feed_image_hash(tmp_path: Path) -> None:
         f.write("/* changed */\n")
     with patch("ltvm_pkg.shmrdma.SRC_DIR", src):
         assert tc.input_hash("image") != before
+
+
+@pytest.mark.skipif(
+    not (shutil.which("cc") or shutil.which("gcc")),
+    reason="needs a C compiler",
+)
+def test_daemon_unpinned_without_taskset(tmp_vmdir: Path, monkeypatch) -> None:  # noqa: F811
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_vmdir / "cache"))
+    which = shutil.which
+    with (
+        patch("ltvm_pkg.qemu_run._guest_scope", return_value=[]),
+        patch("ltvm_pkg.shmrdma.daemon_cpus", return_value="0"),
+        patch(
+            "ltvm_pkg.shmrdma.shutil.which",
+            side_effect=lambda n: None if n == "taskset" else which(n),
+        ),
+    ):
+        d = shmrdma.ensure_daemon()
+    try:
+        assert d.pid()
+    finally:
+        shmrdma.stop_daemon()
 
 
 @pytest.mark.skipif(
@@ -731,6 +754,36 @@ def test_daemon_builds_clean() -> None:
         text=True,
     )
     assert r.returncode == 0, r.stderr
+
+
+def test_daemon_rebuilt_for_another_compiler(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    calls = []
+
+    def cc(name: str) -> Path:
+        p = tmp_path / name
+        p.write_text("")
+        return p
+
+    def run(cmd, **kw):
+        calls.append(cmd[0])
+        Path(cmd[cmd.index("-o") + 1]).write_text(cmd[0])
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("ltvm_pkg.shmrdma.subprocess.run", side_effect=run):
+        monkeypatch.setenv("CC", str(cc("gcc")))
+        out, digest = shmrdma.build_daemon()
+        assert shmrdma.build_daemon() == (out, digest)
+        monkeypatch.setenv("CC", str(cc("clang")))
+        assert shmrdma.build_daemon() == (out, digest)
+        monkeypatch.setenv("CC", "")
+        with patch("ltvm_pkg.shmrdma.shutil.which", return_value=None):
+            assert shmrdma.build_daemon() == (out, digest)
+    assert calls == [str(tmp_path / "gcc"), str(tmp_path / "clang")]
+    with patch("ltvm_pkg.shmrdma.DAEMON_CFLAGS", ("-O0",)):
+        assert shmrdma.daemon_digest() != digest
 
 
 _SHMNET_HARNESS = r"""
@@ -1266,11 +1319,7 @@ class TestRequirements:
         d = shmrdma.Daemon("tester", os.geteuid(), tmp_path / "d")
         with patch("ltvm_pkg.shmrdma.daemon", return_value=d):
             assert not cc_check().ok
-            binary = (
-                shmrdma._cache_dir()
-                / shmrdma._source_hash(shmrdma._DAEMON_FILES)[:16]
-                / "shmrdmad"
-            )
+            binary = shmrdma._cache_dir() / shmrdma.daemon_digest() / "shmrdmad"
             binary.parent.mkdir(parents=True)
             binary.write_text("")
             r = cc_check()
@@ -1696,6 +1745,62 @@ class TestKmodCache:
             ko = shmrdma.build_kmod(tc, None, "6.12.0")
         assert ko == shmrdma.user_kmod_dir(tc) / "shmrdma.ko"
         assert podman.call_count == 2
+
+    def test_concurrent_builds_build_once(self, tc) -> None:
+        import threading
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def run(cmd, **kw):
+            started.set()
+            release.wait(10)
+            src = Path(cmd[cmd.index("-v", 6) + 1].split(":")[0])
+            (src / "kmod" / "shmrdma.ko").write_bytes(b"ko" * 1000)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        got: list[Path | None] = []
+        with patch("ltvm_pkg.shmrdma.subprocess.run", side_effect=run) as r:
+            threads = [
+                threading.Thread(
+                    target=lambda: got.append(
+                        shmrdma.build_kmod(tc, None, "6.12.0")
+                    )
+                )
+                for _ in range(2)
+            ]
+            for t in threads:
+                t.start()
+            assert started.wait(10)
+            time.sleep(0.2)
+            release.set()
+            for t in threads:
+                t.join(10)
+        assert r.call_count == 1
+        ko = shmrdma.kmod_dir(tc) / "shmrdma.ko"
+        assert got == [ko, ko]
+        assert ko.read_bytes() == b"ko" * 1000
+
+    def test_rebuild_keeps_the_old_module_until_replaced(self, tc) -> None:
+        out = shmrdma.kmod_dir(tc)
+        out.mkdir()
+        (out / "shmrdma.ko").write_bytes(b"old")
+        (out / "meta.json").write_text('{"input_hash": "stale"}')
+        seen = []
+
+        def run(cmd, **kw):
+            seen.append((out / "shmrdma.ko").read_bytes())
+            src = Path(cmd[cmd.index("-v", 6) + 1].split(":")[0])
+            (src / "kmod" / "shmrdma.ko").write_bytes(b"new")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with open(out / "shmrdma.ko", "rb") as reader:
+            with patch("ltvm_pkg.shmrdma.subprocess.run", side_effect=run):
+                ko = shmrdma.build_kmod(tc, None, "6.12.0")
+            assert reader.read() == b"old"
+        assert seen == [b"old"]
+        assert ko is not None and ko.read_bytes() == b"new"
+        assert not [p for p in out.iterdir() if p.name.startswith(".")]
 
     @pytest.mark.skipif(os.geteuid() == 0, reason="root writes anywhere")
     def test_unwritable_kernel_dir_warns(self, tc, podman) -> None:

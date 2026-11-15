@@ -36,7 +36,8 @@ ltvm vm shmrdmad [status|start|stop]
 ```
 
 - **The daemon.** ltvm builds `shmrdmad` with the host's C compiler
-  (cached under `~/.cache/ltvm/shmrdmad/<source hash>/`) and runs one
+  (cached under `~/.cache/ltvm/shmrdmad/<hash of sources and flags>/`,
+  and rebuilt when the compiler found differs) and runs one
   per user, started when a VM that needs it starts. Its sockets, pid
   file and log are in `/opt/qemu-vms/shmrdma-<uid>/`, a 0700 directory
   of the user's (or `~/.local/state/ltvm/shmrdma/` when that cannot be

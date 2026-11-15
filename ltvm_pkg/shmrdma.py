@@ -151,6 +151,9 @@ def build_kmod(tc: TargetConfig, kernel: str | None, kver: str) -> Path | None:
         meta = load_meta_safe(d / "meta.json") or {}
         return meta.get("input_hash") == want and (d / "shmrdma.ko").is_file()
 
+    def usable(d: Path) -> bool:
+        return fresh(d) and (d != shared or _untrusted(shared, kdir) is None)
+
     if fresh(shared):
         why = _untrusted(shared, kdir)
         if why is None:
@@ -166,7 +169,11 @@ def build_kmod(tc: TargetConfig, kernel: str | None, kver: str) -> Path | None:
     ours = _shared_is_ours(shared, kdir)
     out = shared if ours else user
     try:
-        ko = _build_kmod_into(tc, build_tree, kver, want, out)
+        with _kmod_lock(out):
+            # another image build of this kernel may have built it meanwhile
+            if usable(out):
+                return out / "shmrdma.ko"
+            ko = _build_kmod_into(tc, build_tree, kver, want, out)
     except OSError as e:
         log.warning(
             "shmrdma.ko could not be built into %s (%s); the image will "
@@ -183,12 +190,40 @@ def build_kmod(tc: TargetConfig, kernel: str | None, kver: str) -> Path | None:
     return ko
 
 
+@contextmanager
+def _kmod_lock(out: Path) -> Iterator[None]:
+    """Serialize builds into one module dir; the lock sits beside it."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(
+        out.parent / f".{out.name}.lock",
+        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o644,
+    )
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _publish(path: Path, data: bytes) -> None:
+    """Replace *path* whole: an image build may be copying the old one."""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def _build_kmod_into(
     tc: TargetConfig, build_tree: Path, kver: str, want: str, out: Path
 ) -> Path | None:
     out.mkdir(parents=True, exist_ok=True)
     ko = out / "shmrdma.ko"
-    ko.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="shmrdma-kmod-") as tmp:
         src = Path(tmp)
         for rel in KMOD_FILES:
@@ -222,9 +257,12 @@ def _build_kmod_into(
                 tail,
             )
             return None
-        shutil.copy2(built, ko)
-    (out / "meta.json").write_text(
-        json.dumps({"kernel": kver, "input_hash": want}, indent=2) + "\n"
+        _publish(ko, built.read_bytes())
+    _publish(
+        out / "meta.json",
+        (
+            json.dumps({"kernel": kver, "input_hash": want}, indent=2) + "\n"
+        ).encode(),
     )
     return ko
 
@@ -484,13 +522,37 @@ def _cache_dir(uid: int | None = None) -> Path:
     return base / "ltvm" / "shmrdmad"
 
 
-def build_daemon() -> tuple[Path, str]:
-    """The shmrdmad binary for the current sources, building it if needed."""
-    digest = _source_hash(_DAEMON_FILES)[:16]
-    out = _cache_dir() / digest / "shmrdmad"
-    if out.is_file():
-        return out, digest
+def daemon_digest() -> str:
+    """What the daemon binary is built from: its sources and flags."""
+    h = hashlib.sha256(_source_hash(_DAEMON_FILES).encode())
+    h.update("\0".join(DAEMON_CFLAGS).encode())
+    return h.hexdigest()[:16]
+
+
+def _compiler() -> str | None:
     cc = os.environ.get("CC") or shutil.which("cc") or shutil.which("gcc")
+    if not cc:
+        return None
+    return os.path.realpath(shutil.which(cc) or cc)
+
+
+def build_daemon() -> tuple[Path, str]:
+    """The shmrdmad binary for the current sources, building it if needed.
+
+    A cached binary built by another compiler than the one found now is
+    rebuilt; with no compiler at all, the cached one is used.
+    """
+    digest = daemon_digest()
+    out = _cache_dir() / digest / "shmrdmad"
+    stamp = out.with_name("cc")
+    cc = _compiler()
+    if out.is_file():
+        try:
+            built_by = stamp.read_text().strip()
+        except OSError:
+            built_by = ""
+        if cc is None or built_by == cc:
+            return out, digest
     if not cc:
         raise RuntimeError(
             "shmrdmad is built on the host and needs a C compiler: install gcc"
@@ -507,13 +569,14 @@ def build_daemon() -> tuple[Path, str]:
         tmp.unlink(missing_ok=True)
         raise RuntimeError(f"building shmrdmad failed:\n{r.stderr.strip()}")
     tmp.replace(out)
+    stamp.write_text(cc + "\n")
     return out, digest
 
 
 def daemon_needs_compiler() -> bool:
     """Whether starting this user's daemon would compile it: no binary
     is cached for the current sources and none runs."""
-    if (_cache_dir() / _source_hash(_DAEMON_FILES)[:16] / "shmrdmad").is_file():
+    if (_cache_dir() / daemon_digest() / "shmrdmad").is_file():
         return False
     try:
         return not daemon(create=False).pid()
@@ -586,7 +649,7 @@ def ensure_daemon() -> Daemon:
         )
     with _daemon_lock(d):
         if d.pid():
-            if d.binary_hash() != _source_hash(_DAEMON_FILES)[:16]:
+            if d.binary_hash() != daemon_digest():
                 log.info(
                     "shmrdmad (pid %d) predates the current sources; it "
                     "keeps running until `ltvm vm shmrdmad stop`",
@@ -603,6 +666,12 @@ def ensure_daemon() -> Daemon:
 
         scope = _guest_scope(VMInfo(name=f"shmrdmad-{d.user}", ip=""))
         cpus = daemon_cpus()
+        if cpus and not shutil.which("taskset"):
+            log.warning(
+                "shmrdmad nodes are set but taskset is missing; unpinned "
+                "(install util-linux)"
+            )
+            cpus = ""
         pin = ["taskset", "-c", cpus] if cpus else []
         extra = os.environ.get("LTVM_SHMRDMAD_ARGS", "").split()
         argv = [
@@ -733,7 +802,7 @@ def _stop_locked(d: Daemon, force: bool) -> str:
 def status() -> dict[str, object]:
     d = daemon(create=False)
     pid = d.pid()
-    current = _source_hash(_DAEMON_FILES)[:16]
+    current = daemon_digest()
     return {
         "running": bool(pid),
         "cpus": daemon_cpus(),
