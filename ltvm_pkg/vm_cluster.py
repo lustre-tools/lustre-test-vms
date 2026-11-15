@@ -17,9 +17,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import numa_dist, vm_claim
+from . import numa_dist, shmrdma_req, vm_claim
 from .nic_spec import numa_problem as nic_numa_problem
-from .qemu_run import die, is_running, run
+from .qemu_run import (
+    die,
+    host_node_problem,
+    is_running,
+    run,
+    shared_numa_problem,
+)
 from .vm_net import (
     SSH_KEEPALIVE_OPTS,
     SSH_OPTS,
@@ -984,6 +990,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     cluster_name = args.name
     # Cluster name flows into filesystem paths (SOCKETS/<name>.cluster)
     # so it needs the same character whitelist as VM names.
+    from .cli.util import host_arch
     from .vm_commands import (
         _validate_disk_options,
         _validate_kernel_args,
@@ -1122,6 +1129,23 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     problem = nic_numa_problem(nic_specs, numa_nodes)
     if problem:
         die(problem)
+    shmrdma_flag = getattr(args, "shmrdma", "") or ""
+    host_node = getattr(args, "host_node", -1)
+    shared_ram = bool(shmrdma_flag) or any(
+        n.type == "shmnet" for n in nic_specs
+    )
+    # What every node's create would refuse alike; the image checks stay
+    # with the nodes, whose targets differ.
+    problem = (
+        host_node_problem(host_node)
+        or (shared_numa_problem(numa_nodes) if shared_ram else None)
+        or shmrdma_req.refusal(
+            shmrdma_req.features_of(shmrdma_flag, nic_specs, host_node),
+            arch=arch or host_arch(),
+        )
+    )
+    if problem:
+        die(problem)
     try:
         owner_id = resolve_owner_id(getattr(args, "owner_id", None))
     except ValueError as e:
@@ -1168,8 +1192,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
         node_targets,
         os_target,
         wait_seconds,
-        shared_ram=bool(getattr(args, "shmrdma", ""))
-        or any(n.type == "shmnet" for n in nic_specs),
+        shared_ram=shared_ram,
     )
 
     print(f"=== Creating cluster '{cluster_name}' ===", flush=True)
@@ -1206,8 +1229,8 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                     wait_seconds=wait_seconds,
                     numa_nodes=numa_nodes,
                     numa_dist=dist,
-                    shmrdma=getattr(args, "shmrdma", "") or "",
-                    host_node=getattr(args, "host_node", -1),
+                    shmrdma=shmrdma_flag,
+                    host_node=host_node,
                     kernel=node_kernels[node.name]
                     or (None if node_targets[node.name] else kernel),
                     variant="base" if node_targets[node.name] else variant,

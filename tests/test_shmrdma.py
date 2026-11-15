@@ -1100,3 +1100,45 @@ def test_cluster_create_refuses_a_swallowed_spec(capsys) -> None:
     create.assert_not_called()
     out = capsys.readouterr()
     assert "put --shmrdma after" in out.out + out.err
+
+
+@pytest.mark.parametrize(
+    "flags, refused",
+    [
+        (["--shmrdma"], "refusal"),
+        (["--host-node", "0"], "host_node_problem"),
+        (["--shmrdma", "--numa-nodes", "16"], "shmrdmad maps at most"),
+    ],
+)
+def test_cluster_create_refuses_before_any_node(
+    tmp_path: Path, capsys, flags: list[str], refused: str
+) -> None:
+    """What every node would refuse alike is refused once, up front."""
+    from ltvm_pkg import vm_cluster
+    from tests.test_cluster_cli import _ns
+
+    ns = _ns("create", "co2", "mgs+mds+oss:co2-srv:3", *flags)
+    with (
+        patch("ltvm_pkg.rootless.ready", return_value=True),
+        patch.object(vm_cluster, "SOCKETS", tmp_path),
+        patch(
+            "ltvm_pkg.vm_cluster.host_node_problem",
+            side_effect=lambda n: "host_node_problem" if n >= 0 else None,
+        ),
+        patch(
+            "ltvm_pkg.shmrdma_req.refusal",
+            side_effect=lambda f, **k: (
+                "refusal"
+                if "--shmrdma" in flags and "--numa-nodes" not in flags
+                else None
+            ),
+        ),
+        patch.object(vm_cluster, "_create_one_node") as create,
+        patch.object(vm_cluster, "_require_cluster_memory") as memory,
+    ):
+        rc = ns.func(ns)
+    assert rc != 0
+    create.assert_not_called()
+    memory.assert_not_called()
+    out = capsys.readouterr()
+    assert refused in out.out + out.err

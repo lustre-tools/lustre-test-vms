@@ -461,6 +461,16 @@ def is_running(vm: VMInfo) -> bool:
 SHMRDMAD_MAX_REGIONS = 8
 
 
+def shared_numa_problem(nodes: int) -> str | None:
+    """Why shmrdmad cannot map a VM of *nodes* NUMA nodes, or None."""
+    if nodes + 1 > SHMRDMAD_MAX_REGIONS:
+        return (
+            f"--numa-nodes {nodes} with --shmrdma or a shmnet NIC: "
+            f"shmrdmad maps at most {SHMRDMAD_MAX_REGIONS - 1} nodes"
+        )
+    return None
+
+
 def numa_problem(
     vcpus: int, mem: int, nodes: int, shared: bool = False
 ) -> str | None:
@@ -469,11 +479,8 @@ def numa_problem(
         return f"--numa-nodes must be >= 0 (got {nodes})"
     if nodes <= 1:
         return None
-    if shared and nodes + 1 > SHMRDMAD_MAX_REGIONS:
-        return (
-            f"--numa-nodes {nodes} with --shmrdma or a shmnet NIC: "
-            f"shmrdmad maps at most {SHMRDMAD_MAX_REGIONS - 1} nodes"
-        )
+    if shared and (problem := shared_numa_problem(nodes)):
+        return problem
     if vcpus % nodes:
         return f"--numa-nodes {nodes} must divide the {vcpus} vCPUs evenly"
     if mem // nodes < 128:
