@@ -4064,8 +4064,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     # Running VMs whose shmrdmad is gone: their shmrdma device and
     # shmnet NICs are dead until each VM restarts and starts it again.
-    shm = shmrdma.daemon(create=False)
-    if not shm.pid():
+    try:
+        shm: shmrdma.Daemon | None = shmrdma.daemon(create=False)
+    except (KeyError, OSError, RuntimeError):
+        # a uid with no passwd entry (a container) has no daemon dir
+        shm = None
+    if shm is not None and not shm.pid():
         orphans = shmrdma.attached_vms(shm)
         if orphans:
             print(
