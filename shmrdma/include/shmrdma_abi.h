@@ -86,7 +86,8 @@ struct shmrdma_ring_desc {
 struct shmrdma_dev_shared {
 	/* written by the backend */
 	__u32 eq_prod;
-	__u32 pad0[15];
+	__u32 eq_lost;		/* 1: an EQE did not fit; the guest clears it */
+	__u32 pad0[14];
 	/* written by the guest */
 	__u32 eq_cons;
 	__u32 eq_armed;		/* 1: guest wants an interrupt for new EQEs */

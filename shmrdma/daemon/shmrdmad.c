@@ -640,17 +640,23 @@ static void dev_send_irq(struct vdev *d)
 	vq_signal(q);
 }
 
+/* an EQE the guest has not read is never overwritten: it is told instead */
 static void dev_raise_eq(struct vdev *d, uint32_t cqn, uint32_t type)
 {
 	if (!d->eq)
 		return;
 	plat_spin_lock(&d->evq_lock);
-	struct shmrdma_eqe *e = &d->eq[d->eq_prod & (d->eq_entries - 1)];
+	if (d->eq_prod - ACQ(&d->shared->eq_cons) >= d->eq_entries) {
+		REL(&d->shared->eq_lost, 1);
+	} else {
+		struct shmrdma_eqe *e =
+			&d->eq[d->eq_prod & (d->eq_entries - 1)];
 
-	e->cqn = cqn;
-	e->type = type;
-	d->eq_prod++;
-	REL(&d->shared->eq_prod, d->eq_prod);
+		e->cqn = cqn;
+		e->type = type;
+		d->eq_prod++;
+		REL(&d->shared->eq_prod, d->eq_prod);
+	}
 	FENCE();
 	if (RLX(&d->shared->eq_armed)) {
 		REL(&d->shared->eq_armed, 0);
@@ -2082,6 +2088,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		d->eq = eq;
 		d->eq_entries = n;
 		d->eq_prod = RLX(&d->shared->eq_cons);
+		REL(&d->shared->eq_lost, 0);
 		d->initialized = true;
 		wunlock();
 		r->val = d->id;

@@ -187,10 +187,11 @@ static void shmrdma_ctrl_cb(struct virtqueue *vq)
 }
 
 /*
- * Stop the backend using this guest's memory: QEMU forwards the reset
- * to it and waits for its reply, and it drops every QP, CQ and MR of
- * the device first.  Memory it was given may be freed after this.
- * Caller holds ctrl_mutex.
+ * Stop the backend using this guest's memory: QEMU stops its vrings and
+ * waits for its reply, which it sends only once it has stopped using
+ * the device's QPs, CQs and MRs, and then forwards the reset, on which
+ * it drops them.  Memory it was given may be freed after this.  Caller
+ * holds ctrl_mutex.
  */
 static void shmrdma_reset_locked(struct shmrdma_dev *dev)
 {
@@ -383,6 +384,17 @@ static inline void *ring_at(struct shmrdma_ring *r, u32 idx)
 /* ---------------------------------------------------------------- */
 /* events                                                           */
 
+static bool shmrdma_cq_has_qps(struct shmrdma_cq *cq)
+{
+	unsigned long flags;
+	bool any;
+
+	spin_lock_irqsave(&cq->lock, flags);
+	any = !list_empty(&cq->sq_qps) || !list_empty(&cq->rq_qps);
+	spin_unlock_irqrestore(&cq->lock, flags);
+	return any;
+}
+
 /* caller holds eq_lock, which destroy_cq and destroy_qp take to erase */
 static void shmrdma_eqe(struct shmrdma_dev *dev, u32 n, u32 type)
 {
@@ -412,8 +424,10 @@ static void shmrdma_eqe(struct shmrdma_dev *dev, u32 n, u32 type)
 		}
 		return;
 	}
+	/* not to a CQ ib_free_cq may be freeing, or one not set up yet: the
+	 * QPs leave it under eq_lock, before it is freed */
 	cq = xa_load(&dev->cqs, n);
-	if (cq)
+	if (cq && shmrdma_cq_has_qps(cq))
 		shmrdma_cq_comp(cq);
 }
 
@@ -430,18 +444,23 @@ static bool shmrdma_eq_process(struct shmrdma_dev *dev)
 
 	for (;;) {
 		u32 prod = smp_load_acquire(&sh->eq_prod);
+		bool lost = READ_ONCE(sh->eq_lost) && xchg(&sh->eq_lost, 0);
 
 		if (prod - dev->eq_cons > SHMRDMA_EQ_ENTRIES) {
-			struct shmrdma_cq *cq;
-			unsigned long i;
-
-			/* events were overwritten: any CQ may have one */
+			/* events were overwritten */
 			dev_warn_ratelimited(&dev->vdev->dev,
 					     "EQ producer %u is %u past %u\n",
 					     prod, prod - dev->eq_cons,
 					     dev->eq_cons);
 			dev->eq_cons = prod;
-			WRITE_ONCE(sh->eq_cons, dev->eq_cons);
+			smp_store_release(&sh->eq_cons, dev->eq_cons);
+			lost = true;
+		}
+		if (lost) {
+			struct shmrdma_cq *cq;
+			unsigned long i;
+
+			/* any CQ may have an event that never came */
 			xa_for_each(&dev->cqs, i, cq)
 				if (shmrdma_cq_pending(dev, cq))
 					shmrdma_cq_comp(cq);
@@ -455,12 +474,14 @@ static bool shmrdma_eq_process(struct shmrdma_dev *dev)
 			if (!budget--)
 				return true;
 			dev->eq_cons++;
-			WRITE_ONCE(sh->eq_cons, dev->eq_cons);
+			/* the backend writes the slot once it reads this */
+			smp_store_release(&sh->eq_cons, dev->eq_cons);
 			shmrdma_eqe(dev, cqn, type);
 		}
 		WRITE_ONCE(sh->eq_armed, 1);
 		smp_mb();
-		if (dev->eq_cons == READ_ONCE(sh->eq_prod))
+		if (dev->eq_cons == READ_ONCE(sh->eq_prod) &&
+		    !READ_ONCE(sh->eq_lost))
 			return false;
 	}
 }
@@ -942,9 +963,15 @@ static int shmrdma_req_notify_cq(struct ib_cq *ibcq,
 			schedule_work(&dev->flush_work);
 		return 0;
 	}
-	if ((flags & IB_CQ_REPORT_MISSED_EVENTS) &&
-	    READ_ONCE(cq->cons) != READ_ONCE(cq->rec->prod))
-		return 1;
+	if (flags & IB_CQ_REPORT_MISSED_EVENTS) {
+		unsigned long irqf;
+		bool missed;
+
+		spin_lock_irqsave(&cq->lock, irqf);
+		missed = cq->cons != shmrdma_cq_prod(dev, cq);
+		spin_unlock_irqrestore(&cq->lock, irqf);
+		return missed;
+	}
 	return 0;
 }
 
@@ -1250,10 +1277,10 @@ static void shmrdma_qp_erase(struct shmrdma_dev *dev, struct shmrdma_qp *qp)
 
 	spin_lock_irqsave(&dev->eq_lock, flags);
 	xa_erase(&dev->qps, qp->ibqp.qp_num);
-	spin_unlock_irqrestore(&dev->eq_lock, flags);
 	shmrdma_cq_clean(qp->scq, qp);
 	if (qp->rcq != qp->scq)
 		shmrdma_cq_clean(qp->rcq, qp);
+	spin_unlock_irqrestore(&dev->eq_lock, flags);
 }
 
 static int shmrdma_destroy_qp(struct ib_qp *ibqp, struct ib_udata *udata)
