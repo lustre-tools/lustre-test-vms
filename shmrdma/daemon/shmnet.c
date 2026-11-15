@@ -236,7 +236,7 @@ enum { DLV_OK, DLV_NOBUF, DLV_DROP };
 static void vq_set_broken(struct vdev *d, struct vq *q, uint16_t ai)
 {
 	if (!q->broken)
-		LOG("dev%d: net vq%d avail %u is past %u", d->id,
+		GLOG(d, "dev%d: net vq%d avail %u is past %u", d->id,
 		    (int)(q - d->vq), ai, q->last_avail);
 	q->broken = true;
 }

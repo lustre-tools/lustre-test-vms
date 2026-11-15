@@ -336,6 +336,11 @@ struct vdev {
 	 * freeing one needs wlock. */
 	plat_spinlock_t mr_lock;
 
+	/* messages the guest can cause: a burst, then one a second */
+	plat_spinlock_t log_lock;
+	uint64_t log_t;
+	uint32_t log_tokens, log_dropped;
+
 	struct vdev *next;
 };
 
@@ -392,6 +397,16 @@ static void worker_yield(void)
 {
 	while (__atomic_load_n(&g_wwait, __ATOMIC_SEQ_CST))
 		cpu_relax();
+}
+
+/* a worker holding its mutex, between units of work */
+static void worker_let_in(struct worker *w)
+{
+	if (!__atomic_load_n(&g_wwait, __ATOMIC_SEQ_CST))
+		return;
+	pthread_mutex_unlock(&w->mtx);
+	worker_yield();
+	pthread_mutex_lock(&w->mtx);
 }
 
 static void wunlock(void)
@@ -459,6 +474,40 @@ static void worker_unwatch_all(int fd)
 	for (int i = 0; i < g_nworkers; i++)
 		worker_unwatch(&g_workers[i], fd);
 }
+
+#define GLOG_BURST	20
+
+static bool glog_ok(struct vdev *d)
+{
+	uint64_t t = now_ns();
+	uint32_t dropped = 0;
+	bool ok = false;
+
+	plat_spin_lock(&d->log_lock);
+	if (t - d->log_t >= 1000000000ull) {
+		uint64_t add = (t - d->log_t) / 1000000000ull;
+
+		d->log_tokens = add >= GLOG_BURST - d->log_tokens ? GLOG_BURST :
+				d->log_tokens + add;
+		d->log_t = t;
+	}
+	if (d->log_tokens) {
+		d->log_tokens--;
+		dropped = d->log_dropped;
+		d->log_dropped = 0;
+		ok = true;
+	} else {
+		d->log_dropped++;
+	}
+	plat_spin_unlock(&d->log_lock);
+	if (dropped)
+		LOG("dev%d: %u messages suppressed", d->id, dropped);
+	return ok;
+}
+
+#define GLOG(d, fmt, ...) do { \
+	if (glog_ok(d)) \
+		LOG(fmt, ##__VA_ARGS__); } while (0)
 
 /* ---------------------------------------------------------------- */
 /* guest memory                                                     */
@@ -575,7 +624,7 @@ static void dev_send_irq(struct vdev *d)
 	}
 	ai = ACQ(&q->avail->idx);
 	if ((uint16_t)(ai - q->last_avail) > q->num) {
-		LOG("dev%d: event vq avail %u is past %u", d->id, ai,
+		GLOG(d, "dev%d: event vq avail %u is past %u", d->id, ai,
 		    q->last_avail);
 		q->broken = true;
 	}
@@ -640,7 +689,7 @@ static void cq_post(struct cq *cq, const struct shmrdma_cqe *cqe, bool solicited
 		bool first = !cq->overflowed;
 
 		if (first)
-			LOG("dev%d cq%u overflow (prod %u cons %u)",
+			GLOG(cq->dev, "dev%d cq%u overflow (prod %u cons %u)",
 			    cq->dev->id, cq->cqn, cq->prod, cons);
 		cq->overflowed = true;
 		plat_spin_unlock(&cq->lock);
@@ -1196,7 +1245,7 @@ static bool rq_bad(struct qp *qp, uint32_t prod)
 {
 	if (prod - qp->rq_cons <= qp->rq.entries)
 		return false;
-	LOG("dev%d qp%u: rq producer %u is %u past consumer, ring holds %u",
+	GLOG(qp->dev, "dev%d qp%u: rq producer %u is %u past consumer, ring holds %u",
 	    qp->dev->id, qp->qpn, prod, prod - qp->rq_cons, qp->rq.entries);
 	qp_err_req(qp);
 	return true;
@@ -1454,7 +1503,7 @@ static int exec_reg_mr(struct qp *qp, struct shmrdma_sq_wqe *w)
 
 		if (cap - mr->cap > DEV_MR_PAGES - d->mr_pages) {
 			plat_spin_unlock(&d->mr_lock);
-			LOG("dev%d qp%u: MR page lists past %u entries, refused",
+			GLOG(d, "dev%d qp%u: MR page lists past %u entries, refused",
 			    d->id, qp->qpn, DEV_MR_PAGES);
 			return WC_LOC_QP_OP_ERR;
 		}
@@ -1630,9 +1679,16 @@ static int exec_wqe(struct qp *qp, struct shmrdma_sq_wqe *w,
 	return WC_LOC_QP_OP_ERR;
 }
 
-/* process up to budget send WQEs; returns work done */
+/* bytes one pass moves for a QP, after its first WQE */
+#define QP_PASS_BYTES	(8u << 20)
+
+/*
+ * Process up to budget send WQEs, fewer once QP_PASS_BYTES have moved or
+ * wlock() is waiting; returns work done.
+ */
 static int qp_process(struct qp *qp, int budget, bool *stalled)
 {
+	uint64_t bytes0 = qp->tx_bytes;
 	int done = 0;
 
 	if (qp->dev->dead || qp->dev->stopped)
@@ -1656,7 +1712,7 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 	uint32_t prod = ACQ(&qp->rec->sq_prod);
 
 	if (prod - qp->sq_cons > qp->sq.entries) {
-		LOG("dev%d qp%u: sq producer %u is %u past consumer, ring holds %u",
+		GLOG(qp->dev, "dev%d qp%u: sq producer %u is %u past consumer, ring holds %u",
 		    qp->dev->id, qp->qpn, prod, prod - qp->sq_cons,
 		    qp->sq.entries);
 		qp_to_err(qp);
@@ -1722,7 +1778,7 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 			cq_post(qp->scq, &c, false);
 		}
 		if (st != WC_SUCCESS && st != WC_WR_FLUSH_ERR) {
-			LOG("dev%d qp%u: wqe op %u failed status %d",
+			GLOG(qp->dev, "dev%d qp%u: wqe op %u failed status %d",
 			    qp->dev->id, qp->qpn, w->opcode, st);
 			qp_to_err(qp);
 		}
@@ -1730,6 +1786,9 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 		qp->sq_cons++;
 		REL(&qp->rec->sq_cons, qp->sq_cons);
 		done++;
+		if (qp->tx_bytes - bytes0 >= QP_PASS_BYTES ||
+		    __atomic_load_n(&g_wwait, __ATOMIC_SEQ_CST))
+			break;
 	}
 	return done;
 }
@@ -1760,11 +1819,17 @@ static void *worker_main(void *arg)
 		bool stalled = false;
 		int did = 0;
 
+		/* between queues, let a waiting wlock() in: the lists may
+		 * change under it, which costs only a queue's turn */
 		pthread_mutex_lock(&w->mtx);
-		for (int i = 0; i < w->nqps; i++)
+		for (int i = 0; i < w->nqps; i++) {
 			did += qp_process(w->qps[i], 32, &stalled);
-		for (int i = 0; i < w->nnq; i++)
+			worker_let_in(w);
+		}
+		for (int i = 0; i < w->nnq; i++) {
 			did += net_tx_process(w->nqs[i], 64, &stalled);
+			worker_let_in(w);
+		}
 		pthread_mutex_unlock(&w->mtx);
 		worker_yield();
 
@@ -2020,7 +2085,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		d->initialized = true;
 		wunlock();
 		r->val = d->id;
-		LOG("dev%d: initialized, eq %u entries", d->id, n);
+		GLOG(d, "dev%d: initialized, eq %u entries", d->id, n);
 		return 0;
 	}
 	case SHMRDMA_CMD_ADD_GID:
@@ -2033,7 +2098,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 				continue;
 			wunlock();
 			gid_str(c->gid.gid, gs, sizeof(gs));
-			LOG("dev%d: gid %s is dev%d's, refused", d->id, gs, o->id);
+			GLOG(d, "dev%d: gid %s is dev%d's, refused", d->id, gs, o->id);
 			return -EEXIST;
 		}
 		memcpy(d->gids[c->gid.index], c->gid.gid, 16);
@@ -2041,7 +2106,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		__atomic_add_fetch(&g_gen, 1, __ATOMIC_SEQ_CST);
 		wunlock();
 		gid_str(c->gid.gid, gs, sizeof(gs));
-		LOG("dev%d: gid[%u] = %s", d->id, c->gid.index, gs);
+		GLOG(d, "dev%d: gid[%u] = %s", d->id, c->gid.index, gs);
 		return 0;
 	case SHMRDMA_CMD_DEL_GID:
 		if (c->gid.index >= SHMRDMA_MAX_GID)
@@ -2255,7 +2320,7 @@ static void ctrl_process(struct vdev *d)
 		return;
 	ai = ACQ(&q->avail->idx);
 	if ((uint16_t)(ai - q->last_avail) > q->num) {
-		LOG("dev%d: ctrl vq avail %u is past %u", d->id, ai,
+		GLOG(d, "dev%d: ctrl vq avail %u is past %u", d->id, ai,
 		    q->last_avail);
 		q->broken = true;
 		return;
@@ -2305,14 +2370,14 @@ static void ctrl_process(struct vdev *d)
 		}
 		if (bad) {
 			/* the guest times out and resets the device */
-			LOG("dev%d: ctrl vq chain at head %u is invalid", d->id,
+			GLOG(d, "dev%d: ctrl vq chain at head %u is invalid", d->id,
 			    head);
 			q->broken = true;
 			break;
 		}
 		resp.status = do_cmd(d, &cmd, &resp);
 		if (resp.status)
-			LOG("dev%d: cmd %u failed %d", d->id, cmd.cmd,
+			GLOG(d, "dev%d: cmd %u failed %d", d->id, cmd.cmd,
 			    resp.status);
 		if (rp && rl >= sizeof(resp))
 			memcpy(rp, &resp, sizeof(resp));
@@ -2400,6 +2465,7 @@ static void dev_destroy(struct vdev *d)
 	free(d->mrs);
 	plat_spin_destroy(&d->mr_lock);
 	plat_spin_destroy(&d->evq_lock);
+	plat_spin_destroy(&d->log_lock);
 	free(d);
 }
 
@@ -2445,7 +2511,7 @@ static void dev_restart(struct vdev *d, struct vq *q)
 	    q->desc_ua == q->mark_desc && q->avail_ua == q->mark_avail &&
 	    q->used_ua == q->mark_used)
 		return;
-	LOG("dev%d: restarted with other vrings, state dropped", d->id);
+	GLOG(d, "dev%d: restarted with other vrings, state dropped", d->id);
 	dev_reset_state(d);
 }
 
@@ -2924,6 +2990,9 @@ static void accept_conn(int lsock, int kind)
 	}
 	plat_spin_init(&d->evq_lock);
 	plat_spin_init(&d->mr_lock);
+	plat_spin_init(&d->log_lock);
+	d->log_t = now_ns();
+	d->log_tokens = GLOG_BURST;
 	wlock();
 	d->next = g_devs;
 	g_devs = d;
