@@ -62,7 +62,7 @@ GOLDEN = [
     # A variant must not perturb the base hashes above, and must differ
     # from them.
     ("rocky9", "container", None, "mofed-24", "cc1a03c2d0fda310"),
-    ("rocky9", "image", None, "mofed-24", "c547280807d5fca8"),
+    ("rocky9", "image", None, "mofed-24", "4ef679d7f40fdfd6"),
     # An explicitly named kernel.
     ("rocky9", "kernel", "5.14-rhel9.5", None, "7a54d6d849f5ca6c"),
     ("rocky9", "image", "5.14-rhel9.5", None, "e3a3847ff99fe570"),
@@ -115,3 +115,23 @@ def test_extra_bytes_still_fold_in() -> None:
     assert tc.input_hash("kernel", extra=b"patchbytes") != tc.input_hash(
         "kernel"
     )
+
+
+def test_shmrdma_sources_skip_mofed_images(monkeypatch) -> None:
+    """A MOFED image never carries shmrdma.ko, so its sources are not an
+    input of that image; they are of the base image."""
+    from ltvm_pkg import shmrdma
+
+    base = TargetConfig("rocky9")
+    mofed = TargetConfig("rocky9", variant="mofed-24")
+    before = (
+        base.input_hash("image"),
+        mofed.input_hash("image", variant="mofed-24"),
+    )
+    monkeypatch.setattr(shmrdma, "kmod_source_hash", lambda: b"edited")
+    after = (
+        base.input_hash("image"),
+        mofed.input_hash("image", variant="mofed-24"),
+    )
+    assert before[0] != after[0]
+    assert before[1] == after[1]

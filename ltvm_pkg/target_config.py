@@ -1303,12 +1303,19 @@ class TargetConfig:
                     h.update(b"kernel:")
                     h.update(kh.encode())
             # The shmrdma guest driver is built and baked into the image
-            # (image_build), so its sources are image inputs.
-            from .shmrdma import MODPROBE_CONF, kmod_source_hash
+            # (image_build), so its sources are image inputs, except for
+            # a MOFED variant's, which image_build always leaves out.
+            # Cross-arch images leave it out too, but are hashed alike:
+            # the hash must not depend on the host that builds them.
+            mofed_v = self.variant_name if variant is None else variant
+            if mofed_v == DEFAULT_VARIANT or not self.variant(
+                mofed_v
+            ).params.get("mofed_version"):
+                from .shmrdma import MODPROBE_CONF, kmod_source_hash
 
-            h.label("shmrdma-kmod")
-            h.update(kmod_source_hash())
-            h.update(MODPROBE_CONF.encode())
+                h.label("shmrdma-kmod")
+                h.update(kmod_source_hash())
+                h.update(MODPROBE_CONF.encode())
 
         if extra:
             # For a kernel this is the Lustre tree's patch series, config
