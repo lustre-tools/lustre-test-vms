@@ -168,6 +168,12 @@ ssh co1-numa cat /sys/class/net/eth1/device/../numa_node
 The guest kernel logs "[Firmware Bug]: Overriding NUMA node" and is
 tainted (W) when the node is set; that is expected.
 
+Every virtio NIC advertises 100 Gb/s (`ethtool eth0`), so socklnd
+auto-tunes `conns_per_peer` to 4 as on a real 100G node rather than the
+1 it uses for a NIC with no speed. `--nic tcp:speed=MBPS` and
+`--eth0-speed MBPS` change it; `0` or `none` advertises nothing, which
+is what upstream CI's VMs do (sanity-lnet test_291 expects that).
+
 `--kernel-args` adds kernel boot parameters, also fixed at create time.
 The target kernels have no KASAN, but they build in SLUB debugging (and
 the Rocky ones page owner tracking), off until booted with them:

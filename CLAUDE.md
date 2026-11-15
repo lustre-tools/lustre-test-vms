@@ -1029,6 +1029,15 @@ ignores it rather than misreading `fc_nics`.  `cluster create` parses
 the specs before it makes any node and hands each node the canonical
 spelling.
 
+**NIC link speed:** every virtio-net NIC gets `speed=N,duplex=full`
+(`nic_spec.speed_device_opts`), 100000 Mbps unless the NIC's `speed=`
+key or eth0's `--eth0-speed` (`ETH0_SPEED` in the `.info`) says
+otherwise; 0 or `none` emits nothing, so the guest reports Unknown.
+socklnd sizes `conns_per_peer` from the ethtool speed and uses 1 for a
+NIC with none.  None in `NicSpec.speed` and `VMInfo.eth0_speed` means
+the default, so an older `.info` gets it at its next start.
+Passthrough takes no key: a real device reports its own.
+
 **NIC NUMA node:** `--nic tcp:node=N` (also softroce; not passthrough,
 whose device need not be ethN) gives the NIC's PCI device guest NUMA
 node N.  `nic_spec.numa_problem` refuses a node outside `--numa-nodes`

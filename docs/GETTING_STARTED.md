@@ -306,6 +306,19 @@ subnets must not overlap each other or the management subnet.
 Without `net=`, `subnet=` or `subnet6=`, existing defaults apply.
 `cluster create` accepts the same NIC values for every node.
 
+Every virtio NIC (eth0 and each `tcp` or `softroce` NIC) advertises a
+100 Gb/s link to the guest, because LNet's socklnd picks how many TCP
+connections it opens per peer (`conns_per_peer`) from the NIC's ethtool
+speed: 4 at 100G, and 1 for a NIC that reports none, which no real node
+does. `speed=MBPS` on a `--nic` sets another speed, and `--eth0-speed`
+does the same for eth0 (`vm set --eth0-speed` changes it later).
+`speed=0` (or `none`) advertises none, as upstream CI's VMs do, for
+matching their behaviour:
+
+```bash
+ltvm create co1-client --eth0-speed none --nic tcp:speed=none
+```
+
 Explicit layouts support up to eight extra NICs. A configured subnet
 uses at most its first 65,534 host addresses. IPv4 network and broadcast
 addresses and the IPv6 subnet-router anycast address are excluded.
