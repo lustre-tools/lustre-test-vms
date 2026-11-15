@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -164,6 +165,34 @@ def test_launch_refuses_without_daemon(tmp_vmdir: Path) -> None:  # noqa: F811
     with pytest.raises(SystemExit):
         vm.save()
         _run_launch(vm, _LaunchHarness())
+
+
+def test_stop_dir_only_what_the_pid_file_vouches_for(tmp_path: Path) -> None:
+    me = os.geteuid()
+    d = tmp_path / "d"
+    d.mkdir(mode=0o700)
+    link = tmp_path / "link"
+    link.symlink_to(d)
+    with (
+        patch.object(shmrdma.Daemon, "pid", side_effect=[4321, 0]),
+        patch("ltvm_pkg.shmrdma.os.kill") as kill,
+    ):
+        assert shmrdma.stop_dir(d, me) == "pid 4321"
+    kill.assert_called_once_with(4321, signal.SIGTERM)
+    with (
+        patch.object(shmrdma.Daemon, "pid", return_value=4321),
+        patch("ltvm_pkg.shmrdma.os.kill") as kill,
+    ):
+        assert shmrdma.stop_dir(d, me + 1) is None
+        assert shmrdma.stop_dir(link, me) is None
+        assert shmrdma.stop_dir(tmp_path / "none", me) is None
+    kill.assert_not_called()
+    with (
+        patch.object(shmrdma.Daemon, "pid", return_value=0),
+        patch("ltvm_pkg.shmrdma.os.kill") as kill,
+    ):
+        assert shmrdma.stop_dir(d, me) is None
+    kill.assert_not_called()
 
 
 def test_launch_refuses_a_dead_daemons_socket(

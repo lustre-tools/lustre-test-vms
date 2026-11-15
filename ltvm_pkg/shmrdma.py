@@ -898,18 +898,39 @@ def _stop_locked(d: Daemon, force: bool) -> str:
             f"devices and shmnet NICs stop working until they restart.  "
             f"Stop them first, or pass --force"
         )
-    os.kill(pid, signal.SIGTERM)
-    for _ in range(50):
-        if not d.pid():
-            break
-        time.sleep(0.1)
-    else:
-        # it may have exited, and the pid gone to another process, since
-        if d.pid() == pid:
-            os.kill(pid, signal.SIGKILL)
+    _kill(d, pid)
     for p in (d.pid_path, d.rdma_socket, d.net_socket):
         p.unlink(missing_ok=True)
     return f"stopped shmrdmad (pid {pid})"
+
+
+def _kill(d: Daemon, pid: int) -> None:
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(50):
+        if not d.pid():
+            return
+        time.sleep(0.1)
+    # it may have exited, and the pid gone to another process, since
+    if d.pid() == pid:
+        os.kill(pid, signal.SIGKILL)
+
+
+def stop_dir(d: Path, uid: int) -> str | None:
+    """Stop *uid*'s daemon whose files are in *d*, VMs or not, when its
+    pid file vouches for it; what was stopped, or None.  For uninstall,
+    possibly as root, so nothing in *d* is written."""
+    try:
+        st = os.lstat(d)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
+        return None
+    dm = Daemon("", uid, d)
+    pid = dm.pid()
+    if not pid:
+        return None
+    _kill(dm, pid)
+    return f"pid {pid}"
 
 
 def status() -> dict[str, object]:
