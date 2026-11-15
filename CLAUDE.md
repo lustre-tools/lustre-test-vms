@@ -1051,7 +1051,10 @@ otherwise; 0 or `none` emits nothing, so the guest reports Unknown.
 socklnd sizes `conns_per_peer` from the ethtool speed and uses 1 for a
 NIC with none.  None in `NicSpec.speed` and `VMInfo.eth0_speed` means
 the default, so an older `.info` gets it at its next start.
-Passthrough takes no key: a real device reports its own.
+Passthrough takes no key: a real device reports its own.  Nor does
+shmnet: the daemon does not offer `VIRTIO_NET_F_SPEED_DUPLEX`, so its
+NICs report Unknown and socklnd uses one connection per peer unless
+`conns_per_peer` is set by hand.
 
 **NIC NUMA node:** `--nic tcp:node=N` (also softroce; not passthrough,
 whose device need not be ethN) gives the NIC's PCI device guest NUMA

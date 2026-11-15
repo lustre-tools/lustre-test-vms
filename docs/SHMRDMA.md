@@ -343,11 +343,25 @@ device stays dead until the module is reloaded or the VM reboots.  A
 daemon that is merely paused costs nothing until a control command
 times out: data traffic needs none.
 
+Nothing tells the guest that the daemon has gone: QEMU sends no notice
+of a closed socket, so the guest finds out only at its next control
+command.  Traffic in flight just stops, and with o2iblnd that command
+usually comes when its transmit timeout (60 s) tears the connection
+down, so the device is reported dead about 90 s after the daemon went.
+Unload LNet before shmrdma, as `lustre_rmmod` does: o2iblnd cannot let
+a device go under it, and removing shmrdma first leaves both stuck in
+`cma_remove_one`.
+
 **shmnet** is the same daemon on a second socket. QEMU uses `-netdev
 vhost-user` with a standard `virtio-net-pci` (mergeable RX buffers,
 TSO4/6, checksum offload). The daemon learns MACs from transmitted
 frames, floods broadcasts and unknown destinations, and copies each
 frame with its virtio-net header into the destination's RX buffers.
+A GSO frame passed on whole must be TCP over the IP version its header
+names, with a partial checksum at the TCP header, or it is dropped,
+since the receiving kernel trusts that header.  RX buffers must be 256
+bytes or more (Linux posts 1518 or more); a smaller one breaks the
+queue.
 A destination without receive TSO gets a TCP GSO frame as MSS-sized
 segments instead: headers copied per segment, IPv4 length, id and
 header checksum, IPv6 payload length and TCP sequence fixed up, FIN
