@@ -90,6 +90,7 @@ enum {
 #define MAX_VQS			(2 * NET_MAX_QP)
 #define PF_MQ			(1ull << 0)
 #define PF_REPLY_ACK		(1ull << 3)
+#define PF_RESET_DEVICE		(1ull << 13)
 
 struct vu_hdr {
 	uint32_t request;
@@ -181,8 +182,19 @@ struct vring_used {
 /* ---------------------------------------------------------------- */
 /* objects                                                          */
 
+enum { EP_LISTEN = 1, EP_SOCK, EP_KICK, EP_LISTEN_NET };
+
+struct vdev;
+
+struct ep_tag {
+	int kind;
+	struct vdev *d;
+	int vq;
+};
+
 struct mapping {
-	uint64_t gpa, size, uaddr;
+	uint64_t gpa, size, uaddr, offset;
+	uint64_t st_dev, st_ino;	/* the file it maps */
 	uint8_t *hva;		/* hva of gpa */
 	void *map_base;
 	size_t map_len;
@@ -204,6 +216,12 @@ struct vq {
 	bool signalled_valid;
 	uint16_t signalled_used;
 	bool broken;		/* guest index past the ring; stopped until reset */
+	/* what GET_VRING_BASE left, while its device is stopped */
+	bool mark;
+	uint32_t mark_num;
+	uint16_t mark_base;
+	uint64_t mark_desc, mark_avail, mark_used;
+	struct ep_tag kick_tag;
 };
 
 struct ring {
@@ -219,8 +237,6 @@ static inline void *ring_entry(struct ring *r, uint32_t idx)
 
 	return r->pages[off >> 12] + (off & 4095);
 }
-
-struct vdev;
 
 struct cq {
 	struct vdev *dev;
@@ -286,7 +302,11 @@ struct vdev {
 	int sock;
 	int kind;
 	struct netport *port;
+	struct ep_tag sock_tag;
 	bool dead;
+	/* QEMU stopped it (GET_VRING_BASE): nothing touches its memory
+	 * until its rings come back as they were */
+	bool stopped;
 	uint64_t features;
 	uint64_t pfeatures;
 	int nmap;
@@ -547,10 +567,9 @@ static bool vq_ready(struct vq *q)
 static void dev_send_irq(struct vdev *d)
 {
 	struct vq *q = &d->vq[SHMRDMA_VQ_EVENT];
-
 	uint16_t ai;
 
-	if (!vq_ready(q) || q->broken) {
+	if (d->stopped || !vq_ready(q) || q->broken) {
 		d->irq_pending = true;
 		return;
 	}
@@ -1236,7 +1255,7 @@ static int exec_ud_send(struct qp *qp, struct shmrdma_sq_wqe *w,
 		    qp->dev->id, qp->qpn);
 		return WC_SUCCESS;
 	}
-	if (!pd || w->ud.dqpn >= SHMRDMA_MAX_QP)
+	if (!pd || pd->stopped || w->ud.dqpn >= SHMRDMA_MAX_QP)
 		return WC_SUCCESS;	/* dropped, as on a wire */
 	peer = pd->qps[w->ud.dqpn];
 	if (!peer || peer->type == SHMRDMA_QPT_RC ||
@@ -1494,6 +1513,8 @@ static int exec_wqe(struct qp *qp, struct shmrdma_sq_wqe *w,
 		peer = qp_peer(qp);
 		if (!peer_ok(qp, peer))
 			return WC_RETRY_EXC_ERR;
+		if (peer->dev->stopped)
+			return -1;
 		rc = deliver_recv(qp, peer, w, sge, true);
 		if (rc < 0)
 			return -1;
@@ -1512,6 +1533,8 @@ static int exec_wqe(struct qp *qp, struct shmrdma_sq_wqe *w,
 		peer = qp_peer(qp);
 		if (!peer_ok(qp, peer))
 			return WC_RETRY_EXC_ERR;
+		if (peer->dev->stopped)
+			return -1;
 		if (!(peer->access & SHMRDMA_ACC_REMOTE_WRITE))
 			return WC_REM_ACCESS_ERR;
 		uint64_t len = (w->flags & SHMRDMA_WQE_INLINE) ?
@@ -1560,6 +1583,8 @@ static int exec_wqe(struct qp *qp, struct shmrdma_sq_wqe *w,
 		peer = qp_peer(qp);
 		if (!peer_ok(qp, peer))
 			return WC_RETRY_EXC_ERR;
+		if (peer->dev->stopped)
+			return -1;
 		if (!(peer->access & SHMRDMA_ACC_REMOTE_READ))
 			return WC_REM_ACCESS_ERR;
 		uint64_t len = sg_total(sge, w->num_sge);
@@ -1610,7 +1635,7 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 {
 	int done = 0;
 
-	if (qp->dev->dead)
+	if (qp->dev->dead || qp->dev->stopped)
 		return 0;
 	if (RLX(&qp->err_req) && __atomic_exchange_n(&qp->err_req, 0,
 						     __ATOMIC_SEQ_CST))
@@ -1712,7 +1737,7 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 /* work qp_process() would do now; a stalled QP waits for the poll timeout */
 static bool qp_has_work(struct qp *qp)
 {
-	if (qp->dev->dead)
+	if (qp->dev->dead || qp->dev->stopped)
 		return false;
 	if (__atomic_load_n(&qp->err_req, __ATOMIC_SEQ_CST))
 		return true;
@@ -1761,7 +1786,8 @@ static void *worker_main(void *arg)
 		pthread_mutex_lock(&w->mtx);
 		__atomic_store_n(&w->sleeping, 1, __ATOMIC_SEQ_CST);
 		for (int i = 0; i < w->nqps; i++)
-			REL(&w->qps[i]->rec->need_kick, 1);
+			if (!w->qps[i]->dev->stopped)
+				REL(&w->qps[i]->rec->need_kick, 1);
 		for (int i = 0; i < w->nnq; i++)
 			net_set_notify(w->nqs[i], true);
 		FENCE();
@@ -1785,7 +1811,8 @@ static void *worker_main(void *arg)
 		__atomic_store_n(&w->sleeping, 0, __ATOMIC_SEQ_CST);
 		pthread_mutex_lock(&w->mtx);
 		for (int i = 0; i < w->nqps; i++)
-			REL(&w->qps[i]->rec->need_kick, 0);
+			if (!w->qps[i]->dev->stopped)
+				REL(&w->qps[i]->rec->need_kick, 0);
 		for (int i = 0; i < w->nnq; i++)
 			net_set_notify(w->nqs[i], false);
 		pthread_mutex_unlock(&w->mtx);
@@ -1937,6 +1964,9 @@ static void dev_reset_state(struct vdev *d)
 	d->nold = 0;
 	d->eq_prod = 0;
 	d->irq_pending = false;
+	d->stopped = false;
+	for (int i = 0; i < MAX_VQS; i++)
+		d->vq[i].mark = false;
 	__atomic_add_fetch(&g_gen, 1, __ATOMIC_SEQ_CST);
 }
 
@@ -2221,7 +2251,7 @@ static void ctrl_process(struct vdev *d)
 	bool any = false;
 	uint16_t ai;
 
-	if (!vq_ready(q) || q->broken)
+	if (d->stopped || !vq_ready(q) || q->broken)
 		return;
 	ai = ACQ(&q->avail->idx);
 	if ((uint16_t)(ai - q->last_avail) > q->num) {
@@ -2296,28 +2326,14 @@ static void ctrl_process(struct vdev *d)
 /* ---------------------------------------------------------------- */
 /* vhost-user message handling                                      */
 
-enum { EP_LISTEN = 1, EP_SOCK, EP_KICK, EP_LISTEN_NET };
-
-struct ep_tag {
-	int kind;
-	struct vdev *d;
-	int vq;
-};
-
-static int ep_add(int fd, int kind, struct vdev *d, int vq)
+/* t lives as long as its device, or for ever */
+static int ep_add(int fd, struct ep_tag *t, int kind, struct vdev *d, int vq)
 {
-	struct ep_tag *t = calloc(1, sizeof(*t));
-
-	if (!t) {
-		LOG("poller add %d: out of memory", fd);
-		return -1;
-	}
 	t->kind = kind;
 	t->d = d;
 	t->vq = vq;
 	if (plat_poller_add(g_epfd, fd, t, false)) {
 		LOG("poller add %d: %s", fd, strerror(errno));
-		free(t);
 		return -1;
 	}
 	return 0;
@@ -2325,7 +2341,6 @@ static int ep_add(int fd, int kind, struct vdev *d, int vq)
 
 static void ep_del(int fd)
 {
-	/* the tag leaks; there are few */
 	plat_poller_del(g_epfd, fd);
 }
 
@@ -2402,12 +2417,74 @@ static int vu_reply(struct vdev *d, uint32_t req, const void *p, uint32_t sz)
 	return send(d->sock, &m, sizeof(m.h) + sz, PLAT_MSG_NOSIGNAL) < 0 ? -1 : 0;
 }
 
+/*
+ * QEMU stops the vrings for a VM stop and for the guest's reset alike;
+ * only a reset follows with RESET_DEVICE.  So a stop keeps the state,
+ * and nothing may touch the guest's memory until the rings come back
+ * exactly as they were.  Caller holds wlock.
+ */
+static void dev_stop(struct vdev *d, struct vq *q)
+{
+	if (!d->stopped) {
+		d->stopped = true;
+		for (int i = 0; i < MAX_VQS; i++)
+			d->vq[i].mark = false;
+	}
+	q->mark = true;
+	q->mark_num = q->num;
+	q->mark_base = q->last_avail;
+	q->mark_desc = q->desc_ua;
+	q->mark_avail = q->avail_ua;
+	q->mark_used = q->used_ua;
+}
+
+/* a stopped device's vring q is started again; caller holds wlock */
+static void dev_restart(struct vdev *d, struct vq *q)
+{
+	if (q->mark && q->num == q->mark_num && q->last_avail == q->mark_base &&
+	    q->desc_ua == q->mark_desc && q->avail_ua == q->mark_avail &&
+	    q->used_ua == q->mark_used)
+		return;
+	LOG("dev%d: restarted with other vrings, state dropped", d->id);
+	dev_reset_state(d);
+}
+
+/* carry on once every stopped vring is running again */
+static void dev_resume(struct vdev *d)
+{
+	bool resumed = false;
+
+	wlock();
+	if (d->stopped) {
+		resumed = true;
+		for (int i = 0; i < MAX_VQS; i++)
+			if (d->vq[i].mark && !vq_ready(&d->vq[i]))
+				resumed = false;
+		if (resumed) {
+			d->stopped = false;
+			for (int i = 0; i < MAX_VQS; i++)
+				d->vq[i].mark = false;
+		}
+	}
+	wunlock();
+	if (resumed) {
+		LOG("dev%d: resumed", d->id);
+		plat_spin_lock(&d->evq_lock);
+		if (d->irq_pending)
+			dev_send_irq(d);
+		plat_spin_unlock(&d->evq_lock);
+		wake_workers_for(d);
+	}
+	ctrl_process(d);
+}
+
 static int vq_map(struct vdev *d, struct vq *q);
 
 /* closes every fd it is given */
 static int set_mem_table(struct vdev *d, struct vu_memtab *mt, int *fds, int nfds)
 {
 	struct mapping nm[VU_MAX_REGIONS];
+	bool same;
 
 	if (mt->nregions > VU_MAX_REGIONS || (int)mt->nregions != nfds) {
 		LOG("dev%d: bad mem table (%u regions, %d fds)", d->id,
@@ -2415,6 +2492,25 @@ static int set_mem_table(struct vdev *d, struct vu_memtab *mt, int *fds, int nfd
 		for (int i = 0; i < nfds; i++)
 			close(fds[i]);
 		return -1;
+	}
+	/* QEMU resends the table on every restart: a VM stop and cont must
+	 * not use up the old maps kept below */
+	same = (int)mt->nregions == d->nmap;
+	for (uint32_t i = 0; i < mt->nregions && same; i++) {
+		struct vu_region *r = &mt->r[i];
+		struct stat st;
+
+		same = !fstat(fds[i], &st) && r->gpa == d->map[i].gpa &&
+		       r->size == d->map[i].size &&
+		       r->uaddr == d->map[i].uaddr &&
+		       r->mmap_offset == d->map[i].offset &&
+		       (uint64_t)st.st_dev == d->map[i].st_dev &&
+		       (uint64_t)st.st_ino == d->map[i].st_ino;
+	}
+	if (same) {
+		for (int i = 0; i < nfds; i++)
+			close(fds[i]);
+		return 0;
 	}
 	memset(nm, 0, sizeof(nm));
 	for (uint32_t i = 0; i < mt->nregions; i++) {
@@ -2443,6 +2539,9 @@ static int set_mem_table(struct vdev *d, struct vu_memtab *mt, int *fds, int nfd
 		nm[i].gpa = r->gpa;
 		nm[i].size = r->size;
 		nm[i].uaddr = r->uaddr;
+		nm[i].offset = r->mmap_offset;
+		nm[i].st_dev = st.st_dev;
+		nm[i].st_ino = st.st_ino;
 		nm[i].map_base = p;
 		nm[i].map_len = len;
 		nm[i].hva = (uint8_t *)p + r->mmap_offset;
@@ -2564,7 +2663,9 @@ static int handle_msg(struct vdev *d)
 			d->vq[i].event_idx = d->features & F_RING_EVENT_IDX;
 		break;
 	case VU_GET_PROTOCOL_FEATURES: {
-		uint64_t f = PF_MQ | PF_REPLY_ACK;
+		/* RESET_DEVICE tells a guest's reset from a VM stop */
+		uint64_t f = PF_MQ | PF_REPLY_ACK |
+			     (d->kind == KIND_RDMA ? PF_RESET_DEVICE : 0);
 
 		rc = vu_reply(d, h.request, &f, 8);
 		need_ack = false;
@@ -2658,8 +2759,8 @@ static int handle_msg(struct vdev *d)
 		wlock();
 		if (d->port)
 			net_detach(d);
-		else if (st.index == SHMRDMA_VQ_CTRL)
-			dev_reset_state(d);	/* device stopped/reset */
+		else
+			dev_stop(d, &d->vq[st.index]);
 		plat_spin_lock(&d->evq_lock);
 		vq_stop(d, st.index);
 		plat_spin_unlock(&d->evq_lock);
@@ -2736,7 +2837,7 @@ static int handle_msg(struct vdev *d)
 							worker_watch(w, fd);
 					}
 				} else {
-					ep_add(fd, EP_KICK, d, idx);
+					ep_add(fd, &q->kick_tag, EP_KICK, d, idx);
 				}
 			}
 			wlock();
@@ -2749,13 +2850,15 @@ static int handle_msg(struct vdev *d)
 					net_attach(d);
 				if (d->port->attached)
 					netq_serve(&d->port->q[idx / 2]);
+			} else if (d->stopped) {
+				dev_restart(d, q);
 			}
 			wunlock();
 			/* catch anything posted before we listened */
 			if (d->kind == KIND_NET)
 				wake_workers_for(d);
-			else if (idx == SHMRDMA_VQ_CTRL)
-				ctrl_process(d);
+			else
+				dev_resume(d);
 		}
 		break;
 	}
@@ -2775,9 +2878,8 @@ static int handle_msg(struct vdev *d)
 				netq_unserve(nq);
 		}
 		wunlock();
-		if (d->kind == KIND_RDMA &&
-		    pl->state.index == SHMRDMA_VQ_CTRL && pl->state.num)
-			ctrl_process(d);
+		if (d->kind == KIND_RDMA && pl->state.num)
+			dev_resume(d);
 		if (d->kind == KIND_NET && pl->state.num)
 			wake_workers_for(d);
 		break;
@@ -2827,7 +2929,8 @@ static void accept_conn(int lsock, int kind)
 	g_devs = d;
 	wunlock();
 	LOG("dev%d: %s connected", d->id, kind == KIND_NET ? "net" : "rdma");
-	if ((kind == KIND_NET && net_port_new(d)) || ep_add(s, EP_SOCK, d, 0))
+	if ((kind == KIND_NET && net_port_new(d)) ||
+	    ep_add(s, &d->sock_tag, EP_SOCK, d, 0))
 		dev_destroy(d);
 }
 
@@ -2966,6 +3069,7 @@ int main(int argc, char **argv)
 	}
 
 	struct sockaddr_un sa = { .sun_family = AF_UNIX };
+	static struct ep_tag listen_tag, listen_net_tag;
 
 	/* The sockets hand out guest RAM: only this user (and root) may
 	 * connect, from the moment they exist.
@@ -2981,7 +3085,7 @@ int main(int argc, char **argv)
 	}
 	chmod(g_sock_path, 0600);
 	g_epfd = plat_poller_new();
-	ep_add(g_lsock, EP_LISTEN, NULL, 0);
+	ep_add(g_lsock, &listen_tag, EP_LISTEN, NULL, 0);
 	if (*g_net_sock_path) {
 		struct sockaddr_un na = { .sun_family = AF_UNIX };
 
@@ -2994,7 +3098,7 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		chmod(g_net_sock_path, 0600);
-		ep_add(g_lsock_net, EP_LISTEN_NET, NULL, 0);
+		ep_add(g_lsock_net, &listen_net_tag, EP_LISTEN_NET, NULL, 0);
 		LOG("net switch on %s", g_net_sock_path);
 	}
 	LOG("listening on %s, %d workers, %d copiers, spin %" PRIu64 " us",
@@ -3020,6 +3124,8 @@ int main(int argc, char **argv)
 		for (int i = 0; i < n; i++) {
 			struct ep_tag *t = evs[i].tag;
 
+			if (!t)
+				continue;
 			switch (t->kind) {
 			case EP_LISTEN:
 				accept_conn(g_lsock, KIND_RDMA);
@@ -3032,12 +3138,12 @@ int main(int argc, char **argv)
 				    handle_msg(t->d)) {
 					struct vdev *d = t->d;
 
-					/* stale tags for d's fds may follow */
+					/* d's tags go with it: drop its events */
 					for (int j = i + 1; j < n; j++) {
 						struct ep_tag *u = evs[j].tag;
 
-						if (u->d == d)
-							u->kind = 0;
+						if (u && u->d == d)
+							evs[j].tag = NULL;
 					}
 					dev_destroy(d);
 				}
