@@ -324,6 +324,7 @@ static uint64_t g_split_min = 256 << 10;	/* split copies at least this big */
 static uint64_t g_part_min = 128 << 10;	/* into parts at least this big */
 static uint64_t g_nt_min = 64 << 10;	/* non-temporal stores from here */
 static uint64_t g_net_nt_min = 16 << 10;	/* the same for shmnet frames */
+static uint64_t g_net_part_min = 30 << 10;	/* split frames into these */
 static int g_lsock;
 
 /* writer lock: hold every worker's mutex */
@@ -744,8 +745,16 @@ static void sg_skip(struct sg_iter *it, uint64_t n)
  * mutex until every part is done, so teardown (wlock) cannot unmap
  * guest memory under a helper.
  */
+struct copy_span {
+	uint8_t *dst;
+	const uint8_t *src;
+	uint64_t len;
+};
+
 struct copy_job {
 	struct sg_iter dst, src;	/* positioned at the start */
+	const struct copy_span *spans;	/* instead of dst and src */
+	int nspans;
 	uint64_t len;
 	uint32_t nparts;
 	uint32_t next;			/* next part to claim */
@@ -758,6 +767,7 @@ static pthread_mutex_t g_cp_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cp_cond = PTHREAD_COND_INITIALIZER;
 static struct copy_job *g_cp_queue;
 static int g_cp_sleepers;
+static int g_cp_spinning;	/* copiers polling g_cp_queue */
 
 static void part_range(struct copy_job *j, uint32_t i, uint64_t *off,
 		       uint64_t *len)
@@ -769,12 +779,38 @@ static void part_range(struct copy_job *j, uint32_t i, uint64_t *off,
 	*len = (i == j->nparts - 1) ? j->len - start : per;
 }
 
+/* bytes [off, off + len) of a span list */
+static void run_spans(struct copy_job *j, uint64_t off, uint64_t len)
+{
+	bool nt = j->len >= g_net_nt_min;
+	int k = 0;
+
+	while (k < j->nspans && off >= j->spans[k].len)
+		off -= j->spans[k++].len;
+	for (; len && k < j->nspans; k++, off = 0) {
+		uint64_t n = j->spans[k].len - off;
+
+		if (n > len)
+			n = len;
+		copy_bytes(j->spans[k].dst + off, j->spans[k].src + off, n,
+			   nt);
+		len -= n;
+	}
+	if (nt)
+		plat_nt_fence();
+}
+
 static void run_part(struct copy_job *j, uint32_t i)
 {
 	struct sg_iter d = j->dst, s = j->src;
 	uint64_t off, len;
 
 	part_range(j, i, &off, &len);
+	if (j->spans) {
+		run_spans(j, off, len);
+		__atomic_add_fetch(&j->done, 1, __ATOMIC_RELEASE);
+		return;
+	}
 	sg_skip(&d, off);
 	sg_skip(&s, off);
 	if (sg_copy_nt(&d, &s, len, j->len >= g_nt_min)) {
@@ -812,8 +848,10 @@ static void *copier_main(void *arg)
 		uint64_t t0 = now_ns();
 
 		/* spin a little before sleeping: jobs come in bursts */
+		__atomic_add_fetch(&g_cp_spinning, 1, __ATOMIC_SEQ_CST);
 		while (!ACQ(&g_cp_queue) && now_ns() - t0 < 50000)
 			cpu_relax();
+		__atomic_sub_fetch(&g_cp_spinning, 1, __ATOMIC_SEQ_CST);
 		pthread_mutex_lock(&g_cp_lock);
 		while (!(j = cp_claim(&part))) {
 			g_cp_sleepers++;
@@ -826,6 +864,53 @@ static void *copier_main(void *arg)
 	return NULL;
 }
 
+/* run j's parts on the helpers and this thread; returns when all are done */
+static void cp_run(struct copy_job *j)
+{
+	uint32_t part;
+
+	pthread_mutex_lock(&g_cp_lock);
+	j->qnext = g_cp_queue;
+	g_cp_queue = j;
+	j->next = 1;		/* part 0 is ours */
+	if (j->spans) {
+		/* one per frame: wake only the helpers the spinning ones
+		 * do not cover; this thread runs any part left unclaimed */
+		int wake = (int)j->nparts - 1 - RLX(&g_cp_spinning);
+
+		if (wake > g_cp_sleepers)
+			wake = g_cp_sleepers;
+		while (wake-- > 0)
+			pthread_cond_signal(&g_cp_cond);
+	} else if (g_cp_sleepers) {
+		pthread_cond_broadcast(&g_cp_cond);
+	}
+	pthread_mutex_unlock(&g_cp_lock);
+	run_part(j, 0);
+	/* help with our own job, then wait for the rest */
+	for (;;) {
+		pthread_mutex_lock(&g_cp_lock);
+		if (j->next < j->nparts) {
+			part = j->next++;
+			if (j->next == j->nparts) {
+				for (struct copy_job **pp = &g_cp_queue; *pp;
+				     pp = &(*pp)->qnext)
+					if (*pp == j) {
+						*pp = j->qnext;
+						break;
+					}
+			}
+			pthread_mutex_unlock(&g_cp_lock);
+			run_part(j, part);
+			continue;
+		}
+		pthread_mutex_unlock(&g_cp_lock);
+		break;
+	}
+	while (ACQ(&j->done) < j->nparts)
+		cpu_relax();
+}
+
 /* copy, splitting across the helpers when it is large */
 static int sg_copy_par(struct sg_iter *dst, struct sg_iter *src, uint64_t len)
 {
@@ -834,43 +919,13 @@ static int sg_copy_par(struct sg_iter *dst, struct sg_iter *src, uint64_t len)
 
 	struct copy_job j = { .dst = *dst, .src = *src, .len = len };
 	uint32_t n = len / g_part_min;
-	uint32_t part;
 
 	if (n > (uint32_t)g_ncopiers + 1)
 		n = g_ncopiers + 1;
 	if (n < 2)
 		return sg_copy_nt(dst, src, len, len >= g_nt_min);
 	j.nparts = n;
-	pthread_mutex_lock(&g_cp_lock);
-	j.qnext = g_cp_queue;
-	g_cp_queue = &j;
-	j.next = 1;		/* part 0 is ours */
-	if (g_cp_sleepers)
-		pthread_cond_broadcast(&g_cp_cond);
-	pthread_mutex_unlock(&g_cp_lock);
-	run_part(&j, 0);
-	/* help with our own job, then wait for the rest */
-	for (;;) {
-		pthread_mutex_lock(&g_cp_lock);
-		if (j.next < j.nparts) {
-			part = j.next++;
-			if (j.next == j.nparts) {
-				for (struct copy_job **pp = &g_cp_queue; *pp;
-				     pp = &(*pp)->qnext)
-					if (*pp == &j) {
-						*pp = j.qnext;
-						break;
-					}
-			}
-			pthread_mutex_unlock(&g_cp_lock);
-			run_part(&j, part);
-			continue;
-		}
-		pthread_mutex_unlock(&g_cp_lock);
-		break;
-	}
-	while (ACQ(&j.done) < j.nparts)
-		cpu_relax();
+	cp_run(&j);
 	if (j.src_err || j.dst_err) {
 		src->err = j.src_err;
 		dst->err = j.dst_err;
@@ -2433,6 +2488,7 @@ int main(int argc, char **argv)
 	if (g_nworkers < 1)
 		g_nworkers = 1;
 	plat_init();
+
 	signal(SIGPIPE, SIG_IGN);
 	signal(SIGUSR1, on_usr1);
 	setvbuf(stderr, NULL, _IOLBF, 0);
