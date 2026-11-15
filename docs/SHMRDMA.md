@@ -264,7 +264,12 @@ memcpy speed: about 10 GB/s on an i7-14700 and only 3 to 5 GB/s on an
 EPYC 7551. Copies of 256 KB or more are therefore split into parts that
 copier threads run in parallel. Copies of 64 KB or more use
 non-temporal stores, since the destination is another guest's buffer
-that will not be in cache.
+that will not be in cache.  shmnet copies frames of 16 KB or more the
+same way, and a 64 KB frame with more queued behind it on its TX queue
+is split between the worker and one copier, then published once both
+halves are done, so a flow's frames stay in order.  On Sookie that
+took socklnd with conns_per_peer=4 from 2.6-3.8 to 3.6-4.1 GB/s and
+four iperf3 streams from 28 to 42 Gbit/s.
 
 **Failure handling.** A send to a QP that is gone or not connected
 completes with `RETRY_EXC_ERR` and moves the QP to error, which is how
