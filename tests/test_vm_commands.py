@@ -1213,6 +1213,23 @@ class TestCmdLlmount:
         assert args_passed[1] == 1  # mdt_disks
         assert args_passed[2] == 3  # ost_disks
 
+    def test_own_lnet_written_for_a_shmrdma_vm(self, tmp_vmdir: Path) -> None:
+        vm = _seed_vm_files(tmp_vmdir, "live")
+        args = argparse.Namespace(name="live", timeout=300, cleanup=False)
+        r = MagicMock(returncode=0, stdout="", stderr="")
+        for shm, called in (("", False), ("auto", True)):
+            vm.shmrdma = shm
+            vm.save()
+            with (
+                patch("ltvm_pkg.vm_commands.is_running", return_value=True),
+                patch("ltvm_pkg.vm_commands.configure_test_disks"),
+                patch("ltvm_pkg.vm_commands.configure_single_lnet") as lnet,
+                patch("ltvm_pkg.vm_commands.run_ssh", return_value=r),
+                pytest.raises(SystemExit),
+            ):
+                vm_commands.cmd_llmount(args)
+            assert lnet.called is called
+
     def test_configure_test_disks_skipped_on_cleanup(
         self, tmp_vmdir: Path
     ) -> None:

@@ -713,6 +713,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 zfs_staging=zfs_staging,
                 fstype=fstype,
                 ost_count=ost_count,
+                lnet=True,
             )
         except RuntimeError as e:
             return _error(str(e), use_json)

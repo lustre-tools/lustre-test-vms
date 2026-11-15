@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import Any
 
 from . import numa_dist, rootless, shmrdma, shmrdma_req, vm_claim
-from .deploy import configure_test_disks, premount_cleanup_script
+from .deploy import (
+    configure_single_lnet,
+    configure_test_disks,
+    premount_cleanup_script,
+    uses_own_lnet,
+)
 from .host_setup import is_macos
 from .nic_guest import wait_for_layout as guest_nic_layout
 from .nic_spec import NicSpec, NicSpecError
@@ -2186,6 +2191,8 @@ def cmd_llmount(args: argparse.Namespace) -> None:
                 disk_size_bytes=vm.disk_size,
                 os_family=os_family,
             )
+            if uses_own_lnet(vm):
+                configure_single_lnet(vm.ip, os_family=os_family)
         except (RuntimeError, subprocess.TimeoutExpired) as e:
             print(f"error: {e}", file=sys.stderr)
             sys.exit(EXIT_ERROR)
