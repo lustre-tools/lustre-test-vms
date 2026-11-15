@@ -49,7 +49,10 @@ struct shmrdma_dev {
 	struct virtqueue *ctrl_vq;
 	struct virtqueue *event_vq;
 	struct virtqueue *db_vq;
-	struct net_device *ndev;
+	/* NULL once the netdev unregisters; dropped then, not held */
+	struct net_device __rcu *ndev;
+	struct notifier_block nb;
+	bool nb_registered;
 
 	struct mutex ctrl_mutex;
 	struct completion ctrl_done;
@@ -66,6 +69,7 @@ struct shmrdma_dev {
 	struct xarray qps;
 	struct xarray cqs;
 	struct ida qpn_ida;
+	u32 next_qpn;
 	struct ida cqn_ida;
 	struct ida mr_ida;
 
@@ -201,6 +205,18 @@ out:
 	return rc;
 }
 
+/*
+ * A command that timed out may still be carried out, and the device
+ * may then use the memory it names: such memory is never freed.
+ */
+static void cmd_leak(struct shmrdma_dev *dev, const char *what, u32 n,
+		     int rc)
+{
+	dev_warn_ratelimited(&dev->vdev->dev,
+			     "%s %u: no answer from the device (%d), its memory is not freed\n",
+			     what, n, rc);
+}
+
 /* ---------------------------------------------------------------- */
 /* rings                                                            */
 
@@ -326,11 +342,15 @@ static int shmrdma_query_port(struct ib_device *ibdev, u32 port,
 			      struct ib_port_attr *attr)
 {
 	struct shmrdma_dev *dev = to_sdev(ibdev);
+	struct net_device *ndev;
 	bool up;
 
 	if (port != 1)
 		return -EINVAL;
-	up = netif_running(dev->ndev) && netif_carrier_ok(dev->ndev);
+	rcu_read_lock();
+	ndev = rcu_dereference(dev->ndev);
+	up = ndev && netif_running(ndev) && netif_carrier_ok(ndev);
+	rcu_read_unlock();
 	attr->state = up ? IB_PORT_ACTIVE : IB_PORT_DOWN;
 	attr->phys_state = up ? IB_PORT_PHYS_STATE_LINK_UP :
 				IB_PORT_PHYS_STATE_DISABLED;
@@ -476,8 +496,12 @@ static int shmrdma_create_cq(struct ib_cq *ibcq,
 
 err_xa:
 	spin_lock_irqsave(&dev->eq_lock, flags);
-	xa_erase_irq(&dev->cqs, cq->cqn);
+	xa_erase(&dev->cqs, cq->cqn);
 	spin_unlock_irqrestore(&dev->eq_lock, flags);
+	if (rc == -ETIMEDOUT) {
+		cmd_leak(dev, "create cq", cq->cqn, rc);
+		return rc;
+	}
 err_ring:
 	ring_free(&cq->ring);
 err_rec:
@@ -493,13 +517,18 @@ static int shmrdma_destroy_cq(struct ib_cq *ibcq, struct ib_udata *udata)
 	struct shmrdma_cq *cq = to_scq(ibcq);
 	struct shmrdma_cmd cmd = { .cmd = SHMRDMA_CMD_DESTROY_CQ };
 	unsigned long flags;
+	int rc;
 
 	cmd.destroy_cq.cqn = cq->cqn;
-	shmrdma_cmd(dev, &cmd, NULL);
+	rc = shmrdma_cmd(dev, &cmd, NULL);
 	/* no completion handler may run after this */
 	spin_lock_irqsave(&dev->eq_lock, flags);
 	xa_erase(&dev->cqs, cq->cqn);
 	spin_unlock_irqrestore(&dev->eq_lock, flags);
+	if (rc) {
+		cmd_leak(dev, "destroy cq", cq->cqn, rc);
+		return 0;
+	}
 	ring_free(&cq->ring);
 	kfree(cq->rec);
 	ida_free(&dev->cqn_ida, cq->cqn);
@@ -584,6 +613,27 @@ static int shmrdma_req_notify_cq(struct ib_cq *ibcq,
 /* ---------------------------------------------------------------- */
 /* queue pairs                                                      */
 
+/*
+ * Round robin, not lowest free: a QPN freed just now is still in the
+ * peer CM's timewait, which rejects a reconnect that reuses it.
+ */
+static int qpn_alloc(struct shmrdma_dev *dev)
+{
+	u32 start = READ_ONCE(dev->next_qpn);
+	int rc;
+
+	if (start < 2 || start >= SHMRDMA_MAX_QP)
+		start = 2;
+	rc = ida_alloc_range(&dev->qpn_ida, start, SHMRDMA_MAX_QP - 1,
+			     GFP_KERNEL);
+	if (rc == -ENOSPC && start > 2)
+		rc = ida_alloc_range(&dev->qpn_ida, 2, SHMRDMA_MAX_QP - 1,
+				     GFP_KERNEL);
+	if (rc >= 0)
+		WRITE_ONCE(dev->next_qpn, rc + 1);
+	return rc;
+}
+
 static int shmrdma_create_qp(struct ib_qp *ibqp,
 			     struct ib_qp_init_attr *init,
 			     struct ib_udata *udata)
@@ -628,8 +678,7 @@ static int shmrdma_create_qp(struct ib_qp *ibqp,
 	if (qp->type == SHMRDMA_QPT_GSI) {
 		qpn = 1;
 	} else {
-		rc = ida_alloc_range(&dev->qpn_ida, 2, SHMRDMA_MAX_QP - 1,
-				     GFP_KERNEL);
+		rc = qpn_alloc(dev);
 		if (rc < 0)
 			return rc;
 		qpn = rc;
@@ -684,6 +733,10 @@ static int shmrdma_create_qp(struct ib_qp *ibqp,
 
 err_xa:
 	xa_erase_irq(&dev->qps, qpn);
+	if (rc == -ETIMEDOUT) {
+		cmd_leak(dev, "create qp", qpn, rc);
+		return rc;
+	}
 err_rq:
 	ring_free(&qp->rq);
 err_sq:
@@ -805,10 +858,15 @@ static int shmrdma_destroy_qp(struct ib_qp *ibqp, struct ib_udata *udata)
 	struct shmrdma_dev *dev = to_sdev(ibqp->device);
 	struct shmrdma_qp *qp = to_sqp(ibqp);
 	struct shmrdma_cmd cmd = { .cmd = SHMRDMA_CMD_DESTROY_QP };
+	int rc;
 
 	cmd.destroy_qp.qpn = ibqp->qp_num;
-	shmrdma_cmd(dev, &cmd, NULL);
+	rc = shmrdma_cmd(dev, &cmd, NULL);
 	xa_erase_irq(&dev->qps, ibqp->qp_num);
+	if (rc) {
+		cmd_leak(dev, "destroy qp", ibqp->qp_num, rc);
+		return 0;
+	}
 	ring_free(&qp->sq);
 	ring_free(&qp->rq);
 	kfree(qp->rec);
@@ -1104,8 +1162,11 @@ static int shmrdma_dereg_mr(struct ib_mr *ibmr, struct ib_udata *udata)
 		struct shmrdma_cmd cmd = { .cmd = SHMRDMA_CMD_DEREG_MR };
 
 		cmd.dereg_mr.key = ibmr->lkey;
-		shmrdma_cmd(dev, &cmd, NULL);
-		ida_free(&dev->mr_ida, mr->index);
+		/* the device copied the page list; keep only the key taken */
+		if (shmrdma_cmd(dev, &cmd, NULL))
+			cmd_leak(dev, "dereg mr", mr->index, -EIO);
+		else
+			ida_free(&dev->mr_ida, mr->index);
 	}
 	kfree(mr->pages);
 	kfree(mr);
@@ -1183,8 +1244,36 @@ static void shmrdma_init_attr(struct shmrdma_dev *dev)
 	a->max_fast_reg_page_list_len = SHMRDMA_MAX_FRPL;
 	a->max_pkeys = 1;
 	a->local_ca_ack_delay = 15;
-	addrconf_addr_eui48((unsigned char *)&a->sys_image_guid,
-			    dev->ndev->dev_addr);
+	a->sys_image_guid = dev->ibdev.node_guid;
+}
+
+/* After the notifier is gone, or before it was registered. */
+static void shmrdma_put_ndev(struct shmrdma_dev *dev)
+{
+	struct net_device *ndev = rcu_dereference_protected(dev->ndev, 1);
+
+	RCU_INIT_POINTER(dev->ndev, NULL);
+	if (ndev)
+		dev_put(ndev);
+}
+
+/*
+ * ib_device_set_netdev()'s contract: on NETDEV_UNREGISTER, detach the
+ * netdev, or its unregistration waits forever for our references.
+ */
+static int shmrdma_netdev_event(struct notifier_block *nb,
+				unsigned long event, void *ptr)
+{
+	struct shmrdma_dev *dev = container_of(nb, struct shmrdma_dev, nb);
+	struct net_device *ndev = netdev_notifier_info_to_dev(ptr);
+
+	if (event != NETDEV_UNREGISTER || ndev != rtnl_dereference(dev->ndev))
+		return NOTIFY_DONE;
+	ib_device_set_netdev(&dev->ibdev, NULL, 1);
+	RCU_INIT_POINTER(dev->ndev, NULL);
+	synchronize_net();
+	dev_put(ndev);
+	return NOTIFY_DONE;
 }
 
 static int shmrdma_probe(struct virtio_device *vdev)
@@ -1232,7 +1321,7 @@ static int shmrdma_probe(struct virtio_device *vdev)
 		return -ENOMEM;
 	}
 	dev->vdev = vdev;
-	dev->ndev = ndev;
+	RCU_INIT_POINTER(dev->ndev, ndev);
 	vdev->priv = dev;
 	mutex_init(&dev->ctrl_mutex);
 	init_completion(&dev->ctrl_done);
@@ -1294,7 +1383,15 @@ static int shmrdma_probe(struct virtio_device *vdev)
 	addrconf_addr_eui48((unsigned char *)&dev->ibdev.node_guid,
 			    ndev->dev_addr);
 	ib_set_device_ops(&dev->ibdev, &shmrdma_dev_ops);
-	rc = ib_device_set_netdev(&dev->ibdev, ndev, 1);
+	dev->nb.notifier_call = shmrdma_netdev_event;
+	rc = register_netdevice_notifier(&dev->nb);
+	if (rc)
+		goto err_reset;
+	dev->nb_registered = true;
+	rtnl_lock();
+	ndev = rtnl_dereference(dev->ndev);
+	rc = ndev ? ib_device_set_netdev(&dev->ibdev, ndev, 1) : -ENODEV;
+	rtnl_unlock();
 	if (rc)
 		goto err_reset;
 	rc = ib_register_device(&dev->ibdev, "shmrdma%d", vdev->dev.parent);
@@ -1308,6 +1405,8 @@ static int shmrdma_probe(struct virtio_device *vdev)
 	return 0;
 
 err_reset:
+	if (dev->nb_registered)
+		unregister_netdevice_notifier(&dev->nb);
 	virtio_reset_device(vdev);
 	vdev->config->del_vqs(vdev);
 err_free:
@@ -1318,7 +1417,7 @@ err_free:
 	kfree(dev->evbufs);
 	kfree(dev->respbuf);
 	kfree(dev->cmdbuf);
-	dev_put(ndev);
+	shmrdma_put_ndev(dev);
 	ib_dealloc_device(&dev->ibdev);
 	return rc;
 }
@@ -1328,6 +1427,8 @@ static void shmrdma_remove(struct virtio_device *vdev)
 	struct shmrdma_dev *dev = vdev->priv;
 	struct shmrdma_cmd cmd = { .cmd = SHMRDMA_CMD_RESET };
 
+	if (dev->nb_registered)
+		unregister_netdevice_notifier(&dev->nb);
 	if (dev->registered)
 		ib_unregister_device(&dev->ibdev);
 	shmrdma_cmd(dev, &cmd, NULL);
@@ -1339,7 +1440,7 @@ static void shmrdma_remove(struct virtio_device *vdev)
 	kfree(dev->evbufs);
 	kfree(dev->respbuf);
 	kfree(dev->cmdbuf);
-	dev_put(dev->ndev);
+	shmrdma_put_ndev(dev);
 	ib_dealloc_device(&dev->ibdev);
 }
 
