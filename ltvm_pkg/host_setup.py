@@ -2063,8 +2063,13 @@ def podman_idle_lock() -> Iterator[bool]:
 # ltvm's own qemu-system-aarch64 for macOS on Apple Silicon.  Homebrew's
 # QEMU is built without vhost-user, which --shmrdma and --nic shmnet
 # need.  Built and packaged by shmrdma/macos/build-qemu.sh and published
-# as the GitHub release qemu-macos-<version>; bump this with a new one.
+# as the GitHub release qemu-macos-<version>; bump this with a new one,
+# and the tarball's sha256 with it: it is unpacked as root, so its sum
+# is pinned here rather than read from the release it came with.
 QEMU_MACOS_VERSION = "11.1.3-1"
+_QEMU_MACOS_SHA256 = (
+    "824be9e7ea045a6d276ec019fcfca7421e6406cc498b97a5438215465c4892ec"
+)
 _QEMU_MACOS_TAG = f"qemu-macos-{QEMU_MACOS_VERSION}"
 _QEMU_MACOS_ASSET = f"qemu-{QEMU_MACOS_VERSION}-macos-arm64.tar.gz"
 
@@ -2137,7 +2142,14 @@ def install_qemu_macos_vhost(force: bool = False) -> None:
                     f"(curl rc={r.returncode}); check access to github.com "
                     f"and retry"
                 )
-            _verify_qemu_asset(url, local, _QEMU_MACOS_ASSET)
+            actual = _sha256_file(local)
+            if actual != _QEMU_MACOS_SHA256:
+                raise RuntimeError(
+                    f"Checksum mismatch for {_QEMU_MACOS_ASSET}:\n"
+                    f"  expected {_QEMU_MACOS_SHA256}\n"
+                    f"  actual   {actual}\n"
+                    f"Refusing to extract it into {QEMU_PREFIX}."
+                )
             _prefix_run(["rm", "-rf", str(dest)])
             _prefix_run(["mkdir", "-p", str(dest)])
             _prefix_run(

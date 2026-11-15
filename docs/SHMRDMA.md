@@ -149,7 +149,8 @@ Homebrew's QEMU has no vhost-user, so ltvm publishes its own
 qemu-system-aarch64 for Apple Silicon (GitHub release
 `qemu-macos-<version>`, built by `shmrdma/macos/build-qemu.sh`, which
 lists the configure flags and the one QEMU patch).  `ltvm install` and
-`ltvm doctor --fix --shmrdma` download it, check its sha256, unpack it
+`ltvm doctor --fix --shmrdma` download it, check it against the sha256
+pinned beside `QEMU_MACOS_VERSION` in `ltvm_pkg/host_setup.py`, unpack it
 under `/opt/qemu/macos-<version>` and point
 `/opt/qemu/bin/qemu-system-aarch64` at it; Homebrew's QEMU stays for
 x86_64 guests and `qemu-img`.  It carries the few Homebrew libraries
