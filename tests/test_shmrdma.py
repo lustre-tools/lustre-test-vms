@@ -954,6 +954,39 @@ static void test_vq_chain(void)
 	/* TX: a loop of empty descriptors ends at the step budget */
 	t[0] = (struct vring_desc){ 4096, 0, VRING_DESC_F_NEXT, 0 };
 	CHECK(chain(&d, &q, false) == -1);
+	/* an indirect table needs only the 8-byte alignment kmalloc gives */
+	struct vring_desc *it = (struct vring_desc *)(mem + 8200);
+
+	it[0] = (struct vring_desc){ 4096, 10, VRING_DESC_F_NEXT, 1 };
+	it[1] = (struct vring_desc){ 4196, 10, 0, 0 };
+	t[0] = (struct vring_desc){ 8200, 2 * sizeof(*it),
+		VRING_DESC_F_INDIRECT, 0 };
+	CHECK(chain(&d, &q, false) == 2);
+	memmove(mem + 8204, it, 2 * sizeof(*it));
+	t[0].addr = 8204;
+	CHECK(chain(&d, &q, false) == -1);
+}
+
+static void test_vq_map(void)
+{
+	static uint8_t mem[1 << 16];
+	static struct vdev d;
+	struct vq q = { .desc_ua = 0x1000, .avail_ua = 0x2000,
+			.used_ua = 0x3000 };
+
+	d.nmap = 1;
+	d.map[0].size = sizeof(mem);
+	d.map[0].uaddr = 0;
+	d.map[0].hva = mem;
+	/* an address with no size maps nothing a later table could leave */
+	CHECK(vq_map(&d, &q) == -1);
+	CHECK(!q.desc && !q.avail && !q.used);
+	q.num = 8;
+	CHECK(vq_map(&d, &q) == 0);
+	CHECK(q.desc && q.avail && q.used);
+	q.used_ua = sizeof(mem) - 8;
+	CHECK(vq_map(&d, &q) == -1);
+	CHECK(!q.desc && !q.avail && !q.used);
 }
 
 static void test_mac_claim(void)
@@ -974,12 +1007,17 @@ static void test_mac_claim(void)
 	CHECK(net_claim_mac(&p2, m));
 	CHECK(p1.mac == 0 && p2.mac == mac_key(m));
 	CHECK(!net_claim_mac(&p1, m));
+	/* the holder sent after the claimer read the clock */
+	p2.mac_ns = now_ns() + 1000000;
+	CHECK(!net_claim_mac(&p1, m));
+	CHECK(p2.mac == mac_key(m));
 }
 
 int main(void)
 {
 	test_fill_csum();
 	test_vq_chain();
+	test_vq_map();
 	test_mac_claim();
 	printf("fails=%d\n", fails);
 	return fails != 0;

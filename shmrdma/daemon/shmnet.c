@@ -92,7 +92,7 @@ static struct netport *g_ports;		/* changed under wlock */
 static plat_spinlock_t g_mac_lock;	/* claiming a source MAC */
 
 /* a port that has not sent from its MAC for this long may lose it */
-#define MAC_HOLD_NS	3000000000ull
+#define MAC_HOLD_NS	3000000000ll
 /* after a hold for a receiver runs out, none for it for this long */
 #define RX_STARVE_NS	100000000ull
 
@@ -152,7 +152,7 @@ static int vq_chain(struct vdev *d, struct vq *q, uint16_t head, bool writable,
 		if (de.flags & VRING_DESC_F_INDIRECT) {
 			/* one indirect table per chain, no longer than the
 			 * queue (virtio 1.x 2.7.5.3.1) */
-			if (indirect || de.len < sizeof(de) || (de.addr & 15) ||
+			if (indirect || de.len < sizeof(de) || (de.addr & 7) ||
 			    de.len % sizeof(de) || de.len / sizeof(de) > q->num)
 				return -1;
 			tab = gpa_range(d, de.addr, de.len);
@@ -902,7 +902,7 @@ static bool net_claim_mac(struct netport *p, const uint8_t *mac)
 	bool ok = true;
 
 	if (RLX(&p->mac) == k) {
-		if (t - RLX(&p->mac_ns) > MAC_HOLD_NS / 4)
+		if ((int64_t)(t - RLX(&p->mac_ns)) > MAC_HOLD_NS / 4)
 			REL(&p->mac_ns, t);
 		return true;
 	}
@@ -910,7 +910,8 @@ static bool net_claim_mac(struct netport *p, const uint8_t *mac)
 	for (struct netport *o = g_ports; o; o = o->next) {
 		if (o == p || RLX(&o->mac) != k)
 			continue;
-		if (o->attached && t - RLX(&o->mac_ns) < MAC_HOLD_NS)
+		if (o->attached &&
+		    (int64_t)(t - RLX(&o->mac_ns)) < MAC_HOLD_NS)
 			ok = false;
 		else
 			REL(&o->mac, 0);
