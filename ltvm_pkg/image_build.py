@@ -103,7 +103,13 @@ def _is_cross_build(target_config: TargetConfig) -> bool:
 
 
 def _podman_platform(target_config: TargetConfig) -> list[str]:
-    """Return --platform flag for podman if cross-arch build needed.
+    """Return the --platform flag for the image build: the target's.
+
+    Native builds pass it too.  A cross build of another target from
+    the same base image re-tags that image as the other arch, and
+    without the flag the next native build ran on it under emulation
+    with only a warning, producing an image of the wrong arch; with
+    it, podman pulls the right one back.
 
     Unlike kernel_build (which flips to host arch so its cross
     toolchain runs natively), the image build needs a target-arch
@@ -119,8 +125,6 @@ def _podman_platform(target_config: TargetConfig) -> list[str]:
     `_prebuild_tools_native`, which cross-builds IOR/iozone/e2fsprogs
     natively and COPYs them into the emulated image build).
     """
-    if not _is_cross_build(target_config):
-        return []
     from .cross_compile import podman_platform_for
 
     return ["--platform", podman_platform_for(target_config.arch)]
