@@ -2315,6 +2315,12 @@ def _cluster_rows() -> list[dict[str, Any]]:
 
 
 def cmd_list(args: argparse.Namespace) -> None:
+    # What create and start admit against, which in a container is its
+    # cgroup's memory.max rather than the host's RAM.
+    from .qemu_run import charged_mb, guest_memory_budget
+
+    budget = guest_memory_budget()
+    overcommit = budget.overcommit if budget else 1.0
     total_vcpus = 0
     total_mem = 0
     total_rss = 0
@@ -2352,7 +2358,7 @@ def cmd_list(args: argparse.Namespace) -> None:
         if status == "running":
             running_count += 1
             total_vcpus += vm.vcpus
-            total_mem += vm.mem
+            total_mem += charged_mb(vm.mem, vm.shared_ram, overcommit)
             total_rss += rss or 0
         else:
             stopped_count += 1
@@ -2395,11 +2401,6 @@ def cmd_list(args: argparse.Namespace) -> None:
 
     host_cpus = os.cpu_count() or 1
     host_mem_mb = _host_total_mem_mb()
-    # What create and start admit against, which in a container is its
-    # cgroup's memory.max rather than the host's RAM.
-    from .qemu_run import guest_memory_budget
-
-    budget = guest_memory_budget()
     mem_limit_mb = budget.limit_mb if budget else host_mem_mb
 
     if args.json:

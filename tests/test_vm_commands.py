@@ -2658,3 +2658,33 @@ class TestCmdListBudget:
         assert "cgroup memory.max 27107" in totals["mem_budget"]
         assert "mem: 6144M/24397M committed" in text
         assert "budget: cgroup memory.max 27107 MiB" in text
+
+    def test_shared_ram_vm_charged_as_admission_charges_it(
+        self, tmp_vmdir: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Regression: under overcommit list counted a shmrdma VM at its
+        -m while create and start charged it overcommit times that."""
+        from ltvm_pkg.qemu_run import MemoryBudget
+
+        VMInfo(
+            name="mem-s",
+            ip="10.0.0.9",
+            pid=42,
+            vcpus=2,
+            mem=6144,
+            shmrdma="auto",
+        ).save()
+        VMInfo(name="mem-p", ip="10.0.0.8", pid=43, vcpus=2, mem=1024).save()
+        budget = MemoryBudget(11264, "MemTotal", 1024, 2.0)
+        with (
+            patch(
+                "ltvm_pkg.vm_commands.is_running",
+                side_effect=lambda vm: vm.pid > 0,
+            ),
+            patch("ltvm_pkg.vm_commands._rss_mb", return_value=900),
+            patch("ltvm_pkg.qemu_run.guest_memory_budget", return_value=budget),
+        ):
+            vm_commands.cmd_list(argparse.Namespace(json=True))
+            totals = json.loads(capsys.readouterr().out)["totals"]
+        assert totals["mem_used_mb"] == 2 * 6144 + 1024
+        assert totals["mem_free_mb"] == budget.limit_mb - (2 * 6144 + 1024)
