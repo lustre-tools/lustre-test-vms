@@ -69,8 +69,9 @@ struct netq {
 
 struct netport {
 	struct vdev *dev;
-	uint8_t mac[6];
-	bool mac_known;
+	/* mac_key() of the address it sends from, 0 until it sends; one
+	 * word, since its TX queues learn it on several workers at once */
+	uint64_t mac;
 	bool attached;		/* on the switch */
 	plat_spinlock_t rx_lock[NET_MAX_QP];
 	struct netq q[NET_MAX_QP];
@@ -90,6 +91,23 @@ static struct netport *g_ports;		/* changed under wlock */
 static struct vdev *netq_dev(struct netq *nq)
 {
 	return nq->p->dev;
+}
+
+#define MAC_KNOWN	(1ull << 48)
+
+static uint64_t mac_key(const uint8_t *m)
+{
+	uint64_t k = MAC_KNOWN;
+
+	for (int i = 0; i < 6; i++)
+		k |= (uint64_t)m[i] << (8 * i);
+	return k;
+}
+
+static void mac_bytes(uint64_t k, uint8_t *m)
+{
+	for (int i = 0; i < 6; i++)
+		m[i] = k >> (8 * i);
 }
 static uint64_t g_net_stall_ns = 2000000;
 
@@ -791,8 +809,10 @@ bad:
 
 static struct netport *port_by_mac(const uint8_t *mac)
 {
+	uint64_t k = mac_key(mac);
+
 	for (struct netport *p = g_ports; p; p = p->next)
-		if (p->mac_known && !memcmp(p->mac, mac, 6))
+		if (RLX(&p->mac) == k)
 			return p;
 	return NULL;
 }
@@ -891,14 +911,13 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 			cur_read(&c, &h, hlen);
 			frame = c;
 			cur_read(&c, eth, 12);
-			if (!p->mac_known || memcmp(p->mac, eth + 6, 6)) {
+			if (RLX(&p->mac) != mac_key(eth + 6)) {
 				struct netport *o = port_by_mac(eth + 6);
 
 				/* another port's address is not ours to take */
 				if (o && o != p && o->attached)
 					goto drop;
-				memcpy(p->mac, eth + 6, 6);
-				p->mac_known = true;
+				REL(&p->mac, mac_key(eth + 6));
 			}
 
 			int rc = DLV_DROP;
@@ -1029,6 +1048,7 @@ static void netq_unserve(struct netq *nq)
 {
 	struct worker *w = nq->w;
 
+	nq->stall_since = 0;
 	if (!w)
 		return;
 	for (int i = 0; i < w->nnq; i++)
@@ -1048,8 +1068,12 @@ static void net_attach(struct vdev *d)
 	if (p->attached)
 		return;
 	p->attached = true;
-	for (int i = 0; i < NET_MAX_QP; i++)
+	/* a hold or a starved RX queue from before the detach is over */
+	for (int i = 0; i < NET_MAX_QP; i++) {
+		p->q[i].stall_since = 0;
+		p->q[i].rx_starved = false;
 		netq_serve(&p->q[i]);
+	}
 	LOG("dev%d: net port up, features 0x%" PRIx64, d->id, d->features);
 }
 
@@ -1063,7 +1087,7 @@ static void net_detach(struct vdev *d)
 	for (int i = 0; i < NET_MAX_QP; i++)
 		netq_unserve(&p->q[i]);
 	p->attached = false;
-	p->mac_known = false;
+	REL(&p->mac, 0);
 }
 
 static int net_port_new(struct vdev *d)
@@ -1133,12 +1157,14 @@ static void net_write_stats(void)
 	}
 	for (struct netport *p = g_ports; p; p = p->next) {
 		uint64_t ft = p->dev->features;
+		uint8_t m[6];
 
+		mac_bytes(RLX(&p->mac), m);
 		fprintf(f, "dev=%d mac=%02x:%02x:%02x:%02x:%02x:%02x "
 			"attached=%d queues=%d guest_tso4=%d guest_tso6=%d "
 			"guest_csum=%d",
-			p->dev->id, p->mac[0], p->mac[1], p->mac[2],
-			p->mac[3], p->mac[4], p->mac[5], p->attached,
+			p->dev->id, m[0], m[1], m[2], m[3], m[4], m[5],
+			p->attached,
 			p->attached ? net_rx_queues(p) : 0,
 			!!(ft & VNET_F_GUEST_TSO4), !!(ft & VNET_F_GUEST_TSO6),
 			!!(ft & VNET_F_GUEST_CSUM));

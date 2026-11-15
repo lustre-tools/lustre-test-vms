@@ -2342,6 +2342,23 @@ static void vq_stop(struct vdev *d, int idx)
 	}
 }
 
+/* forget the ring as a front end's reset does; caller holds wlock */
+static void vq_reset(struct vdev *d, int idx)
+{
+	struct vq *q = &d->vq[idx];
+
+	vq_stop(d, idx);
+	q->enabled = false;
+	q->broken = false;
+	q->desc = NULL;
+	q->avail = NULL;
+	q->used = NULL;
+	q->desc_ua = q->avail_ua = q->used_ua = 0;
+	q->num = 0;
+	q->last_avail = q->used_idx = 0;
+	q->signalled_valid = false;
+}
+
 static void dev_destroy(struct vdev *d)
 {
 	LOG("dev%d: disconnected", d->id);
@@ -2403,9 +2420,17 @@ static int set_mem_table(struct vdev *d, struct vu_memtab *mt, int *fds, int nfd
 	for (uint32_t i = 0; i < mt->nregions; i++) {
 		struct vu_region *r = &mt->r[i];
 		size_t len = r->size + r->mmap_offset;
-		void *p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED,
-			       fds[i], 0);
+		struct stat st;
+		void *p = MAP_FAILED;
 
+		/* a mapping past the end of its file faults when touched */
+		if (!r->size || r->size > SIZE_MAX - r->mmap_offset ||
+		    fstat(fds[i], &st) || st.st_size < 0 ||
+		    (uint64_t)st.st_size < len)
+			errno = EINVAL;
+		else
+			p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED,
+				 fds[i], 0);
 		close(fds[i]);
 		if (p == MAP_FAILED) {
 			LOG("dev%d: mmap region %u: %s", d->id, i,
@@ -2564,6 +2589,10 @@ static int handle_msg(struct vdev *d)
 		if (d->port)
 			net_detach(d);
 		dev_reset_state(d);
+		plat_spin_lock(&d->evq_lock);
+		for (int i = 0; i < MAX_VQS; i++)
+			vq_reset(d, i);
+		plat_spin_unlock(&d->evq_lock);
 		wunlock();
 		break;
 	case VU_SET_MEM_TABLE:
@@ -2597,14 +2626,16 @@ static int handle_msg(struct vdev *d)
 			break;
 		}
 		q = &d->vq[pl->addr.index];
+		wlock();
 		q->desc_ua = pl->addr.desc;
 		q->avail_ua = pl->addr.avail;
 		q->used_ua = pl->addr.used;
-		if (vq_map(d, q)) {
+		if (vq_map(d, q))
+			ack = 1;
+		wunlock();
+		if (ack)
 			LOG("dev%d: vq%u addresses not in guest memory", d->id,
 			    pl->addr.index);
-			ack = 1;
-		}
 		break;
 	}
 	case VU_SET_VRING_BASE:
@@ -2612,10 +2643,12 @@ static int handle_msg(struct vdev *d)
 			ack = 1;
 			break;
 		}
+		wlock();
 		d->vq[pl->state.index].last_avail = pl->state.num;
 		d->vq[pl->state.index].used_idx = pl->state.num;
 		d->vq[pl->state.index].signalled_valid = false;
 		d->vq[pl->state.index].broken = false;
+		wunlock();
 		break;
 	case VU_GET_VRING_BASE: {
 		struct vu_state st = pl->state;
@@ -2706,21 +2739,23 @@ static int handle_msg(struct vdev *d)
 					ep_add(fd, EP_KICK, d, idx);
 				}
 			}
+			wlock();
 			q->started = true;
 			if (!(d->features & F_PROTOCOL_FEATURES))
 				q->enabled = true;
-			/* catch anything posted before we listened */
 			if (d->kind == KIND_NET) {
-				wlock();
 				if (d->vq[NET_RXQ(0)].started &&
 				    d->vq[NET_TXQ(0)].started)
 					net_attach(d);
 				if (d->port->attached)
 					netq_serve(&d->port->q[idx / 2]);
-				wunlock();
-			} else if (idx == SHMRDMA_VQ_CTRL) {
-				ctrl_process(d);
 			}
+			wunlock();
+			/* catch anything posted before we listened */
+			if (d->kind == KIND_NET)
+				wake_workers_for(d);
+			else if (idx == SHMRDMA_VQ_CTRL)
+				ctrl_process(d);
 		}
 		break;
 	}
@@ -2729,22 +2764,22 @@ static int handle_msg(struct vdev *d)
 			ack = 1;
 			break;
 		}
+		wlock();
 		d->vq[pl->state.index].enabled = pl->state.num;
-		if (d->kind == KIND_RDMA &&
-		    pl->state.index == SHMRDMA_VQ_CTRL && pl->state.num)
-			ctrl_process(d);
 		if (d->kind == KIND_NET) {
 			struct netq *nq = &d->port->q[pl->state.index / 2];
 
-			wlock();
 			if (pl->state.num)
 				netq_serve(nq);
 			else if (pl->state.index & 1)
 				netq_unserve(nq);
-			wunlock();
-			if (pl->state.num)
-				wake_workers_for(d);
 		}
+		wunlock();
+		if (d->kind == KIND_RDMA &&
+		    pl->state.index == SHMRDMA_VQ_CTRL && pl->state.num)
+			ctrl_process(d);
+		if (d->kind == KIND_NET && pl->state.num)
+			wake_workers_for(d);
 		break;
 	case VU_SET_LOG_BASE:
 	case VU_SET_LOG_FD:
@@ -2844,12 +2879,15 @@ static void dump_stats(void)
 {
 	char gs[64];
 
-	for (struct netport *p = g_ports; p; p = p->next)
+	for (struct netport *p = g_ports; p; p = p->next) {
+		uint8_t m[6];
+
+		mac_bytes(RLX(&p->mac), m);
 		LOG("dev%d: net %02x:%02x:%02x:%02x:%02x:%02x tx %" PRIu64
 		    "/%" PRIu64 " rx %" PRIu64 "/%" PRIu64 " drops %" PRIu64,
-		    p->dev->id, p->mac[0], p->mac[1], p->mac[2], p->mac[3],
-		    p->mac[4], p->mac[5], p->tx_pkts, p->tx_bytes, p->rx_pkts,
-		    p->rx_bytes, p->drops);
+		    p->dev->id, m[0], m[1], m[2], m[3], m[4], m[5],
+		    p->tx_pkts, p->tx_bytes, p->rx_pkts, p->rx_bytes, p->drops);
+	}
 	for (struct vdev *d = g_devs; d; d = d->next) {
 		LOG("dev%d: init %d", d->id, d->initialized);
 		for (int i = 0; i < SHMRDMA_MAX_GID; i++)
