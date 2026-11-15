@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import pwd
+import select
 import shlex
 import shutil
 import signal
@@ -904,7 +905,76 @@ def _stop_locked(d: Daemon, force: bool) -> str:
     return f"stopped shmrdmad (pid {pid})"
 
 
+_SYS_PIDFD_SEND_SIGNAL = 424  # the same on every Linux arch
+_SYS_PIDFD_OPEN = 434
+_KILL_WAIT_MS = 5000
+
+
+def _syscall(nr: int, *args: object) -> int:
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    rc = int(libc.syscall(nr, *args))
+    if rc < 0:
+        e = ctypes.get_errno()
+        raise OSError(e, os.strerror(e))
+    return rc
+
+
+def _pidfd_open(pid: int) -> int | None:
+    """A pidfd for *pid*, or None where there are none."""
+    if hasattr(os, "pidfd_open"):
+        return int(os.pidfd_open(pid))
+    if not sys.platform.startswith("linux"):
+        return None
+    import ctypes
+
+    return _syscall(_SYS_PIDFD_OPEN, ctypes.c_int(pid), ctypes.c_uint(0))
+
+
+def _pidfd_signal(fd: int, sig: int) -> None:
+    if hasattr(signal, "pidfd_send_signal"):
+        signal.pidfd_send_signal(fd, sig)
+        return
+    import ctypes
+
+    _syscall(
+        _SYS_PIDFD_SEND_SIGNAL,
+        ctypes.c_int(fd),
+        ctypes.c_int(sig),
+        None,
+        ctypes.c_uint(0),
+    )
+
+
 def _kill(d: Daemon, pid: int) -> None:
+    try:
+        fd = _pidfd_open(pid)
+    except OSError as e:
+        if e.errno == errno.ESRCH:
+            return
+        fd = None
+    if fd is None:
+        _kill_by_pid(d, pid)
+        return
+    # The pidfd names one process: vouch for it after taking it, then
+    # signal only through it, so a reused pid is never signalled.
+    try:
+        if d.pid() != pid:
+            return
+        try:
+            _pidfd_signal(fd, signal.SIGTERM)
+            poll = select.poll()
+            poll.register(fd, select.POLLIN)
+            if not poll.poll(_KILL_WAIT_MS):
+                _pidfd_signal(fd, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    finally:
+        os.close(fd)
+
+
+def _kill_by_pid(d: Daemon, pid: int) -> None:
     os.kill(pid, signal.SIGTERM)
     for _ in range(50):
         if not d.pid():
