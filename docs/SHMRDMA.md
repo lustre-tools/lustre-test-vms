@@ -279,9 +279,8 @@ the CQ index its completion goes to into the record as well, since the
 slot may hold a new request once it is freed.  A guest whose daemon
 died between those stores finds `done` one behind `cons`, and flushes
 that request from the record unless the CQ's producer already covers
-its completion.  The daemon says it fills these fields in its INIT
-reply (`SHMRDMA_INIT_F_LIMBO`); with a daemon that does not, the guest
-flushes from `cons` alone.
+its completion.  The guest and the daemon must have the same
+`SHMRDMA_ABI_VERSION`: the daemon refuses INIT from any other.
 
 **Connection management is plain RoCEv2.** The device is bound to a
 netdev (eth0 by default), so the RDMA core builds the GID table from
@@ -396,7 +395,13 @@ a guest that is merely slow to refill.
   WRITE/READ therefore stalls the control plane for all VMs on the
   daemon for the length of its copy, 0.1 to 0.7 s at 2 GB.
 - Kernel verbs only (no userspace verbs, so no perftest); no SRQ,
-  atomics or memory windows.
+  atomics or memory windows.  A move to SQD (send queue drain) is
+  refused; `ib_drain_qp` and the ULPs ltvm runs go through ERR.
+- The module claims virtio-fs devices and gives back every one whose
+  tag is not `shmrdma` only after virtio has negotiated its features
+  and marked the device failed, so virtiofs then starts on a failed
+  device.  ltvm VMs have no real virtiofs share, so this does not
+  arise in them.
 - x86_64 hosts: the daemon uses AVX2 non-temporal stores when the CPU
   has them.  aarch64 hosts use memcpy: on an Apple M5 no NEON or
   non-temporal variant beat it (`tools/memcpy_bw.c`).

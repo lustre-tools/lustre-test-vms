@@ -175,6 +175,7 @@ def test_stop_dir_only_what_the_pid_file_vouches_for(tmp_path: Path) -> None:
     link.symlink_to(d)
     with (
         patch.object(shmrdma.Daemon, "pid", side_effect=[4321, 0]),
+        patch("ltvm_pkg.shmrdma._pidfd_open", return_value=None),
         patch("ltvm_pkg.shmrdma.os.kill") as kill,
     ):
         assert shmrdma.stop_dir(d, me) == "pid 4321"
@@ -1004,6 +1005,7 @@ def test_stop_kills_only_the_daemon(tmp_vmdir: Path) -> None:  # noqa: F811
     with (
         patch.object(shmrdma.Daemon, "pid", side_effect=[4242] * 51 + [0]),
         patch("ltvm_pkg.shmrdma.attached_vms", return_value=[]),
+        patch("ltvm_pkg.shmrdma._pidfd_open", return_value=None),
         patch("ltvm_pkg.shmrdma.time.sleep"),
         patch("ltvm_pkg.shmrdma.os.kill") as kill,
     ):
@@ -1011,6 +1013,53 @@ def test_stop_kills_only_the_daemon(tmp_vmdir: Path) -> None:  # noqa: F811
     assert [c.args for c in kill.call_args_list] == [
         (4242, shmrdma.signal.SIGTERM)
     ]
+
+
+class _Vouched:
+    def __init__(self, *pids: int) -> None:
+        self.pids = list(pids)
+
+    def pid(self) -> int:
+        return self.pids.pop(0)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="pidfds are Linux's")
+def test_kill_signals_through_a_pidfd(monkeypatch) -> None:
+    """TERM, then KILL for a daemon that ignores it, both by pidfd."""
+    monkeypatch.setattr(shmrdma, "_KILL_WAIT_MS", 200)
+    p = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import signal, sys, time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print(flush=True); time.sleep(60)",
+        ],
+        stdout=subprocess.PIPE,
+    )
+    try:
+        assert p.stdout is not None
+        p.stdout.readline()
+        with patch("ltvm_pkg.shmrdma.os.kill") as kill:
+            shmrdma._kill(_Vouched(p.pid), p.pid)  # type: ignore[arg-type]
+        assert p.wait(timeout=10) == -signal.SIGKILL
+        kill.assert_not_called()
+    finally:
+        p.kill()
+        p.wait()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="pidfds are Linux's")
+def test_kill_leaves_a_pid_no_longer_vouched_for() -> None:
+    """The check after the pidfd is taken decides: no signal at all."""
+    p = subprocess.Popen(["sleep", "60"])
+    try:
+        shmrdma._kill(_Vouched(0), p.pid)  # type: ignore[arg-type]
+        assert p.poll() is None
+    finally:
+        p.kill()
+        p.wait()
+    shmrdma._kill(_Vouched(p.pid), p.pid)  # type: ignore[arg-type]
 
 
 def test_stop_holds_the_daemon_lock(tmp_vmdir: Path) -> None:  # noqa: F811
@@ -1035,6 +1084,7 @@ def test_stop_holds_the_daemon_lock(tmp_vmdir: Path) -> None:  # noqa: F811
         patch("ltvm_pkg.shmrdma.daemon", return_value=d),
         patch.object(shmrdma.Daemon, "pid", side_effect=[4242, 4242, 0]),
         patch("ltvm_pkg.shmrdma.attached_vms", return_value=[]),
+        patch("ltvm_pkg.shmrdma._pidfd_open", return_value=None),
         patch("ltvm_pkg.shmrdma.os.kill", side_effect=kill),
     ):
         assert shmrdma.stop_daemon() == "stopped shmrdmad (pid 4242)"

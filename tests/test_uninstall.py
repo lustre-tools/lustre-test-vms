@@ -597,13 +597,36 @@ def test_shmrdma_daemons_stopped(
         return "pid 5" if d == mine else None
 
     monkeypatch.setattr(shmrdma, "stop_dir", stop_dir)
-    host.answer((sys.executable, "-c"), out="pid 6\n")
+    host.answer((sys.executable, "-I", "-c"), out="pid 6\n")
     got = host_uninstall._shmrdma_daemons()
     assert got == f"{mine} (pid 5) {theirs} (pid 6)"
     assert (mine, me) in direct
     assert all(d != theirs for d, _ in direct)
-    assert host.ran(sys.executable, "-c")
+    assert host.ran(sys.executable, "-I", "-c")
     assert [c[-2:] for c in host.calls] == [[str(theirs), str(me + 1)]]
+
+
+def test_root_shmrdmad_stop_ignores_the_working_directory(
+    host: FakeSudo, tmp_path: Path
+) -> None:
+    """The helper root runs imports nothing from the caller's cwd."""
+    me = os.geteuid()
+    (host_uninstall.VM_DIR / f"shmrdma-{me + 1}").mkdir(parents=True)
+    host.answer((sys.executable, "-I", "-c"), out="")
+    host_uninstall._shmrdma_daemons()
+    [cmd] = host.calls
+    plant = tmp_path / "plant"
+    plant.mkdir()
+    marker = tmp_path / "planted"
+    (plant / "getpass.py").write_text(f"open({str(marker)!r}, 'w').close()\n")
+    env = dict(os.environ, PYTHONPATH=str(plant))
+    cmd = [*cmd[:-2], str(tmp_path / "none"), str(me + 1)]
+    with subprocess.Popen(
+        cmd, cwd=plant, env=env, stderr=subprocess.PIPE, text=True
+    ) as p:
+        _, err = p.communicate(timeout=60)
+    assert p.returncode == 0, err
+    assert not marker.exists()
 
 
 def test_claimed_vms_refuse_before_anything(host: FakeSudo) -> None:

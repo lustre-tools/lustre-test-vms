@@ -1775,8 +1775,7 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 			done++;
 		}
 	}
-	if (qp->state != QPS_RTS && qp->state != QPS_ERR &&
-	    qp->state != QPS_SQD && qp->state != QPS_SQE)
+	if (qp->state != QPS_RTS && qp->state != QPS_ERR)
 		return done;
 
 	uint32_t prod = ACQ(&qp->rec->sq_prod);
@@ -1874,8 +1873,8 @@ static bool qp_has_work(struct qp *qp)
 		return true;
 	if (qp->state == QPS_ERR && ACQ(&qp->rec->rq_prod) != qp->rq_cons)
 		return true;
-	if ((qp->state != QPS_RTS && qp->state != QPS_ERR &&
-	     qp->state != QPS_SQD && qp->state != QPS_SQE) || qp->stall_since)
+	if ((qp->state != QPS_RTS && qp->state != QPS_ERR) ||
+	    qp->stall_since)
 		return false;
 	return ACQ(&qp->rec->sq_prod) != qp->sq_cons;
 }
@@ -2157,7 +2156,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		REL(&d->shared->eq_lost, 0);
 		d->initialized = true;
 		wunlock();
-		r->val = (uint32_t)d->id | SHMRDMA_INIT_F_LIMBO;
+		r->val = (uint32_t)d->id;
 		GLOG(d, "dev%d: initialized, eq %u entries", d->id, n);
 		return 0;
 	}
@@ -2306,6 +2305,13 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 
 		if (qpn >= SHMRDMA_MAX_QP || !(qp = d->qps[qpn]))
 			return -EINVAL;
+		if ((c->modify_qp.mask & SHMRDMA_MQ_STATE) &&
+		    c->modify_qp.state != QPS_RESET &&
+		    c->modify_qp.state != QPS_INIT &&
+		    c->modify_qp.state != QPS_RTR &&
+		    c->modify_qp.state != QPS_RTS &&
+		    c->modify_qp.state != QPS_ERR)
+			return -EOPNOTSUPP;
 		wlock();
 		/* other QPs' cached peers may name this one */
 		if (c->modify_qp.mask & SHMRDMA_MQ_DEST) {
@@ -3258,16 +3264,31 @@ int main(int argc, char **argv)
 		pthread_mutex_init(&w->mtx, NULL);
 		w->evfd = plat_notifier_new(&w->evfd_w);
 		w->epfd = plat_poller_new();
-		plat_poller_add(w->epfd, w->evfd, (void *)(intptr_t)w->evfd,
-				false);
+		if (w->evfd < 0 || w->epfd < 0 ||
+		    plat_poller_add(w->epfd, w->evfd,
+				    (void *)(intptr_t)w->evfd, false)) {
+			LOG("worker %d: %s", i, strerror(errno));
+			return 1;
+		}
 	}
-	for (int i = 0; i < g_nworkers; i++)
-		pthread_create(&g_workers[i].thr, NULL, worker_main,
-			       &g_workers[i]);
+	/* before the sockets exist: ltvm takes them as the daemon ready */
+	for (int i = 0; i < g_nworkers; i++) {
+		int rc = pthread_create(&g_workers[i].thr, NULL, worker_main,
+					&g_workers[i]);
+
+		if (rc) {
+			LOG("worker %d: %s", i, strerror(rc));
+			return 1;
+		}
+	}
 	for (int i = 0; i < g_ncopiers; i++) {
 		pthread_t t;
+		int rc = pthread_create(&t, NULL, copier_main, NULL);
 
-		pthread_create(&t, NULL, copier_main, NULL);
+		if (rc) {
+			LOG("copier %d: %s", i, strerror(rc));
+			return 1;
+		}
 	}
 
 	struct sockaddr_un sa = { .sun_family = AF_UNIX };
@@ -3287,6 +3308,10 @@ int main(int argc, char **argv)
 	}
 	chmod(g_sock_path, 0600);
 	g_epfd = plat_poller_new();
+	if (g_epfd < 0) {
+		LOG("poller: %s", strerror(errno));
+		return 1;
+	}
 	ep_add(g_lsock, &listen_tag, EP_LISTEN, NULL, 0);
 	if (*g_net_sock_path) {
 		struct sockaddr_un na = { .sun_family = AF_UNIX };

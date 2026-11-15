@@ -64,8 +64,6 @@ struct shmrdma_dev {
 	bool broken;
 	/* the device was reset: the backend holds nothing of ours */
 	bool reset_done;
-	/* the backend fills the QP records' *_done */
-	bool limbo;
 	bool fatal_sent;
 	struct work_struct fatal_work;
 	/* work posted after the reset: have its CQs polled for the flush */
@@ -847,7 +845,7 @@ static int shmrdma_flush_limbo(struct shmrdma_dev *dev, struct shmrdma_cq *cq,
 	u32 o = READ_ONCE(*op);
 	int owed;
 
-	if (!dev->limbo || READ_ONCE(*done) == cons)
+	if (READ_ONCE(*done) == cons)
 		return 0;
 	owed = shmrdma_limbo_owed(READ_ONCE(*done), cons, o, READ_ONCE(*pos),
 				  READ_ONCE(cq->rec->prod));
@@ -895,14 +893,14 @@ static int shmrdma_flush_cq(struct shmrdma_dev *dev, struct shmrdma_cq *cq,
 			n = 1;
 		for (; wc && n < num && c != qp->sq_prod; c++, n++) {
 			struct shmrdma_sq_wqe *e = ring_at(&qp->sq, c);
+			u32 op = READ_ONCE(e->opcode);
 
-			flush_wc(&wc[n], qp, e->wr_id,
-				 e->opcode < ARRAY_SIZE(sq_wc_opcode) ?
-				 sq_wc_opcode[e->opcode] : IB_WC_SEND);
+			flush_wc(&wc[n], qp, READ_ONCE(e->wr_id),
+				 op < ARRAY_SIZE(sq_wc_opcode) ?
+				 sq_wc_opcode[op] : IB_WC_SEND);
 		}
 		WRITE_ONCE(qp->rec->sq_cons, c);
-		if (dev->limbo)
-			WRITE_ONCE(qp->rec->sq_done, c);
+		WRITE_ONCE(qp->rec->sq_done, c);
 		spin_unlock(&qp->sq_lock);
 	}
 	list_for_each_entry(qp, &cq->rq_qps, rcq_node) {
@@ -929,8 +927,7 @@ static int shmrdma_flush_cq(struct shmrdma_dev *dev, struct shmrdma_cq *cq,
 			flush_wc(&wc[n], qp, e->wr_id, IB_WC_RECV);
 		}
 		WRITE_ONCE(qp->rec->rq_cons, c);
-		if (dev->limbo)
-			WRITE_ONCE(qp->rec->rq_done, c);
+		WRITE_ONCE(qp->rec->rq_done, c);
 		spin_unlock(&qp->rq_lock);
 	}
 	return n;
@@ -979,40 +976,43 @@ static int shmrdma_poll_cq(struct ib_cq *ibcq, int num, struct ib_wc *wc)
 	reset = smp_load_acquire(&dev->reset_done);
 	prod = shmrdma_cq_prod(dev, cq);
 	while (n < num && cq->cons != prod) {
-		struct shmrdma_cqe *e = ring_at(&cq->ring, cq->cons);
+		struct shmrdma_cqe c;
 		struct shmrdma_qp *qp;
 		struct ib_wc *w = &wc[n];
 
+		/* the backend may write the slot: use only this copy */
+		memcpy(&c, ring_at(&cq->ring, cq->cons), sizeof(c));
+		barrier();
 		cq->cons++;
 		/* a QP of another CQ is freed once out of the xarray */
 		xa_lock(&dev->qps);
-		qp = xa_load(&dev->qps, e->qpn);
+		qp = xa_load(&dev->qps, c.qpn);
 		if (qp && qp->scq != cq && qp->rcq != cq)
 			qp = NULL;
 		xa_unlock(&dev->qps);
 		if (!qp)
 			continue;
 		memset(w, 0, sizeof(*w));
-		w->wr_id = e->wr_id;
-		w->status = e->status;
-		w->opcode = e->opcode < ARRAY_SIZE(wc_opcode) ?
-			    wc_opcode[e->opcode] : IB_WC_SEND;
-		w->vendor_err = e->vendor_err;
-		w->byte_len = e->byte_len;
+		w->wr_id = c.wr_id;
+		w->status = c.status;
+		w->opcode = c.opcode < ARRAY_SIZE(wc_opcode) ?
+			    wc_opcode[c.opcode] : IB_WC_SEND;
+		w->vendor_err = c.vendor_err;
+		w->byte_len = min_t(u32, c.byte_len, SHMRDMA_MAX_MSG);
 		w->qp = &qp->ibqp;
-		w->src_qp = e->src_qp;
+		w->src_qp = c.src_qp;
 		w->port_num = 1;
-		if (e->flags & SHMRDMA_CQE_IMM) {
+		if (c.flags & SHMRDMA_CQE_IMM) {
 			w->wc_flags |= IB_WC_WITH_IMM;
-			w->ex.imm_data = (__force __be32)e->ex;
+			w->ex.imm_data = (__force __be32)c.ex;
 		}
-		if (e->flags & SHMRDMA_CQE_INV) {
+		if (c.flags & SHMRDMA_CQE_INV) {
 			w->wc_flags |= IB_WC_WITH_INVALIDATE;
-			w->ex.invalidate_rkey = e->ex;
+			w->ex.invalidate_rkey = c.ex;
 		}
-		if (e->flags & SHMRDMA_CQE_GRH) {
+		if (c.flags & SHMRDMA_CQE_GRH) {
 			w->wc_flags |= IB_WC_GRH | IB_WC_WITH_NETWORK_HDR_TYPE;
-			w->network_hdr_type = (e->flags & SHMRDMA_CQE_IPV4) ?
+			w->network_hdr_type = (c.flags & SHMRDMA_CQE_IPV4) ?
 				RDMA_NETWORK_IPV4 : RDMA_NETWORK_IPV6;
 		}
 		n++;
@@ -1198,6 +1198,9 @@ err_qpn:
 }
 
 /* on a reset device; RESET drops what is posted, as the backend does */
+static void shmrdma_cq_clean(struct shmrdma_cq *cq, struct shmrdma_qp *qp,
+			     bool unlink);
+
 static int shmrdma_qp_drop(struct shmrdma_qp *qp, enum ib_qp_state next)
 {
 	unsigned long flags;
@@ -1206,9 +1209,11 @@ static int shmrdma_qp_drop(struct shmrdma_qp *qp, enum ib_qp_state next)
 		return 0;
 	spin_lock_irqsave(&qp->sq_lock, flags);
 	WRITE_ONCE(qp->rec->sq_cons, qp->sq_prod);
+	WRITE_ONCE(qp->rec->sq_done, qp->sq_prod);
 	spin_unlock_irqrestore(&qp->sq_lock, flags);
 	spin_lock_irqsave(&qp->rq_lock, flags);
 	WRITE_ONCE(qp->rec->rq_cons, qp->rq_prod);
+	WRITE_ONCE(qp->rec->rq_done, qp->rq_prod);
 	spin_unlock_irqrestore(&qp->rq_lock, flags);
 	return 0;
 }
@@ -1230,6 +1235,11 @@ static int shmrdma_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 	next = (mask & IB_QP_STATE) ? attr->qp_state : cur;
 	if (!ib_modify_qp_is_ok(cur, next, ibqp->qp_type, mask)) {
 		rc = -EINVAL;
+		goto out;
+	}
+	/* the backend has no send queue drain */
+	if (next == IB_QPS_SQD) {
+		rc = -EOPNOTSUPP;
 		goto out;
 	}
 
@@ -1312,6 +1322,9 @@ static int shmrdma_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 			spin_lock_irqsave(&dev->eq_lock, flags);
 			qp->fatal_seen = false;
 			spin_unlock_irqrestore(&dev->eq_lock, flags);
+			shmrdma_cq_clean(qp->scq, qp, false);
+			if (qp->rcq != qp->scq)
+				shmrdma_cq_clean(qp->rcq, qp, false);
 		}
 	}
 	rc = 0;
@@ -1341,19 +1354,20 @@ static int shmrdma_query_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 
 /*
  * The backend no longer completes anything for qpn: its unpolled CQEs
- * must not reach a later QP given the same number, and no flush may
- * find the QP on the CQ's lists.
+ * must not reach a later QP given the same number, or the QP after a
+ * RESET; once unlinked, no flush finds the QP on the CQ's lists.
  */
-static void shmrdma_cq_clean(struct shmrdma_cq *cq, struct shmrdma_qp *qp)
+static void shmrdma_cq_clean(struct shmrdma_cq *cq, struct shmrdma_qp *qp,
+			     bool unlink)
 {
 	u32 qpn = qp->ibqp.qp_num;
 	unsigned long flags;
 	u32 i, prod;
 
 	spin_lock_irqsave(&cq->lock, flags);
-	if (qp->scq == cq)
+	if (unlink && qp->scq == cq)
 		list_del_init(&qp->scq_node);
-	if (qp->rcq == cq)
+	if (unlink && qp->rcq == cq)
 		list_del_init(&qp->rcq_node);
 	prod = smp_load_acquire(&cq->rec->prod);
 	if (prod - cq->cons > cq->ring.entries)
@@ -1377,9 +1391,9 @@ static void shmrdma_qp_erase(struct shmrdma_dev *dev, struct shmrdma_qp *qp)
 
 	spin_lock_irqsave(&dev->eq_lock, flags);
 	xa_erase(&dev->qps, qp->ibqp.qp_num);
-	shmrdma_cq_clean(qp->scq, qp);
+	shmrdma_cq_clean(qp->scq, qp, true);
 	if (qp->rcq != qp->scq)
-		shmrdma_cq_clean(qp->rcq, qp);
+		shmrdma_cq_clean(qp->rcq, qp, true);
 	spin_unlock_irqrestore(&dev->eq_lock, flags);
 }
 
@@ -1539,8 +1553,7 @@ static int shmrdma_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 	unsigned long flags;
 	int rc = 0;
 
-	if (st != IB_QPS_RTS && st != IB_QPS_ERR && st != IB_QPS_SQD &&
-	    st != IB_QPS_SQE) {
+	if (st != IB_QPS_RTS && st != IB_QPS_ERR) {
 		*bad = wr;
 		return -EINVAL;
 	}
@@ -1917,7 +1930,6 @@ static int shmrdma_probe(struct virtio_device *vdev)
 	rc = shmrdma_cmd(dev, &cmd, &resp);
 	if (!rc && resp.abi != SHMRDMA_ABI_VERSION)
 		rc = -EPROTO;
-	dev->limbo = !!(resp.val & SHMRDMA_INIT_F_LIMBO);
 	if (rc) {
 		dev_err(&vdev->dev, "backend init failed: %d (ABI %u, backend %u)\n",
 			rc, SHMRDMA_ABI_VERSION, resp.abi);

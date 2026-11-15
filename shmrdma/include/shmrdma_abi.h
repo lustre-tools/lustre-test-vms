@@ -39,7 +39,7 @@ typedef int32_t __s32;
  */
 #define SHMRDMA_VIRTIO_ID	26	/* VIRTIO_ID_FS */
 #define SHMRDMA_TAG		"shmrdma"
-#define SHMRDMA_ABI_VERSION	3
+#define SHMRDMA_ABI_VERSION	4
 
 enum {
 	SHMRDMA_VQ_CTRL = 0,	/* guest -> host commands, host replies */
@@ -118,7 +118,7 @@ struct shmrdma_qp_rec {
 	__u32 need_kick;	/* backend idle: guest must ring the doorbell */
 	__u32 fatal;		/* 1: QP_FATAL raised, read after eq_lost */
 	/*
-	 * SHMRDMA_INIT_F_LIMBO.  A backend frees a WR's slot (*_cons), then
+	 * A backend frees a WR's slot (*_cons), then
 	 * makes its CQE visible, then moves *_done up to *_cons.  WR *_done
 	 * of a backend that died between the two is described here, since
 	 * its slot may hold a new WR: *_limbo_op is SHMRDMA_LIMBO_NONE when
@@ -371,11 +371,8 @@ enum {
 struct shmrdma_resp {
 	__s32 status;		/* 0 or -errno */
 	__u32 abi;		/* INIT: the backend's SHMRDMA_ABI_VERSION */
-	__u64 val;		/* INIT: device number | SHMRDMA_INIT_F_* */
+	__u64 val;		/* INIT: the backend's device number */
 };
-
-/* INIT's val: the low 32 bits are the backend's device number */
-#define SHMRDMA_INIT_F_LIMBO	(1ull << 32)	/* fills qp_rec *_done */
 
 #define SHMRDMA_ABI_SIZE(t, n) \
 	_Static_assert(sizeof(struct t) == (n), #t " size is ABI")
