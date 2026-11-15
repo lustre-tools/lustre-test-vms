@@ -4132,6 +4132,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(line)
     fix_failures += comp_failures
 
+    from ltvm_pkg import host_cpufreq
+
+    cpu_issues, cpu_notes, cpu_failures = host_cpufreq.doctor_report(args.fix)
+    for line in cpu_issues:
+        print(line)
+        issues += 1
+    for line in cpu_notes:
+        print(line)
+    fix_failures += cpu_failures
+
     # Disk-usage probe.  Always prints the info line so the user has a
     # capacity reference; counts as an issue only when free space is
     # under the threshold.  No --fix here: cleanup is opinionated, the
