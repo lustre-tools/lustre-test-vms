@@ -2698,8 +2698,15 @@ def _hand_over_from_host_dnsmasq(subnet: str) -> None:
         return
 
 
-def _start_ltvm_dnsmasq(subnet: str) -> None:
+def _start_ltvm_dnsmasq(subnet: str, restart: bool = True) -> None:
+    """Enable and (re)start ltvm's dnsmasq.
+
+    A rerun of install that changed neither its config nor its unit
+    leaves a running instance alone, so the guests keep their DNS.
+    """
     _run_quiet(["systemctl", "enable", LTVM_DNSMASQ_UNIT], check=False)
+    if not restart and _systemctl_ok("is-active", "--quiet", LTVM_DNSMASQ_UNIT):
+        return
     if _systemctl_ok("restart", LTVM_DNSMASQ_UNIT):
         return
     journal = _run_quiet(
@@ -2902,8 +2909,10 @@ def setup_network(
     hosts_dir.mkdir(parents=True, exist_ok=True)
     if _selinux_enabled():
         _label_hosts_dir(hosts_dir)
-    _write_if_changed(LTVM_DNSMASQ_CONF, _render_ltvm_dnsmasq_conf(subnet))
-    _write_if_changed(
+    dnsmasq_changed = _write_if_changed(
+        LTVM_DNSMASQ_CONF, _render_ltvm_dnsmasq_conf(subnet)
+    )
+    dnsmasq_changed |= _write_if_changed(
         LTVM_DNSMASQ_UNIT_PATH, _render_ltvm_dnsmasq_unit(dnsmasq)
     )
 
@@ -2929,7 +2938,7 @@ def setup_network(
         )
 
     _hand_over_from_host_dnsmasq(subnet)
-    _start_ltvm_dnsmasq(subnet)
+    _start_ltvm_dnsmasq(subnet, restart=dnsmasq_changed)
 
     from ltvm_pkg import host_firewall
 

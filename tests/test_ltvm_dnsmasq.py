@@ -354,3 +354,26 @@ class TestReloadDns:
             P.return_value.exists.return_value = False
             vm_net.reload_dns()
         assert kill.call_args.args[0] == 456
+
+
+class TestStartOnRerun:
+    def test_rerun_leaves_a_running_unchanged_instance(self) -> None:
+        host = _Host()
+        with patch.object(host_setup, "_run_quiet", host):
+            host_setup._start_ltvm_dnsmasq("192.168.200", restart=False)
+        assert host.ran("systemctl", "is-active")
+        assert not host.ran("systemctl", "restart")
+
+    def test_rerun_starts_a_stopped_instance(self) -> None:
+        host = _Host()
+        real = host.__call__
+
+        def stopped(cmd: list[str], **kw: object) -> MagicMock:
+            if cmd[:2] == ["systemctl", "is-active"]:
+                host.cmds.append(cmd)
+                return _done(3)
+            return real(cmd, **kw)
+
+        with patch.object(host_setup, "_run_quiet", stopped):
+            host_setup._start_ltvm_dnsmasq("192.168.200", restart=False)
+        assert host.ran("systemctl", "restart")
