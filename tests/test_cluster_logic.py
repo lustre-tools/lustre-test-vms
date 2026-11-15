@@ -457,6 +457,25 @@ class TestLnetFromProbe:
         lnet = vm_cluster.lnet_from_probe(f"--\n{_ADDRS}")
         assert lnet.mgsnid == "192.168.122.10@tcp"
 
+    def test_passthrough_hca_resolves_to_its_netdev(self) -> None:
+        probe = _probe("o2ib0(mlx5_0)") + (
+            "-- ibdev\n"
+            "/sys/class/infiniband/shmrdma0/device/net/eth0\n"
+            "/sys/class/infiniband/mlx5_0/device/net/eth1\n"
+        )
+        lnet = vm_cluster.lnet_from_probe(probe)
+        assert lnet.mgsnid == "172.16.100.23@o2ib"
+
+    def test_passthrough_hca_without_an_address_names_it(self) -> None:
+        probe = _probe("o2ib0(mlx5_0)") + (
+            "-- ibdev\n/sys/class/infiniband/mlx5_0/device/net/ib0\n"
+        )
+        with pytest.raises(ValueError, match=r"on mlx5_0 \(ib0\)"):
+            vm_cluster.lnet_from_probe(probe)
+
+    def test_probe_lists_rdma_netdevs(self) -> None:
+        assert "/sys/class/infiniband/*/device/net/*" in vm_cluster.LNET_PROBE
+
     def test_unresolved_passthrough_is_refused(self) -> None:
         with pytest.raises(ValueError, match="@ib-of-eth1"):
             vm_cluster.lnet_from_probe(_probe("o2ib0(@ib-of-eth1))"))

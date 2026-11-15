@@ -714,6 +714,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 fstype=fstype,
                 ost_count=ost_count,
                 lnet=True,
+                lnet_required=bool(args.mount),
             )
         except RuntimeError as e:
             return _error(str(e), use_json)

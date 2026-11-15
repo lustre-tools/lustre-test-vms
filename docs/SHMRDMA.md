@@ -114,7 +114,9 @@ ltvm vm shmrdmad [status|start|stop]
   addressed to it over o2ib. `cluster deploy` reads the MGS's
   lnet.conf, so NETTYPE and the MGS NID follow; for a single VM,
   `deploy-lustre` and `ltvm llmount` read its own and write them in an
-  LNet block of cfg/local.sh (the stock file says tcp). lnet.conf is
+  LNet block of cfg/local.sh (the stock file says tcp; without
+  `--mount`, a deploy that cannot work the net out keeps the stock file
+  and warns). lnet.conf is
   written at first boot only, so after `vm set --shmrdma` on an
   existing VM, remove `/etc/modprobe.d/lnet.conf` in the guest and
   reboot it.
