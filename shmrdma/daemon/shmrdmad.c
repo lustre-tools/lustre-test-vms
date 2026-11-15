@@ -675,6 +675,7 @@ static void cq_overflow(struct cq *cq)
 {
 	struct vdev *d = cq->dev;
 
+	REL(&cq->rec->err, 1);
 	dev_raise_eq(d, cq->cqn, SHMRDMA_EQE_CQ_ERR);
 	for (int i = 0; i < SHMRDMA_MAX_QP; i++) {
 		struct qp *qp = d->qps[i];
@@ -1197,6 +1198,7 @@ static void qp_to_err(struct qp *qp)
 		REL(&qp->state, QPS_ERR);
 		if (!qp->fatal_sent) {
 			qp->fatal_sent = true;
+			REL(&qp->rec->fatal, 1);
 			dev_raise_eq(qp->dev, qp->qpn, SHMRDMA_EQE_QP_FATAL);
 		}
 	}
@@ -2262,6 +2264,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 				REL(&qp->rec->sq_cons, qp->sq_cons);
 				REL(&qp->rec->rq_cons, qp->rq_cons);
 				qp->fatal_sent = false;
+				REL(&qp->rec->fatal, 0);
 				qp->err_req = 0;
 			}
 			qp->state = ns;

@@ -116,14 +116,16 @@ struct shmrdma_qp_rec {
 	__u32 sq_cons;
 	__u32 rq_cons;
 	__u32 need_kick;	/* backend idle: guest must ring the doorbell */
-	__u32 pad1[13];
+	__u32 fatal;		/* 1: QP_FATAL raised, read after eq_lost */
+	__u32 pad1[12];
 };
 
 /* Per-CQ record, 128 bytes. */
 struct shmrdma_cq_rec {
 	/* written by the backend */
 	__u32 prod;
-	__u32 pad0[15];
+	__u32 err;		/* 1: CQ_ERR raised, read after eq_lost */
+	__u32 pad0[14];
 	/* written by the guest; arm is cleared by the backend */
 	__u32 cons;
 	__u32 arm;		/* SHMRDMA_CQ_ARM_* */
