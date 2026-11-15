@@ -61,6 +61,10 @@ struct netq {
 	int qi;
 	struct worker *w;	/* NULL while the queue is not served */
 	uint64_t stall_since;
+	/* RX: a hold on this queue ran out at this avail idx; frames for it
+	 * drop without a hold until the guest moves the idx (rx_lock) */
+	bool rx_starved;
+	uint16_t rx_starved_ai;
 };
 
 struct netport {
@@ -328,6 +332,38 @@ static void rx_put(struct rxtake *t)
 		REL(&q->used->flags, VRING_USED_F_NO_NOTIFY);
 }
 
+/*
+ * No RX buffers for a frame; caller holds the queue's rx_lock.  A queue
+ * whose last hold ran out drops at once while its avail idx stands.
+ */
+static int rx_nobuf(struct netport *dp, int rqi, struct rxtake *t)
+{
+	struct netq *nq = &dp->q[rqi];
+
+	if (nq->rx_starved) {
+		if (t->ai == nq->rx_starved_ai)
+			return DLV_DROP;
+		nq->rx_starved = false;
+	}
+	net_want_rx_kick(t->q);
+	return DLV_NOBUF;
+}
+
+/* a hold for dp ran out: drop its frames until it refills */
+static void rx_starve(struct netport *dp)
+{
+	for (int i = 0; i < NET_MAX_QP; i++) {
+		struct vq *q = &dp->dev->vq[NET_RXQ(i)];
+
+		if (!vq_ready(q))
+			continue;
+		plat_spin_lock(&dp->rx_lock[i]);
+		dp->q[i].rx_starved = true;
+		dp->q[i].rx_starved_ai = ACQ(&q->avail->idx);
+		plat_spin_unlock(&dp->rx_lock[i]);
+	}
+}
+
 static int net_deliver_segs(struct netport *dp, int rqi,
 			    const struct vnet_hdr *th,
 			    const struct cursor *src0, uint64_t len);
@@ -426,6 +462,14 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 	if (gso != VNET_HDR_GSO_NONE && gso != VNET_HDR_GSO_TCPV4 &&
 	    gso != VNET_HDR_GSO_TCPV6)
 		return DLV_DROP;
+	/* the sender's header reaches the receiving kernel: check it */
+	if (gso != VNET_HDR_GSO_NONE && !h.gso_size)
+		return DLV_DROP;
+	if ((h.flags & VNET_HDR_F_NEEDS_CSUM) &&
+	    (uint32_t)h.csum_start + h.csum_offset + 2 > len)
+		return DLV_DROP;
+	if (!(d->features & VNET_F_GUEST_ECN))
+		h.gso_type &= ~VNET_HDR_GSO_ECN;
 	h.flags &= VNET_HDR_F_NEEDS_CSUM;
 	if ((gso == VNET_HDR_GSO_TCPV4 && !(d->features & VNET_F_GUEST_TSO4)) ||
 	    (gso == VNET_HDR_GSO_TCPV6 && !(d->features & VNET_F_GUEST_TSO6)) ||
@@ -440,9 +484,9 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 	rx_begin(&t, d, q);
 	rc = rx_take(&t, sizeof(h) + len, &dst, &nbufs);
 	h.num_buffers = nbufs;
+	if (rc == DLV_NOBUF)
+		rc = rx_nobuf(dp, rqi, &t);
 	if (rc != DLV_OK) {
-		if (rc == DLV_NOBUF)
-			net_want_rx_kick(q);
 		plat_spin_unlock(&dp->rx_lock[rqi]);
 		return rc;
 	}
@@ -722,9 +766,9 @@ static int net_deliver_segs(struct netport *dp, int rqi,
 		off += sl;
 		bytes += hlen + sl;
 	}
+	if (rc == DLV_NOBUF)
+		rc = rx_nobuf(dp, rqi, &t);
 	if (rc != DLV_OK) {
-		if (rc == DLV_NOBUF)
-			net_want_rx_kick(q);
 		plat_spin_unlock(&dp->rx_lock[rqi]);
 		if (rc == DLV_DROP)
 			STAT_ADD(dp->rx_seg_drops, 1);
@@ -849,6 +893,11 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 			frame = c;
 			cur_read(&c, eth, 12);
 			if (!p->mac_known || memcmp(p->mac, eth + 6, 6)) {
+				struct netport *o = port_by_mac(eth + 6);
+
+				/* another port's address is not ours to take */
+				if (o && o != p && o->attached)
+					goto drop;
 				memcpy(p->mac, eth + 6, 6);
 				p->mac_known = true;
 			}
@@ -890,6 +939,7 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 					break;
 				}
 				STAT_ADD(dp->rx_hold_drops, 1);
+				rx_starve(dp);
 			}
 			if (nq->stall_since) {
 				uint64_t held = now_ns() - nq->stall_since;
@@ -903,6 +953,7 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 			STAT_ADD(p->tx_pkts, 1);
 			STAT_ADD(p->tx_bytes, flen);
 		} else {
+drop:
 			STAT_ADD(p->drops, 1);
 		}
 		nq->stall_since = 0;
