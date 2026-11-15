@@ -3264,16 +3264,31 @@ int main(int argc, char **argv)
 		pthread_mutex_init(&w->mtx, NULL);
 		w->evfd = plat_notifier_new(&w->evfd_w);
 		w->epfd = plat_poller_new();
-		plat_poller_add(w->epfd, w->evfd, (void *)(intptr_t)w->evfd,
-				false);
+		if (w->evfd < 0 || w->epfd < 0 ||
+		    plat_poller_add(w->epfd, w->evfd,
+				    (void *)(intptr_t)w->evfd, false)) {
+			LOG("worker %d: %s", i, strerror(errno));
+			return 1;
+		}
 	}
-	for (int i = 0; i < g_nworkers; i++)
-		pthread_create(&g_workers[i].thr, NULL, worker_main,
-			       &g_workers[i]);
+	/* before the sockets exist: ltvm takes them as the daemon ready */
+	for (int i = 0; i < g_nworkers; i++) {
+		int rc = pthread_create(&g_workers[i].thr, NULL, worker_main,
+					&g_workers[i]);
+
+		if (rc) {
+			LOG("worker %d: %s", i, strerror(rc));
+			return 1;
+		}
+	}
 	for (int i = 0; i < g_ncopiers; i++) {
 		pthread_t t;
+		int rc = pthread_create(&t, NULL, copier_main, NULL);
 
-		pthread_create(&t, NULL, copier_main, NULL);
+		if (rc) {
+			LOG("copier %d: %s", i, strerror(rc));
+			return 1;
+		}
 	}
 
 	struct sockaddr_un sa = { .sun_family = AF_UNIX };
@@ -3293,6 +3308,10 @@ int main(int argc, char **argv)
 	}
 	chmod(g_sock_path, 0600);
 	g_epfd = plat_poller_new();
+	if (g_epfd < 0) {
+		LOG("poller: %s", strerror(errno));
+		return 1;
+	}
 	ep_add(g_lsock, &listen_tag, EP_LISTEN, NULL, 0);
 	if (*g_net_sock_path) {
 		struct sockaddr_un na = { .sun_family = AF_UNIX };
