@@ -39,7 +39,8 @@ def deps(path: Path) -> list[str]:
     names = [line.split()[0] for line in out if line.strip()]
     own = run("otool", "-D", str(path)).splitlines()[1:]
     return [
-        n for n in names
+        n
+        for n in names
         if not n.startswith(SYSTEM) and not n.startswith("@") and n not in own
     ]
 
@@ -66,12 +67,17 @@ def bundle(stage: Path) -> list[Path]:
                 copied[name] = dst
                 todo.append(dst)
             # binaries live in bin/, dylibs in lib/
-            rel = "@loader_path/../lib/" if f.parent.name == "bin" else (
-                "@loader_path/"
+            rel = (
+                "@loader_path/../lib/"
+                if f.parent.name == "bin"
+                else ("@loader_path/")
             )
             run(
-                "install_name_tool", "-change", name,
-                rel + Path(name).name, str(f),
+                "install_name_tool",
+                "-change",
+                name,
+                rel + Path(name).name,
+                str(f),
             )
     for dst in copied.values():
         run("install_name_tool", "-id", "@rpath/" + dst.name, str(dst))
@@ -83,8 +89,13 @@ def sign(stage: Path, binaries: list[Path], entitlements: Path) -> None:
         run("codesign", "--force", "--sign", "-", str(dylib))
     for b in binaries:
         run(
-            "codesign", "--force", "--sign", "-",
-            "--entitlements", str(entitlements), str(b),
+            "codesign",
+            "--force",
+            "--sign",
+            "-",
+            "--entitlements",
+            str(entitlements),
+            str(b),
         )
 
 
@@ -105,9 +116,17 @@ def check(stage: Path) -> None:
         # -netdev help lists vhost-user even when it is not built in;
         # a build with it complains about the missing chardev instead
         r = subprocess.run(
-            [str(b), "-M", "none", "-display", "none",
-             "-netdev", "vhost-user,id=probe,chardev=probe"],
-            capture_output=True, text=True,
+            [
+                str(b),
+                "-M",
+                "none",
+                "-display",
+                "none",
+                "-netdev",
+                "vhost-user,id=probe,chardev=probe",
+            ],
+            capture_output=True,
+            text=True,
         )
         if "not compiled" in r.stderr:
             sys.exit(f"{b} has no -netdev vhost-user")
