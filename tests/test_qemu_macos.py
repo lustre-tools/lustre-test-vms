@@ -169,6 +169,7 @@ def test_doctor_fix_on_macos() -> None:
 
     with (
         patch("ltvm_pkg.host_setup.is_macos", return_value=True),
+        patch("ltvm_pkg.shmrdma_req._native_arch", return_value="aarch64"),
         patch("ltvm_pkg.shmrdma_req._qemu_help", return_value=""),
         patch(
             "ltvm_pkg.shmrdma_req._qemu_has_vhost_user_netdev",
@@ -181,6 +182,44 @@ def test_doctor_fix_on_macos() -> None:
     numa = reqs["host NUMA nodes"]
     assert not numa.ok and not numa.hard
     assert "taskset" not in reqs
+
+
+def test_doctor_fix_rechecks_qemu() -> None:
+    """An install that leaves QEMU without vhost-user is not "fixed"."""
+    from ltvm_pkg import shmrdma_req as sr
+
+    with (
+        patch("ltvm_pkg.host_setup.is_macos", return_value=True),
+        patch("ltvm_pkg.shmrdma_req._native_arch", return_value="aarch64"),
+        patch("ltvm_pkg.shmrdma_req._qemu_help", return_value=""),
+        patch(
+            "ltvm_pkg.shmrdma_req._qemu_has_vhost_user_netdev",
+            return_value=False,
+        ),
+    ):
+        reqs = {r.name: r for r in sr.host_checks()}
+        r = reqs["QEMU vhost-user-fs-pci"]
+        assert r.recheck is not None and not r.recheck()
+
+
+def test_doctor_on_intel_mac_offers_no_qemu_fix() -> None:
+    """Regression: an Intel Mac was offered ltvm's QEMU, whose install
+    does nothing there, and doctor then reported the QEMU fixed."""
+    from ltvm_pkg import shmrdma_req as sr
+
+    with (
+        patch("ltvm_pkg.host_setup.is_macos", return_value=True),
+        patch("ltvm_pkg.shmrdma_req._native_arch", return_value="x86_64"),
+        patch("ltvm_pkg.shmrdma_req._qemu_help", return_value=""),
+        patch(
+            "ltvm_pkg.shmrdma_req._qemu_has_vhost_user_netdev",
+            return_value=False,
+        ),
+    ):
+        reqs = {r.name: r for r in sr.host_checks()}
+    for name in ("QEMU vhost-user-fs-pci", "QEMU vhost-user netdev"):
+        assert reqs[name].fix is None
+        assert "Intel Macs" in reqs[name].how
 
 
 def test_doctor_on_linux_unchanged() -> None:

@@ -294,12 +294,23 @@ def host_checks(arch: str | None = None) -> list[Req]:
             f"qemu-system-{arch} has no vhost-user: use a "
             f"{_native_arch()} target"
         )
+    elif is_macos() and _native_arch() != "aarch64":
+        reinstall = (
+            "no QEMU with vhost-user is published for Intel Macs: use "
+            "Apple Silicon or a Linux host"
+        )
     elif is_macos():
         # Homebrew's QEMU has no vhost-user; ltvm publishes one that does
         from .host_setup import install_qemu_macos_vhost
 
-        reinstall = "install ltvm's QEMU for macOS (Apple Silicon only)"
+        reinstall = "install ltvm's QEMU for macOS"
         qemu_fix = install_qemu_macos_vhost
+
+    def _recheck(cap: str) -> Callable[[], bool] | None:
+        if qemu_fix is None:
+            return None
+        return lambda: _qemu_caps(_qemu(arch))[cap]
+
     reqs.append(
         Req(
             "QEMU vhost-user-fs-pci",
@@ -308,6 +319,7 @@ def host_checks(arch: str | None = None) -> list[Req]:
             qemu,
             fix=qemu_fix,
             how=reinstall,
+            recheck=_recheck("vhost-user-fs-pci"),
         )
     )
     reqs.append(
@@ -318,6 +330,7 @@ def host_checks(arch: str | None = None) -> list[Req]:
             qemu,
             fix=qemu_fix,
             how=reinstall,
+            recheck=_recheck("shared-ram"),
         )
     )
     reqs.append(
@@ -328,6 +341,7 @@ def host_checks(arch: str | None = None) -> list[Req]:
             qemu,
             fix=qemu_fix,
             how=reinstall,
+            recheck=_recheck("vhost-user-netdev"),
         )
     )
     reqs.append(_run_dir_check())
