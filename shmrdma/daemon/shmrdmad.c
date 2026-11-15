@@ -223,6 +223,7 @@ struct mr {
 	uint32_t page_shift;
 	uint32_t npages;
 	uint32_t fpo;		/* offset of iova in the first page */
+	uint32_t pdn;		/* the PD of the QP that registered it */
 	bool valid;
 	uint32_t cap;		/* entries pages[] has room for */
 	uint64_t *pages;	/* grows, never shrinks or moves once used */
@@ -243,6 +244,8 @@ struct qp {
 	uint32_t dqpn;
 	uint32_t qkey;
 	uint32_t rnr_retry;
+	uint32_t pdn;
+	uint32_t access;	/* SHMRDMA_ACC_REMOTE_* its peer may use */
 	struct qp *peer;
 	uint64_t peer_gen;
 	plat_spinlock_t rq_lock;
@@ -659,7 +662,7 @@ static inline void copy_bytes(uint8_t *dst, const uint8_t *src, uint64_t n,
 /* scatter/gather iteration                                         */
 
 struct sg_iter {
-	struct vdev *dev;
+	struct qp *qp;		/* whose device and PD the keys are in */
 	const struct shmrdma_sge *sge;
 	int nsge;
 	int idx;
@@ -706,21 +709,24 @@ static int64_t sg_next(struct sg_iter *it, uint64_t max, uint8_t **out)
 	if (left > max)
 		left = max;
 
+	struct vdev *d = it->qp->dev;
+
 	if (s->lkey == SHMRDMA_LOCAL_DMA_LKEY && !it->remote) {
 		gpa = addr;
-		p = gpa_hva(it->dev, gpa, &avail);
+		p = gpa_hva(d, gpa, &avail);
 		if (!p) {
 			it->err = WC_LOC_PROT_ERR;
 			return -1;
 		}
 	} else {
-		plat_spin_lock(&it->dev->mr_lock);
-		struct mr *mr = dev_mr(it->dev, s->lkey);
+		plat_spin_lock(&d->mr_lock);
+		struct mr *mr = dev_mr(d, s->lkey);
 
-		if (!mr || (mr->access & it->need_access) != it->need_access ||
+		if (!mr || mr->pdn != it->qp->pdn ||
+		    (mr->access & it->need_access) != it->need_access ||
 		    addr < mr->iova || addr - mr->iova >= mr->length ||
 		    mr->length - (addr - mr->iova) < left) {
-			plat_spin_unlock(&it->dev->mr_lock);
+			plat_spin_unlock(&d->mr_lock);
 			it->err = it->remote ? WC_REM_ACCESS_ERR :
 					       WC_LOC_PROT_ERR;
 			return -1;
@@ -730,7 +736,7 @@ static int64_t sg_next(struct sg_iter *it, uint64_t max, uint8_t **out)
 		uint64_t poff = moff & ((1ull << mr->page_shift) - 1);
 
 		if (pidx >= mr->npages) {
-			plat_spin_unlock(&it->dev->mr_lock);
+			plat_spin_unlock(&d->mr_lock);
 			it->err = it->remote ? WC_REM_ACCESS_ERR :
 					       WC_LOC_PROT_ERR;
 			return -1;
@@ -745,10 +751,10 @@ static int64_t sg_next(struct sg_iter *it, uint64_t max, uint8_t **out)
 			pidx++;
 			avail += 1ull << mr->page_shift;
 		}
-		plat_spin_unlock(&it->dev->mr_lock);
+		plat_spin_unlock(&d->mr_lock);
 		uint64_t ravail;
 
-		p = gpa_hva(it->dev, gpa, &ravail);
+		p = gpa_hva(d, gpa, &ravail);
 		if (!p) {
 			it->err = it->remote ? WC_REM_ACCESS_ERR :
 					       WC_LOC_PROT_ERR;
@@ -1246,7 +1252,7 @@ static int exec_ud_send(struct qp *qp, struct shmrdma_sq_wqe *w,
 	c.src_qp = qp->qpn;
 	c.flags = SHMRDMA_CQE_GRH;
 
-	struct sg_iter dst = { .dev = pd, .sge = rsge, .nsge = rn,
+	struct sg_iter dst = { .qp = peer, .sge = rsge, .nsge = rn,
 			       .need_access = SHMRDMA_ACC_LOCAL_WRITE };
 	uint8_t grh[SHMRDMA_GRH_BYTES];
 
@@ -1262,7 +1268,7 @@ static int exec_ud_send(struct qp *qp, struct shmrdma_sq_wqe *w,
 		if (sg_copy_in(&dst, (const uint8_t *)w->sge, len))
 			c.status = dst.err;
 	} else {
-		struct sg_iter src = { .dev = qp->dev, .sge = sge,
+		struct sg_iter src = { .qp = qp, .sge = sge,
 				       .nsge = w->num_sge };
 
 		if (sg_copy(&dst, &src, len)) {
@@ -1323,7 +1329,7 @@ static int deliver_recv(struct qp *qp, struct qp *peer,
 			c.status = WC_LOC_LEN_ERR;
 			rc = WC_REM_INV_REQ_ERR;
 		} else {
-			struct sg_iter dst = { .dev = peer->dev, .sge = rsge,
+			struct sg_iter dst = { .qp = peer, .sge = rsge,
 					       .nsge = rn,
 					       .need_access = SHMRDMA_ACC_LOCAL_WRITE };
 
@@ -1334,7 +1340,7 @@ static int deliver_recv(struct qp *qp, struct qp *peer,
 					rc = WC_REM_OP_ERR;
 				}
 			} else {
-				struct sg_iter src = { .dev = qp->dev,
+				struct sg_iter src = { .qp = qp,
 						       .sge = sge,
 						       .nsge = w->num_sge };
 
@@ -1364,7 +1370,7 @@ static int deliver_recv(struct qp *qp, struct qp *peer,
 		plat_spin_lock(&peer->dev->mr_lock);
 		struct mr *mr = dev_mr(peer->dev, w->ex);
 
-		if (mr)
+		if (mr && mr->pdn == peer->pdn)
 			REL(&mr->valid, false);
 		plat_spin_unlock(&peer->dev->mr_lock);
 	}
@@ -1419,6 +1425,7 @@ static int exec_reg_mr(struct qp *qp, struct shmrdma_sq_wqe *w)
 	mr->page_shift = w->reg.page_shift;
 	mr->npages = w->reg.npages;
 	mr->access = w->reg.access;
+	mr->pdn = qp->pdn;
 	mr->fpo = w->ex & ((1u << w->reg.page_shift) - 1);
 	memcpy(mr->pages, pl, w->reg.npages * 8ull);
 	REL(&mr->valid, true);
@@ -1476,6 +1483,8 @@ static int exec_wqe(struct qp *qp, struct shmrdma_sq_wqe *w,
 		peer = qp_peer(qp);
 		if (!peer_ok(qp, peer))
 			return WC_RETRY_EXC_ERR;
+		if (!(peer->access & SHMRDMA_ACC_REMOTE_WRITE))
+			return WC_REM_ACCESS_ERR;
 		uint64_t len = (w->flags & SHMRDMA_WQE_INLINE) ?
 			w->rdma.inline_len : sg_total(sge, w->num_sge);
 
@@ -1488,7 +1497,7 @@ static int exec_wqe(struct qp *qp, struct shmrdma_sq_wqe *w,
 		}
 		struct shmrdma_sge rs = { .addr = w->rdma.remote_addr,
 					  .length = len, .lkey = w->rdma.rkey };
-		struct sg_iter dst = { .dev = peer->dev, .sge = &rs, .nsge = 1,
+		struct sg_iter dst = { .qp = peer, .sge = &rs, .nsge = 1,
 				       .remote = true,
 				       .need_access = SHMRDMA_ACC_REMOTE_WRITE };
 
@@ -1497,7 +1506,7 @@ static int exec_wqe(struct qp *qp, struct shmrdma_sq_wqe *w,
 				if (sg_copy_in(&dst, (const uint8_t *)w->sge, len))
 					return dst.err;
 			} else {
-				struct sg_iter src = { .dev = qp->dev, .sge = sge,
+				struct sg_iter src = { .qp = qp, .sge = sge,
 						       .nsge = w->num_sge };
 
 				if (sg_copy_par(&dst, &src, len))
@@ -1522,13 +1531,15 @@ static int exec_wqe(struct qp *qp, struct shmrdma_sq_wqe *w,
 		peer = qp_peer(qp);
 		if (!peer_ok(qp, peer))
 			return WC_RETRY_EXC_ERR;
+		if (!(peer->access & SHMRDMA_ACC_REMOTE_READ))
+			return WC_REM_ACCESS_ERR;
 		uint64_t len = sg_total(sge, w->num_sge);
 		struct shmrdma_sge rs = { .addr = w->rdma.remote_addr,
 					  .length = len, .lkey = w->rdma.rkey };
-		struct sg_iter src = { .dev = peer->dev, .sge = &rs, .nsge = 1,
+		struct sg_iter src = { .qp = peer, .sge = &rs, .nsge = 1,
 				       .remote = true,
 				       .need_access = SHMRDMA_ACC_REMOTE_READ };
-		struct sg_iter dst = { .dev = qp->dev, .sge = sge,
+		struct sg_iter dst = { .qp = qp, .sge = sge,
 				       .nsge = w->num_sge,
 				       .need_access = SHMRDMA_ACC_LOCAL_WRITE };
 
@@ -1551,6 +1562,10 @@ static int exec_wqe(struct qp *qp, struct shmrdma_sq_wqe *w,
 			return WC_LOC_PROT_ERR;
 		plat_spin_lock(&qp->dev->mr_lock);
 		mr = qp->dev->mrs[idx];
+		if (mr && mr->key == w->ex && mr->pdn != qp->pdn) {
+			plat_spin_unlock(&qp->dev->mr_lock);
+			return WC_LOC_PROT_ERR;
+		}
 		if (mr && mr->key == w->ex)
 			REL(&mr->valid, false);
 		plat_spin_unlock(&qp->dev->mr_lock);
@@ -2046,6 +2061,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		qp->dev = d;
 		qp->qpn = qpn;
 		qp->type = c->create_qp.type;
+		qp->pdn = c->create_qp.pdn;
 		qp->state = QPS_RESET;
 		qp->scq = d->cqs[sc];
 		qp->rcq = d->cqs[rcn];
@@ -2099,6 +2115,8 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 			qp->qkey = c->modify_qp.qkey;
 		if (c->modify_qp.mask & SHMRDMA_MQ_RETRY)
 			qp->rnr_retry = c->modify_qp.rnr_retry;
+		if (c->modify_qp.mask & SHMRDMA_MQ_ACCESS)
+			qp->access = c->modify_qp.access;
 		if (c->modify_qp.mask & SHMRDMA_MQ_STATE) {
 			uint32_t ns = c->modify_qp.state;
 

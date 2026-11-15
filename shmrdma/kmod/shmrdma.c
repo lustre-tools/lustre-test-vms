@@ -37,6 +37,7 @@ MODULE_PARM_DESC(netdev, "netdev whose IP addresses give the GIDs");
 #define SHMRDMA_NEVBUF		8
 #define SHMRDMA_CQE_SIZE	32
 #define SHMRDMA_QPN_NONE	U32_MAX	/* a cleaned CQE: no QP has it */
+#define SHMRDMA_MAX_PD		(1 << 20)
 
 #ifndef HAVE_VIRTIO_RESET_DEVICE
 static inline void virtio_reset_device(struct virtio_device *vdev)
@@ -83,6 +84,7 @@ struct shmrdma_dev {
 	struct ida cqn_ida;
 	u32 next_cqn;
 	struct ida mr_ida;
+	struct ida pdn_ida;
 
 	struct ib_device_attr attr;
 	bool registered;
@@ -90,6 +92,7 @@ struct shmrdma_dev {
 
 struct shmrdma_pd {
 	struct ib_pd ibpd;
+	u32 pdn;
 };
 
 struct shmrdma_ah {
@@ -146,6 +149,11 @@ struct shmrdma_mr {
 static inline struct shmrdma_dev *to_sdev(struct ib_device *d)
 {
 	return container_of(d, struct shmrdma_dev, ibdev);
+}
+
+static inline struct shmrdma_pd *to_spd(struct ib_pd *p)
+{
+	return container_of(p, struct shmrdma_pd, ibpd);
 }
 
 static inline struct shmrdma_cq *to_scq(struct ib_cq *c)
@@ -592,11 +600,21 @@ static int shmrdma_del_gid(const struct ib_gid_attr *attr, void **context)
 
 static int shmrdma_alloc_pd(struct ib_pd *pd, struct ib_udata *udata)
 {
-	return udata ? -EOPNOTSUPP : 0;
+	struct shmrdma_dev *dev = to_sdev(pd->device);
+	int rc;
+
+	if (udata)
+		return -EOPNOTSUPP;
+	rc = ida_alloc_range(&dev->pdn_ida, 1, SHMRDMA_MAX_PD - 1, GFP_KERNEL);
+	if (rc < 0)
+		return rc;
+	to_spd(pd)->pdn = rc;
+	return 0;
 }
 
 static int shmrdma_dealloc_pd(struct ib_pd *pd, struct ib_udata *udata)
 {
+	ida_free(&to_sdev(pd->device)->pdn_ida, to_spd(pd)->pdn);
 	return 0;
 }
 
@@ -934,6 +952,7 @@ static int shmrdma_req_notify_cq(struct ib_cq *ibcq,
 /* queue pairs                                                      */
 
 static void shmrdma_qp_erase(struct shmrdma_dev *dev, struct shmrdma_qp *qp);
+static u32 acc_bits(int ib);
 
 static void shmrdma_cq_link(struct shmrdma_cq *cq, struct list_head *node,
 			    struct list_head *head)
@@ -1031,6 +1050,7 @@ static int shmrdma_create_qp(struct ib_qp *ibqp,
 	cmd.create_qp.send_cqn = qp->scq->cqn;
 	cmd.create_qp.recv_cqn = qp->rcq->cqn;
 	cmd.create_qp.rec_gpa = virt_to_phys(qp->rec);
+	cmd.create_qp.pdn = to_spd(ibqp->pd)->pdn;
 	ring_desc(&qp->sq, &cmd.create_qp.sq);
 	ring_desc(&qp->rq, &cmd.create_qp.rq);
 	rc = xa_err(xa_store_irq(&dev->qps, qpn, qp, GFP_KERNEL));
@@ -1137,8 +1157,11 @@ static int shmrdma_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 		qp->attr.sq_psn = attr->sq_psn;
 	if (mask & IB_QP_RQ_PSN)
 		qp->attr.rq_psn = attr->rq_psn;
-	if (mask & IB_QP_ACCESS_FLAGS)
+	if (mask & IB_QP_ACCESS_FLAGS) {
+		cmd.modify_qp.mask |= SHMRDMA_MQ_ACCESS;
+		cmd.modify_qp.access = acc_bits(attr->qp_access_flags);
 		qp->attr.qp_access_flags = attr->qp_access_flags;
+	}
 	if (mask & IB_QP_PKEY_INDEX)
 		qp->attr.pkey_index = attr->pkey_index;
 	if (mask & IB_QP_PORT)
@@ -1306,6 +1329,9 @@ static int build_wqe(struct shmrdma_qp *qp, const struct ib_send_wr *wr,
 		const struct ib_reg_wr *rw = reg_wr(wr);
 		struct shmrdma_mr *mr = to_smr(rw->mr);
 
+		/* the backend puts the MR in the QP's PD */
+		if (rw->mr->pd != qp->ibqp.pd)
+			return -EINVAL;
 		w->opcode = SHMRDMA_OP_REG_MR;
 		w->reg.iova = mr->ibmr.iova;
 		w->reg.length = mr->ibmr.length;
@@ -1624,7 +1650,7 @@ static void shmrdma_init_attr(struct shmrdma_dev *dev)
 	a->max_cq = SHMRDMA_MAX_CQ;
 	a->max_cqe = SHMRDMA_MAX_CQE - 1;
 	a->max_mr = SHMRDMA_MAX_MR - 1;
-	a->max_pd = 1 << 20;
+	a->max_pd = SHMRDMA_MAX_PD - 1;
 	a->max_qp_rd_atom = 16;
 	a->max_res_rd_atom = 16 * (SHMRDMA_MAX_QP - 2);
 	a->max_qp_init_rd_atom = 16;
@@ -1723,6 +1749,7 @@ static int shmrdma_probe(struct virtio_device *vdev)
 	ida_init(&dev->qpn_ida);
 	ida_init(&dev->cqn_ida);
 	ida_init(&dev->mr_ida);
+	ida_init(&dev->pdn_ida);
 
 	rc = -ENOMEM;
 	dev->cmdbuf = kzalloc(sizeof(*dev->cmdbuf), GFP_KERNEL);
@@ -1821,6 +1848,7 @@ err_free:
 	ida_destroy(&dev->qpn_ida);
 	ida_destroy(&dev->cqn_ida);
 	ida_destroy(&dev->mr_ida);
+	ida_destroy(&dev->pdn_ida);
 	ib_dealloc_device(&dev->ibdev);
 	return rc;
 }
@@ -1854,6 +1882,7 @@ static void shmrdma_remove(struct virtio_device *vdev)
 	ida_destroy(&dev->qpn_ida);
 	ida_destroy(&dev->cqn_ida);
 	ida_destroy(&dev->mr_ida);
+	ida_destroy(&dev->pdn_ida);
 	ib_dealloc_device(&dev->ibdev);
 }
 

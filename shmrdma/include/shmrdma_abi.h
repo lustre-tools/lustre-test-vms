@@ -39,7 +39,7 @@ typedef int32_t __s32;
  */
 #define SHMRDMA_VIRTIO_ID	26	/* VIRTIO_ID_FS */
 #define SHMRDMA_TAG		"shmrdma"
-#define SHMRDMA_ABI_VERSION	2
+#define SHMRDMA_ABI_VERSION	3
 
 enum {
 	SHMRDMA_VQ_CTRL = 0,	/* guest -> host commands, host replies */
@@ -159,7 +159,11 @@ enum {
 	SHMRDMA_WQE_FENCE = 1 << 3,
 };
 
-/* MR access, our own bits */
+/*
+ * MR access, our own bits.  An MR is in the protection domain of the QP
+ * its REG_MR is posted on, and its keys work only on QPs of that PD; the
+ * local DMA key works on every QP of the device.
+ */
 enum {
 	SHMRDMA_ACC_LOCAL_WRITE = 1 << 0,
 	SHMRDMA_ACC_REMOTE_WRITE = 1 << 1,
@@ -301,6 +305,8 @@ struct shmrdma_cmd {
 			__u64 rec_gpa;
 			struct shmrdma_ring_desc sq;
 			struct shmrdma_ring_desc rq;
+			__u32 pdn;	/* protection domain */
+			__u32 pad;
 		} create_qp;
 		struct {
 			__u32 qpn;
@@ -310,7 +316,7 @@ struct shmrdma_cmd {
 			__u32 qkey;
 			__u32 rnr_retry;
 			__u32 retry_cnt;
-			__u32 pad;
+			__u32 access;	/* SHMRDMA_ACC_REMOTE_*: what peers may do */
 			__u8 dgid[16];
 		} modify_qp;
 		struct {
@@ -328,6 +334,7 @@ enum {
 	SHMRDMA_MQ_DEST = 1 << 1,	/* dgid + dest_qpn */
 	SHMRDMA_MQ_QKEY = 1 << 2,
 	SHMRDMA_MQ_RETRY = 1 << 3,
+	SHMRDMA_MQ_ACCESS = 1 << 4,
 };
 
 struct shmrdma_resp {
