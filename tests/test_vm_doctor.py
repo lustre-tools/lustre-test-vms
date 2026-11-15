@@ -810,9 +810,34 @@ class TestDoctorShmrdmad:
         doctor_env: dict,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        with patch("ltvm_pkg.shmrdma.attached_vms", return_value=["co1-a"]):
+        from ltvm_pkg.vm_state import VMInfo
+
+        vm = VMInfo(name="co1-a", ip="192.168.100.50", shm_daemon="10:99")
+        with patch("ltvm_pkg.shmrdma._attached", return_value=[vm]):
             rc = vm_commands.cmd_doctor(_make_args(fix=False))
         assert rc != 0
-        assert "shmrdmad is not running but co1-a use it" in (
+        assert "the shmrdmad co1-a started against is gone" in (
             capsys.readouterr().out
         )
+
+    def test_replaced_daemon_reported(
+        self,
+        tmp_vmdir: Path,
+        doctor_env: dict,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from ltvm_pkg.vm_state import VMInfo
+
+        old = VMInfo(name="co1-a", ip="192.168.100.50", shm_daemon="10:99")
+        new = VMInfo(name="co1-b", ip="192.168.100.51", shm_daemon="20:500")
+        legacy = VMInfo(name="co1-c", ip="192.168.100.52")
+        with (
+            patch(
+                "ltvm_pkg.shmrdma._attached", return_value=[old, new, legacy]
+            ),
+            patch("ltvm_pkg.shmrdma.Daemon.identity", return_value="20:500"),
+        ):
+            rc = vm_commands.cmd_doctor(_make_args(fix=False))
+        assert rc != 0
+        out = capsys.readouterr().out
+        assert "the shmrdmad co1-a started against is gone" in out

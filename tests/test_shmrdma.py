@@ -210,7 +210,7 @@ def test_daemon_starts_outside_the_launch_lock(
         finally:
             held.pop()
 
-    ensure.side_effect = lambda: (held and pytest.fail("lock held"), d)[1]
+    ensure.side_effect = lambda *_: (held and pytest.fail("lock held"), d)[1]
     vm = _make_vm(tmp_vmdir)
     vm.shmrdma = "auto"
     vm.save()
@@ -225,12 +225,84 @@ def test_sockets_gone_by_the_lock_refuse(
 ) -> None:
     """A daemon stopped between the start and the lock is refused."""
     d, ensure = own_daemon
-    ensure.side_effect = lambda: (d.rdma_socket.unlink(), d)[1]
+    ensure.side_effect = lambda *_: (d.rdma_socket.unlink(), d)[1]
     vm = _make_vm(tmp_vmdir)
     vm.shmrdma = "auto"
     vm.save()
     with pytest.raises(SystemExit):
         _run_launch(vm, _LaunchHarness())
+
+
+def test_launch_refuses_another_users_socket(
+    tmp_vmdir: Path,  # noqa: F811
+    daemon_socket: Path,
+) -> None:
+    vm = _make_vm(tmp_vmdir)
+    vm.shmrdma = str(daemon_socket)
+    vm.save()
+    real = os.lstat
+
+    def lstat(p, *a, **kw):
+        st = real(p, *a, **kw)
+        if str(p) != str(daemon_socket):
+            return st
+        f = list(st[:10])
+        f[4] = os.geteuid() + 1
+        return os.stat_result(f)
+
+    with patch("ltvm_pkg.shmrdma.os.lstat", side_effect=lstat):
+        with pytest.raises(SystemExit):
+            _run_launch(vm, _LaunchHarness())
+
+
+def test_long_socket_path_refused(tmp_vmdir: Path) -> None:  # noqa: F811
+    from ltvm_pkg.nic_spec import SUN_PATH_SIZE, socket_path_problem
+
+    long = "/" + "x" * SUN_PATH_SIZE
+    assert socket_path_problem(long)
+    assert socket_path_problem("/" + "x" * (SUN_PATH_SIZE - 2)) is None
+    d = shmrdma.Daemon("tester", os.geteuid(), Path(long))
+    with pytest.raises(RuntimeError, match="shorter than"):
+        shmrdma.ensure_daemon(d)
+
+
+def test_root_reach_refused(tmp_vmdir: Path) -> None:  # noqa: F811
+    vm = _make_vm(tmp_vmdir)
+    denied = subprocess.CompletedProcess(
+        [], 1, "", "stat: cannot statx '/h/s': Permission denied\n"
+    )
+    with (
+        patch.object(shmrdma, "_LINUX", True),
+        patch("ltvm_pkg.shmrdma.os.geteuid", return_value=1000),
+        patch("ltvm_pkg.priv.sudo_run", return_value=denied),
+    ):
+        with pytest.raises(SystemExit):
+            shmrdma.check_root_reach(vm, ["/h/s"])
+    ok = subprocess.CompletedProcess([], 0, "socket\n", "")
+    with (
+        patch.object(shmrdma, "_LINUX", True),
+        patch("ltvm_pkg.shmrdma.os.geteuid", return_value=1000),
+        patch("ltvm_pkg.priv.sudo_run", return_value=ok),
+    ):
+        shmrdma.check_root_reach(vm, ["/h/s"])
+
+
+def test_launch_records_the_daemon(tmp_vmdir: Path, own_daemon) -> None:  # noqa: F811
+    d, _ensure = own_daemon
+    vm = _make_vm(tmp_vmdir)
+    vm.shmrdma = "auto"
+    vm.save()
+    with patch.object(shmrdma.Daemon, "identity", return_value="77:123"):
+        _run_launch(vm, _LaunchHarness())
+    assert VMInfo.load(vm.name).shm_daemon == "77:123"
+
+
+def test_proc_start_is_stable() -> None:
+    if not sys.platform.startswith("linux"):
+        pytest.skip("needs /proc")
+    start = shmrdma._proc_start(os.getpid())
+    assert start and start == shmrdma._proc_start(os.getpid())
+    assert shmrdma._proc_start(2**22 + 12345) == ""
 
 
 def test_launch_shmnet_only(

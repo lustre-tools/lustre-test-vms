@@ -4069,21 +4069,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     print(f"  FAILED to remove: {err}")
                     fix_failures += 1
 
-    # Running VMs whose shmrdmad is gone: their shmrdma device and
-    # shmnet NICs are dead until each VM restarts and starts it again.
+    # Running VMs whose shmrdmad is gone, or was replaced: their shmrdma
+    # device and shmnet NICs are dead until each VM restarts.
     try:
         shm: shmrdma.Daemon | None = shmrdma.daemon(create=False)
     except (KeyError, OSError, RuntimeError):
         # a uid with no passwd entry (a container) has no daemon dir
         shm = None
-    if shm is not None and not shm.pid():
-        orphans = shmrdma.attached_vms(shm)
-        if orphans:
-            print(
-                f"shmrdmad is not running but {', '.join(orphans)} use it: "
-                f"restart them (`ltvm stop`, `ltvm start`) to bring it back"
-            )
-            issues += 1
+    orphans = shmrdma.orphaned_vms(shm) if shm is not None else []
+    if orphans:
+        print(
+            f"the shmrdmad {', '.join(orphans)} started against is gone: "
+            f"restart them (`ltvm stop`, `ltvm start`) to bring it back"
+        )
+        issues += 1
 
     # Cluster files referencing dead nodes.  A user can `ltvm destroy
     # node` individually after a `cluster create`, leaving the .cluster
