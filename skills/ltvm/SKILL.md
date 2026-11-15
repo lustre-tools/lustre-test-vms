@@ -488,27 +488,38 @@ LTVM.TEST; rerunning keeps the keys, recreating the cluster loses them):
 ltvm cluster krb5 co2
 ```
 
-### Fast LNet between VMs: shmrdma
+### Fast networking between VMs: shmrdma and shmnet
 
-`--shmrdma` (on `create` and `cluster create`) gives each node an RDMA
-device served by a host daemon that copies straight between the
-guests' memory, and LNet comes up on o2ib over it: about 25 GB/s of
-LNet between two VMs, where the bridge gives 1.  Use it when a test
-needs network speed (bulk I/O, many clients); ordinary functional
-testing does not.  Plain TCP programs can ride it too, through SMC:
-`smc_run iperf3 ...` in a `--shmrdma` VM (`smcss` shows the
-connections).  `--nic shmnet` is a TCP NIC on the same daemon's
-switch.  ltvm builds and starts the daemon (`ltvm vm shmrdmad status`);
-never stop it while VMs use it, since their devices die until they
-restart.  On a multi-NUMA host, put the VMs that talk to each other
-on one node with `--host-node N` (memory bound there, QEMU on its
-CPUs), and the daemon with `[shmrdma] nodes = N` in /etc/ltvm.conf:
-placement alone made a 3-4x difference on Sookie.  Shared-memory VMs
-cannot be merged by KSM, so they cost their
-full RAM on the host.  When something it needs is missing (a fetched
-image has no guest module, for one), create refuses and says to run
-`ltvm doctor --fix --shmrdma <target>`, which installs and builds it.  docs/SHMRDMA.md has the
-detail.
+When a test needs network speed between VMs (bulk I/O, many clients,
+LNet performance work), give them a fast path through host memory.
+Ordinary functional testing does not need it.  Two options, both
+served by a host daemon that copies straight between the guests'
+memory:
+
+- `--shmrdma` (on `create` and `cluster create`) gives each node an
+  RDMA device, and LNet comes up on o2ib over it: about 10 to 25 GB/s
+  of LNet between two VMs, against about 1 GB/s on the default NIC.
+  LNet then runs o2iblnd, not socklnd, so it is not the TCP path CI
+  mostly tests.
+- `--nic shmnet` adds a TCP NIC on the daemon's switch, so LNet stays
+  on socklnd.  It gains less: about 1.5 times the default NIC on slow
+  cores, where the guests' own TCP is the limit, and close to o2ib on
+  fast ones (9 GB/s on an Apple M5).
+
+On a `--shmrdma` VM an extra NIC joins LNet only when its spec names
+a net (`--nic shmnet:net=tcp1`); otherwise LNet would send its traffic
+over o2ib anyway.  ltvm builds and starts the daemon (`ltvm vm shmrdmad
+status`); never stop it while VMs use it, since their devices die until
+they restart.  On a multi-NUMA host, placing the VMs that talk to each
+other on one node (`--host-node N`, and the daemon with `[shmrdma]
+nodes = N` in /etc/ltvm.conf) made TCP paths 2 to 3 times faster on
+Sookie; o2ib bulk is faster spread over nodes, since one node's memory
+channels cap the copies.  Shared-memory VMs cannot be merged by KSM,
+so they cost their full RAM on the host.  It works on macOS too, on
+ltvm's own QEMU.  When something it needs is missing (a fetched image
+has no guest module, say), create refuses and says to run `ltvm doctor
+--fix --shmrdma <target>`, which installs and builds it.
+docs/SHMRDMA.md has the detail.
 
 ```bash
 ltvm cluster create co2 --shmrdma mgs+mds+oss:co2-srv:3 client:co2-c1
