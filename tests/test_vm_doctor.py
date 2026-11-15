@@ -651,6 +651,20 @@ class TestDoctorSkillLinks:
         assert failures == 0
         assert (home / ".claude" / "skills" / "ltvm").is_symlink()
 
+    def test_fix_from_another_checkout_links_the_installed_one(
+        self, checkout: Path, tmp_path: Path
+    ) -> None:
+        """doctor --fix in a worktree must not repoint the links at it."""
+        from ltvm_pkg import host_setup_version as hsv
+
+        home = tmp_path / "home"
+        with patch.object(
+            hsv, "installed_script", return_value=checkout / "ltvm"
+        ):
+            vm_commands._check_skill_links(True, home=home)
+        link = home / ".claude" / "skills" / "ltvm"
+        assert link.resolve() == (checkout / "skills" / "ltvm").resolve()
+
     def test_linked_skills_are_not_an_issue(
         self, checkout: Path, tmp_path: Path
     ) -> None:
