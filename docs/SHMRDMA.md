@@ -105,14 +105,14 @@ ltvm vm shmrdmad [status|start|stop]
   images predate it: rebuild with `ltvm build image <target>`.
 - **LNet.** `--shmrdma` adds `fc_shmrdma=1` to the guest's command
   line, and the boot-time lnet.conf emitter then puts eth0 on `o2ib`
-  (the device takes its GIDs from eth0's addresses), extra NICs keeping
-  their own nets. `cluster deploy` reads the MGS's lnet.conf, so
-  NETTYPE and the MGS NID follow. lnet.conf is written at first boot
-  only, so after `vm set --shmrdma` on an existing VM, remove
-  `/etc/modprobe.d/lnet.conf` in the guest and reboot it.
-  Don't put shmrdma and a shmnet NIC in one LNet config by hand:
-  LNet treats the two nets on one peer as multi-rail and spreads
-  traffic over both, which runs at the slower one's pace.
+  (the device takes its GIDs from eth0's addresses). An extra tcp or
+  softroce NIC (a shmnet NIC included) joins LNet only when its spec
+  names a net (`--nic shmnet:net=tcp1`): unnamed, it would reach the
+  same peers as a second rail, and LNet then sends the traffic
+  addressed to it over o2ib. `cluster deploy` reads the MGS's
+  lnet.conf, so NETTYPE and the MGS NID follow. lnet.conf is written
+  at first boot only, so after `vm set --shmrdma` on an existing VM,
+  remove `/etc/modprobe.d/lnet.conf` in the guest and reboot it.
 - **Memory.** Guest RAM is a shared memfd, which KSM cannot merge, so
   where `/etc/ltvm.conf` sets `[memory] overcommit`, a shmrdma or
   shmnet VM counts against the limit at overcommit times its size.

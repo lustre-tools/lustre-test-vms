@@ -134,9 +134,17 @@ check "cli: fc_shmrdma=1 -> eth0 on o2ib" \
 	'options lnet networks="o2ib0(eth0)"' \
 	"$(run_cli 'fc_ip=1.2.3.4 fc_shmrdma=1')"
 
-check "cli: fc_shmrdma=1 keeps eth0 on o2ib with extras" \
-	'options lnet networks="o2ib0(eth0),tcp0(eth1)"' \
+check "cli: fc_shmrdma=1 leaves an unnamed extra NIC out of LNet" \
+	'options lnet networks="o2ib0(eth0)"' \
 	"$(run_cli 'fc_shmrdma=1 fc_nics=tcp')"
+
+check "cli: fc_shmrdma=1 keeps a named extra NIC" \
+	'options lnet networks="o2ib0(eth0),tcp0(eth1)"' \
+	"$(run_cli 'fc_shmrdma=1 fc_nics=tcp fc_nic_nets=tcp0')"
+
+check "cli: fc_shmrdma=1 with one named of two extras" \
+	'options lnet networks="o2ib0(eth0),tcp5(eth2)"' \
+	"$(run_cli 'fc_shmrdma=1 fc_nics=tcp,tcp fc_nic_nets=,tcp5')"
 
 check "cli: fc_nics=passthrough (mgmt SSH-only)" \
 	'options lnet networks="o2ib0(@ib-of-eth1))"' \
