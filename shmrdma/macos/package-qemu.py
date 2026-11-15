@@ -158,9 +158,7 @@ def write_docs(
         )
         dest = lic / formula
         dest.mkdir()
-        found = [
-            p for g in LICENSE_GLOBS for p in keg.glob(g) if p.is_file()
-        ]
+        found = [p for g in LICENSE_GLOBS for p in keg.glob(g) if p.is_file()]
         for p in found:
             shutil.copy2(p, dest / p.name)
         if not found:
