@@ -455,12 +455,25 @@ def is_running(vm: VMInfo) -> bool:
     return False
 
 
-def numa_problem(vcpus: int, mem: int, nodes: int) -> str | None:
+# shmrdmad maps at most this many guest RAM regions (VU_MAX_REGIONS).
+# Shared RAM is one memfd per NUMA node, and on x86 the node holding
+# the 32-bit PCI hole gives two regions.
+SHMRDMAD_MAX_REGIONS = 8
+
+
+def numa_problem(
+    vcpus: int, mem: int, nodes: int, shared: bool = False
+) -> str | None:
     """Why *nodes* NUMA nodes cannot split this VM, or None if they can."""
     if nodes < 0:
         return f"--numa-nodes must be >= 0 (got {nodes})"
     if nodes <= 1:
         return None
+    if shared and nodes + 1 > SHMRDMAD_MAX_REGIONS:
+        return (
+            f"--numa-nodes {nodes} with --shmrdma or a shmnet NIC: "
+            f"shmrdmad maps at most {SHMRDMAD_MAX_REGIONS - 1} nodes"
+        )
     if vcpus % nodes:
         return f"--numa-nodes {nodes} must divide the {vcpus} vCPUs evenly"
     if mem // nodes < 128:

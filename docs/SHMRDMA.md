@@ -27,7 +27,7 @@ benchmark scripts in `bench/`).
 
 ```bash
 ltvm create co1-a --shmrdma
-ltvm cluster create co2 --shmrdma mgs+mds+oss:co2-srv:3 client:co2-c1
+ltvm cluster create co2 mgs+mds+oss:co2-srv:3 client:co2-c1 --shmrdma
 ltvm cluster deploy co2 --build <tree> --mount     # Lustre over o2ib
 ltvm create co1-b --nic shmnet                      # a NIC on the switch
 ltvm vm set co1-a --shmrdma none                    # drop it (stopped VM)

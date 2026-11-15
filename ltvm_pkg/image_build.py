@@ -1211,6 +1211,8 @@ def build_image(
     # would otherwise leak as a podman layer on every retry.  Wrap
     # so we can rmi it on failure.  On success it goes once the
     # package manifest below has been read from it.
+    prev_image = current_image(out_dir)
+    prev_meta = load_meta_safe(out_dir / "meta.json") or {}
     log.info("Exporting container to ext4 ...")
     try:
         image_path = _export_to_ext4(final_tag, out_dir)
@@ -1275,6 +1277,9 @@ def build_image(
             else None
         ),
         shmrdma_kmod=shmrdma_kmod,
+        shmrdma_kmod_images=_kmod_images(
+            prev_meta, prev_image, image_path, shmrdma_kmod
+        ),
         build_seconds=round(elapsed, 1),
         image_size_mb=round(size_mb, 1),
         packages=pkg_manifest,
@@ -1310,6 +1315,30 @@ def _compute_image_size_mb_from_tar(tarball: Path) -> int:
         + _IMAGE_SIZE_HEADROOM_MB
     )
     return max(mb, _IMAGE_SIZE_FLOOR_MB)
+
+
+def _kmod_images(
+    prev_meta: dict[str, Any],
+    prev_image: Path | None,
+    image_path: Path,
+    has_kmod: bool,
+) -> dict[str, bool]:
+    """Which image files in the directory have shmrdma.ko, by file name.
+
+    VMs keep the versioned image they were created on, so the newest
+    build's ``shmrdma_kmod`` does not describe theirs.
+    """
+    out_dir = image_path.parent
+    known = prev_meta.get("shmrdma_kmod_images")
+    names = {
+        k: bool(v)
+        for k, v in (known.items() if isinstance(known, dict) else ())
+        if (out_dir / k).is_file()
+    }
+    if prev_image is not None and "shmrdma_kmod" in prev_meta:
+        names.setdefault(prev_image.name, bool(prev_meta["shmrdma_kmod"]))
+    names[image_path.name] = has_kmod
+    return names
 
 
 def _export_to_ext4(

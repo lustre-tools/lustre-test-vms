@@ -42,6 +42,9 @@ class Req:
     fix: Callable[[], None] | None = None
     how: str = ""
     hard: bool = True  # False: worth reporting, never a refusal
+    # Asks again after ``fix`` ran, when the fix can succeed and still
+    # leave the requirement unmet.
+    recheck: Callable[[], bool] | None = None
 
     def needed_by(self, features: set[str]) -> bool:
         return bool(self.features & features)
@@ -296,34 +299,70 @@ def host_checks() -> list[Req]:
 
 def _run_dir_check() -> Req:
     uid = os.geteuid()
+    user = None
     if os.geteuid() == 0 and os.environ.get("SUDO_USER"):
         import pwd
 
-        uid = pwd.getpwnam(os.environ["SUDO_USER"]).pw_uid
+        user = os.environ["SUDO_USER"]
+        uid = pwd.getpwnam(user).pw_uid
     d = shmrdma.run_dir(uid, create=False)
     ok = False
     detail = str(d)
+    fix: Callable[[], None] | None = None
     try:
         if os.path.lexists(d):
             shmrdma._check_private(d, uid)
             ok = True
+        elif user is not None:
+            # root never makes it: the user's own ltvm run does
+            detail = f"none yet; {user}'s first ltvm run makes one"
         else:
-            parent = d.parent
-            ok = parent.is_dir() and os.access(parent, os.W_OK | os.X_OK)
-            detail = f"{d} (to be created)" if ok else f"{parent} not writable"
+            free = [
+                c
+                for c in shmrdma._candidate_dirs(uid)
+                if not os.path.lexists(c) and shmrdma.creatable(c)
+            ]
+            ok = bool(free)
+            detail = (
+                f"{free[0]} (to be created)"
+                if ok
+                else "no candidate can be created: "
+                + ", ".join(map(str, shmrdma._candidate_dirs(uid)))
+            )
+
+            def make() -> None:
+                shmrdma.run_dir(uid, create=True)
+
+            fix = make
     except (OSError, shmrdma.UnsafeDir) as e:
         detail = str(e)
-
-    def make() -> None:
-        shmrdma.run_dir(uid, create=True)
 
     return Req(
         "shmrdmad runtime directory",
         frozenset({SHMRDMA, SHMNET}),
         ok,
         detail,
-        fix=make,
+        fix=fix,
         how="a private directory for the daemon's sockets",
+    )
+
+
+def _build_image(t: Target, force: bool = False) -> None:
+    """Rebuild *t*'s image with the Lustre tree doctor was given."""
+    if not t.lustre_tree:
+        raise RuntimeError(
+            "an image build bakes in Lustre from a source tree: pass "
+            "--lustre-tree"
+        )
+    k = ["--kernel", t.kernel] if t.kernel else []
+    _ltvm(
+        "build",
+        "image",
+        t.name,
+        *k,
+        "--lustre-tree",
+        t.lustre_tree,
+        *(["--force"] if force else []),
     )
 
 
@@ -339,7 +378,7 @@ def target_checks(t: Target) -> list[Req]:
                 _ltvm(
                     "build", "kernel", t.name, *k.split(), "--lustre-tree", tree
                 )
-            _ltvm("build", "image", t.name, *k.split())
+            _build_image(t)
 
         reqs.append(
             Req(
@@ -360,8 +399,12 @@ def target_checks(t: Target) -> list[Req]:
             frozenset({SHMRDMA}),
             shmrdma.image_has_kmod(t.image),
             str(t.image),
-            fix=lambda: _ltvm("build", "image", t.name, *k.split()),
-            how=f"ltvm build image {t.name}{k} (a fetched image predates it)",
+            # Its inputs may be unchanged (the module failed to build
+            # last time), so only a forced rebuild retries it.
+            fix=lambda: _build_image(t, force=True),
+            how=f"ltvm build image {t.name}{k} --lustre-tree <tree> "
+            f"--force (a fetched image predates it)",
+            recheck=lambda: _current_has_kmod(t),
         )
     )
     smc = _kernel_has_smc(t.kernel_dir)
@@ -374,7 +417,7 @@ def target_checks(t: Target) -> list[Req]:
                 "carries: pass --lustre-tree"
             )
         _ltvm("build", "kernel", t.name, *k.split(), "--lustre-tree", tree)
-        _ltvm("build", "image", t.name, *k.split())
+        _build_image(t)
 
     reqs.append(
         Req(
@@ -432,6 +475,15 @@ def refusal(feats: set[str], t: Target | None = None) -> str | None:
     return "\n".join(lines)
 
 
+def _current_has_kmod(t: Target) -> bool:
+    from .image_store import current_image
+
+    if t.image is None:
+        return False
+    cur = current_image(Path(t.image).parent)
+    return cur is not None and shmrdma.image_has_kmod(cur)
+
+
 def doctor(t: Target, fix: bool) -> tuple[int, int]:
     """Report every requirement; with *fix*, repair what can be.
 
@@ -457,6 +509,8 @@ def doctor(t: Target, fix: bool) -> tuple[int, int]:
             continue
         try:
             r.fix()
+            if r.recheck is not None and not r.recheck():
+                raise RuntimeError(f"still missing after: {r.how}")
             print(f"           fixed: {r.how}")
         except (RuntimeError, OSError, subprocess.CalledProcessError) as e:
             print(f"           could not fix: {e}")

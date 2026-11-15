@@ -90,6 +90,16 @@ def cmd_cluster_create(args: argparse.Namespace) -> int:
     """Create a cluster from node specs."""
     use_json = args.json
 
+    if args.shmrdma and args.shmrdma != "auto":
+        from ltvm_pkg.nic_spec import socket_path_problem
+        from ltvm_pkg.vm_commands import shmrdma_socket_message
+
+        problem = socket_path_problem(args.shmrdma)
+        if problem:
+            return _error(
+                shmrdma_socket_message(args.shmrdma, problem), use_json
+            )
+
     # A dry run only reads, so it must not demand root: prompting for a
     # password nothing will spend is the surest way to stop people using
     # it.

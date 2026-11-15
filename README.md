@@ -548,7 +548,7 @@ switch instead of the bridge, and TCP programs can use the RDMA
 device through SMC (`smc_run CMD`).  See [docs/SHMRDMA.md](docs/SHMRDMA.md).
 
 ```bash
-ltvm cluster create co2 --shmrdma mgs+mds+oss:co2-srv:3 client:co2-c1
+ltvm cluster create co2 mgs+mds+oss:co2-srv:3 client:co2-c1 --shmrdma
 ltvm cluster deploy co2 --build <tree> --mount
 ```
 

@@ -522,7 +522,7 @@ has no guest module, say), create refuses and says to run `ltvm doctor
 docs/SHMRDMA.md has the detail.
 
 ```bash
-ltvm cluster create co2 --shmrdma mgs+mds+oss:co2-srv:3 client:co2-c1
+ltvm cluster create co2 mgs+mds+oss:co2-srv:3 client:co2-c1 --shmrdma
 ltvm cluster deploy co2 --build <tree> --mount
 ```
 

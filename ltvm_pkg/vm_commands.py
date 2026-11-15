@@ -945,7 +945,7 @@ def _allocate_and_persist_vm(
             disk_cache=getattr(args, "disk_cache", "") or "",
             disk_prealloc=getattr(args, "disk_prealloc", "") or "",
         )
-        problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes)
+        problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes, vm.shared_ram)
         if problem:
             die(problem)
 
@@ -1202,6 +1202,16 @@ def _resolve_os_and_kernel(
     return os_arts, image, kernel, kver, os_target, variant
 
 
+def shmrdma_socket_message(value: str, problem: str) -> str:
+    """Why a --shmrdma value is refused.  It takes an optional value, so a
+    positional written after it is taken as its socket."""
+    return (
+        f"--shmrdma took {value!r} as its socket: put --shmrdma after the "
+        f"VM name, target and node specs, or give --shmrdma=SOCKET (the "
+        f"{problem})"
+    )
+
+
 def _check_shmrdma_socket(value: str) -> None:
     """--shmrdma takes 'auto' or an absolute socket path."""
     from .nic_spec import socket_path_problem
@@ -1210,10 +1220,7 @@ def _check_shmrdma_socket(value: str) -> None:
         return
     problem = socket_path_problem(value)
     if problem:
-        die(
-            f"--shmrdma {value!r}: give no value for ltvm's own daemon, or "
-            f"the {problem}"
-        )
+        die(shmrdma_socket_message(value, problem))
 
 
 def _check_shmrdma_image(image: str, target: str, kernel: str) -> None:
@@ -3465,7 +3472,7 @@ def cmd_set(args: argparse.Namespace) -> None:
             f"disk cache {vm.disk_cache or 'default'} -> {cache or 'default'}"
         )
         vm.disk_cache = cache
-    problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes) or (
+    problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes, vm.shared_ram) or (
         nic_numa_problem(vm.nics, vm.numa_nodes)
     )
     if problem:

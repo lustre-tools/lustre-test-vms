@@ -210,11 +210,50 @@ class TestMemoryCharge:
         assert qemu_run.charged_mb(4096, True, 1.0) == 4096
 
 
-def test_image_has_kmod(tmp_path: Path) -> None:
-    image = tmp_path / "rootfs.ext4"
-    assert not shmrdma.image_has_kmod(image)
-    (tmp_path / "meta.json").write_text(json.dumps({"shmrdma_kmod": True}))
-    assert shmrdma.image_has_kmod(image)
+OLD_IMG = "base-20261001T000000-aaaaaa.ext4"
+NEW_IMG = "base-20261101T000000-bbbbbb.ext4"
+
+
+def _image_dir(tmp_path: Path, meta: dict) -> Path:
+    for name in (OLD_IMG, NEW_IMG):
+        (tmp_path / name).write_bytes(b"")
+    (tmp_path / "current.ext4").symlink_to(NEW_IMG)
+    (tmp_path / "meta.json").write_text(json.dumps(meta))
+    return tmp_path
+
+
+def test_image_has_kmod_flag_describes_current_only(tmp_path: Path) -> None:
+    d = _image_dir(tmp_path, {"shmrdma_kmod": True})
+    assert shmrdma.image_has_kmod(d / NEW_IMG)
+    assert shmrdma.image_has_kmod(d / "current.ext4")
+    # an older VM's base predates the build the flag describes
+    assert not shmrdma.image_has_kmod(d / OLD_IMG)
+
+
+def test_image_has_kmod_per_file(tmp_path: Path) -> None:
+    d = _image_dir(
+        tmp_path,
+        {
+            "shmrdma_kmod": False,
+            "shmrdma_kmod_images": {OLD_IMG: True, NEW_IMG: False},
+        },
+    )
+    assert shmrdma.image_has_kmod(d / OLD_IMG)
+    assert not shmrdma.image_has_kmod(d / NEW_IMG)
+
+
+def test_image_has_kmod_no_meta(tmp_path: Path) -> None:
+    assert not shmrdma.image_has_kmod(tmp_path / NEW_IMG)
+
+
+def test_kmod_images_carries_older_files(tmp_path: Path) -> None:
+    from ltvm_pkg.image_build import _kmod_images
+
+    for name in (OLD_IMG, NEW_IMG):
+        (tmp_path / name).write_bytes(b"")
+    prev = {"shmrdma_kmod": True, "shmrdma_kmod_images": {"gone.ext4": True}}
+    got = _kmod_images(prev, tmp_path / OLD_IMG, tmp_path / NEW_IMG, False)
+    assert got == {OLD_IMG: True, NEW_IMG: False}
 
 
 def test_kmod_sources_feed_image_hash(tmp_path: Path) -> None:
@@ -256,6 +295,27 @@ def test_daemon_start_status_stop(tmp_vmdir: Path, monkeypatch) -> None:  # noqa
         assert not d.pid()
         assert not d.rdma_socket.exists()
         assert shmrdma.stop_daemon() == "shmrdmad is not running"
+
+
+@pytest.mark.skipif(
+    not (shutil.which("cc") or shutil.which("gcc")),
+    reason="needs a C compiler",
+)
+def test_daemon_starts_when_scope_refused(tmp_vmdir: Path, monkeypatch) -> None:  # noqa: F811
+    """As QEMU's launch: a refused systemd-run scope is retried without."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_vmdir / "cache"))
+    fake = tmp_vmdir / "systemd-run"
+    fake.write_text(
+        "#!/bin/sh\necho 'Failed to start transient scope unit: x' >&2\nexit 1\n"
+    )
+    fake.chmod(0o755)
+    with patch("ltvm_pkg.qemu_run._guest_scope", return_value=[str(fake)]):
+        d = shmrdma.ensure_daemon()
+        try:
+            assert d.pid() and d.rdma_socket.is_socket()
+            assert "transient scope" in d.log_path.read_text()
+        finally:
+            shmrdma.stop_daemon()
 
 
 def test_stop_refuses_with_vms(tmp_vmdir: Path) -> None:  # noqa: F811
@@ -319,6 +379,38 @@ class TestPrivateDir:
 
         with patch("ltvm_pkg.shmrdma.os.lstat", side_effect=lstat):
             assert shmrdma.run_dir(os.geteuid()) != d
+            # status, stop and doctor look where create would put it
+            assert shmrdma.run_dir(os.geteuid(), create=False) != d
+
+    def test_live_daemon_wins(self, tmp_vmdir: Path, monkeypatch) -> None:  # noqa: F811
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_vmdir / "state"))
+        first = tmp_vmdir / f"shmrdma-{os.geteuid()}"
+        state = tmp_vmdir / "state" / "ltvm" / "shmrdma"
+        first.mkdir(mode=0o700)
+        state.mkdir(mode=0o700, parents=True)
+
+        def pid(self: shmrdma.Daemon) -> int:
+            return 4242 if self.dir == state else 0
+
+        with patch.object(shmrdma.Daemon, "pid", pid):
+            assert shmrdma.run_dir(os.geteuid()) == state
+            assert shmrdma.run_dir(os.geteuid(), create=False) == state
+
+    def test_root_never_creates(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        uid = os.geteuid()
+        with patch("ltvm_pkg.shmrdma.os.geteuid", return_value=0):
+            d = shmrdma.run_dir(uid if uid else 1000, create=True)
+        assert not d.exists()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="/proc")
+def test_proc_info_deleted_binary() -> None:
+    with patch(
+        "ltvm_pkg.shmrdma.os.readlink",
+        return_value="/c/ltvm/shmrdmad (deleted)",
+    ):
+        _, _, exe = shmrdma._proc_info(os.getpid())
+    assert exe == "/c/ltvm/shmrdmad"
 
 
 class TestPidFile:
@@ -341,6 +433,13 @@ class TestPidFile:
         d = self._daemon(tmp_path, f"{os.getpid()} abc {self.EXE}\n")
         with self._proc(os.geteuid(), self.EXE):
             assert d.pid() == os.getpid()
+
+    def test_binary_path_with_spaces(self, tmp_path: Path) -> None:
+        exe = "/home/test/My Cache/ltvm/shmrdmad"
+        d = self._daemon(tmp_path, f"{os.getpid()} abc {exe}\n")
+        with self._proc(os.geteuid(), exe):
+            assert d.pid() == os.getpid()
+        assert d.binary_hash() == "abc"
 
     def test_other_binary_refused(self, tmp_path: Path) -> None:
         d = self._daemon(tmp_path, f"{os.getpid()} abc /tmp/evil\n")
@@ -684,10 +783,10 @@ class TestRequirements:
     def test_image_and_smc_checks(self, tmp_path: Path) -> None:
         from ltvm_pkg import shmrdma_req as sr
 
-        (tmp_path / "meta.json").write_text(json.dumps({"shmrdma_kmod": True}))
+        _image_dir(tmp_path, {"shmrdma_kmod": True})
         (tmp_path / "build-tree").mkdir()
         (tmp_path / "build-tree" / ".config").write_text("#\nCONFIG_SMC=m\n")
-        t = sr.Target("rocky10", image=tmp_path / "x.ext4", kernel_dir=tmp_path)
+        t = sr.Target("rocky10", image=tmp_path / NEW_IMG, kernel_dir=tmp_path)
         assert all(r.ok for r in sr.target_checks(t))
         (tmp_path / "build-tree" / ".config").write_text(
             "# CONFIG_SMC is not set\n"
@@ -815,3 +914,18 @@ def test_install_wants_numactl() -> None:
     assert '"numactl": "numactl"' in inspect.getsource(
         host_setup.check_prerequisites
     )
+
+
+def test_cluster_create_refuses_a_swallowed_spec(capsys) -> None:
+    """--shmrdma takes an optional value, so a node spec after it would
+    become its socket; cluster create refuses before making any node."""
+    from tests.test_cluster_cli import _ns
+
+    ns = _ns("create", "co2", "--shmrdma", "mgs+mds+oss:co2-srv:3", "client:c1")
+    assert ns.shmrdma == "mgs+mds+oss:co2-srv:3"
+    with patch("ltvm_pkg.vm_cluster.cmd_cluster_create") as create:
+        rc = ns.func(ns)
+    assert rc != 0
+    create.assert_not_called()
+    out = capsys.readouterr()
+    assert "put --shmrdma after" in out.out + out.err

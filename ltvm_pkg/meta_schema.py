@@ -79,6 +79,7 @@ class ImageMeta(_BaseMeta, total=False):
     with_lustre: str | None
     lustre_version: str | None
     shmrdma_kmod: bool
+    shmrdma_kmod_images: dict[str, bool]
 
 
 _KERNEL_REQUIRED = ("kernel_version", "lustre_target")

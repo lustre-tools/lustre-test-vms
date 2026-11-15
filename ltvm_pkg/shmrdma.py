@@ -180,9 +180,24 @@ def build_kmod(tc: TargetConfig, kernel: str | None, kver: str) -> Path | None:
 
 
 def image_has_kmod(image: str | Path) -> bool:
-    """Whether the image at *image* was built with shmrdma.ko."""
-    meta = load_meta_safe(Path(image).parent / "meta.json") or {}
-    return bool(meta.get("shmrdma_kmod"))
+    """Whether the image file at *image* was built with shmrdma.ko."""
+    from .image_store import CURRENT, current_image
+
+    path = Path(image)
+    if path.name == CURRENT:
+        path = current_image(path.parent) or path
+    meta = load_meta_safe(path.parent / "meta.json") or {}
+    per_file = meta.get("shmrdma_kmod_images")
+    if isinstance(per_file, dict) and path.name in per_file:
+        return bool(per_file[path.name])
+    # Older meta.json, or a fetched image: the flag describes the
+    # current image only.
+    cur = current_image(path.parent)
+    return (
+        cur is not None
+        and cur.name == path.name
+        and bool(meta.get("shmrdma_kmod"))
+    )
 
 
 # --- the host daemon --------------------------------------------------
@@ -224,39 +239,64 @@ def _candidate_dirs(uid: int) -> list[Path]:
     ]
 
 
+def _is_users_dir(d: Path, uid: int) -> bool:
+    """Whether *d* is a real directory of *uid* (no repair, no raise)."""
+    try:
+        st = os.lstat(d)
+    except OSError:
+        return False
+    return stat.S_ISDIR(st.st_mode) and st.st_uid == uid
+
+
+def creatable(d: Path) -> bool:
+    """Whether this process could make *d*: its nearest existing parent
+    is a directory it can write."""
+    p = d.parent
+    while not os.path.lexists(p):
+        p = p.parent
+    return p.is_dir() and os.access(p, os.W_OK | os.X_OK)
+
+
 def run_dir(uid: int, create: bool = True) -> Path:
     """The private directory of *uid*'s daemon: sockets, pid, log, lock.
 
     ``/opt/qemu-vms/shmrdma-<uid>`` (mode 0700, owned by the user), which
     outlives a login and which both a QEMU running as the user and one
     running as root reach; the user's state directory when that one
-    cannot be used, or someone else made it first.  With *create*
-    false, the first that exists, or the first candidate.
+    cannot be used, or someone else made it first.
+
+    Lookup and create agree: a candidate the user owns that holds a live
+    daemon wins, then the first the user owns.  Only the user creates
+    one, never root on the user's behalf, so a sudo run cannot move the
+    daemon somewhere new.  With nothing yet, lookup names the first
+    candidate nobody else has taken.
     """
     cands = _candidate_dirs(uid)
-    for d in cands:
-        if not create:
-            if os.path.lexists(d):
-                return d
-            continue
-        try:
-            if d is cands[-1]:
-                d.parent.mkdir(parents=True, exist_ok=True)
+    mine = [d for d in cands if _is_users_dir(d, uid)]
+    chosen = next((d for d in mine if Daemon("", uid, d).pid()), None)
+    if chosen is None and mine:
+        chosen = mine[0]
+    if chosen is not None:
+        if create:
+            _check_private(chosen, uid)
+        return chosen
+    if create and os.geteuid() == uid:
+        for d in cands:
             try:
-                d.mkdir(mode=0o700)
-                if os.geteuid() != uid:
-                    os.chown(d, uid, pwd.getpwuid(uid).pw_gid)
-            except FileExistsError:
-                pass
-            _check_private(d, uid)
-            return d
-        except (OSError, UnsafeDir) as e:
-            log.debug("shmrdmad: not using %s: %s", d, e)
-    if not create:
-        return cands[0]
-    raise RuntimeError(
-        f"no private directory for shmrdmad ({', '.join(map(str, cands))})"
-    )
+                if d is cands[-1]:
+                    d.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    d.mkdir(mode=0o700)
+                except FileExistsError:
+                    pass
+                _check_private(d, uid)
+                return d
+            except (OSError, UnsafeDir) as e:
+                log.debug("shmrdmad: not using %s: %s", d, e)
+        raise RuntimeError(
+            f"no private directory for shmrdmad ({', '.join(map(str, cands))})"
+        )
+    return next((d for d in cands if not os.path.lexists(d)), cands[0])
 
 
 def _open_private(path: Path, flags: int) -> int:
@@ -298,7 +338,9 @@ class Daemon:
         except OSError:
             return []
         with os.fdopen(fd) as f:
-            return f.read(256).split()
+            # pid, source hash, then the binary's path, which may hold spaces
+            line = f.read(8192).splitlines()
+        return line[0].split(" ", 2) if line else []
 
     def pid(self) -> int:
         """The running daemon's pid, or 0.
@@ -331,7 +373,8 @@ def _proc_info(pid: int) -> tuple[int, str, str]:
             exe = os.readlink(f"/proc/{pid}/exe")
         except OSError:
             return -1, "", ""
-        return uid, comm, exe
+        # the cached binary was rebuilt or cleaned while it ran
+        return uid, comm, exe.removesuffix(" (deleted)")
     # macOS: no /proc; ps prints the full executable path as comm
     try:
         r = subprocess.run(
@@ -454,51 +497,60 @@ def ensure_daemon() -> Daemon:
         binary, digest = build_daemon()
         for s in (d.rdma_socket, d.net_socket):
             s.unlink(missing_ok=True)
-        from .qemu_run import _guest_scope
+        from .qemu_run import _guest_scope, _scope_refused
         from .vm_state import VMInfo
 
         scope = _guest_scope(VMInfo(name=f"shmrdmad-{d.user}", ip=""))
         cpus = daemon_cpus()
         pin = ["taskset", "-c", cpus] if cpus else []
         extra = os.environ.get("LTVM_SHMRDMAD_ARGS", "").split()
-        logfd = _open_private(
-            d.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND
-        )
-        with os.fdopen(logfd, "a") as logf:
-            logf.write(
-                f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} starting {binary}\n"
+        argv = [
+            *pin,
+            str(binary),
+            "-s",
+            str(d.rdma_socket),
+            "-n",
+            str(d.net_socket),
+            *extra,
+        ]
+        # As QEMU's launch does: where systemd-run refuses the scope, run
+        # without one rather than not at all.
+        for prefix in (scope, []) if scope else ([],):
+            logfd = _open_private(
+                d.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND
             )
-            logf.flush()
-            proc = subprocess.Popen(
-                [
-                    *scope,
-                    *pin,
-                    str(binary),
-                    "-s",
-                    str(d.rdma_socket),
-                    "-n",
-                    str(d.net_socket),
-                    *extra,
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=logf,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
+            with os.fdopen(logfd, "a") as logf:
+                logf.write(
+                    f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                    f"starting {binary}\n"
+                )
+                logf.flush()
+                logged = os.fstat(logf.fileno()).st_size
+                proc = subprocess.Popen(
+                    [*prefix, *argv],
+                    stdin=subprocess.DEVNULL,
+                    stdout=logf,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            pidfd = _open_private(
+                d.pid_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
             )
-        pidfd = _open_private(d.pid_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-        with os.fdopen(pidfd, "w") as f:
-            f.write(f"{proc.pid} {digest} {binary}\n")
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
+            with os.fdopen(pidfd, "w") as f:
+                f.write(f"{proc.pid} {digest} {binary}\n")
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    break
+                if d.rdma_socket.is_socket() and d.net_socket.is_socket():
+                    return d
+                time.sleep(0.05)
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            d.pid_path.unlink(missing_ok=True)
+            if not (prefix and _scope_refused(d.log_path, logged)):
                 break
-            if d.rdma_socket.is_socket() and d.net_socket.is_socket():
-                return d
-            time.sleep(0.05)
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait()
-        d.pid_path.unlink(missing_ok=True)
         raise RuntimeError(f"shmrdmad did not come up; see {d.log_path}")
 
 

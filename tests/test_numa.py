@@ -67,6 +67,12 @@ class TestNumaProblem:
     def test_negative(self) -> None:
         assert ">= 0" in (qemu_run.numa_problem(4, 4096, -1) or "")
 
+    def test_shared_ram_region_limit(self) -> None:
+        assert qemu_run.numa_problem(8, 8192, 8) is None
+        assert qemu_run.numa_problem(7, 8192, 7, shared=True) is None
+        msg = qemu_run.numa_problem(8, 8192, 8, shared=True) or ""
+        assert "at most 7 nodes" in msg
+
 
 def test_info_round_trip(tmp_vmdir: Path) -> None:  # noqa: F811
     vm = _make_vm(tmp_vmdir)
