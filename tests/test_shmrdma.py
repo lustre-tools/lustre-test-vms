@@ -27,12 +27,16 @@ from tests.test_qemu_run import (  # noqa: F401
     tmp_vmdir,
 )
 
+# sun_path holds 104 bytes on macOS, 108 on Linux; the tests' sockets
+# go at most this far below tmp_path (shmrdma-<uid>/rdma.sock).
+_SOCKET_SUFFIX_MAX = 32
+
 
 @pytest.fixture
 def tmp_path(tmp_path: Path) -> Iterator[Path]:
-    """A short directory on macOS, which caps unix socket paths at 104
-    bytes: pytest's own there are already longer."""
-    if sys.platform != "darwin":
+    """A short directory when pytest's own would leave no room for a
+    unix socket path: on macOS always, on Linux in a deep workspace."""
+    if len(str(tmp_path)) + _SOCKET_SUFFIX_MAX < 104:
         yield tmp_path
         return
     d = Path(tempfile.mkdtemp(prefix="ltvm-", dir="/tmp"))
