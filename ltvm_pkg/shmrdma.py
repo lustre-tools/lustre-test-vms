@@ -460,6 +460,17 @@ def build_daemon() -> tuple[Path, str]:
     return out, digest
 
 
+def daemon_needs_compiler() -> bool:
+    """Whether starting this user's daemon would compile it: no binary
+    is cached for the current sources and none runs."""
+    if (_cache_dir() / _source_hash(_DAEMON_FILES)[:16] / "shmrdmad").is_file():
+        return False
+    try:
+        return not daemon(create=False).pid()
+    except (OSError, RuntimeError, KeyError):
+        return True
+
+
 def vm_uses(vm: VMInfo, d: Daemon) -> bool:
     """Whether *vm*, as last started, is attached to daemon *d*."""
     socks = {str(d.rdma_socket), str(d.net_socket)}

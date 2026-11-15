@@ -9,6 +9,7 @@ only asks for --host-node is not refused for want of a C compiler.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -149,6 +150,53 @@ def _qemu_has_vhost_user_netdev(qemu: str | None = None) -> bool:
     return "not compiled" not in r.stderr
 
 
+def _caps_cache() -> Path:
+    return shmrdma._cache_dir().parent / "qemu-caps.json"
+
+
+def _qemu_caps(qemu: str) -> dict[str, bool]:
+    """What *qemu* supports of what the features need, probed once per
+    binary (path, size and mtime) and cached, since every start asks."""
+    from .host_setup import is_macos
+    from .qemu_run import qemu_binds_numa
+
+    try:
+        real = os.path.realpath(qemu)
+        st = os.stat(real)
+        ident = f"{st.st_size}:{st.st_mtime_ns}"
+    except OSError:
+        real = ident = ""
+    cache: dict = {}
+    if ident:
+        try:
+            raw = json.loads(_caps_cache().read_text())
+            cache = raw if isinstance(raw, dict) else {}
+            hit = cache[real]
+            if hit["id"] == ident:
+                return {k: bool(v) for k, v in hit["caps"].items()}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            pass
+    devices = _qemu_help("device", qemu)
+    caps = {
+        "vhost-user-fs-pci": '"vhost-user-fs-pci"' in devices,
+        "shared-ram": shmrdma.SHARED_RAM_BACKEND in _qemu_help("object", qemu),
+        "vhost-user-netdev": _qemu_has_vhost_user_netdev(qemu),
+        "binds-numa": not is_macos() and qemu_binds_numa(qemu),
+    }
+    # an empty answer is a probe that failed, not a QEMU without devices
+    if ident and devices:
+        cache[real] = {"id": ident, "caps": caps}
+        path = _caps_cache()
+        tmp = path.with_name(f".{path.name}.{os.getpid()}")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(cache, indent=2) + "\n")
+            tmp.replace(path)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+    return caps
+
+
 def install_packages(*pkgs: str) -> None:
     """Install host packages as `ltvm install` does, elevating with sudo."""
     from .host_setup import HostInfo, _translate_pkgs
@@ -191,19 +239,24 @@ def host_checks(arch: str | None = None) -> list[Req]:
     None): each arch has its own QEMU."""
     reqs = []
     cc = os.environ.get("CC") or shutil.which("cc") or shutil.which("gcc")
+    built = not cc and not shmrdma.daemon_needs_compiler()
     reqs.append(
         Req(
             "C compiler for shmrdmad",
             frozenset({OWN_DAEMON}),
-            bool(cc),
-            cc or "no cc or gcc on PATH",
+            bool(cc) or built,
+            cc
+            or (
+                "none, and none needed: shmrdmad is built"
+                if built
+                else "no cc or gcc on PATH"
+            ),
             fix=lambda: install_packages("gcc"),
             how="install gcc",
         )
     )
     qemu = _qemu(arch)
-    devices = _qemu_help("device", qemu)
-    objects = _qemu_help("object", qemu)
+    caps = _qemu_caps(qemu)
     backend = shmrdma.SHARED_RAM_BACKEND
     reinstall = "reinstall ltvm's QEMU: `sudo ltvm setup --qemu --force`"
     qemu_fix: Callable[[], None] | None = None
@@ -225,7 +278,7 @@ def host_checks(arch: str | None = None) -> list[Req]:
         Req(
             "QEMU vhost-user-fs-pci",
             frozenset({SHMRDMA}),
-            '"vhost-user-fs-pci"' in devices,
+            caps["vhost-user-fs-pci"],
             qemu,
             fix=qemu_fix,
             how=reinstall,
@@ -235,7 +288,7 @@ def host_checks(arch: str | None = None) -> list[Req]:
         Req(
             f"QEMU {backend}",
             frozenset({SHMRDMA, SHMNET}),
-            backend in objects,
+            caps["shared-ram"],
             qemu,
             fix=qemu_fix,
             how=reinstall,
@@ -245,7 +298,7 @@ def host_checks(arch: str | None = None) -> list[Req]:
         Req(
             "QEMU vhost-user netdev",
             frozenset({SHMNET}),
-            _qemu_has_vhost_user_netdev(qemu),
+            caps["vhost-user-netdev"],
             qemu,
             fix=qemu_fix,
             how=reinstall,
@@ -276,9 +329,7 @@ def host_checks(arch: str | None = None) -> list[Req]:
             how="install util-linux",
         )
     )
-    from .qemu_run import qemu_binds_numa
-
-    binds = qemu_binds_numa(qemu)
+    binds = caps["binds-numa"]
     numactl = shutil.which("numactl")
     reqs.append(
         Req(

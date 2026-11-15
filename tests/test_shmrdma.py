@@ -971,6 +971,7 @@ class TestRequirements:
         assert reqs["QEMU vhost-user-fs-pci"].ok
         assert reqs[f"QEMU {shmrdma.SHARED_RAM_BACKEND}"].ok
         assert reqs["QEMU vhost-user netdev"].ok
+        sr._caps_cache().unlink()  # another QEMU
         with (
             patch("ltvm_pkg.shmrdma_req._qemu_help", return_value=""),
             patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=True),
@@ -980,6 +981,93 @@ class TestRequirements:
         assert not reqs["QEMU vhost-user-fs-pci"].ok
         assert not reqs["QEMU vhost-user netdev"].ok
         assert reqs["NUMA memory binding"].ok
+
+    def test_qemu_probed_once_per_binary(self, tmp_path: Path) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        qemu = tmp_path / "qemu"
+        qemu.write_text("v1")
+        helps = {"device": '"vhost-user-fs-pci"', "object": ""}
+        with (
+            patch(
+                "ltvm_pkg.shmrdma_req._qemu_help",
+                side_effect=lambda what, q=None: helps[what],
+            ) as qh,
+            patch(
+                "ltvm_pkg.shmrdma_req._qemu_has_vhost_user_netdev",
+                return_value=True,
+            ),
+            patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=False),
+        ):
+            first = sr._qemu_caps(str(qemu))
+            assert first["vhost-user-fs-pci"]
+            assert qh.call_count == 2
+            assert sr._qemu_caps(str(qemu)) == first
+            assert qh.call_count == 2
+            # a reinstalled QEMU is probed again
+            qemu.write_text("v2, longer")
+            sr._qemu_caps(str(qemu))
+            assert qh.call_count == 4
+
+    def test_failed_probe_not_cached(self, tmp_path: Path) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        qemu = tmp_path / "qemu"
+        qemu.write_text("v1")
+        with (
+            patch("ltvm_pkg.shmrdma_req._qemu_help", return_value="") as qh,
+            patch(
+                "ltvm_pkg.shmrdma_req._qemu_has_vhost_user_netdev",
+                return_value=False,
+            ),
+            patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=False),
+        ):
+            sr._qemu_caps(str(qemu))
+            sr._qemu_caps(str(qemu))
+        assert qh.call_count == 4
+        assert not sr._caps_cache().exists()
+
+    def test_compiler_not_needed_once_built(self, tmp_path: Path) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        def cc_check() -> sr.Req:
+            with (
+                patch("ltvm_pkg.shmrdma_req.shutil.which", return_value=None),
+                patch.dict(os.environ, {"CC": ""}),
+                patch("ltvm_pkg.shmrdma_req._qemu_caps") as caps,
+            ):
+                caps.return_value.__getitem__.return_value = True
+                return {r.name: r for r in sr.host_checks()}[
+                    "C compiler for shmrdmad"
+                ]
+
+        d = shmrdma.Daemon("tester", os.geteuid(), tmp_path / "d")
+        with patch("ltvm_pkg.shmrdma.daemon", return_value=d):
+            assert not cc_check().ok
+            binary = (
+                shmrdma._cache_dir()
+                / shmrdma._source_hash(shmrdma._DAEMON_FILES)[:16]
+                / "shmrdmad"
+            )
+            binary.parent.mkdir(parents=True)
+            binary.write_text("")
+            r = cc_check()
+        assert r.ok and "none needed" in r.detail
+
+    def test_compiler_not_needed_while_running(self, tmp_path: Path) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        d = MagicMock()
+        d.pid.return_value = 4321
+        with (
+            patch("ltvm_pkg.shmrdma.daemon", return_value=d),
+            patch("ltvm_pkg.shmrdma_req.shutil.which", return_value=None),
+            patch.dict(os.environ, {"CC": ""}),
+            patch("ltvm_pkg.shmrdma_req._qemu_caps") as caps,
+        ):
+            caps.return_value.__getitem__.return_value = True
+            reqs = {r.name: r for r in sr.host_checks()}
+        assert reqs["C compiler for shmrdmad"].ok
 
     def test_vhost_user_netdev_probe(self) -> None:
         """Help lists vhost-user even where it is not built in."""
