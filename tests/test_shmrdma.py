@@ -693,6 +693,7 @@ class TestRequirements:
                 return_value=True,
             ),
             patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=False),
+            patch("ltvm_pkg.host_setup.is_macos", return_value=False),
         ):
             reqs = {r.name: r for r in sr.host_checks()}
         assert reqs["QEMU vhost-user-fs-pci"].ok
@@ -701,6 +702,7 @@ class TestRequirements:
         with (
             patch("ltvm_pkg.shmrdma_req._qemu_help", return_value=""),
             patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=True),
+            patch("ltvm_pkg.host_setup.is_macos", return_value=False),
         ):
             reqs = {r.name: r for r in sr.host_checks()}
         assert not reqs["QEMU vhost-user-fs-pci"].ok

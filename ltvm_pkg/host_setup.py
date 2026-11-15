@@ -2060,13 +2060,128 @@ def podman_idle_lock() -> Iterator[bool]:
         os.close(fd)
 
 
+# ltvm's own qemu-system-aarch64 for macOS on Apple Silicon.  Homebrew's
+# QEMU is built without vhost-user, which --shmrdma and --nic shmnet
+# need.  Built and packaged by shmrdma/macos/build-qemu.sh and published
+# as the GitHub release qemu-macos-<version>; bump this with a new one.
+QEMU_MACOS_VERSION = "11.1.3-1"
+_QEMU_MACOS_TAG = f"qemu-macos-{QEMU_MACOS_VERSION}"
+_QEMU_MACOS_ASSET = f"qemu-{QEMU_MACOS_VERSION}-macos-arm64.tar.gz"
+
+
+def qemu_macos_dir() -> Path:
+    """Where this release of ltvm's macOS QEMU unpacks: bin, lib, share."""
+    return QEMU_PREFIX / f"macos-{QEMU_MACOS_VERSION}"
+
+
+def _prefix_run(cmd: list[str]) -> None:
+    """Run a command that writes under QEMU_PREFIX, with sudo only if
+    the user cannot write there (a prefix of their own needs none)."""
+    probe = QEMU_PREFIX if QEMU_PREFIX.exists() else QEMU_PREFIX.parent
+    if os.access(probe, os.W_OK):
+        _run(cmd, check=True, quiet=True)
+    else:
+        _sudo_run(cmd, quiet=True)
+
+
+def qemu_macos_installed() -> bool:
+    """Whether QEMU_PREFIX/bin/qemu-system-aarch64 is this release of
+    ltvm's macOS QEMU."""
+    link = QEMU_PREFIX / "bin" / "qemu-system-aarch64"
+    target = qemu_macos_dir() / "bin" / "qemu-system-aarch64"
+    try:
+        return target.is_file() and link.resolve() == target.resolve()
+    except OSError:
+        return False
+
+
+def install_qemu_macos_vhost(force: bool = False) -> None:
+    """Install ltvm's macOS QEMU and make it QEMU_PREFIX's aarch64 QEMU.
+
+    The tarball is self-contained (its Homebrew dylibs are bundled under
+    lib/) and unpacks into qemu_macos_dir(); bin/qemu-system-aarch64
+    becomes a symlink to it, which QEMU and dyld both resolve to find
+    its data and libraries.  Homebrew's QEMU stays for x86_64 guests and
+    qemu-img.  Intel Macs keep Homebrew's: there is no x86_64 build.
+    """
+    if platform.machine() != "arm64":
+        log.info(
+            "ltvm's macOS QEMU is built for Apple Silicon; keeping "
+            "Homebrew's (no --shmrdma or --nic shmnet on this Mac)"
+        )
+        return
+    if qemu_macos_installed() and not force:
+        log.info(
+            "ltvm's QEMU %s for macOS already installed", QEMU_MACOS_VERSION
+        )
+        return
+    dest = qemu_macos_dir()
+    target = dest / "bin" / "qemu-system-aarch64"
+    if force or not target.is_file():
+        url = (
+            f"https://github.com/{_QEMU_GITHUB_REPO}/releases/download/"
+            f"{_QEMU_MACOS_TAG}/{_QEMU_MACOS_ASSET}"
+        )
+        log.info("Downloading ltvm's QEMU %s for macOS...", QEMU_MACOS_VERSION)
+        tmpdir = Path(tempfile.mkdtemp(prefix="qemu-fetch."))
+        try:
+            local = tmpdir / _QEMU_MACOS_ASSET
+            r = _run(
+                ["curl", "-fsSL", url, "-o", str(local)],
+                check=False,
+                quiet=True,
+            )
+            if r.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to download {_QEMU_MACOS_ASSET} from {url} "
+                    f"(curl rc={r.returncode}); check access to github.com "
+                    f"and retry"
+                )
+            _verify_qemu_asset(url, local, _QEMU_MACOS_ASSET)
+            _prefix_run(["rm", "-rf", str(dest)])
+            _prefix_run(["mkdir", "-p", str(dest)])
+            _prefix_run(
+                ["tar", "xf", str(local), "-C", str(dest), "--no-same-owner"]
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+    r = _run_quiet([str(target), "-M", "none", "-device", "help"], check=False)
+    if '"vhost-user-fs-pci"' not in r.stdout:
+        raise RuntimeError(
+            f"{target} does not run, or lacks vhost-user-fs-pci: "
+            f"{(r.stderr or r.stdout).strip()[:300]}"
+        )
+    _prefix_run(["mkdir", "-p", str(QEMU_PREFIX / "bin")])
+    _prefix_run(
+        [
+            "ln",
+            "-sfn",
+            str(target),
+            str(QEMU_PREFIX / "bin" / "qemu-system-aarch64"),
+        ]
+    )
+    # Earlier releases: nothing points at them any more.
+    for old in QEMU_PREFIX.glob("macos-*"):
+        if old != dest and old.is_dir() and not old.is_symlink():
+            _prefix_run(["rm", "-rf", str(old)])
+    log.info(
+        "Installed ltvm's QEMU %s for macOS at %s", QEMU_MACOS_VERSION, dest
+    )
+
+
 def install_qemu_macos(force: bool = False) -> None:
-    """Install QEMU on macOS via Homebrew."""
+    """Install QEMU on macOS: Homebrew's, and ltvm's own aarch64 QEMU
+    on Apple Silicon (install_qemu_macos_vhost)."""
     existing = _qemu_installed_version()
     if existing and not force:
         log.info("QEMU %s already installed", existing)
-        return
+    else:
+        _install_brew_qemu_macos()
+    install_qemu_macos_vhost(force=force)
 
+
+def _install_brew_qemu_macos() -> None:
+    """Link Homebrew's QEMU (installing it if needed) into QEMU_PREFIX."""
     brew_prefix = _brew_qemu_prefix()
 
     if not brew_prefix:

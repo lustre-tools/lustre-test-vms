@@ -192,12 +192,22 @@ def host_checks() -> list[Req]:
     qemu = _host_qemu()
     backend = shmrdma.SHARED_RAM_BACKEND
     reinstall = "reinstall ltvm's QEMU: `sudo ltvm setup --qemu --force`"
+    qemu_fix: Callable[[], None] | None = None
+    from .host_setup import is_macos
+
+    if is_macos():
+        # Homebrew's QEMU has no vhost-user; ltvm publishes one that does
+        from .host_setup import install_qemu_macos_vhost
+
+        reinstall = "install ltvm's QEMU for macOS (Apple Silicon only)"
+        qemu_fix = install_qemu_macos_vhost
     reqs.append(
         Req(
             "QEMU vhost-user-fs-pci",
             frozenset({SHMRDMA}),
             '"vhost-user-fs-pci"' in devices,
             qemu,
+            fix=qemu_fix,
             how=reinstall,
         )
     )
@@ -207,6 +217,7 @@ def host_checks() -> list[Req]:
             frozenset({SHMRDMA, SHMNET}),
             backend in objects,
             qemu,
+            fix=qemu_fix,
             how=reinstall,
         )
     )
@@ -216,10 +227,25 @@ def host_checks() -> list[Req]:
             frozenset({SHMNET}),
             _qemu_has_vhost_user_netdev(),
             qemu,
+            fix=qemu_fix,
             how=reinstall,
         )
     )
     reqs.append(_run_dir_check())
+    if is_macos():
+        # No NUMA nodes to pin to: create refuses --host-node here
+        # (qemu_run.host_node_problem); taskset and numactl do not exist.
+        reqs.append(
+            Req(
+                "host NUMA nodes",
+                frozenset({HOST_NODE}),
+                False,
+                "macOS has none",
+                how="--host-node is for Linux hosts with NUMA nodes",
+                hard=False,
+            )
+        )
+        return reqs
     reqs.append(
         Req(
             "taskset",
