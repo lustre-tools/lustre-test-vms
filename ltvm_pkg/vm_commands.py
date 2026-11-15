@@ -26,7 +26,7 @@ from .deploy import (
 )
 from .host_setup import is_macos
 from .nic_guest import wait_for_layout as guest_nic_layout
-from .nic_spec import NicSpec, NicSpecError
+from .nic_spec import DEFAULT_SPEED, NicSpec, NicSpecError, parse_speed
 from .nic_spec import numa_problem as nic_numa_problem
 from .paths import load_meta_safe
 from .priv import SudoUnavailable, chmod_regular, sudo_prime, sudo_run
@@ -753,6 +753,7 @@ def _warn_ignored_resource_flags(
     existing stopped VM just restarted it with the stored 4096/3 and
     printed "started", with no hint that the flags did nothing.
     """
+    _warn_ignored_eth0_speed(vm, getattr(args, "eth0_speed", None))
     ignored = []
     for dest in sorted(_explicit_flags(argv)):
         requested = getattr(args, dest, None)
@@ -786,6 +787,27 @@ def _warn_ignored_resource_flags(
     print(
         f"  these are fixed at create time -- "
         f"`ltvm destroy {vm.name}` first to change them",
+        file=sys.stderr,
+    )
+
+
+def _warn_ignored_eth0_speed(vm: VMInfo, requested: int | None) -> None:
+    """Warn when create gives an existing VM another eth0 speed.
+
+    The speed is not fixed at create time, so the warning names
+    `vm set`.  An unset speed is DEFAULT_SPEED on both sides.
+    """
+    if requested is None:
+        return
+    current = DEFAULT_SPEED if vm.eth0_speed is None else vm.eth0_speed
+    if requested == current:
+        return
+    label = _speed_label(requested)
+    print(
+        f"warning: {vm.name} already exists; --eth0-speed was ignored: "
+        f"requested {label}, VM has {_speed_label(vm.eth0_speed)}\n"
+        f"  `ltvm vm set {vm.name} --eth0-speed {label}` changes it "
+        f"on a stopped VM",
         file=sys.stderr,
     )
 
@@ -950,6 +972,7 @@ def _allocate_and_persist_vm(
             disk_dir=getattr(args, "disk_dir", "") or "",
             disk_cache=getattr(args, "disk_cache", "") or "",
             disk_prealloc=getattr(args, "disk_prealloc", "") or "",
+            eth0_speed=getattr(args, "eth0_speed", None),
         )
         problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes, vm.shared_ram)
         if problem:
@@ -1052,6 +1075,7 @@ def _print_create_plan(
         "disk_dir": getattr(args, "disk_dir", "") or "",
         "disk_cache": getattr(args, "disk_cache", "") or "",
         "disk_prealloc": getattr(args, "disk_prealloc", "") or "",
+        "eth0_speed": getattr(args, "eth0_speed", None),
         "owner_id": getattr(args, "owner_id", None),
     }
     if args.json:
@@ -3380,7 +3404,8 @@ def cmd_restore(args: argparse.Namespace) -> None:
 
 
 def cmd_set(args: argparse.Namespace) -> None:
-    """Change the vCPUs, memory, NUMA layout or disk cache of a stopped VM.
+    """Change the vCPUs, memory, NUMA layout, disk cache or eth0 speed of
+    a stopped VM.
 
     All are read from the .info file each time QEMU is launched, so
     the new values take effect at the next start, and the VM keeps its
@@ -3399,6 +3424,7 @@ def cmd_set(args: argparse.Namespace) -> None:
         if problem:
             die(problem)
         host_node = max(host_node, -1)
+    speed_arg = getattr(args, "eth0_speed", None)
     if (
         args.vcpus is None
         and args.mem is None
@@ -3408,15 +3434,23 @@ def cmd_set(args: argparse.Namespace) -> None:
         and cache is None
         and shm is None
         and host_node is None
+        and speed_arg is None
     ):
         die(
             "nothing to set: give --vcpus, --mem, --numa-nodes, "
-            "--numa-dist[-file], --disk-cache, --host-node and/or --shmrdma"
+            "--numa-dist[-file], --disk-cache, --host-node, --shmrdma "
+            "and/or --eth0-speed"
         )
     if shm == "none":
         shm = ""
     if shm:
         _check_shmrdma_socket(shm)
+    speed: int | None = None
+    if speed_arg is not None and speed_arg != "default":
+        try:
+            speed = parse_speed(speed_arg)
+        except NicSpecError as e:
+            die(f"--eth0-speed: {e}")
     if cache == "default":
         cache = ""
     if cache and cache not in DISK_CACHE_MODES:
@@ -3486,6 +3520,11 @@ def cmd_set(args: argparse.Namespace) -> None:
             f"disk cache {vm.disk_cache or 'default'} -> {cache or 'default'}"
         )
         vm.disk_cache = cache
+    if speed_arg is not None and speed != vm.eth0_speed:
+        changes.append(
+            f"eth0 speed {_speed_label(vm.eth0_speed)} -> {_speed_label(speed)}"
+        )
+        vm.eth0_speed = speed
     problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes, vm.shared_ram) or (
         nic_numa_problem(vm.nics, vm.numa_nodes)
     )
@@ -3497,6 +3536,13 @@ def cmd_set(args: argparse.Namespace) -> None:
 
     vm.save()
     print(f"{vm.name}: {', '.join(changes)} (takes effect at next start)")
+
+
+def _speed_label(speed: int | None) -> str:
+    """A stored eth0 speed as `vm set` reports it."""
+    if speed is None:
+        return f"default ({DEFAULT_SPEED})"
+    return str(speed) if speed else "none"
 
 
 # ── doctor ───────────────────────────────────────────────

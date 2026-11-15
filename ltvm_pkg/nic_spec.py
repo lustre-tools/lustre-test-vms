@@ -53,6 +53,9 @@ class NicSpec:
     # Receive TSO on a shmnet NIC (tso=off: the switch cuts TCP frames
     # into MSS-sized segments for it).
     tso: bool = True
+    # Link speed in Mbps the virtio NIC advertises (speed=N); None is
+    # DEFAULT_SPEED and 0 advertises none.
+    speed: int | None = None
 
     @classmethod
     def parse(cls, raw: str) -> NicSpec:
@@ -139,6 +142,39 @@ class NicSpec:
         if self.type == "shmnet":
             return "tcp"
         return self.type
+
+
+# Mbps a virtio-net NIC advertises when not told otherwise.  socklnd
+# picks its conns_per_peer from the NIC's ethtool speed (4 at 100G) and
+# falls back to 1 when the NIC reports none, which no real node does.
+DEFAULT_SPEED = 100000
+
+# QEMU holds speed= in an int32.
+_MAX_SPEED = 2**31 - 1
+
+
+def parse_speed(value: str) -> int:
+    """A link speed in Mbps; 0 or "none" advertises none."""
+    value = value.strip().lower()
+    if value == "none":
+        return 0
+    if not (value.isascii() and value.isdigit()) or int(value) > _MAX_SPEED:
+        raise NicSpecError(
+            f"speed {value!r}: expected Mbps (100000 for 100G), "
+            f"or 0 or none to advertise no speed"
+        )
+    return int(value)
+
+
+def speed_device_opts(speed: int | None) -> str:
+    """The virtio-net-pci options that advertise *speed* Mbps.
+
+    None is DEFAULT_SPEED; 0 adds nothing, so the guest reports the
+    speed as unknown.
+    """
+    if speed is None:
+        speed = DEFAULT_SPEED
+    return f",speed={speed},duplex=full" if speed else ""
 
 
 _BDF_RE = re.compile(
@@ -304,6 +340,8 @@ _KEYS: dict[str, _Key] = {
     "socket": _Key("socket", ("shmnet",), _socket),
     "queues": _Key("queues", ("shmnet",), _queues),
     "tso": _Key("tso", ("shmnet",), _on_off),
+    # Not passthrough: a real device reports its own speed.
+    "speed": _Key("speed", ("tcp", "softroce"), parse_speed),
 }
 
 # The key a type's first item may give without "key=".

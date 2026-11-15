@@ -24,6 +24,7 @@ from typing import Any, NoReturn
 from . import numa_dist, rootless, shmrdma, site_config, vm_state
 from .host_setup import is_macos, socket_vmnet_socket_path
 from .nic_cmdline import network_names, prefixes
+from .nic_spec import speed_device_opts
 from .priv import ensure_dir, ensure_lock_file, invoking_user, sudo_run
 from .vm_state import (
     BRIDGE,
@@ -1381,7 +1382,8 @@ def _start_qemu(vm: VMInfo) -> None:
             else bridge_netdev("net0", vm.tap, helper, vhost)
         ),
         "-device",
-        f"{net_driver},netdev=net0,mac={vm.mac}",
+        f"{net_driver},netdev=net0,mac={vm.mac}"
+        + speed_device_opts(vm.eth0_speed),
         "-daemonize",
         "-pidfile",
         str(vm.pid_path),
@@ -1425,7 +1427,8 @@ def _start_qemu(vm: VMInfo) -> None:
                 "-netdev",
                 _netdev_arg,
                 "-device",
-                f"{net_driver},netdev={_netdev_id},mac={_mac}",
+                f"{net_driver},netdev={_netdev_id},mac={_mac}"
+                + speed_device_opts(_nic.speed),
             ]
         elif _base_type == "shmnet":
             _sock = shm_socks.pop(1 if vm.shmrdma else 0)

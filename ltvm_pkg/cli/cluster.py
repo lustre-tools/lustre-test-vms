@@ -217,6 +217,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> int:
             disk_dir=args.disk_dir,
             disk_cache=args.disk_cache,
             disk_prealloc=args.disk_prealloc,
+            eth0_speed=args.eth0_speed,
             nic=list(args.nic or []),
             kernel_args=args.kernel_args,
             numa_nodes=args.numa_nodes,
