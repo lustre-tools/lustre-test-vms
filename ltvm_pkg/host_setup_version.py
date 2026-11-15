@@ -14,6 +14,7 @@ record was installed before this existed and counts as 0.
 
 History:
   1: /dev/vhost-net for the ltvm group (PR #63), and the first record.
+  2: the performance cpufreq governor, now and at boot (PR #66).
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-HOST_SETUP_VERSION = 1
+HOST_SETUP_VERSION = 2
 
 NOTICE_INTERVAL = timedelta(hours=24)
 

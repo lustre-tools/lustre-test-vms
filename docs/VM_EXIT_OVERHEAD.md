@@ -40,9 +40,9 @@ schedutil never sees enough load on any one CPU to clock it up.  With
 So `ltvm doctor` reports a load-following governor (schedutil, ondemand,
 conservative, or powersave on a driver that uses the generic governors)
 and `--fix` sets performance, now and at boot through
-`/etc/tmpfiles.d/ltvm-cpufreq.conf`.  `ltvm install` only warns: the
-governor is the host owner's power policy.  `[host] cpufreq = leave` in
-/etc/ltvm.conf keeps a host's choice and turns the report into a note.
+`/etc/tmpfiles.d/ltvm-cpufreq.conf`, and `ltvm install` does the same.
+`[host] cpufreq = leave` in /etc/ltvm.conf keeps a host's choice and
+turns the report into a note.
 intel_pstate and amd-pstate-epp in active mode are left alone; they
 were not measured.  The C-state made no difference: C2's exit latency
 is not what a woken vCPU waits for.

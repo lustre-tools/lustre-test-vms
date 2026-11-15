@@ -976,8 +976,8 @@ performance, now and at boot (`/etc/tmpfiles.d/ltvm-cpufreq.conf`;
 [ltvm_pkg/host_cpufreq.py](ltvm_pkg/host_cpufreq.py)).  A vCPU runs in
 bursts on whichever CPU it lands, so schedutil never clocks one up: on
 Sookie performance took the sanity subset from 185 s to 152 s.  `ltvm
-install` only warns, since the governor is the owner's power policy, and
-`[host] cpufreq = leave` in /etc/ltvm.conf silences both.  intel_pstate
+install` sets it too, and `[host] cpufreq = leave` in /etc/ltvm.conf
+opts out of both.  intel_pstate
 and amd-pstate-epp (active mode) are not touched.  `tests/conftest.py`
 points the module at an empty sysfs.
 

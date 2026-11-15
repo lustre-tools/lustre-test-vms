@@ -7,8 +7,9 @@ lowest clock.  On Sookie (acpi-cpufreq, EPYC 7551) the performance
 governor took the sanity subset in docs/VM_EXIT_OVERHEAD.md from 190 s
 to 152 s and doubled small LNet RPC rates.
 
-``ltvm doctor`` reports such a governor and ``--fix`` sets performance,
-now and at boot through a tmpfiles.d line.  ``[host] cpufreq = leave``
+``ltvm install`` sets performance, now and at boot through a
+tmpfiles.d line; ``ltvm doctor`` reports such a governor and ``--fix``
+does the same.  ``[host] cpufreq = leave``
 in /etc/ltvm.conf keeps a host's own choice (a laptop, say) and turns
 the report into a note.  Drivers that pick the frequency in hardware
 (intel_pstate and amd-pstate-epp in active mode, where "powersave" is
