@@ -733,6 +733,159 @@ def test_daemon_builds_clean() -> None:
     assert r.returncode == 0, r.stderr
 
 
+_SHMNET_HARNESS = r"""
+#define main shmrdmad_main
+#include "shmrdmad.c"
+#undef main
+
+static int fails;
+#define CHECK(c) do { if (!(c)) { printf("FAIL line %d\n", __LINE__); \
+	fails++; } } while (0)
+
+/* a partial UDP checksum, finished across odd segment splits */
+static void test_fill_csum(void)
+{
+	srand(1);
+	for (int it = 0; it < 500; it++) {
+		int ulen = 8 + rand() % 1500, len = 34 + ulen, n = 0, off = 0;
+		uint8_t pkt[2000];
+		uint32_t s = 0, p;
+		struct seg sg[8];
+
+		for (int i = 0; i < len; i++)
+			pkt[i] = rand();
+		pkt[38] = ulen >> 8;
+		pkt[39] = ulen;
+		pkt[40] = pkt[41] = 0;
+		for (int i = 26; i < 34; i += 2)
+			s += pkt[i] << 8 | pkt[i + 1];
+		s += 17 + ulen;
+		p = s;
+		for (int i = 0; i < ulen; i += 2)
+			s += pkt[34 + i] << 8 | (i + 1 < ulen ? pkt[35 + i] : 0);
+		while (s >> 16)
+			s = (s & 0xffff) + (s >> 16);
+		while (p >> 16)
+			p = (p & 0xffff) + (p >> 16);
+		uint16_t want = (uint16_t)~s ? (uint16_t)~s : 0xffff;
+
+		pkt[40] = p >> 8;
+		pkt[41] = p;
+		while (off < len && n < 7) {
+			int k = 1 + rand() % 300;
+
+			if (off + k > len)
+				k = len - off;
+			sg[n].p = pkt + off;
+			sg[n++].len = k;
+			off += k;
+		}
+		if (off < len) {
+			sg[n].p = pkt + off;
+			sg[n++].len = len - off;
+		}
+		struct cursor c = { .s = sg, .n = n };
+		struct vnet_hdr h = { .flags = 1, .csum_start = 34 };
+
+		h.csum_offset = 6;
+
+		net_fill_csum(c, len, &h);
+		CHECK((pkt[40] << 8 | pkt[41]) == want);
+	}
+}
+
+static int chain(struct vdev *d, struct vq *q, bool writable)
+{
+	struct seg segs[MAX_SEGS];
+	uint64_t total;
+
+	return vq_chain(d, q, 0, writable, segs, MAX_SEGS, &total);
+}
+
+static void test_vq_chain(void)
+{
+	static uint8_t mem[1 << 16];
+	static struct vdev d;
+	struct vq q = { .num = 8, .desc = (struct vring_desc *)mem };
+	struct vring_desc *t = q.desc;
+
+	d.nmap = 1;
+	d.map[0].size = sizeof(mem);
+	d.map[0].hva = mem;
+	t[0] = (struct vring_desc){ 4096, 100, VRING_DESC_F_WRITE, 0 };
+	CHECK(chain(&d, &q, true) == 1);
+	/* RX: a zero-length or read-only descriptor refuses the chain */
+	t[0] = (struct vring_desc){ 4096, 0,
+		VRING_DESC_F_WRITE | VRING_DESC_F_NEXT, 1 };
+	t[1] = (struct vring_desc){ 4096, 100, VRING_DESC_F_WRITE, 0 };
+	CHECK(chain(&d, &q, true) == -1);
+	t[0] = (struct vring_desc){ 4096, 10, VRING_DESC_F_NEXT, 1 };
+	CHECK(chain(&d, &q, true) == -1);
+	CHECK(chain(&d, &q, false) == 1);
+	/* TX: a loop of empty descriptors ends at the step budget */
+	t[0] = (struct vring_desc){ 4096, 0, VRING_DESC_F_NEXT, 0 };
+	CHECK(chain(&d, &q, false) == -1);
+}
+
+static void test_mac_claim(void)
+{
+	static struct vdev d1, d2;
+	static struct netport p1 = { .dev = &d1, .attached = true };
+	static struct netport p2 = { .dev = &d2, .attached = true };
+	const uint8_t m[6] = { 2, 0, 0, 0, 0, 1 };
+
+	plat_spin_init(&g_mac_lock);
+	p1.next = &p2;
+	g_ports = &p1;
+	CHECK(net_claim_mac(&p1, m));
+	CHECK(!net_claim_mac(&p2, m));
+	CHECK(p1.mac == mac_key(m));
+	/* the holder went quiet: the address moves */
+	p1.mac_ns = now_ns() - MAC_HOLD_NS - 1;
+	CHECK(net_claim_mac(&p2, m));
+	CHECK(p1.mac == 0 && p2.mac == mac_key(m));
+	CHECK(!net_claim_mac(&p1, m));
+}
+
+int main(void)
+{
+	test_fill_csum();
+	test_vq_chain();
+	test_mac_claim();
+	printf("fails=%d\n", fails);
+	return fails != 0;
+}
+"""
+
+
+def test_shmnet_helpers(tmp_path: Path) -> None:
+    """Checksum completion, RX chain rules and MAC takeover, in C."""
+    cc = shutil.which("cc") or shutil.which("gcc")
+    if not cc:
+        pytest.skip("needs a C compiler")
+    src = tmp_path / "harness.c"
+    src.write_text(_SHMNET_HARNESS)
+    exe = tmp_path / "harness"
+    r = subprocess.run(
+        [
+            cc,
+            "-O1",
+            "-pthread",
+            "-Wno-unused-function",
+            "-I",
+            str(shmrdma.SRC_DIR / "daemon"),
+            "-o",
+            str(exe),
+            str(src),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    r = subprocess.run([str(exe)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
 class TestHostNode:
     def test_backend_bound(self) -> None:
         args = qemu_run.smp_args(2, 2048, 0, host_node=3)

@@ -83,7 +83,9 @@ ltvm vm shmrdmad [status|start|stop]
   this port and held the sender), `rx_hold_ns` (time held),
   `rx_hold_drops` (frames dropped when a hold ran out), `tx_holds` and
   `tx_hold_ns` (this port as the held sender), `rx_segs` (segments cut
-  for it) and `rx_seg_drops` (GSO frames it could not be given).  A
+  for it), `rx_seg_drops` (GSO frames it could not be given) and
+  `rx_drops` (frames for it that it was not given, flooded copies
+  included).  A
   sender that looks idle in a profile while its peer's `rx_hold_ns`
   climbs is waiting for the peer to post RX buffers.
 - **It is never restarted behind a VM's back.** QEMU's vhost-user

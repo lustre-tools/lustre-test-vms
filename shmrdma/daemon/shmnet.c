@@ -61,17 +61,17 @@ struct netq {
 	int qi;
 	struct worker *w;	/* NULL while the queue is not served */
 	uint64_t stall_since;
-	/* RX: a hold on this queue ran out at this avail idx; frames for it
-	 * drop without a hold until the guest moves the idx (rx_lock) */
-	bool rx_starved;
-	uint16_t rx_starved_ai;
+	/* RX: a hold on this queue ran out; frames for it that find no
+	 * buffers drop without a hold until then (rx_lock) */
+	uint64_t rx_starved_until;
 };
 
 struct netport {
 	struct vdev *dev;
 	/* mac_key() of the address it sends from, 0 until it sends; one
-	 * word, since its TX queues learn it on several workers at once */
+	 * word, read without g_mac_lock; and when it last sent from it */
 	uint64_t mac;
+	uint64_t mac_ns;
 	bool attached;		/* on the switch */
 	plat_spinlock_t rx_lock[NET_MAX_QP];
 	struct netq q[NET_MAX_QP];
@@ -81,12 +81,20 @@ struct netport {
 	uint64_t rx_holds, rx_hold_ns, rx_hold_drops, tx_holds, tx_hold_ns;
 	/* segments cut from GSO frames for this port; frames not cut */
 	uint64_t rx_segs, rx_seg_drops;
+	/* frames for this port it was not given, flooded copies included */
+	uint64_t rx_drops;
 	struct netport *next;
 };
 
 #define STAT_ADD(x, v)	__atomic_add_fetch(&(x), (v), __ATOMIC_RELAXED)
 
 static struct netport *g_ports;		/* changed under wlock */
+static plat_spinlock_t g_mac_lock;	/* claiming a source MAC */
+
+/* a port that has not sent from its MAC for this long may lose it */
+#define MAC_HOLD_NS	3000000000ull
+/* after a hold for a receiver runs out, none for it for this long */
+#define RX_STARVE_NS	100000000ull
 
 static struct vdev *netq_dev(struct netq *nq)
 {
@@ -117,8 +125,13 @@ struct seg {
 };
 
 #define MAX_SEGS 72
+/* descriptors a chain may take, the indirect one included */
+#define MAX_CHAIN (2 * MAX_SEGS)
 
-/* the readable (or writable) descriptors of a chain */
+/*
+ * The readable descriptors of a TX chain, or the writable ones of an
+ * RX chain, which may hold nothing else.
+ */
 static int vq_chain(struct vdev *d, struct vq *q, uint16_t head, bool writable,
 		    struct seg *segs, int max, uint64_t *total)
 {
@@ -129,8 +142,8 @@ static int vq_chain(struct vdev *d, struct vq *q, uint16_t head, bool writable,
 	int n = 0;
 
 	*total = 0;
-	/* a direct chain, then at most one indirect table: 2 * num steps */
-	for (uint32_t guard = 0; guard < 2 * q->num; guard++) {
+	/* walked under the receiver's rx_lock: every step counts */
+	for (uint32_t guard = 0; guard < MAX_CHAIN; guard++) {
 		if (i >= num)
 			return -1;
 
@@ -153,6 +166,8 @@ static int vq_chain(struct vdev *d, struct vq *q, uint16_t head, bool writable,
 
 		bool w = de.flags & VRING_DESC_F_WRITE;
 
+		if (writable && (!w || !de.len))
+			return -1;
 		if (w == writable && de.len) {
 			uint8_t *p = gpa_range(d, de.addr, de.len);
 
@@ -355,28 +370,21 @@ static void rx_put(struct rxtake *t)
  */
 static int rx_nobuf(struct netport *dp, int rqi, struct rxtake *t)
 {
-	struct netq *nq = &dp->q[rqi];
-
-	if (nq->rx_starved) {
-		if (t->ai == nq->rx_starved_ai)
-			return DLV_DROP;
-		nq->rx_starved = false;
-	}
+	if (now_ns() < dp->q[rqi].rx_starved_until)
+		return DLV_DROP;
 	net_want_rx_kick(t->q);
 	return DLV_NOBUF;
 }
 
-/* a hold for dp ran out: drop its frames until it refills */
+/* a hold for dp ran out: its senders hold no more for a while, so a
+ * guest that refills a buffer at a time cannot hold them on every frame */
 static void rx_starve(struct netport *dp)
 {
-	for (int i = 0; i < NET_MAX_QP; i++) {
-		struct vq *q = &dp->dev->vq[NET_RXQ(i)];
+	uint64_t until = now_ns() + RX_STARVE_NS;
 
-		if (!vq_ready(q))
-			continue;
+	for (int i = 0; i < NET_MAX_QP; i++) {
 		plat_spin_lock(&dp->rx_lock[i]);
-		dp->q[i].rx_starved = true;
-		dp->q[i].rx_starved_ai = ACQ(&q->avail->idx);
+		dp->q[i].rx_starved_until = until;
 		plat_spin_unlock(&dp->rx_lock[i]);
 	}
 }
@@ -384,6 +392,8 @@ static void rx_starve(struct netport *dp)
 static int net_deliver_segs(struct netport *dp, int rqi,
 			    const struct vnet_hdr *th,
 			    const struct cursor *src0, uint64_t len);
+static void net_fill_csum(struct cursor frame, uint64_t len,
+			  const struct vnet_hdr *h);
 
 #define NET_MAX_SPANS	160
 
@@ -469,6 +479,7 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 	struct vnet_hdr h = *th;
 	uint8_t gso = h.gso_type & ~VNET_HDR_GSO_ECN;
 	uint16_t nbufs;
+	bool fill = false;
 	int rc, fd;
 
 	if (d->dead || !vq_ready(q) || q->broken)
@@ -489,13 +500,16 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 		h.gso_type &= ~VNET_HDR_GSO_ECN;
 	h.flags &= VNET_HDR_F_NEEDS_CSUM;
 	if ((gso == VNET_HDR_GSO_TCPV4 && !(d->features & VNET_F_GUEST_TSO4)) ||
-	    (gso == VNET_HDR_GSO_TCPV6 && !(d->features & VNET_F_GUEST_TSO6)) ||
-	    (gso == VNET_HDR_GSO_NONE && (h.flags & VNET_HDR_F_NEEDS_CSUM) &&
-	     !(d->features & VNET_F_GUEST_CSUM)))
+	    (gso == VNET_HDR_GSO_TCPV6 && !(d->features & VNET_F_GUEST_TSO6)))
 		return net_deliver_segs(dp, rqi, th, src0, len);
 	if ((h.flags & VNET_HDR_F_NEEDS_CSUM) &&
-	    !(d->features & VNET_F_GUEST_CSUM))
-		return DLV_DROP;
+	    !(d->features & VNET_F_GUEST_CSUM)) {
+		if (gso != VNET_HDR_GSO_NONE)
+			return DLV_DROP;
+		fill = true;
+		h.flags = 0;
+		h.csum_start = h.csum_offset = 0;
+	}
 
 	plat_spin_lock(&dp->rx_lock[rqi]);
 	rx_begin(&t, d, q);
@@ -509,9 +523,13 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 	}
 
 	struct cursor src = *src0;
+	struct cursor body;
 
 	cur_write(&dst, &h, sizeof(h));
+	body = dst;
 	net_copy(&dst, &src, len);
+	if (fill)
+		net_fill_csum(body, len, th);
 	rx_put(&t);
 	STAT_ADD(dp->rx_pkts, 1);
 	STAT_ADD(dp->rx_bytes, len);
@@ -600,6 +618,32 @@ static uint16_t csum_fold(uint64_t s)
 	return s;
 }
 
+/* sum of the next len bytes of c, the first at an even offset */
+static uint64_t cur_csum(struct cursor c, uint64_t len)
+{
+	uint64_t sum = 0, pos = 0;
+
+	while (len && c.i < c.n) {
+		uint64_t k = c.s[c.i].len - c.off;
+		uint16_t f;
+
+		if (k > len)
+			k = len;
+		f = csum_fold(csum_add(0, c.s[c.i].p + c.off, k));
+		if (pos & 1)
+			f = (uint16_t)(f << 8 | f >> 8);
+		sum += f;
+		pos += k;
+		len -= k;
+		c.off += k;
+		if (c.off == c.s[c.i].len) {
+			c.i++;
+			c.off = 0;
+		}
+	}
+	return sum;
+}
+
 /* sum of segments laid end to end, the first at an even offset */
 static uint64_t csum_segs(const struct seg *s, int n)
 {
@@ -614,6 +658,24 @@ static uint64_t csum_segs(const struct seg *s, int n)
 		pos += s[i].len;
 	}
 	return sum;
+}
+
+/*
+ * Finish a partial checksum in a delivered frame, as the kernel's
+ * skb_checksum_help() does: the sum from csum_start to the end, the
+ * pseudo-header sum the sender left in place included.
+ */
+static void net_fill_csum(struct cursor frame, uint64_t len,
+			  const struct vnet_hdr *h)
+{
+	uint16_t v;
+
+	cur_skip(&frame, h->csum_start);
+	v = ~csum_fold(cur_csum(frame, len - h->csum_start));
+	if (!v)
+		v = 0xffff;
+	cur_skip(&frame, h->csum_offset);
+	cur_write(&frame, &v, 2);
 }
 
 static uint16_t get_be16(const uint8_t *p)
@@ -818,6 +880,38 @@ static struct netport *port_by_mac(const uint8_t *mac)
 }
 
 /*
+ * p sends from mac: learn it, unless another port on the switch holds
+ * it and has sent from it lately.  A port that went quiet loses it, as
+ * a virtual MAC moves on failover.
+ */
+static bool net_claim_mac(struct netport *p, const uint8_t *mac)
+{
+	uint64_t k = mac_key(mac), t = now_ns();
+	bool ok = true;
+
+	if (RLX(&p->mac) == k) {
+		if (t - RLX(&p->mac_ns) > MAC_HOLD_NS / 4)
+			REL(&p->mac_ns, t);
+		return true;
+	}
+	plat_spin_lock(&g_mac_lock);
+	for (struct netport *o = g_ports; o; o = o->next) {
+		if (o == p || RLX(&o->mac) != k)
+			continue;
+		if (o->attached && t - RLX(&o->mac_ns) < MAC_HOLD_NS)
+			ok = false;
+		else
+			REL(&o->mac, 0);
+	}
+	if (ok) {
+		REL(&p->mac_ns, t);
+		REL(&p->mac, k);
+	}
+	plat_spin_unlock(&g_mac_lock);
+	return ok;
+}
+
+/*
  * A hash of the frame's IP addresses and TCP/UDP ports, as RSS would
  * take it, so that every segment of a flow lands on one RX queue and is
  * received in order.  0 for anything else.
@@ -911,38 +1005,26 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 			cur_read(&c, &h, hlen);
 			frame = c;
 			cur_read(&c, eth, 12);
-			if (RLX(&p->mac) != mac_key(eth + 6)) {
-				struct netport *o = port_by_mac(eth + 6);
-
-				/* another port's address is not ours to take */
-				if (o && o != p && o->attached)
-					goto drop;
-				REL(&p->mac, mac_key(eth + 6));
-			}
+			if (!net_claim_mac(p, eth + 6))
+				goto drop;
 
 			int rc = DLV_DROP;
 			struct netport *dp = NULL;
 			uint32_t fh = net_flow_hash(&frame, flen);
 
-			if (eth[0] & 1) {
+			dp = eth[0] & 1 ? NULL : port_by_mac(eth);
+			if (dp && dp != p && dp->attached) {
+				rc = net_send_to(dp, fh, &h, &frame, flen);
+				if (rc == DLV_DROP)
+					STAT_ADD(dp->rx_drops, 1);
+			} else if (!dp) {
+				/* broadcast, multicast, or no port has it */
 				for (struct netport *o = g_ports; o; o = o->next)
-					if (o != p && o->attached)
-						net_send_to(o, fh, &h, &frame,
-							    flen);
+					if (o != p && o->attached &&
+					    net_send_to(o, fh, &h, &frame,
+							flen) != DLV_OK)
+						STAT_ADD(o->rx_drops, 1);
 				rc = DLV_OK;
-			} else {
-				dp = port_by_mac(eth);
-				if (dp && dp != p && dp->attached) {
-					rc = net_send_to(dp, fh, &h, &frame,
-							 flen);
-				} else if (!dp) {
-					for (struct netport *o = g_ports; o;
-					     o = o->next)
-						if (o != p && o->attached)
-							net_send_to(o, fh, &h,
-								    &frame, flen);
-					rc = DLV_OK;
-				}
 			}
 			if (rc == DLV_NOBUF) {
 				uint64_t t = now_ns();
@@ -957,6 +1039,7 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 					break;
 				}
 				STAT_ADD(dp->rx_hold_drops, 1);
+				STAT_ADD(dp->rx_drops, 1);
 				rx_starve(dp);
 			}
 			if (nq->stall_since) {
@@ -1071,7 +1154,7 @@ static void net_attach(struct vdev *d)
 	/* a hold or a starved RX queue from before the detach is over */
 	for (int i = 0; i < NET_MAX_QP; i++) {
 		p->q[i].stall_since = 0;
-		p->q[i].rx_starved = false;
+		p->q[i].rx_starved_until = 0;
 		netq_serve(&p->q[i]);
 	}
 	LOG("dev%d: net port up, features 0x%" PRIx64, d->id, d->features);
@@ -1181,6 +1264,7 @@ static void net_write_stats(void)
 		STAT_OUT(tx_hold_ns);
 		STAT_OUT(rx_segs);
 		STAT_OUT(rx_seg_drops);
+		STAT_OUT(rx_drops);
 #undef STAT_OUT
 		fputc('\n', f);
 	}

@@ -3108,6 +3108,7 @@ int main(int argc, char **argv)
 	if (g_nworkers < 1)
 		g_nworkers = 1;
 	plat_init();
+	plat_spin_init(&g_mac_lock);
 
 	signal(SIGPIPE, SIG_IGN);
 	signal(SIGUSR1, on_usr1);
