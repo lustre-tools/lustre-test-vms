@@ -16,7 +16,11 @@
 # Writes OUTDIR/qemu-$VERSION-$REVISION-macos-arm64.tar.gz and its .sha256:
 # bin/qemu-system-aarch64, share/qemu, and lib/ with the few Homebrew
 # dylibs it loads (glib, pixman, libslirp, zstd and theirs), so it runs
-# without Homebrew.  ltvm installs it (`ltvm install`, or
+# without Homebrew.  share/doc/ltvm-qemu/ lists each component's
+# version, license and source, with the license files and the patch.
+# The release should also carry the QEMU source tarball, the patch, and
+# the source of each LGPL library (glib, gettext) with Homebrew's patch
+# and formula for it; see the release notes of qemu-macos-11.1.3-1.  ltvm installs it (`ltvm install`, or
 # `ltvm doctor --fix --shmrdma`) from the GitHub release
 # qemu-macos-$VERSION-$REVISION; to publish a new build:
 #
@@ -67,4 +71,5 @@ stage=$(mktemp -d "${TMPDIR:-/tmp}/qemu-stage.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 DESTDIR="$stage" ninja install >/dev/null
 python3 "$here/package-qemu.py" "$stage/opt/qemu" \
-	"$src/accel/hvf/entitlements.plist" "$outdir/$name.tar.gz"
+	"$src/accel/hvf/entitlements.plist" "$outdir/$name.tar.gz" \
+	"$src" "$here/qemu-vhost-user-non-linux.patch"
