@@ -106,17 +106,33 @@ command; they never build anything themselves.
 | requirement | needed by | fixed by `doctor --fix` |
 |---|---|---|
 | a C compiler (shmrdmad is built on the host) | shmrdma, shmnet | installs gcc |
-| QEMU with vhost-user-fs-pci | shmrdma | no: `sudo ltvm setup --qemu --force` |
-| QEMU with memory-backend-memfd | shmrdma, shmnet | no: as above |
-| QEMU with the vhost-user netdev | shmnet | no: as above |
+| QEMU with vhost-user-fs-pci | shmrdma | Linux: no, `sudo ltvm setup --qemu --force`; macOS: installs ltvm's QEMU |
+| QEMU with memory-backend-memfd (memory-backend-shm on macOS) | shmrdma, shmnet | as above |
+| QEMU with the vhost-user netdev | shmnet | as above |
 | a private runtime directory for the daemon | shmrdma, shmnet | creates it |
-| taskset | --host-node | installs util-linux |
-| QEMU with libnuma, or numactl (optional: pinned vCPUs place most memory anyway) | --host-node | installs numactl |
+| taskset (Linux) | --host-node | installs util-linux |
+| QEMU with libnuma, or numactl (Linux; optional: pinned vCPUs place most memory anyway) | --host-node | installs numactl |
 | TARGET's image built with the guest module (a fetched one is not) | shmrdma | `ltvm build image` |
 | TARGET's kernel built with SMC (optional: without it SMC falls back to TCP) | SMC | `ltvm build kernel` with `--lustre-tree`, then the image |
 
 `ltvm install` installs gcc and numactl with its other prerequisites.
 The daemon's node list (`[shmrdma] nodes`), when set, is checked too.
+
+### macOS (Apple Silicon)
+
+Homebrew's QEMU has no vhost-user, so ltvm publishes its own
+qemu-system-aarch64 for Apple Silicon (GitHub release
+`qemu-macos-<version>`, built by `shmrdma/macos/build-qemu.sh`, which
+lists the configure flags and the one QEMU patch).  `ltvm install` and
+`ltvm doctor --fix --shmrdma` download it, check its sha256, unpack it
+under `/opt/qemu/macos-<version>` and point
+`/opt/qemu/bin/qemu-system-aarch64` at it; Homebrew's QEMU stays for
+x86_64 guests and `qemu-img`.  It carries the few Homebrew libraries
+it loads, so it runs without them.  Guest RAM is POSIX shared memory
+(`memory-backend-shm`) instead of a memfd, and the daemon runs on
+kqueue and pipes (`shmrdma/daemon/plat_macos.h`).  `--host-node` does
+not apply: macOS has no NUMA nodes.  Intel Macs keep Homebrew's QEMU
+and cannot use these features.
 
 ## SMC sockets over shmrdma
 
@@ -268,7 +284,8 @@ a guest that is merely slow to refill.
 - Kernel verbs only (no userspace verbs, so no perftest); no SRQ,
   atomics or memory windows.
 - x86_64 hosts: the daemon uses AVX2 non-temporal stores when the CPU
-  has them.
+  has them.  aarch64 hosts use memcpy: on an Apple M5 no NEON or
+  non-temporal variant beat it (`tools/memcpy_bw.c`).
 
 ## Results
 
@@ -304,6 +321,25 @@ with one worker plus four copiers the daemon has five copy threads,
 which on Sookie copy 27 GB/s with non-temporal stores, so 24.5 GB/s is
 91% of it. Per byte the daemon is far cheaper in host CPU than the
 bridge: 1.6 GB/s per host core against 0.18 for TCP today.
+
+### LNet selftest between two VMs (Mac, Apple M5)
+
+Two rocky10-16k guests (2 vCPUs, 3 GB) under HVF, ltvm's macOS QEMU,
+`lst-bench.sh`, 10 s per test, no errors:
+
+| test | shmrdma (o2ib) | shmnet (tcp) |
+|---|---|---|
+| ping, 1 in flight | 11,100/s | 9,500/s |
+| 4 KB write, 1 in flight | 11,900/s | 10,200/s |
+| 1 MB write, 8 in flight | 36 GB/s; 13.9 with check=full | 9.3 GB/s (check=full) |
+| 1 MB read, 8 in flight | | 11 GB/s (check=full) |
+
+Per-message rates match Sookie's, and bulk is higher: the M5 copies
+about 50 GB/s per thread, and with both of the daemon's workers busy
+the o2ib run is bound by the daemon and the guests, not memory.  With
+check=full the guests' checksums are the limit.  shmnet is several
+times faster than on Sookie because the guests' TCP stack is not the
+bottleneck on these cores.
 
 ### Lustre (Sookie)
 
