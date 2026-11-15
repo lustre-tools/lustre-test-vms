@@ -105,7 +105,8 @@ def _qemu(arch: str | None = None) -> str:
     return vm_state.qemu_binary_for_arch(arch or _native_arch())
 
 
-def _qemu_help(what: str, qemu: str | None = None) -> str:
+def _qemu_help(what: str, qemu: str | None = None) -> str | None:
+    """``-<what> help``'s output, or None when QEMU did not answer."""
     qemu = qemu or _qemu()
     try:
         r = subprocess.run(
@@ -118,16 +119,20 @@ def _qemu_help(what: str, qemu: str | None = None) -> str:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return ""
+        return None
     return r.stdout
 
 
-def _qemu_has_vhost_user_netdev(qemu: str | None = None) -> bool:
-    """Whether QEMU was built with vhost-user.  ``-netdev help`` lists
-    vhost-user even in a build without it (Homebrew's, on macOS), so
-    ask for one: a build with it complains about the chardev instead."""
+def _qemu_has_vhost_user_netdev(qemu: str | None = None) -> bool | None:
+    """Whether QEMU was built with vhost-user, None if it did not say.
+    ``-netdev help`` lists vhost-user even in a build without it
+    (Homebrew's, on macOS), so ask for one: a build with it complains
+    about the chardev instead."""
     qemu = qemu or _qemu()
-    if "vhost-user" not in _qemu_help("netdev", qemu):
+    netdevs = _qemu_help("netdev", qemu)
+    if netdevs is None:
+        return None
+    if "vhost-user" not in netdevs:
         return False
     try:
         r = subprocess.run(
@@ -146,7 +151,7 @@ def _qemu_has_vhost_user_netdev(qemu: str | None = None) -> bool:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return False
+        return None
     return "not compiled" not in r.stderr
 
 
@@ -167,9 +172,13 @@ def _qemu_caps(qemu: str) -> dict[str, bool]:
     except OSError:
         real = ident = ""
     cache: dict = {}
-    if ident:
+    try:
+        cache_path: Path | None = _caps_cache()
+    except RuntimeError:
+        cache_path = None
+    if ident and cache_path:
         try:
-            raw = json.loads(_caps_cache().read_text())
+            raw = json.loads(cache_path.read_text())
             cache = raw if isinstance(raw, dict) else {}
             hit = cache[real]
             if hit["id"] == ident:
@@ -177,16 +186,25 @@ def _qemu_caps(qemu: str) -> dict[str, bool]:
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             pass
     devices = _qemu_help("device", qemu)
+    objects = _qemu_help("object", qemu)
+    netdev = _qemu_has_vhost_user_netdev(qemu)
     caps = {
-        "vhost-user-fs-pci": '"vhost-user-fs-pci"' in devices,
-        "shared-ram": shmrdma.SHARED_RAM_BACKEND in _qemu_help("object", qemu),
-        "vhost-user-netdev": _qemu_has_vhost_user_netdev(qemu),
+        "vhost-user-fs-pci": '"vhost-user-fs-pci"' in (devices or ""),
+        "shared-ram": shmrdma.SHARED_RAM_BACKEND in (objects or ""),
+        "vhost-user-netdev": bool(netdev),
         "binds-numa": not is_macos() and qemu_binds_numa(qemu),
     }
-    # an empty answer is a probe that failed, not a QEMU without devices
-    if ident and devices:
+    # an empty device list is a probe that failed, not a QEMU without
+    # devices; a probe that failed is asked again next time
+    if (
+        ident
+        and cache_path
+        and devices
+        and objects is not None
+        and (netdev is not None)
+    ):
         cache[real] = {"id": ident, "caps": caps}
-        path = _caps_cache()
+        path = cache_path
         tmp = path.with_name(f".{path.name}.{os.getpid()}")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -238,19 +256,21 @@ def host_checks(arch: str | None = None) -> list[Req]:
     """What the host itself needs, for guests of *arch* (the host's if
     None): each arch has its own QEMU."""
     reqs = []
-    cc = os.environ.get("CC") or shutil.which("cc") or shutil.which("gcc")
+    cmd = shmrdma._compiler()
+    cc = " ".join(cmd) if cmd and shutil.which(cmd[0]) else None
     built = not cc and not shmrdma.daemon_needs_compiler()
+    if cc or built:
+        detail = cc or "none, and none needed: shmrdmad is built"
+    elif cmd and os.environ.get("CC"):
+        detail = f"CC={os.environ['CC']}: {cmd[0]} is not on PATH"
+    else:
+        detail = "no cc or gcc on PATH"
     reqs.append(
         Req(
             "C compiler for shmrdmad",
             frozenset({OWN_DAEMON}),
             bool(cc) or built,
-            cc
-            or (
-                "none, and none needed: shmrdmad is built"
-                if built
-                else "no cc or gcc on PATH"
-            ),
+            detail,
             fix=lambda: install_packages("gcc"),
             how="install gcc",
         )
@@ -372,12 +392,16 @@ def _run_dir_check() -> Req:
         import pwd
 
         user = os.environ["SUDO_USER"]
-        uid = pwd.getpwnam(user).pw_uid
-    d = shmrdma.run_dir(uid, create=False)
+        try:
+            uid = pwd.getpwnam(user).pw_uid
+        except KeyError:
+            user = None
     ok = False
-    detail = str(d)
+    detail = ""
     fix: Callable[[], None] | None = None
     try:
+        d = shmrdma.run_dir(uid, create=False)
+        detail = str(d)
         if os.path.lexists(d):
             shmrdma._check_private(d, uid)
             ok = True
@@ -402,7 +426,7 @@ def _run_dir_check() -> Req:
                 shmrdma.run_dir(uid, create=True)
 
             fix = make
-    except (OSError, shmrdma.UnsafeDir) as e:
+    except (OSError, RuntimeError, shmrdma.UnsafeDir) as e:
         detail = str(e)
 
     return Req(

@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import pwd
+import shlex
 import shutil
 import signal
 import socket
@@ -342,10 +343,17 @@ def _check_private(d: Path, uid: int) -> None:
             os.close(fd)
 
 
+def _passwd(uid: int) -> pwd.struct_passwd:
+    try:
+        return pwd.getpwuid(uid)
+    except KeyError:
+        raise RuntimeError(f"uid {uid} has no passwd entry") from None
+
+
 def _state_home(uid: int) -> Path:
     # Not $XDG_STATE_HOME: sudo drops it, and root must look where the
     # user put the daemon.
-    return Path(pwd.getpwuid(uid).pw_dir) / ".local" / "state"
+    return Path(_passwd(uid).pw_dir) / ".local" / "state"
 
 
 def _candidate_dirs(uid: int) -> list[Path]:
@@ -569,7 +577,7 @@ def daemon_for(vm: VMInfo, create: bool = False) -> Daemon:
     uid = _vm_uid(vm)
     if uid is None or uid in (0, _owner()[1]):
         return daemon(create)
-    return Daemon(pwd.getpwuid(uid).pw_name, uid, run_dir(uid, create))
+    return Daemon(_passwd(uid).pw_name, uid, run_dir(uid, create))
 
 
 def _cache_dir(uid: int | None = None) -> Path:
@@ -577,7 +585,7 @@ def _cache_dir(uid: int | None = None) -> Path:
     if uid == os.geteuid() and os.environ.get("XDG_CACHE_HOME"):
         base = Path(os.environ["XDG_CACHE_HOME"])
     else:
-        base = Path(pwd.getpwuid(uid).pw_dir) / ".cache"
+        base = Path(_passwd(uid).pw_dir) / ".cache"
     return base / "ltvm" / "shmrdmad"
 
 
@@ -606,13 +614,22 @@ def daemon_digest() -> str:
     return h.hexdigest()[:16]
 
 
-def _compiler() -> str | None:
-    """The compiler as found: run by this name, since a ccache wrapper is
-    a compiler only when its argv[0] names one."""
-    cc = os.environ.get("CC") or shutil.which("cc") or shutil.which("gcc")
-    if not cc:
+def _compiler() -> list[str] | None:
+    """The compiler command as found, $CC split as make splits it (so
+    "ccache gcc" works), its first word resolved on PATH but run by that
+    name, since a ccache wrapper is a compiler only when its argv[0]
+    names one."""
+    env = os.environ.get("CC", "")
+    try:
+        words = shlex.split(env)
+    except ValueError:
+        words = env.split()
+    if not words:
+        cc = shutil.which("cc") or shutil.which("gcc")
+        words = [cc] if cc else []
+    if not words:
         return None
-    return shutil.which(cc) or cc
+    return [shutil.which(words[0]) or words[0], *words[1:]]
 
 
 def build_daemon() -> tuple[Path, str]:
@@ -625,7 +642,7 @@ def build_daemon() -> tuple[Path, str]:
     out = _cache_dir() / digest / "shmrdmad"
     stamp = out.with_name("cc")
     cc = _compiler()
-    real_cc = os.path.realpath(cc) if cc else None
+    real_cc = " ".join([os.path.realpath(cc[0]), *cc[1:]]) if cc else None
     if out.is_file():
         try:
             built_by = stamp.read_text().strip()
@@ -639,12 +656,17 @@ def build_daemon() -> tuple[Path, str]:
         )
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(f".shmrdmad.{os.getpid()}")
-    r = subprocess.run(
-        [cc, *DAEMON_CFLAGS, "-o", str(tmp), "shmrdmad.c"],
-        cwd=SRC_DIR / "daemon",
-        capture_output=True,
-        text=True,
-    )
+    try:
+        r = subprocess.run(
+            [*cc, *DAEMON_CFLAGS, "-o", str(tmp), "shmrdmad.c"],
+            cwd=SRC_DIR / "daemon",
+            capture_output=True,
+            text=True,
+        )
+    except OSError as e:
+        raise RuntimeError(
+            f"building shmrdmad: cannot run {cc[0]}: {e.strerror}"
+        ) from None
     if r.returncode != 0:
         tmp.unlink(missing_ok=True)
         raise RuntimeError(f"building shmrdmad failed:\n{r.stderr.strip()}")
@@ -656,9 +678,9 @@ def build_daemon() -> tuple[Path, str]:
 def daemon_needs_compiler() -> bool:
     """Whether starting this user's daemon would compile it: no binary
     is cached for the current sources and none runs."""
-    if (_cache_dir() / daemon_digest() / "shmrdmad").is_file():
-        return False
     try:
+        if (_cache_dir() / daemon_digest() / "shmrdmad").is_file():
+            return False
         return not daemon(create=False).pid()
     except (OSError, RuntimeError, KeyError):
         return True

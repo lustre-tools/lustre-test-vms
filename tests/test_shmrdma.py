@@ -1070,6 +1070,70 @@ def test_daemon_rebuilt_for_another_compiler(
         assert shmrdma.daemon_digest() != digest
 
 
+def test_cc_with_arguments(tmp_path: Path, monkeypatch) -> None:
+    """CC is split as make splits it: "ccache gcc" runs ccache."""
+    from ltvm_pkg import shmrdma_req as sr
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    wrapper = tmp_path / "ccache"
+    wrapper.write_text("")
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("CC", f"{wrapper} gcc -m64")
+    assert shmrdma._compiler() == [str(wrapper), "gcc", "-m64"]
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd[:3])
+        Path(cmd[cmd.index("-o") + 1]).write_text("")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("ltvm_pkg.shmrdma.subprocess.run", side_effect=run):
+        shmrdma.build_daemon()
+    assert calls == [[str(wrapper), "gcc", "-m64"]]
+    with patch("ltvm_pkg.shmrdma_req._qemu_caps") as caps:
+        caps.return_value.__getitem__.return_value = True
+        r = {r.name: r for r in sr.host_checks()}["C compiler for shmrdmad"]
+    assert r.ok
+    monkeypatch.setenv("CC", "no-such-cc-ltvm gcc")
+    with (
+        patch("ltvm_pkg.shmrdma.daemon_needs_compiler", return_value=True),
+        patch("ltvm_pkg.shmrdma_req._qemu_caps") as caps,
+    ):
+        caps.return_value.__getitem__.return_value = True
+        r = {r.name: r for r in sr.host_checks()}["C compiler for shmrdmad"]
+    assert not r.ok and "no-such-cc-ltvm is not on PATH" in r.detail
+
+
+def test_uid_without_passwd_entry(monkeypatch) -> None:
+    """A container uid with no passwd entry gets a refusal, not a
+    traceback, and a --host-node VM is not refused for it."""
+    from ltvm_pkg import shmrdma_req as sr
+
+    def nobody(uid):
+        raise KeyError(uid)
+
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    # conftest's stand-in for the passwd home
+    monkeypatch.setattr(
+        shmrdma,
+        "_state_home",
+        lambda uid: Path(shmrdma._passwd(uid).pw_dir) / ".local" / "state",
+    )
+    with patch("ltvm_pkg.shmrdma.pwd.getpwuid", side_effect=nobody):
+        with pytest.raises(RuntimeError, match="no passwd entry"):
+            shmrdma._cache_dir()
+        with (
+            patch("ltvm_pkg.shmrdma_req._qemu_caps") as caps,
+            patch("ltvm_pkg.host_setup.is_macos", return_value=False),
+        ):
+            caps.return_value.__getitem__.return_value = True
+            reqs = {r.name: r for r in sr.host_checks()}
+        r = reqs["shmrdmad runtime directory"]
+        assert not r.ok and "no passwd entry" in r.detail
+        assert sr.HOST_NODE not in r.features
+
+
 def test_daemon_builds_through_a_ccache_wrapper(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1948,6 +2012,37 @@ class TestRequirements:
             sr._qemu_caps(str(qemu))
         assert qh.call_count == 4
         assert not sr._caps_cache().exists()
+
+    def test_timed_out_probe_not_cached(self, tmp_path: Path) -> None:
+        """A probe that timed out is not taken for a QEMU without it."""
+        from ltvm_pkg import shmrdma_req as sr
+
+        qemu = tmp_path / "qemu"
+        qemu.write_text("v1")
+        helps = {"device": '"vhost-user-fs-pci"', "object": None}
+        with (
+            patch(
+                "ltvm_pkg.shmrdma_req._qemu_help",
+                side_effect=lambda what, q=None: helps[what],
+            ),
+            patch(
+                "ltvm_pkg.shmrdma_req._qemu_has_vhost_user_netdev",
+                return_value=None,
+            ),
+            patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=False),
+        ):
+            caps = sr._qemu_caps(str(qemu))
+            assert not caps["shared-ram"] and not caps["vhost-user-netdev"]
+            assert not sr._caps_cache().exists()
+            helps["object"] = shmrdma.SHARED_RAM_BACKEND
+            assert sr._qemu_caps(str(qemu))["shared-ram"]
+        assert not sr._caps_cache().exists()
+        with patch(
+            "ltvm_pkg.shmrdma_req.subprocess.run",
+            side_effect=subprocess.TimeoutExpired("qemu", 30),
+        ):
+            assert sr._qemu_help("object", str(qemu)) is None
+            assert sr._qemu_has_vhost_user_netdev(str(qemu)) is None
 
     def test_compiler_not_needed_once_built(self, tmp_path: Path) -> None:
         from ltvm_pkg import shmrdma_req as sr
