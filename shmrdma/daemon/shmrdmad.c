@@ -323,6 +323,7 @@ static int g_ncopiers = 0;		/* helper threads for large copies */
 static uint64_t g_split_min = 256 << 10;	/* split copies at least this big */
 static uint64_t g_part_min = 128 << 10;	/* into parts at least this big */
 static uint64_t g_nt_min = 64 << 10;	/* non-temporal stores from here */
+static uint64_t g_net_nt_min = 16 << 10;	/* the same for shmnet frames */
 static int g_lsock;
 
 /* writer lock: hold every worker's mutex */
