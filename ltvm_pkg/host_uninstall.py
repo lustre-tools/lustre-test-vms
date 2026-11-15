@@ -614,8 +614,10 @@ _STOP_SHMRDMAD = (
 
 
 def _shmrdma_daemons() -> str | None:
-    """Stop every user's shmrdmad its pid file vouches for: it runs
-    detached, and would outlive its sockets, VM_DIR and the VMs."""
+    """Stop the shmrdmad of every user with a directory in VM_DIR, and
+    the invoking user's own anywhere, when its pid file vouches for it:
+    it runs detached, and would outlive its sockets, VM_DIR and the
+    VMs.  Another user's daemon in their home directory is left."""
     from . import shmrdma
 
     me = os.geteuid()
@@ -638,6 +640,7 @@ def _shmrdma_daemons() -> str | None:
             r = sudo_run(
                 [
                     sys.executable,
+                    "-I",
                     "-c",
                     _STOP_SHMRDMAD,
                     str(root),
