@@ -914,7 +914,10 @@ class TestRequirements:
             "object": f"{shmrdma.SHARED_RAM_BACKEND}\n",
         }
         with (
-            patch("ltvm_pkg.shmrdma_req._qemu_help", side_effect=helps.get),
+            patch(
+                "ltvm_pkg.shmrdma_req._qemu_help",
+                side_effect=lambda what, qemu=None: helps[what],
+            ),
             patch(
                 "ltvm_pkg.shmrdma_req._qemu_has_vhost_user_netdev",
                 return_value=True,
@@ -992,6 +995,86 @@ class TestRequirements:
             pytest.raises(SystemExit),
         ):
             _run_launch(vm, _LaunchHarness())
+
+    def test_launch_refuses_before_taps(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        """On a classic host a refusal leaves no TAP behind."""
+        vm = _make_vm(tmp_vmdir, arch="aarch64")
+        vm.shmrdma = "auto"
+        vm.save()
+        h = _LaunchHarness()
+        with (
+            patch(
+                "ltvm_pkg.qemu_run.rootless.readiness",
+                return_value=MagicMock(ok=False),
+            ),
+            patch(
+                "ltvm_pkg.shmrdma_req.refusal", return_value="needs gcc"
+            ) as refusal,
+            pytest.raises(SystemExit),
+        ):
+            _run_launch(vm, h)
+        assert not any("tuntap" in c for c in h.run_calls)
+        # the QEMU checked is the one this VM's arch runs on
+        assert refusal.call_args.kwargs["arch"] == "aarch64"
+
+    def test_checks_probe_the_guest_arch_qemu(self) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        probed = []
+
+        def qemu_help(what: str, qemu: str | None = None) -> str:
+            probed.append(qemu)
+            return ""
+
+        with (
+            patch("ltvm_pkg.shmrdma_req._qemu_help", side_effect=qemu_help),
+            patch(
+                "ltvm_pkg.shmrdma_req._qemu_has_vhost_user_netdev",
+                side_effect=lambda qemu=None: probed.append(qemu) or False,
+            ),
+            patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=False),
+            patch("ltvm_pkg.host_setup.is_macos", return_value=False),
+            patch(
+                "ltvm_pkg.vm_state.qemu_binary_for_arch",
+                side_effect=lambda a: f"/q/qemu-system-{a}",
+            ),
+        ):
+            reqs = {r.name: r for r in sr.host_checks("riscv64")}
+        assert set(probed) == {"/q/qemu-system-riscv64"}
+        assert reqs["QEMU vhost-user-fs-pci"].detail == "/q/qemu-system-riscv64"
+
+    def test_cross_arch_on_macos_has_no_fix(self) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        other = "x86_64" if sr._native_arch() != "x86_64" else "aarch64"
+        with (
+            patch("ltvm_pkg.host_setup.is_macos", return_value=True),
+            patch("ltvm_pkg.shmrdma_req._qemu_help", return_value=""),
+            patch(
+                "ltvm_pkg.shmrdma_req._qemu_has_vhost_user_netdev",
+                return_value=False,
+            ),
+        ):
+            reqs = {r.name: r for r in sr.host_checks(other)}
+        fs = reqs["QEMU vhost-user-fs-pci"]
+        assert fs.fix is None and "native guests only" in fs.how
+
+    def test_hand_given_sockets_need_no_build(self) -> None:
+        """A daemon run by hand needs no compiler or run dir here."""
+        from ltvm_pkg import shmrdma_req as sr
+
+        own = NicSpec.parse("shmnet")
+        hand = NicSpec.parse("shmnet:socket=/run/x.sock")
+        assert sr.OWN_DAEMON in sr.features_of("auto", [], -1)
+        assert sr.OWN_DAEMON in sr.features_of("", [own], -1)
+        assert sr.OWN_DAEMON not in sr.features_of("/run/r.sock", [hand], -1)
+        reqs = [
+            self._req("C compiler for shmrdmad", {sr.OWN_DAEMON}, False),
+            self._req("QEMU vhost-user netdev", {sr.SHMNET}, True),
+        ]
+        with patch("ltvm_pkg.shmrdma_req.host_checks", return_value=reqs):
+            assert sr.refusal(sr.features_of("", [hand], -1)) is None
+            assert sr.refusal(sr.features_of("", [own], -1)) is not None
 
 
 def test_install_wants_numactl() -> None:

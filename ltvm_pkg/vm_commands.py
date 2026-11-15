@@ -1194,6 +1194,7 @@ def _resolve_os_and_kernel(
             explicit_kernel or None,
             image=Path(image),
             kernel_dir=Path(kernel).parent,
+            arch=arch,
         )
         why = shmrdma_req.refusal(feats, target)
         if why:
@@ -1223,12 +1224,16 @@ def _check_shmrdma_socket(value: str) -> None:
         die(shmrdma_socket_message(value, problem))
 
 
-def _check_shmrdma_image(image: str, target: str, kernel: str) -> None:
-    """Refuse --shmrdma on an image built without the guest module."""
+def _check_shmrdma_image(vm: VMInfo, shm: str) -> None:
+    """Refuse --shmrdma *shm* on what *vm* lacks: the guest module in its
+    image, or what the host needs."""
     t = shmrdma_req.Target(
-        target, kernel or None, image=Path(image), kernel_dir=Path(image).parent
+        vm.os_id,
+        image=Path(vm.image),
+        kernel_dir=Path(vm.image).parent,
+        arch=vm.arch or None,
     )
-    why = shmrdma_req.refusal({shmrdma_req.SHMRDMA}, t)
+    why = shmrdma_req.refusal(shmrdma_req.features_of(shm, [], -1), t)
     if why:
         die(why)
 
@@ -3432,7 +3437,7 @@ def cmd_set(args: argparse.Namespace) -> None:
         vm.numa_nodes = numa
     if shm is not None and shm != vm.shmrdma:
         if shm:
-            _check_shmrdma_image(vm.image, vm.os_id, "")
+            _check_shmrdma_image(vm, shm)
         changes.append(f"shmrdma {vm.shmrdma or 'none'} -> {shm or 'none'}")
         vm.shmrdma = shm
     if host_node is not None and host_node != vm.host_node:
