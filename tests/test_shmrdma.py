@@ -1142,3 +1142,34 @@ def test_cluster_create_refuses_before_any_node(
     memory.assert_not_called()
     out = capsys.readouterr()
     assert refused in out.out + out.err
+
+
+class TestImageLines:
+    def _lines(self, tmp_path: Path, **kw) -> tuple[list[str], MagicMock]:
+        from ltvm_pkg.image_build import _shmrdma_lines
+
+        ko = tmp_path / "built.ko"
+        ko.write_bytes(b"ko")
+        inject = tmp_path / "inject"
+        inject.mkdir()
+        with patch("ltvm_pkg.shmrdma.build_kmod", return_value=ko) as build:
+            args = {"cross": False, "mofed": False, **kw}
+            return (
+                _shmrdma_lines(MagicMock(), "k", "5.14.0", inject, **args),
+                build,
+            )
+
+    def test_baked_in(self, tmp_path: Path) -> None:
+        lines, _ = self._lines(tmp_path)
+        assert "COPY shmrdma/shmrdma.ko /lib/modules/5.14.0/extra/" in lines
+        assert (tmp_path / "inject" / "shmrdma" / "shmrdma.ko").is_file()
+
+    def test_left_out_over_mofed_kmods(self, tmp_path: Path) -> None:
+        lines, build = self._lines(tmp_path, mofed=True)
+        assert lines == []
+        build.assert_not_called()
+
+    def test_left_out_of_a_cross_build(self, tmp_path: Path) -> None:
+        lines, build = self._lines(tmp_path, cross=True)
+        assert lines == []
+        build.assert_not_called()
