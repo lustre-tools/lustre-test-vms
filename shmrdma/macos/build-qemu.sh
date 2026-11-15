@@ -20,15 +20,19 @@
 # version, license and source, with the license files and the patch.
 # The release should also carry the QEMU source tarball, the patch, and
 # the source of each LGPL library (glib, gettext) with Homebrew's patch
-# and formula for it; see the release notes of qemu-macos-11.1.3-1.  ltvm installs it (`ltvm install`, or
-# `ltvm doctor --fix --shmrdma`) from the GitHub release
-# qemu-macos-$VERSION-$REVISION; to publish a new build:
+# and formula for it; see the release notes of qemu-macos-11.1.3-1.
+#
+# ltvm installs it (`ltvm install`, or `ltvm doctor --fix --shmrdma`)
+# from the GitHub release qemu-macos-$VERSION-$REVISION.  To publish a
+# new build:
 #
 #   gh release create qemu-macos-$VERSION-$REVISION \
 #       -R lustre-tools/lustre-test-vms <tarball> <tarball>.sha256
 #
-# and bump QEMU_MACOS_VERSION in ltvm_pkg/host_setup.py.  Bump REVISION
-# whenever the patch or the configure flags change.
+# then, in ltvm_pkg/host_setup.py, bump QEMU_MACOS_VERSION and set
+# _QEMU_MACOS_SHA256 to the digest in <tarball>.sha256: ltvm refuses a
+# download that does not match it.  Bump REVISION whenever the patch or
+# the configure flags change.
 #
 # Needs: Xcode command line tools, and from Homebrew ninja, pkg-config,
 # glib, pixman, libslirp and zstd (at build time only).
