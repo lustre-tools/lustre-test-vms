@@ -147,7 +147,8 @@ struct cursor {
 };
 
 /* copy up to len bytes between cursors; returns bytes copied */
-static uint64_t cur_copy(struct cursor *dst, struct cursor *src, uint64_t len)
+static uint64_t cur_copy_nt(struct cursor *dst, struct cursor *src,
+			    uint64_t len, bool nt)
 {
 	uint64_t done = 0;
 
@@ -160,7 +161,8 @@ static uint64_t cur_copy(struct cursor *dst, struct cursor *src, uint64_t len)
 			k = dl;
 		if (k > sl)
 			k = sl;
-		memcpy(dst->s[dst->i].p + dst->off, src->s[src->i].p + src->off, k);
+		copy_bytes(dst->s[dst->i].p + dst->off,
+			   src->s[src->i].p + src->off, k, nt);
 		done += k;
 		dst->off += k;
 		src->off += k;
@@ -174,6 +176,11 @@ static uint64_t cur_copy(struct cursor *dst, struct cursor *src, uint64_t len)
 		}
 	}
 	return done;
+}
+
+static uint64_t cur_copy(struct cursor *dst, struct cursor *src, uint64_t len)
+{
+	return cur_copy_nt(dst, src, len, false);
 }
 
 static void cur_read(struct cursor *src, void *out, uint32_t len)
@@ -345,7 +352,13 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 	struct cursor src = *src0;
 
 	cur_write(&dst, &h, sizeof(h));
-	cur_copy(&dst, &src, len);
+	if (len >= g_net_nt_min) {
+		/* the guest may read the frame once used->idx moves */
+		cur_copy_nt(&dst, &src, len, true);
+		plat_nt_fence();
+	} else {
+		cur_copy(&dst, &src, len);
+	}
 	rx_put(&t);
 	STAT_ADD(dp->rx_pkts, 1);
 	STAT_ADD(dp->rx_bytes, len);
