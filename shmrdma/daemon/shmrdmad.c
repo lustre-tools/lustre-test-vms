@@ -287,6 +287,9 @@ struct vdev {
 	struct qp *qps[SHMRDMA_MAX_QP];
 	struct cq *cqs[SHMRDMA_MAX_CQ];
 	struct mr **mrs;		/* SHMRDMA_MAX_MR pointers */
+	/* Workers register, invalidate and translate MRs concurrently;
+	 * freeing one needs wlock. */
+	plat_spinlock_t mr_lock;
 
 	struct vdev *next;
 };
@@ -429,7 +432,9 @@ static void *uaddr_hva(struct vdev *d, uint64_t ua, uint64_t len)
 
 static void vq_signal(struct vq *q)
 {
-	if (q->callfd < 0)
+	int fd = RLX(&q->callfd);
+
+	if (fd < 0)
 		return;
 	if (q->event_idx) {
 		uint16_t ev = ACQ(&q->avail->ring[q->num]);
@@ -444,7 +449,7 @@ static void vq_signal(struct vq *q)
 	} else if (ACQ(&q->avail->flags) & VRING_AVAIL_F_NO_INTERRUPT) {
 		return;
 	}
-	plat_notifier_signal(q->callfd);
+	plat_notifier_signal(fd);
 }
 
 static void vq_push_used(struct vq *q, uint32_t head, uint32_t len)
@@ -543,6 +548,22 @@ static void cq_post(struct cq *cq, const struct shmrdma_cqe *cqe, bool solicited
 /* ---------------------------------------------------------------- */
 /* copying                                                          */
 
+/* The worker checks one inline length for SEND and RDMA WRITE alike. */
+_Static_assert(offsetof(struct shmrdma_sq_wqe, send.inline_len) ==
+	       offsetof(struct shmrdma_sq_wqe, rdma.inline_len),
+	       "inline_len must be one field for SEND and RDMA WRITE");
+
+/* SGEs of a receive entry that are both in range and inside the entry. */
+static uint32_t rq_nsge(const struct qp *qp, const struct shmrdma_rq_wqe *rw)
+{
+	uint32_t fit = (qp->rq.esz - sizeof(*rw)) / sizeof(rw->sge[0]);
+	uint32_t n = rw->num_sge;
+
+	if (n > fit)
+		n = fit;
+	return n > SHMRDMA_MAX_SGE ? SHMRDMA_MAX_SGE : n;
+}
+
 static inline void copy_bytes(uint8_t *dst, const uint8_t *src, uint64_t n,
 			      bool nt)
 {
@@ -609,11 +630,13 @@ static int64_t sg_next(struct sg_iter *it, uint64_t max, uint8_t **out)
 			return -1;
 		}
 	} else {
+		plat_spin_lock(&it->dev->mr_lock);
 		struct mr *mr = dev_mr(it->dev, s->lkey);
 
 		if (!mr || (mr->access & it->need_access) != it->need_access ||
 		    addr < mr->iova || addr - mr->iova >= mr->length ||
 		    mr->length - (addr - mr->iova) < left) {
+			plat_spin_unlock(&it->dev->mr_lock);
 			it->err = it->remote ? WC_REM_ACCESS_ERR :
 					       WC_LOC_PROT_ERR;
 			return -1;
@@ -623,6 +646,7 @@ static int64_t sg_next(struct sg_iter *it, uint64_t max, uint8_t **out)
 		uint64_t poff = moff & ((1ull << mr->page_shift) - 1);
 
 		if (pidx >= mr->npages) {
+			plat_spin_unlock(&it->dev->mr_lock);
 			it->err = it->remote ? WC_REM_ACCESS_ERR :
 					       WC_LOC_PROT_ERR;
 			return -1;
@@ -637,6 +661,7 @@ static int64_t sg_next(struct sg_iter *it, uint64_t max, uint8_t **out)
 			pidx++;
 			avail += 1ull << mr->page_shift;
 		}
+		plat_spin_unlock(&it->dev->mr_lock);
 		uint64_t ravail;
 
 		p = gpa_hva(it->dev, gpa, &ravail);
@@ -967,7 +992,9 @@ static struct qp *qp_peer(struct qp *qp)
 		return NULL;
 	struct qp *p = pd->qps[qp->dqpn];
 
-	if (!p)
+	/* QPNs are the guests' to choose: a peer must also be connected
+	 * back to one of this device's GIDs, not just name our QPN. */
+	if (!p || dev_by_gid(p->dgid) != qp->dev)
 		return NULL;
 	qp->peer = p;
 	return p;
@@ -991,6 +1018,9 @@ static void qp_flush_rq(struct qp *qp)
 	plat_spin_lock(&qp->rq_lock);
 	uint32_t prod = ACQ(&qp->rec->rq_prod);
 
+	/* more posted than the ring holds: nothing valid to complete */
+	if (prod - qp->rq_cons > qp->rq.entries)
+		qp->rq_cons = prod;
 	while (qp->rq_cons != prod) {
 		struct shmrdma_rq_wqe *w = ring_entry(&qp->rq, qp->rq_cons);
 
@@ -1086,8 +1116,7 @@ static int exec_ud_send(struct qp *qp, struct shmrdma_sq_wqe *w,
 	}
 	struct shmrdma_rq_wqe *rw = ring_entry(&peer->rq, peer->rq_cons);
 	struct shmrdma_sge rsge[SHMRDMA_MAX_SGE];
-	uint32_t rn = rw->num_sge > SHMRDMA_MAX_SGE ? SHMRDMA_MAX_SGE :
-		      rw->num_sge;
+	uint32_t rn = rq_nsge(peer, rw);
 
 	memcpy(rsge, rw->sge, rn * sizeof(rsge[0]));
 	c.wr_id = rw->wr_id;
@@ -1154,8 +1183,7 @@ static int deliver_recv(struct qp *qp, struct qp *peer,
 	}
 	struct shmrdma_rq_wqe *rw = ring_entry(&peer->rq, peer->rq_cons);
 	struct shmrdma_sge rsge[SHMRDMA_MAX_SGE];
-	uint32_t rn = rw->num_sge > SHMRDMA_MAX_SGE ? SHMRDMA_MAX_SGE :
-		      rw->num_sge;
+	uint32_t rn = rq_nsge(peer, rw);
 
 	memcpy(rsge, rw->sge, rn * sizeof(rsge[0]));
 	c.wr_id = rw->wr_id;
@@ -1207,10 +1235,12 @@ static int deliver_recv(struct qp *qp, struct qp *peer,
 	} else if (w->opcode == SHMRDMA_OP_SEND_INV) {
 		c.flags |= SHMRDMA_CQE_INV;
 		c.ex = w->ex;
+		plat_spin_lock(&peer->dev->mr_lock);
 		struct mr *mr = dev_mr(peer->dev, w->ex);
 
 		if (mr)
 			REL(&mr->valid, false);
+		plat_spin_unlock(&peer->dev->mr_lock);
 	}
 	peer->rq_cons++;
 	REL(&peer->rec->rq_cons, peer->rq_cons);
@@ -1236,11 +1266,14 @@ static int exec_reg_mr(struct qp *qp, struct shmrdma_sq_wqe *w)
 
 	if (!pl)
 		return WC_LOC_PROT_ERR;
+	plat_spin_lock(&d->mr_lock);
 	mr = d->mrs[idx];
 	if (!mr) {
 		mr = calloc(1, sizeof(*mr));
-		if (!mr)
+		if (!mr) {
+			plat_spin_unlock(&d->mr_lock);
 			return WC_GENERAL_ERR;
+		}
 		d->mrs[idx] = mr;
 	}
 	REL(&mr->valid, false);
@@ -1249,8 +1282,10 @@ static int exec_reg_mr(struct qp *qp, struct shmrdma_sq_wqe *w)
 		uint32_t cap = w->reg.npages < 64 ? 64 : w->reg.npages;
 		uint64_t *np = realloc(mr->pages, cap * sizeof(*np));
 
-		if (!np)
+		if (!np) {
+			plat_spin_unlock(&d->mr_lock);
 			return WC_GENERAL_ERR;
+		}
 		mr->pages = np;
 		mr->cap = cap;
 	}
@@ -1263,6 +1298,7 @@ static int exec_reg_mr(struct qp *qp, struct shmrdma_sq_wqe *w)
 	mr->fpo = w->ex & ((1u << w->reg.page_shift) - 1);
 	memcpy(mr->pages, pl, w->reg.npages * 8ull);
 	REL(&mr->valid, true);
+	plat_spin_unlock(&d->mr_lock);
 	return WC_SUCCESS;
 }
 
@@ -1368,9 +1404,11 @@ static int exec_wqe(struct qp *qp, struct shmrdma_sq_wqe *w,
 
 		if (idx >= SHMRDMA_MAX_MR)
 			return WC_LOC_PROT_ERR;
+		plat_spin_lock(&qp->dev->mr_lock);
 		mr = qp->dev->mrs[idx];
 		if (mr && mr->key == w->ex)
 			REL(&mr->valid, false);
+		plat_spin_unlock(&qp->dev->mr_lock);
 		return WC_SUCCESS;
 	}
 	}
@@ -1400,6 +1438,15 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 
 	uint32_t prod = ACQ(&qp->rec->sq_prod);
 
+	if (prod - qp->sq_cons > qp->sq.entries) {
+		LOG("dev%d qp%u: sq producer %u is %u past consumer, ring holds %u",
+		    qp->dev->id, qp->qpn, prod, prod - qp->sq_cons,
+		    qp->sq.entries);
+		qp_to_err(qp);
+		qp->sq_cons = prod;
+		REL(&qp->rec->sq_cons, qp->sq_cons);
+		return done;
+	}
 	while (qp->sq_cons != prod && done < budget) {
 		struct shmrdma_sq_wqe *gw = ring_entry(&qp->sq, qp->sq_cons);
 		uint8_t buf[4096] __attribute__((aligned(16)));
@@ -1425,6 +1472,13 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 			case SHMRDMA_OP_LOCAL_INV:
 				opc = SHMRDMA_WC_LOCAL_INV; break;
 			}
+		} else if ((w->flags & SHMRDMA_WQE_INLINE) &&
+			   qp->type != SHMRDMA_QPT_RC) {
+			/* a UD WQE's address fields hold the inline length */
+			st = WC_LOC_QP_OP_ERR;
+		} else if ((w->flags & SHMRDMA_WQE_INLINE) &&
+			   w->send.inline_len > qp->sq.esz - SHMRDMA_WQE_HDR) {
+			st = WC_LOC_LEN_ERR;
 		} else {
 			st = exec_wqe(qp, w, w->sge, &opc);
 			if (st < 0) {
@@ -1911,27 +1965,28 @@ static void ctrl_process(struct vdev *d)
 		memset(&cmd, 0, sizeof(cmd));
 		q->last_avail++;
 		for (;;) {
-			struct vring_desc *de = &q->desc[i % q->num];
-			uint8_t *p = gpa_range(d, de->addr, de->len);
+			/* one read: the length checked is the length used */
+			struct vring_desc de = q->desc[i % q->num];
+			uint8_t *p = gpa_range(d, de.addr, de.len);
 
 			if (!p)
 				break;
-			if (de->flags & VRING_DESC_F_WRITE) {
+			if (de.flags & VRING_DESC_F_WRITE) {
 				if (!rp) {
 					rp = p;
-					rl = de->len;
+					rl = de.len;
 				}
 			} else if (got < sizeof(cmd)) {
-				size_t n = de->len;
+				size_t n = de.len;
 
 				if (n > sizeof(cmd) - got)
 					n = sizeof(cmd) - got;
 				memcpy((uint8_t *)&cmd + got, p, n);
 				got += n;
 			}
-			if (!(de->flags & VRING_DESC_F_NEXT) || ++guard > 16)
+			if (!(de.flags & VRING_DESC_F_NEXT) || ++guard > 16)
 				break;
-			i = de->next;
+			i = de.next;
 		}
 		resp.status = do_cmd(d, &cmd, &resp);
 		if (resp.status)
@@ -2019,6 +2074,7 @@ static void dev_destroy(struct vdev *d)
 	unmap_all(d->map, d->nmap);
 	unmap_all(d->old, d->nold);
 	free(d->mrs);
+	plat_spin_destroy(&d->mr_lock);
 	plat_spin_destroy(&d->evq_lock);
 	free(d);
 }
@@ -2036,6 +2092,8 @@ static int vu_reply(struct vdev *d, uint32_t req, const void *p, uint32_t sz)
 	memcpy(m.b, p, sz);
 	return send(d->sock, &m, sizeof(m.h) + sz, PLAT_MSG_NOSIGNAL) < 0 ? -1 : 0;
 }
+
+static int vq_map(struct vdev *d, struct vq *q);
 
 static int set_mem_table(struct vdev *d, struct vu_memtab *mt, int *fds, int nfds)
 {
@@ -2079,7 +2137,10 @@ static int set_mem_table(struct vdev *d, struct vu_memtab *mt, int *fds, int nfd
 	}
 	memcpy(d->map, nm, sizeof(nm));
 	d->nmap = mt->nregions;
-	/* vring pointers are re-derived at the next SET_VRING_ADDR */
+	/* before any worker runs again: the old maps may be gone */
+	for (int i = 0; i < MAX_VQS; i++)
+		if (d->vq[i].num && d->vq[i].desc_ua)
+			vq_map(d, &d->vq[i]);
 	wunlock();
 	return 0;
 }
@@ -2087,8 +2148,8 @@ static int set_mem_table(struct vdev *d, struct vu_memtab *mt, int *fds, int nfd
 static int vq_map(struct vdev *d, struct vq *q)
 {
 	q->desc = uaddr_hva(d, q->desc_ua, 16ull * q->num);
-	q->avail = uaddr_hva(d, q->avail_ua, 4 + 2ull * q->num);
-	q->used = uaddr_hva(d, q->used_ua, 4 + 8ull * q->num);
+	q->avail = uaddr_hva(d, q->avail_ua, 6 + 2ull * q->num);
+	q->used = uaddr_hva(d, q->used_ua, 6 + 8ull * q->num);
 	return (q->desc && q->avail && q->used) ? 0 : -1;
 }
 
@@ -2193,9 +2254,6 @@ static int handle_msg(struct vdev *d)
 		if (set_mem_table(d, &pl->mem, fds, nfds))
 			ack = 1;
 		nfds = 0;
-		for (int i = 0; i < MAX_VQS; i++)
-			if (d->vq[i].num && d->vq[i].desc_ua)
-				vq_map(d, &d->vq[i]);
 		break;
 	case VU_SET_VRING_NUM:
 		if (pl->state.index >= MAX_VQS) {
@@ -2269,11 +2327,15 @@ static int handle_msg(struct vdev *d)
 			if (fd >= 0)
 				close(fd);
 		} else if (h.request == VU_SET_VRING_CALL) {
+			/* Workers signal under their mutexes: once wlock has
+			 * them all, none still holds the old fd. */
+			wlock();
 			plat_spin_lock(&d->evq_lock);
 			int old = q->callfd;
 
 			q->callfd = fd;
 			plat_spin_unlock(&d->evq_lock);
+			wunlock();
 			if (old >= 0)
 				close(old);
 		} else {
@@ -2387,6 +2449,7 @@ static void accept_conn(int lsock, int kind)
 		d->vq[i].callfd = -1;
 	}
 	plat_spin_init(&d->evq_lock);
+	plat_spin_init(&d->mr_lock);
 	wlock();
 	d->next = g_devs;
 	g_devs = d;

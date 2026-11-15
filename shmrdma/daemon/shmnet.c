@@ -105,37 +105,39 @@ static int vq_chain(struct vdev *d, struct vq *q, uint16_t head, bool writable,
 
 	*total = 0;
 	for (uint32_t guard = 0; guard < num; guard++) {
-		struct vring_desc *de = &tab[i % num];
+		/* one read of the guest's descriptor, checked and used as read */
+		struct vring_desc de = tab[i % num];
 
-		if (de->flags & VRING_DESC_F_INDIRECT) {
-			/* one indirect table per chain, at its head */
-			if (tab != q->desc || de->len < sizeof(*de) ||
-			    de->len % sizeof(*de))
+		if (de.flags & VRING_DESC_F_INDIRECT) {
+			/* one indirect table per chain, at its head, and no
+			 * longer than the queue (virtio 1.x 2.7.5.3.1) */
+			if (tab != q->desc || de.len < sizeof(de) ||
+			    de.len % sizeof(de) || de.len / sizeof(de) > q->num)
 				return -1;
-			tab = gpa_range(d, de->addr, de->len);
+			tab = gpa_range(d, de.addr, de.len);
 			if (!tab)
 				return -1;
-			num = de->len / sizeof(*de);
+			num = de.len / sizeof(de);
 			i = 0;
 			guard = (uint32_t)-1;
 			continue;
 		}
 
-		bool w = de->flags & VRING_DESC_F_WRITE;
+		bool w = de.flags & VRING_DESC_F_WRITE;
 
-		if (w == writable && de->len) {
-			uint8_t *p = gpa_range(d, de->addr, de->len);
+		if (w == writable && de.len) {
+			uint8_t *p = gpa_range(d, de.addr, de.len);
 
 			if (!p || n == max)
 				return -1;
 			segs[n].p = p;
-			segs[n].len = de->len;
-			*total += de->len;
+			segs[n].len = de.len;
+			*total += de.len;
 			n++;
 		}
-		if (!(de->flags & VRING_DESC_F_NEXT))
+		if (!(de.flags & VRING_DESC_F_NEXT))
 			return n;
-		i = de->next;
+		i = de.next;
 	}
 	return -1;
 }
@@ -399,6 +401,11 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 		return DLV_DROP;
 	if (!(d->features & VNET_F_MRG_RXBUF))
 		return DLV_DROP;
+	/* only what every receiver handles: TCP segmentation, or none */
+	if (gso != VNET_HDR_GSO_NONE && gso != VNET_HDR_GSO_TCPV4 &&
+	    gso != VNET_HDR_GSO_TCPV6)
+		return DLV_DROP;
+	h.flags &= VNET_HDR_F_NEEDS_CSUM;
 	if ((gso == VNET_HDR_GSO_TCPV4 && !(d->features & VNET_F_GUEST_TSO4)) ||
 	    (gso == VNET_HDR_GSO_TCPV6 && !(d->features & VNET_F_GUEST_TSO6)) ||
 	    (gso == VNET_HDR_GSO_NONE && (h.flags & VNET_HDR_F_NEEDS_CSUM) &&
