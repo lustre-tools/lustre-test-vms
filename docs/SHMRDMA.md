@@ -284,14 +284,24 @@ o2iblnd notices a dead peer. A send that finds no receive posted waits
 Moving a QP to error flushes its outstanding work requests, which
 o2iblnd waits for before destroying the connection. A guest reset or VM
 exit tears down that VM's state in the daemon, with all worker threads
-stopped.  A CQ that overflows raises a CQ error event and moves its QPs
+stopped.  Pausing the VM (QMP `stop`) only stops its device, and `cont`
+resumes it with every QP, CQ and MR as it was; a peer sending to it
+meanwhile waits as on a receiver not ready, so a pause longer than 2 s
+fails the peer's QPs unless their `rnr_retry` is 7.  A CQ that overflows raises a CQ error event and moves its QPs
 to error.
 
 **When the daemon stops answering.** A control command with no reply
-after 30 s makes the guest reset its own device: QEMU forwards the
-reset to the daemon and waits for it, so once the reset returns the
-daemon has dropped every QP, CQ and MR of that VM and no longer touches
-its memory.  The guest then completes everything outstanding, and
+after 30 s makes the guest reset its own device.  QEMU stops the
+device in the daemon and waits for its reply, which comes only once the
+daemon has stopped using that VM's memory, then forwards the reset, on
+which the daemon drops every QP, CQ and MR of the VM.  So once the
+reset returns the daemon no longer touches the guest's memory.  The
+price is that the reset holds QEMU until the daemon answers: a daemon
+that is stopped or stuck freezes the whole VM, every vCPU and its ssh
+included, until it answers again, and on x86 a freeze that long trips
+the guest's watchdog, which panics it into kdump once the daemon comes
+back.  A daemon that has died has closed its socket, and QEMU fails the
+reset at once instead of waiting.  The guest then completes everything outstanding, and
 anything posted later, with a flush error in software (as mlx5 does
 after an internal error), reports the port down, and raises a fatal
 device event, so ULP teardown such as `lnetctl net del` finishes.  The
