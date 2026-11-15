@@ -2,9 +2,9 @@
 / doctor thin wrappers (root-gated VM lifecycle entry points).
 
 ``cmd_setup`` wraps ``host_setup.run_setup`` / ``host_setup.verify``.
-``cmd_update`` pulls the ltvm repo with --ff-only and refreshes
+``cmd_update`` pulls the ltvm repo with --ff-only, refreshes
 ``_build_info.py`` so the next invocation reports the new git hash
-without a reload.
+without a reload, and reruns ``ltvm install`` for any new host steps.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -583,8 +584,33 @@ def cmd_update(args: argparse.Namespace) -> int:
             print(f"Updated ltvm: {old_version} -> {new_version}")
         if pull.stdout.strip():
             print(pull.stdout.strip())
+
+    # New code can bring new install steps, which only `ltvm install`
+    # applies; the automatic update path has always run it.  Also run
+    # it with nothing pulled when this host's setup is behind the code,
+    # as after a plain `git pull`.
+    from ltvm_pkg import host_setup_version, update_check
+
+    if getattr(args, "no_install", False):
+        result["install"] = "skipped"
+    elif result["changed"] or host_setup_version.is_stale():
+        # Under --json, install's chatter goes to stderr.
+        ok = update_check.run_install(
+            repo, stdout=sys.stderr if use_json else None
+        )
+        result["install"] = "ran" if ok else "failed"
     else:
+        result["install"] = "not needed"
+    if use_json:
         print(json.dumps(result, indent=2))
+    if result["install"] == "failed":
+        if not use_json:
+            print(
+                f"ltvm was updated but `ltvm install` failed. "
+                f"Run: {host_setup_version.install_command()}",
+                file=sys.stderr,
+            )
+        return EXIT_ERROR
     return EXIT_OK
 
 

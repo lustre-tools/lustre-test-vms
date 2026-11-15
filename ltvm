@@ -779,7 +779,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser(
         "update",
         parents=[common],
-        help="Pull the latest ltvm from GitHub (git fast-forward)",
+        help="Pull the latest ltvm from GitHub (git fast-forward) and rerun "
+        "`ltvm install`",
     )
     sp.add_argument(
         "--check",
@@ -790,6 +791,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Update even if the working tree has local changes",
+    )
+    sp.add_argument(
+        "--no-install",
+        action="store_true",
+        help="Do not rerun `ltvm install` after pulling",
     )
     sp.set_defaults(func=cmd_update)
 
@@ -3306,6 +3312,17 @@ def main() -> int:
             # block the user's actual command.
             logging.getLogger("ltvm.update_check").debug(
                 "update check skipped: %s", e
+            )
+        # The stale host setup line, which update (it reruns install)
+        # and doctor (it reports the versions) have no need of.
+        try:
+            from ltvm_pkg import host_setup_version
+
+            if args.command not in ("update", "doctor"):
+                host_setup_version.maybe_notify()
+        except Exception as e:  # noqa: BLE001
+            logging.getLogger("ltvm.update_check").debug(
+                "host setup check skipped: %s", e
             )
 
     result: int = args.func(args)

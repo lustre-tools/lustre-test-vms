@@ -2816,8 +2816,15 @@ def _hand_over_from_host_dnsmasq(subnet: str) -> None:
         return
 
 
-def _start_ltvm_dnsmasq(subnet: str) -> None:
+def _start_ltvm_dnsmasq(subnet: str, restart: bool = True) -> None:
+    """Enable and (re)start ltvm's dnsmasq.
+
+    A rerun of install that changed neither its config nor its unit
+    leaves a running instance alone, so the guests keep their DNS.
+    """
     _run_quiet(["systemctl", "enable", LTVM_DNSMASQ_UNIT], check=False)
+    if not restart and _systemctl_ok("is-active", "--quiet", LTVM_DNSMASQ_UNIT):
+        return
     if _systemctl_ok("restart", LTVM_DNSMASQ_UNIT):
         return
     journal = _run_quiet(
@@ -2875,6 +2882,27 @@ def _write_root_file(path: Path, text: str, mode: int = 0o644) -> None:
     )
     with os.fdopen(fd, "w") as f:
         f.write(text)
+
+
+def _setup_vhost_net() -> None:
+    """Load vhost_net now and at boot, and give the ltvm group the device.
+
+    Best effort: VMs run without it, and a host whose admin blocks the
+    module keeps it blocked.
+    """
+    from . import vhost_net
+    from .qemu_run import vhost_net_setting
+
+    if vhost_net_setting() == "off":
+        log.info("vhost-net: off in %s; not set up", "/etc/ltvm.conf")
+        return
+    try:
+        vhost_net.ensure()
+        log.info("vhost_net loaded, and at boot (%s)", vhost_net.MODULES_LOAD)
+    except vhost_net.Blocked as e:
+        log.info("vhost-net: %s", e)
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as e:
+        log.warning("vhost-net not set up: %s", e)
 
 
 def setup_network(
@@ -2999,8 +3027,10 @@ def setup_network(
     hosts_dir.mkdir(parents=True, exist_ok=True)
     if _selinux_enabled():
         _label_hosts_dir(hosts_dir)
-    _write_if_changed(LTVM_DNSMASQ_CONF, _render_ltvm_dnsmasq_conf(subnet))
-    _write_if_changed(
+    dnsmasq_changed = _write_if_changed(
+        LTVM_DNSMASQ_CONF, _render_ltvm_dnsmasq_conf(subnet)
+    )
+    dnsmasq_changed |= _write_if_changed(
         LTVM_DNSMASQ_UNIT_PATH, _render_ltvm_dnsmasq_unit(dnsmasq)
     )
 
@@ -3026,7 +3056,7 @@ def setup_network(
         )
 
     _hand_over_from_host_dnsmasq(subnet)
-    _start_ltvm_dnsmasq(subnet)
+    _start_ltvm_dnsmasq(subnet, restart=dnsmasq_changed)
 
     from ltvm_pkg import host_firewall
 
@@ -3156,6 +3186,8 @@ def install_scripts(host: HostInfo) -> None:
 
     _setup_shared_vm_dirs()
     _setup_bridge_helper(host)
+    # After the group exists: it gets read-write /dev/vhost-net.
+    _setup_vhost_net()
     from ltvm_pkg import vm_claim
 
     vm_claim.ensure_claims_dir()
@@ -3910,6 +3942,7 @@ def _run_setup_macos(
             log.info("ltvm launcher already current at %s", link)
 
     if all_steps:
+        _record_host_setup()
         log.info("")
         log.info("Install complete.")
         log.info("")
@@ -3921,6 +3954,28 @@ def _run_setup_macos(
         log.info("")
         log.info("Next:")
         log.info("  ltvm target fetch rocky9")
+
+
+def _record_host_setup() -> None:
+    """Note that this host now has every install step this ltvm knows.
+
+    Only a full install records: one step alone leaves the others as
+    they were.  A failure costs a stale-host notice, not the install.
+    """
+    from ltvm_pkg import host_setup_version as hsv
+
+    try:
+        hsv.write_record()
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "could not record host setup in %s: %s", hsv.record_path(), e
+        )
+        return
+    log.info(
+        "Host setup version %d recorded in %s",
+        hsv.HOST_SETUP_VERSION,
+        hsv.record_path(),
+    )
 
 
 def run_setup(
@@ -4022,6 +4077,7 @@ def run_setup(
                 )
 
     if all_steps:
+        _record_host_setup()
         log.info("")
         log.info("Install complete.")
         log.info("")

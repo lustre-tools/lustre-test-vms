@@ -373,6 +373,67 @@ A newer ltvm is available (local={local}, remote={remote}).
 Your choice [y/a/N/x]: """
 
 
+def run_install(repo: Path, *, stdout: Any = None) -> bool:
+    """Run ``ltvm install`` from *repo* in a fresh process.  True on success.
+
+    A new process, so the freshly pulled code does the installing.  The
+    interpreter is pinned to the one running ltvm now (already known to
+    meet the floor) instead of the script's shebang: on a host whose
+    /usr/bin/env python3 is a sub-floor system Python (rocky9's 3.9),
+    the install bombed at the floor check, leaving the tree pulled but
+    _build_info.py and the wrappers never refreshed.
+
+    macOS install runs as the invoking user (Homebrew refuses root) and
+    sudos for the operations that need it, so under ``sudo ltvm update``
+    it drops back to ``SUDO_UID``.  Linux install needs root throughout:
+    root runs it directly, anyone else through sudo.
+    """
+    import platform
+
+    installer = repo / "ltvm"
+    if not installer.exists():
+        return False
+    cmd = [sys.executable, str(installer), "install"]
+    kwargs: dict[str, Any] = {}
+    say = f"  Running {installer} install..."
+    if platform.system() == "Darwin":
+        if os.geteuid() == 0:
+            from .priv import invoking_user
+
+            who = invoking_user()
+            if who is None:
+                print(
+                    "  `ltvm install` must run as your own user on macOS; "
+                    "run it without sudo.",
+                    file=sys.stderr,
+                )
+                return False
+            import pwd
+
+            pw = pwd.getpwnam(who[0])
+            env = dict(os.environ)
+            env["HOME"] = pw.pw_dir
+            env["USER"] = env["LOGNAME"] = pw.pw_name
+            for var in ("SUDO_UID", "SUDO_GID", "SUDO_USER", "SUDO_COMMAND"):
+                env.pop(var, None)
+            kwargs = {
+                "user": pw.pw_uid,
+                "group": pw.pw_gid,
+                "extra_groups": os.getgrouplist(pw.pw_name, pw.pw_gid),
+                "env": env,
+            }
+    elif os.geteuid() != 0:
+        say = f"  Running {installer} install (will sudo)..."
+        cmd = ["sudo", *cmd]
+    print(say, file=stdout or sys.stdout)
+    try:
+        subprocess.run(cmd, check=True, stdout=stdout, **kwargs)
+    except (subprocess.CalledProcessError, OSError):
+        print("  `ltvm install` failed; update incomplete.", file=sys.stderr)
+        return False
+    return True
+
+
 def _apply_update() -> bool:
     """Attempt `git pull` + `sudo ./ltvm install` in the checkout
     this package was loaded from.  Returns True on success.
@@ -394,32 +455,7 @@ def _apply_update() -> bool:
     except subprocess.CalledProcessError:
         print("  git pull failed; aborting update.", file=sys.stderr)
         return False
-    installer = repo / "ltvm"
-    if not installer.exists():
-        return False
-    # Pin the interpreter to whatever python is currently running ltvm
-    # (already known to meet the floor) instead of going through the
-    # script's shebang.  Without this, on a host whose
-    # /usr/bin/env python3 resolves to a sub-floor system Python (e.g.
-    # rocky9's 3.9), the install step bombs at the floor check and the
-    # update aborts mid-flight -- working tree pulled but
-    # _build_info.py / wrappers never refreshed.
-    py = sys.executable
-    # macOS install runs as the invoking user (Homebrew refuses root)
-    # and sudos selectively for the operations that need it; Linux
-    # install needs root throughout.
-    import platform
-
-    if platform.system() == "Darwin":
-        print(f"  Running {installer} install...")
-        cmd = [py, str(installer), "install"]
-    else:
-        print(f"  Running {installer} install (will sudo)...")
-        cmd = ["sudo", py, str(installer), "install"]
-    try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError:
-        print("  `ltvm install` failed; update incomplete.", file=sys.stderr)
+    if not run_install(repo):
         return False
     print("  ltvm updated.  Re-run your command.")
     return True

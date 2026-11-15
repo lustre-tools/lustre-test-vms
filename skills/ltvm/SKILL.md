@@ -813,6 +813,44 @@ Both refuse unless the machine is one ltvm built and the working
 directory is a Lustre tree. On EL8/EL9 images run them with
 `python3.11`, and install podman first.
 
+## On Google Cloud
+
+**To run Lustre on Google Cloud VMs, export an ltvm image; do not build
+Lustre from source on a stock cloud image.** The export carries ltvm's
+kernel and the Lustre build baked into the target's image, so cloud
+nodes run exactly what your local VMs run, and it takes minutes:
+
+```bash
+# the Lustre you want, baked into the image, then the GCE export
+ltvm build lustre rocky10 --kernel 6.12-rhel10.2 --lustre-tree <tree>
+ltvm build image  rocky10 --kernel 6.12-rhel10.2 --variant gce --lustre-tree <tree>
+ltvm target export rocky10 --kernel 6.12-rhel10.2 --variant gce \
+    --format gce --disk-size-gb 20 [--force]
+```
+
+The export prints the `lustre=` build it carries and the next commands:
+copy the tar.gz to a bucket, then `gcloud compute images create ...
+--guest-os-features=UEFI_COMPATIBLE,GVNIC --source-uri gs://...`. Keep
+`UEFI_COMPATIBLE`, or GCE boots it through legacy BIOS. Create
+instances from that image with `--network-interface=nic-type=GVNIC`.
+
+- Use the `gce` variant (rocky10): it carries the Google guest agent,
+  so `gcloud compute ssh` works. A base image cannot take GCE's SSH
+  keys; bake one in with `--ssh-key` instead.
+- The export fails if the asset already exists; check whether that
+  asset (and an image made from it) already has the `lustre=` you want
+  before exporting again with `--force`.
+- To change Lustre on a running node instead: `ltvm make-install`
+  (above), which needs podman and `ltvm target fetch` on the node.
+- The image is ltvm's lab build with password SSH off: do not open
+  port 22 to the world for longer than a test.
+- Project, bucket and spending rules belong to whoever owns the cloud
+  account; ltvm does not choose them.
+
+`CLAUDE.md` ("Exporting Images", "Running ltvm inside a VM it built")
+has the details: the disk format GCE needs, root growth at boot, and
+the machine checks `make-install` makes.
+
 ## For agent controllers
 
 Export `LTVM_OWNER_ID=<durable-session-id>` before creating VMs so the
