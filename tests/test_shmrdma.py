@@ -8,6 +8,9 @@ import shutil
 import socket
 import stat
 import subprocess
+import sys
+import tempfile
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -23,6 +26,18 @@ from tests.test_qemu_run import (  # noqa: F401
     _run_launch,
     tmp_vmdir,
 )
+
+
+@pytest.fixture
+def tmp_path(tmp_path: Path) -> Iterator[Path]:
+    """A short directory on macOS, which caps unix socket paths at 104
+    bytes: pytest's own there are already longer."""
+    if sys.platform != "darwin":
+        yield tmp_path
+        return
+    d = Path(tempfile.mkdtemp(prefix="ltvm-", dir="/tmp"))
+    yield d
+    shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)
@@ -350,12 +365,14 @@ class TestPidFile:
             assert d.pid() == 0
 
     def test_proc_info_self(self) -> None:
-        import sys
-
         # comm is whatever this process was started as (pytest, python3)
         uid, comm, exe = shmrdma._proc_info(os.getpid())
         assert uid == os.geteuid() and comm
-        assert Path(exe).resolve() == Path(sys.executable).resolve()
+        if sys.platform == "darwin":
+            # A framework build runs Python.app, not sys.executable.
+            assert Path(exe).is_file()
+        else:
+            assert Path(exe).resolve() == Path(sys.executable).resolve()
 
     def test_proc_info_ps(self) -> None:
         r = subprocess.CompletedProcess(
