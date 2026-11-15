@@ -4066,14 +4066,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # shmnet NICs are dead until each VM restarts and starts it again.
     shm = shmrdma.daemon(create=False)
     if not shm.pid():
-        orphans = []
-        for name in VMInfo.all_names():
-            try:
-                vm = VMInfo.load(name)
-            except (VMNotFound, ValueError):
-                continue
-            if vm.shared_ram and shmrdma.vm_uses(vm, shm) and is_running(vm):
-                orphans.append(name)
+        orphans = shmrdma.attached_vms(shm)
         if orphans:
             print(
                 f"shmrdmad is not running but {', '.join(orphans)} use it: "

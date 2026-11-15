@@ -539,7 +539,11 @@ def vm_sockets(vm: VMInfo, d: Daemon) -> list[str]:
 
 
 def attached_vms(d: Daemon) -> list[str]:
-    """Running VMs that use daemon *d*."""
+    """Running VMs of *d*'s user (or root's) that use daemon *d*.
+
+    Anyone can write a socket path into a ``.info`` of their own, so
+    another user's VM never counts.
+    """
     from .qemu_run import is_running
     from .vm_state import VMInfo, VMNotFound
 
@@ -547,7 +551,10 @@ def attached_vms(d: Daemon) -> list[str]:
     for name in VMInfo.all_names():
         try:
             vm = VMInfo.load(name)
-        except (VMNotFound, ValueError):
+            owner = os.stat(vm.info_path).st_uid
+        except (VMNotFound, ValueError, OSError):
+            continue
+        if owner not in (d.uid, 0):
             continue
         if vm.shared_ram and vm_uses(vm, d) and is_running(vm):
             names.append(name)

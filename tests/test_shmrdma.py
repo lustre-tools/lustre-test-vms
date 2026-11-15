@@ -382,6 +382,30 @@ def test_stop_refuses_with_vms(tmp_vmdir: Path) -> None:  # noqa: F811
         launch_lock.assert_called_once()
 
 
+def test_attached_vms_only_the_users(tmp_vmdir: Path) -> None:  # noqa: F811
+    d = shmrdma.Daemon("tester", os.geteuid(), tmp_vmdir)
+    for name in ("co1-mine", "co1-theirs"):
+        vm = _make_vm(tmp_vmdir, name=name)
+        vm.shmrdma = "auto"
+        vm.shm_sockets = [str(d.rdma_socket)]
+        vm.save()
+    real = os.stat
+
+    def stat_(path, *a, **k):
+        st = real(path, *a, **k)
+        if Path(path).name == "co1-theirs.info":
+            fake = list(st)
+            fake[stat.ST_UID] = os.geteuid() + 1
+            return os.stat_result(fake)
+        return st
+
+    with (
+        patch("ltvm_pkg.shmrdma.os.stat", side_effect=stat_),
+        patch("ltvm_pkg.qemu_run.is_running", return_value=True),
+    ):
+        assert shmrdma.attached_vms(d) == ["co1-mine"]
+
+
 class TestPrivateDir:
     def test_created_private(self, tmp_vmdir: Path) -> None:  # noqa: F811
         d = shmrdma.run_dir(os.geteuid())
