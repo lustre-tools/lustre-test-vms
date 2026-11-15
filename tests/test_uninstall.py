@@ -9,8 +9,10 @@ tmp_path, and a bare ``subprocess.run`` from the module fails the test.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -574,6 +576,34 @@ def test_a_failed_step_does_not_stop_the_rest(
     assert st["launchd jobs"] == host_uninstall.FAILED
     assert st["vm dir"] == host_uninstall.DONE
     assert not host_uninstall.VM_DIR.exists()
+
+
+def test_shmrdma_daemons_stopped(
+    host: FakeSudo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each user's daemon goes; another user's through sudo."""
+    from ltvm_pkg import shmrdma
+
+    me = os.geteuid()
+    mine = host_uninstall.VM_DIR / f"shmrdma-{me}"
+    theirs = host_uninstall.VM_DIR / f"shmrdma-{me + 1}"
+    mine.mkdir(parents=True)
+    theirs.mkdir()
+    (host_uninstall.VM_DIR / "shmrdma-x").mkdir()
+    direct: list[tuple[Path, int]] = []
+
+    def stop_dir(d: Path, uid: int) -> str | None:
+        direct.append((d, uid))
+        return "pid 5" if d == mine else None
+
+    monkeypatch.setattr(shmrdma, "stop_dir", stop_dir)
+    host.answer((sys.executable, "-c"), out="pid 6\n")
+    got = host_uninstall._shmrdma_daemons()
+    assert got == f"{mine} (pid 5) {theirs} (pid 6)"
+    assert (mine, me) in direct
+    assert all(d != theirs for d, _ in direct)
+    assert host.ran(sys.executable, "-c")
+    assert [c[-2:] for c in host.calls] == [[str(theirs), str(me + 1)]]
 
 
 def test_claimed_vms_refuse_before_anything(host: FakeSudo) -> None:

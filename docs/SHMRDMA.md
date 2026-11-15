@@ -111,7 +111,8 @@ ltvm vm shmrdmad [status|start|stop]
   A start also refuses a socket another user could replace before QEMU
   connects: every directory on its path, symlinks followed, must be
   root's or the VM owner's and not writable by others unless sticky
-  (`/tmp` itself is fine, a shared group-writable directory is not).
+  (`/tmp` itself is fine, a shared group-writable directory is not),
+  and so must every symlink on it, since its owner can repoint it.
 - **The guest module** is built per kernel in the target's build
   container and baked into the image (`/lib/modules/<kver>/extra/`,
   with `softdep virtiofs pre: shmrdma` in modprobe.d), so it is there
@@ -267,6 +268,20 @@ it serves in its own epoll, edge-triggered, so a kick wakes it
 directly. Completions are written straight into the CQ ring. When a CQ
 is armed, the daemon appends the CQ number to an event queue in guest
 memory and sends one interrupt through the event virtqueue.
+
+A work request is retired in three stores, in this order: its consumer
+index (`sq_cons` or `rq_cons` in the QP record) frees its slot, then
+its completion, if it has one, becomes visible in the CQ, then the
+record's `sq_done` or `rq_done` catches up.  So a ULP that refills
+from its completion handler always finds the slot free.  Before the
+first store the daemon writes the request's `wr_id`, its opcode and
+the CQ index its completion goes to into the record as well, since the
+slot may hold a new request once it is freed.  A guest whose daemon
+died between those stores finds `done` one behind `cons`, and flushes
+that request from the record unless the CQ's producer already covers
+its completion.  The daemon says it fills these fields in its INIT
+reply (`SHMRDMA_INIT_F_LIMBO`); with a daemon that does not, the guest
+flushes from `cons` alone.
 
 **Connection management is plain RoCEv2.** The device is bound to a
 netdev (eth0 by default), so the RDMA core builds the GID table from

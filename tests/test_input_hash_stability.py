@@ -28,44 +28,44 @@ from ltvm_pkg.target_config import TargetConfig
 GOLDEN = [
     ("rocky8", "container", None, None, "05ec17e26c081652"),
     ("rocky8", "kernel", None, None, "94b2aa2076342737"),
-    ("rocky8", "image", None, None, "3f3e8252449a470a"),
+    ("rocky8", "image", None, None, "2ba0effaf308b353"),
     ("rocky9", "container", None, None, "4a58226592cb2cf5"),
     ("rocky9", "kernel", None, None, "895d9670b0a945cb"),
-    ("rocky9", "image", None, None, "1de3d714a07ff935"),
+    ("rocky9", "image", None, None, "2956a5b9026266d0"),
     ("rocky9-64k", "container", None, None, "9ebe6bff482840f1"),
     ("rocky9-64k", "kernel", None, None, "12c9c532b86f8cf1"),
-    ("rocky9-64k", "image", None, None, "1417236a6b6c32c9"),
+    ("rocky9-64k", "image", None, None, "73cb0bfb2605cef9"),
     ("rocky10", "container", None, None, "9f9eabcec78fc131"),
     ("rocky10", "kernel", None, None, "7812dbd5a370c2b9"),
-    ("rocky10", "image", None, None, "c76bdce3809e8f70"),
+    ("rocky10", "image", None, None, "37f6a4fbe35defa7"),
     ("rocky10-16k", "container", None, None, "ee00de82e663a154"),
     ("rocky10-16k", "kernel", None, None, "0b92dfd2a104d132"),
-    ("rocky10-16k", "image", None, None, "c34f519bd87d352b"),
+    ("rocky10-16k", "image", None, None, "95b0c686ac43cbb8"),
     ("mainline", "container", None, None, "c25d828a438d5e1b"),
     ("mainline", "kernel", None, None, "368c2341ea029471"),
-    ("mainline", "image", None, None, "d4276ee3e3aa2365"),
+    ("mainline", "image", None, None, "0dc0419c08d8ac10"),
     ("ubuntu2404", "container", None, None, "a6dbffaea81d2907"),
     ("ubuntu2404", "kernel", None, None, "2f2c2f9b5edffb9f"),
-    ("ubuntu2404", "image", None, None, "0aca368f0cb4a0d5"),
+    ("ubuntu2404", "image", None, None, "623f83c1b3442314"),
     ("ubuntu2604", "container", None, None, "a12a95e67b1528aa"),
     ("ubuntu2604", "kernel", None, None, "04b3d2e1fbbb0db6"),
-    ("ubuntu2604", "image", None, None, "8656d16afe0d7f7b"),
+    ("ubuntu2604", "image", None, None, "4dd337f68d396ffa"),
     ("ubuntu2604-server", "container", None, None, "9a6c381b934a8c9f"),
     ("ubuntu2604-server", "kernel", None, None, "faa918878df6999c"),
-    ("ubuntu2604-server", "image", None, None, "e56c99efaa134b97"),
+    ("ubuntu2604-server", "image", None, None, "7ed9a12e369f3e2f"),
     ("debian13", "container", None, None, "8bc7587fe4a5bc3f"),
     ("debian13", "kernel", None, None, "b1897fdaad34a730"),
-    ("debian13", "image", None, None, "e931bbd3a4bc1dc2"),
+    ("debian13", "image", None, None, "d99fa144ec16c52f"),
     ("opensuse156", "container", None, None, "d9f755295c83a19c"),
     ("opensuse156", "kernel", None, None, "59696dfca0eefcf0"),
-    ("opensuse156", "image", None, None, "3f52f9f4e32c0a19"),
+    ("opensuse156", "image", None, None, "f1c52e1f7f4c7890"),
     # A variant must not perturb the base hashes above, and must differ
     # from them.
     ("rocky9", "container", None, "mofed-24", "cc1a03c2d0fda310"),
-    ("rocky9", "image", None, "mofed-24", "a4da12ca7716743b"),
+    ("rocky9", "image", None, "mofed-24", "4ef679d7f40fdfd6"),
     # An explicitly named kernel.
     ("rocky9", "kernel", "5.14-rhel9.5", None, "7a54d6d849f5ca6c"),
-    ("rocky9", "image", "5.14-rhel9.5", None, "8176deb0af812cda"),
+    ("rocky9", "image", "5.14-rhel9.5", None, "e3a3847ff99fe570"),
 ]
 
 
@@ -115,3 +115,23 @@ def test_extra_bytes_still_fold_in() -> None:
     assert tc.input_hash("kernel", extra=b"patchbytes") != tc.input_hash(
         "kernel"
     )
+
+
+def test_shmrdma_sources_skip_mofed_images(monkeypatch) -> None:
+    """A MOFED image never carries shmrdma.ko, so its sources are not an
+    input of that image; they are of the base image."""
+    from ltvm_pkg import shmrdma
+
+    base = TargetConfig("rocky9")
+    mofed = TargetConfig("rocky9", variant="mofed-24")
+    before = (
+        base.input_hash("image"),
+        mofed.input_hash("image", variant="mofed-24"),
+    )
+    monkeypatch.setattr(shmrdma, "kmod_source_hash", lambda: b"edited")
+    after = (
+        base.input_hash("image"),
+        mofed.input_hash("image", variant="mofed-24"),
+    )
+    assert before[0] != after[0]
+    assert before[1] == after[1]

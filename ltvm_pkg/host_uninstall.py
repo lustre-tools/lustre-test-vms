@@ -606,6 +606,55 @@ def _destroy_vms(s: Survey, use_json: bool) -> str | None:
     return " ".join(s.vms)
 
 
+_STOP_SHMRDMAD = (
+    "import sys; sys.path.insert(0, sys.argv[1]); "
+    "from pathlib import Path; from ltvm_pkg import shmrdma; "
+    "print(shmrdma.stop_dir(Path(sys.argv[2]), int(sys.argv[3])) or '')"
+)
+
+
+def _shmrdma_daemons() -> str | None:
+    """Stop every user's shmrdmad its pid file vouches for: it runs
+    detached, and would outlive its sockets, VM_DIR and the VMs."""
+    from . import shmrdma
+
+    me = os.geteuid()
+    dirs: list[tuple[Path, int]] = []
+    if VM_DIR.is_dir():
+        for d in sorted(VM_DIR.glob("shmrdma-*")):
+            n = d.name.removeprefix("shmrdma-")
+            if n.isdigit():
+                dirs.append((d, int(n)))
+    try:
+        dirs += [(d, me) for d in shmrdma._candidate_dirs(me)[1:]]
+    except RuntimeError:
+        pass
+    root = Path(__file__).resolve().parent.parent
+    stopped = []
+    for d, uid in dirs:
+        if uid == me:
+            what = shmrdma.stop_dir(d, uid)
+        else:
+            r = sudo_run(
+                [
+                    sys.executable,
+                    "-c",
+                    _STOP_SHMRDMAD,
+                    str(root),
+                    str(d),
+                    str(uid),
+                ],
+                check=False,
+                quiet=True,
+            )
+            if r.returncode:
+                raise RuntimeError(f"cannot stop shmrdmad in {d}: {r.stderr}")
+            what = r.stdout.strip()
+        if what:
+            stopped.append(f"{d} ({what})")
+    return " ".join(stopped) or None
+
+
 def _forget_stray_names(s: Survey) -> str | None:
     if not s.stray_names:
         return None
@@ -957,6 +1006,7 @@ def steps(
     """
     out: list[tuple[str, StepFn]] = [
         ("vms", lambda: _destroy_vms(s, use_json)),
+        ("shmrdma daemons", _shmrdma_daemons),
         ("vm names", lambda: _forget_stray_names(s)),
         ("podman images", lambda: _remove_podman_images(s, c)),
         ("podman machine", lambda: _remove_podman_machine(s, c)),

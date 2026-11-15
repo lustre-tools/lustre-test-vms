@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import pwd
+import shlex
 import shutil
 import signal
 import socket
@@ -42,7 +43,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import vm_state
-from .nic_spec import sun_path_problem
+from .nic_spec import socket_path_problem, sun_path_problem
 from .paths import load_meta_safe
 
 if TYPE_CHECKING:
@@ -342,10 +343,17 @@ def _check_private(d: Path, uid: int) -> None:
             os.close(fd)
 
 
+def _passwd(uid: int) -> pwd.struct_passwd:
+    try:
+        return pwd.getpwuid(uid)
+    except KeyError:
+        raise RuntimeError(f"uid {uid} has no passwd entry") from None
+
+
 def _state_home(uid: int) -> Path:
     # Not $XDG_STATE_HOME: sudo drops it, and root must look where the
     # user put the daemon.
-    return Path(pwd.getpwuid(uid).pw_dir) / ".local" / "state"
+    return Path(_passwd(uid).pw_dir) / ".local" / "state"
 
 
 def _candidate_dirs(uid: int) -> list[Path]:
@@ -569,7 +577,7 @@ def daemon_for(vm: VMInfo, create: bool = False) -> Daemon:
     uid = _vm_uid(vm)
     if uid is None or uid in (0, _owner()[1]):
         return daemon(create)
-    return Daemon(pwd.getpwuid(uid).pw_name, uid, run_dir(uid, create))
+    return Daemon(_passwd(uid).pw_name, uid, run_dir(uid, create))
 
 
 def _cache_dir(uid: int | None = None) -> Path:
@@ -577,7 +585,7 @@ def _cache_dir(uid: int | None = None) -> Path:
     if uid == os.geteuid() and os.environ.get("XDG_CACHE_HOME"):
         base = Path(os.environ["XDG_CACHE_HOME"])
     else:
-        base = Path(pwd.getpwuid(uid).pw_dir) / ".cache"
+        base = Path(_passwd(uid).pw_dir) / ".cache"
     return base / "ltvm" / "shmrdmad"
 
 
@@ -606,13 +614,22 @@ def daemon_digest() -> str:
     return h.hexdigest()[:16]
 
 
-def _compiler() -> str | None:
-    """The compiler as found: run by this name, since a ccache wrapper is
-    a compiler only when its argv[0] names one."""
-    cc = os.environ.get("CC") or shutil.which("cc") or shutil.which("gcc")
-    if not cc:
+def _compiler() -> list[str] | None:
+    """The compiler command as found, $CC split as make splits it (so
+    "ccache gcc" works), its first word resolved on PATH but run by that
+    name, since a ccache wrapper is a compiler only when its argv[0]
+    names one."""
+    env = os.environ.get("CC", "")
+    try:
+        words = shlex.split(env)
+    except ValueError:
+        words = env.split()
+    if not words:
+        cc = shutil.which("cc") or shutil.which("gcc")
+        words = [cc] if cc else []
+    if not words:
         return None
-    return shutil.which(cc) or cc
+    return [shutil.which(words[0]) or words[0], *words[1:]]
 
 
 def build_daemon() -> tuple[Path, str]:
@@ -625,7 +642,7 @@ def build_daemon() -> tuple[Path, str]:
     out = _cache_dir() / digest / "shmrdmad"
     stamp = out.with_name("cc")
     cc = _compiler()
-    real_cc = os.path.realpath(cc) if cc else None
+    real_cc = " ".join([os.path.realpath(cc[0]), *cc[1:]]) if cc else None
     if out.is_file():
         try:
             built_by = stamp.read_text().strip()
@@ -639,12 +656,17 @@ def build_daemon() -> tuple[Path, str]:
         )
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(f".shmrdmad.{os.getpid()}")
-    r = subprocess.run(
-        [cc, *DAEMON_CFLAGS, "-o", str(tmp), "shmrdmad.c"],
-        cwd=SRC_DIR / "daemon",
-        capture_output=True,
-        text=True,
-    )
+    try:
+        r = subprocess.run(
+            [*cc, *DAEMON_CFLAGS, "-o", str(tmp), "shmrdmad.c"],
+            cwd=SRC_DIR / "daemon",
+            capture_output=True,
+            text=True,
+        )
+    except OSError as e:
+        raise RuntimeError(
+            f"building shmrdmad: cannot run {cc[0]}: {e.strerror}"
+        ) from None
     if r.returncode != 0:
         tmp.unlink(missing_ok=True)
         raise RuntimeError(f"building shmrdmad failed:\n{r.stderr.strip()}")
@@ -656,9 +678,9 @@ def build_daemon() -> tuple[Path, str]:
 def daemon_needs_compiler() -> bool:
     """Whether starting this user's daemon would compile it: no binary
     is cached for the current sources and none runs."""
-    if (_cache_dir() / daemon_digest() / "shmrdmad").is_file():
-        return False
     try:
+        if (_cache_dir() / daemon_digest() / "shmrdmad").is_file():
+            return False
         return not daemon(create=False).pid()
     except (OSError, RuntimeError, KeyError):
         return True
@@ -876,18 +898,39 @@ def _stop_locked(d: Daemon, force: bool) -> str:
             f"devices and shmnet NICs stop working until they restart.  "
             f"Stop them first, or pass --force"
         )
-    os.kill(pid, signal.SIGTERM)
-    for _ in range(50):
-        if not d.pid():
-            break
-        time.sleep(0.1)
-    else:
-        # it may have exited, and the pid gone to another process, since
-        if d.pid() == pid:
-            os.kill(pid, signal.SIGKILL)
+    _kill(d, pid)
     for p in (d.pid_path, d.rdma_socket, d.net_socket):
         p.unlink(missing_ok=True)
     return f"stopped shmrdmad (pid {pid})"
+
+
+def _kill(d: Daemon, pid: int) -> None:
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(50):
+        if not d.pid():
+            return
+        time.sleep(0.1)
+    # it may have exited, and the pid gone to another process, since
+    if d.pid() == pid:
+        os.kill(pid, signal.SIGKILL)
+
+
+def stop_dir(d: Path, uid: int) -> str | None:
+    """Stop *uid*'s daemon whose files are in *d*, VMs or not, when its
+    pid file vouches for it; what was stopped, or None.  For uninstall,
+    possibly as root, so nothing in *d* is written."""
+    try:
+        st = os.lstat(d)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
+        return None
+    dm = Daemon("", uid, d)
+    pid = dm.pid()
+    if not pid:
+        return None
+    _kill(dm, pid)
+    return f"pid {pid}"
 
 
 def status() -> dict[str, object]:
@@ -944,10 +987,19 @@ def verify_sockets(vm: VMInfo) -> list[str]:
     owner = _vm_uid(vm)
     allowed = {0, d.uid} if owner is None or owner == 0 else {owner}
     socks = vm_sockets(vm, d)
+    own = {str(d.rdma_socket), str(d.net_socket)}
     for s in socks:
         problem = sun_path_problem(s)
         if problem:
             die(f"{vm.name}: {problem}")
+        problem = socket_path_problem(s)
+        if problem and s in own:
+            die(
+                f"{vm.name}: shmrdmad's directory {d.dir} cannot hold its "
+                f"sockets: QEMU needs an {problem}"
+            )
+        if problem:
+            die(f"{vm.name}: {s} is not an {problem}")
         try:
             st = os.lstat(s)
         except PermissionError:
@@ -970,32 +1022,85 @@ def verify_sockets(vm: VMInfo) -> list[str]:
                 f"{vm.name}: {problem}, so another user could put their "
                 f"own socket at {s} before QEMU connects"
             )
+        # ltvm's own daemon was vouched for by its pid; a probe would
+        # make it set up and tear down a device
+        if s not in own and _refused(s):
+            die(f"{vm.name} needs shmrdmad, but nothing listens on {s}")
     return socks
+
+
+def _refused(path: str) -> bool:
+    """Whether a connect to the socket at *path* is refused: the socket
+    of a daemon that is gone."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
+        c.settimeout(5)
+        try:
+            c.connect(path)
+        except ConnectionRefusedError:
+            return True
+        except OSError:
+            return False
+    return False
 
 
 def replaceable(path: str, uids: set[int]) -> str | None:
     """Why a uid outside *uids* could replace the entry at *path*, or None.
 
-    Every directory the path is resolved through, symlinks followed, must
-    belong to one of *uids* and be writable by nobody else, unless it is
-    sticky.
+    The path is walked as the kernel resolves it.  Every directory on the
+    way must belong to one of *uids* and be writable by nobody else,
+    unless it is sticky; so must every symlink, whose owner can repoint
+    it, before its target is walked in turn.
     """
-    seen = set()
-    p = Path(os.path.abspath(path))
-    for lexical in p.parents:
-        real = Path(os.path.realpath(lexical))
-        for d in (real, *real.parents):
-            if d in seen:
-                continue
-            seen.add(d)
-            try:
-                st = os.stat(d)
-            except OSError as e:
-                return f"{d} cannot be checked ({e.strerror})"
+    parts = path.split("/")
+    if not path.startswith("/"):
+        parts = os.getcwd().split("/") + parts
+    parts.reverse()
+    cur = "/"
+    hops = 0
+    problem = _dir_problem(cur, uids)
+    while parts and not problem:
+        name = parts.pop()
+        if name in ("", "."):
+            continue
+        if name == "..":
+            cur = os.path.dirname(cur)
+            continue
+        nxt = os.path.join(cur, name)
+        try:
+            st = os.lstat(nxt)
+        except OSError as e:
+            if not any(p not in ("", ".") for p in parts):
+                return None
+            return f"{nxt} cannot be checked ({e.strerror})"
+        if stat.S_ISLNK(st.st_mode):
             if st.st_uid not in uids:
-                return f"{d} belongs to uid {st.st_uid}"
-            if st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX:
-                return f"{d} is writable by other users"
+                return f"{nxt} is a symlink belonging to uid {st.st_uid}"
+            hops += 1
+            if hops > 40:
+                return f"{path} has too many levels of symlinks"
+            target = os.readlink(nxt)
+            if target.startswith("/"):
+                cur = "/"
+            parts.extend(reversed(target.split("/")))
+            continue
+        if not any(p not in ("", ".") for p in parts):
+            return None
+        if not stat.S_ISDIR(st.st_mode):
+            return f"{nxt} is not a directory"
+        cur = nxt
+        problem = _dir_problem(cur, uids)
+    return problem
+
+
+def _dir_problem(d: str, uids: set[int]) -> str | None:
+    try:
+        st = os.lstat(d)
+    except OSError as e:
+        return f"{d} cannot be checked ({e.strerror})"
+    if st.st_uid not in uids:
+        return f"{d} belongs to uid {st.st_uid}"
+    if st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX:
+        return f"{d} is writable by other users"
     return None
 
 

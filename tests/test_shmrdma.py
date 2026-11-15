@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -166,6 +167,71 @@ def test_launch_refuses_without_daemon(tmp_vmdir: Path) -> None:  # noqa: F811
         _run_launch(vm, _LaunchHarness())
 
 
+def test_stop_dir_only_what_the_pid_file_vouches_for(tmp_path: Path) -> None:
+    me = os.geteuid()
+    d = tmp_path / "d"
+    d.mkdir(mode=0o700)
+    link = tmp_path / "link"
+    link.symlink_to(d)
+    with (
+        patch.object(shmrdma.Daemon, "pid", side_effect=[4321, 0]),
+        patch("ltvm_pkg.shmrdma.os.kill") as kill,
+    ):
+        assert shmrdma.stop_dir(d, me) == "pid 4321"
+    kill.assert_called_once_with(4321, signal.SIGTERM)
+    with (
+        patch.object(shmrdma.Daemon, "pid", return_value=4321),
+        patch("ltvm_pkg.shmrdma.os.kill") as kill,
+    ):
+        assert shmrdma.stop_dir(d, me + 1) is None
+        assert shmrdma.stop_dir(link, me) is None
+        assert shmrdma.stop_dir(tmp_path / "none", me) is None
+    kill.assert_not_called()
+    with (
+        patch.object(shmrdma.Daemon, "pid", return_value=0),
+        patch("ltvm_pkg.shmrdma.os.kill") as kill,
+    ):
+        assert shmrdma.stop_dir(d, me) is None
+    kill.assert_not_called()
+
+
+def test_launch_refuses_a_dead_daemons_socket(
+    tmp_vmdir: Path,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """The socket file a killed daemon left behind refuses connects."""
+    path = tmp_path / "stale.sock"
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(str(path))
+    try:
+        vm = _make_vm(tmp_vmdir)
+        vm.shmrdma = str(path)
+        vm.save()
+        with (
+            patch("ltvm_pkg.qemu_run.die", side_effect=SystemExit) as die,
+            pytest.raises(SystemExit),
+        ):
+            shmrdma.verify_sockets(vm)
+        assert "nothing listens" in die.call_args[0][0]
+    finally:
+        s.close()
+
+
+def test_own_sockets_checked_for_qemu(tmp_vmdir: Path) -> None:  # noqa: F811
+    """A daemon directory QEMU's -chardev cannot name is refused by name."""
+    d = shmrdma.Daemon("tester", os.geteuid(), tmp_vmdir / "a,b")
+    vm = _make_vm(tmp_vmdir)
+    vm.shmrdma = "auto"
+    with (
+        patch("ltvm_pkg.shmrdma.daemon_for", return_value=d),
+        patch("ltvm_pkg.qemu_run.die", side_effect=SystemExit) as die,
+        pytest.raises(SystemExit),
+    ):
+        shmrdma.verify_sockets(vm)
+    msg = die.call_args[0][0]
+    assert f"directory {d.dir} cannot hold its sockets" in msg
+
+
 def test_launch_own_daemon(tmp_vmdir: Path, own_daemon) -> None:  # noqa: F811
     d, ensure = own_daemon
     vm = _make_vm(tmp_vmdir)
@@ -321,6 +387,54 @@ class TestReplaceable:
             str(open_dir / "link2" / "s.sock"), {0, os.geteuid()}
         )
         assert why == f"{(safe / 'in').resolve()} is writable by other users"
+
+    def test_foreign_symlink(self, tmp_path: Path) -> None:
+        """A symlink another user owns can be repointed after the check."""
+        safe = tmp_path / "safe"
+        safe.mkdir(mode=0o700)
+        link = tmp_path / "link"
+        link.symlink_to(safe)
+        real_lstat = os.lstat
+        walked = str(tmp_path.resolve() / "link")
+
+        def lstat(p, *a, **kw):
+            st = real_lstat(p, *a, **kw)
+            if str(p) == walked:
+                return os.stat_result((st.st_mode, *st[1:4], 4242, *st[5:]))
+            return st
+
+        uids = {0, os.geteuid()}
+        assert shmrdma.replaceable(str(link / "s.sock"), uids) is None
+        with patch("ltvm_pkg.shmrdma.os.lstat", side_effect=lstat):
+            why = shmrdma.replaceable(str(link / "s.sock"), uids)
+        assert why is not None and "symlink belonging to uid 4242" in why
+
+    def test_dotdot_after_symlink(self, tmp_path: Path) -> None:
+        """'..' leaves the symlink's target, not the symlink's directory."""
+        top = tmp_path / "top"
+        (top / "in").mkdir(parents=True)
+        top.chmod(0o777)
+        safe = tmp_path / "safe"
+        safe.mkdir(mode=0o700)
+        (safe / "link").symlink_to(top / "in")
+        try:
+            why = shmrdma.replaceable(
+                str(safe / "link" / ".." / "s.sock"), {0, os.geteuid()}
+            )
+        finally:
+            top.chmod(0o755)
+        assert why == f"{top.resolve()} is writable by other users"
+
+    def test_relative_path(self, tmp_path: Path, monkeypatch) -> None:
+        d = tmp_path / "d"
+        d.mkdir()
+        d.chmod(0o777)
+        monkeypatch.chdir(tmp_path)
+        try:
+            why = shmrdma.replaceable("d/s.sock", {0, os.geteuid()})
+        finally:
+            d.chmod(0o755)
+        assert why == f"{d.resolve()} is writable by other users"
 
     def test_launch_refuses(self, tmp_vmdir: Path, tmp_path: Path) -> None:  # noqa: F811
         d = tmp_path / "shared"
@@ -985,6 +1099,70 @@ def test_daemon_rebuilt_for_another_compiler(
         assert shmrdma.daemon_digest() != digest
 
 
+def test_cc_with_arguments(tmp_path: Path, monkeypatch) -> None:
+    """CC is split as make splits it: "ccache gcc" runs ccache."""
+    from ltvm_pkg import shmrdma_req as sr
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    wrapper = tmp_path / "ccache"
+    wrapper.write_text("")
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("CC", f"{wrapper} gcc -m64")
+    assert shmrdma._compiler() == [str(wrapper), "gcc", "-m64"]
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd[:3])
+        Path(cmd[cmd.index("-o") + 1]).write_text("")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("ltvm_pkg.shmrdma.subprocess.run", side_effect=run):
+        shmrdma.build_daemon()
+    assert calls == [[str(wrapper), "gcc", "-m64"]]
+    with patch("ltvm_pkg.shmrdma_req._qemu_caps") as caps:
+        caps.return_value.__getitem__.return_value = True
+        r = {r.name: r for r in sr.host_checks()}["C compiler for shmrdmad"]
+    assert r.ok
+    monkeypatch.setenv("CC", "no-such-cc-ltvm gcc")
+    with (
+        patch("ltvm_pkg.shmrdma.daemon_needs_compiler", return_value=True),
+        patch("ltvm_pkg.shmrdma_req._qemu_caps") as caps,
+    ):
+        caps.return_value.__getitem__.return_value = True
+        r = {r.name: r for r in sr.host_checks()}["C compiler for shmrdmad"]
+    assert not r.ok and "no-such-cc-ltvm is not on PATH" in r.detail
+
+
+def test_uid_without_passwd_entry(monkeypatch) -> None:
+    """A container uid with no passwd entry gets a refusal, not a
+    traceback, and a --host-node VM is not refused for it."""
+    from ltvm_pkg import shmrdma_req as sr
+
+    def nobody(uid):
+        raise KeyError(uid)
+
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    # conftest's stand-in for the passwd home
+    monkeypatch.setattr(
+        shmrdma,
+        "_state_home",
+        lambda uid: Path(shmrdma._passwd(uid).pw_dir) / ".local" / "state",
+    )
+    with patch("ltvm_pkg.shmrdma.pwd.getpwuid", side_effect=nobody):
+        with pytest.raises(RuntimeError, match="no passwd entry"):
+            shmrdma._cache_dir()
+        with (
+            patch("ltvm_pkg.shmrdma_req._qemu_caps") as caps,
+            patch("ltvm_pkg.host_setup.is_macos", return_value=False),
+        ):
+            caps.return_value.__getitem__.return_value = True
+            reqs = {r.name: r for r in sr.host_checks()}
+        r = reqs["shmrdmad runtime directory"]
+        assert not r.ok and "no passwd entry" in r.detail
+        assert sr.HOST_NODE not in r.features
+
+
 def test_daemon_builds_through_a_ccache_wrapper(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1186,6 +1364,246 @@ def test_shmnet_helpers(tmp_path: Path) -> None:
         pytest.skip("needs a C compiler")
     src = tmp_path / "harness.c"
     src.write_text(_SHMNET_HARNESS)
+    exe = tmp_path / "harness"
+    r = subprocess.run(
+        [
+            cc,
+            "-O1",
+            "-pthread",
+            "-Wno-unused-function",
+            "-I",
+            str(shmrdma.SRC_DIR / "daemon"),
+            "-o",
+            str(exe),
+            str(src),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    r = subprocess.run([str(exe)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+_RETIRE_HARNESS = r"""
+static void rel_hook(void *p);
+#define REL(p, v) do { __atomic_store_n((p), (v), __ATOMIC_RELEASE); \
+	rel_hook((void *)(p)); } while (0)
+#define main shmrdmad_main
+#include "shmrdmad.c"
+#undef main
+
+static int fails;
+#define CHECK(c) do { if (!(c)) { printf("FAIL line %d\n", __LINE__); \
+	fails++; } } while (0)
+
+enum { N = 8, BASE = 1000 };
+
+static uint8_t sqpage[4096], rqpage[4096], cqpage[4096];
+static uint8_t *sqp[1] = { sqpage }, *rqp[1] = { rqpage }, *cqp[1] = { cqpage };
+static struct shmrdma_qp_rec rec __attribute__((aligned(128)));
+static struct shmrdma_cq_rec cqr __attribute__((aligned(128)));
+static struct vdev dev;
+static struct cq cq;
+static struct qp qp;
+
+/* what a guest would find after the backend died just after a store */
+static struct snap {
+	struct shmrdma_qp_rec r;
+	uint32_t cq_prod;
+} snaps[256];
+static int nsnap;
+
+static void take(void)
+{
+	if (nsnap < 256) {
+		snaps[nsnap].r = rec;
+		snaps[nsnap].cq_prod = cqr.prod;
+		nsnap++;
+	}
+}
+
+static void rel_hook(void *p)
+{
+	if ((p >= (void *)&rec && p < (void *)(&rec + 1)) ||
+		(p >= (void *)&cqr && p < (void *)(&cqr + 1)))
+		take();
+}
+
+static void setup(uint32_t state)
+{
+	memset(&rec, 0, sizeof(rec));
+	memset(&cqr, 0, sizeof(cqr));
+	memset(sqpage, 0, sizeof(sqpage));
+	memset(rqpage, 0, sizeof(rqpage));
+	memset(cqpage, 0, sizeof(cqpage));
+	memset(&cq, 0, sizeof(cq));
+	memset(&qp, 0, sizeof(qp));
+	cq.dev = &dev;
+	cq.rec = &cqr;
+	cq.ring = (struct ring){ .entries = 64, .esz = 32, .npages = 1,
+					.pages = cqp };
+	plat_spin_init(&cq.lock);
+	qp.dev = &dev;
+	qp.type = SHMRDMA_QPT_UD;
+	qp.state = state;
+	qp.scq = qp.rcq = &cq;
+	qp.rec = &rec;
+	qp.sq = (struct ring){ .entries = N, .esz = 64, .npages = 1,
+				.pages = sqp };
+	qp.rq = (struct ring){ .entries = N, .esz = 32, .npages = 1,
+				.pages = rqp };
+	plat_spin_init(&qp.rq_lock);
+	nsnap = 0;
+	take();
+}
+
+/*
+ * The guest's flush after a backend death at every snapshot: each WR
+ * completes once, through a visible CQE, the limbo record or its slot;
+ * an unsignaled one that ran may complete never.  A visible CQE always
+ * means its slot is free.
+ */
+static void check_flush(bool sq, const bool *must)
+{
+	for (int k = 0; k < nsnap; k++) {
+		const struct shmrdma_qp_rec *r = &snaps[k].r;
+		uint32_t prod = snaps[k].cq_prod;
+		uint32_t cons = sq ? r->sq_cons : r->rq_cons;
+		uint32_t done = sq ? r->sq_done : r->rq_done;
+		int count[N] = {0};
+
+		for (uint32_t j = 0; j < prod; j++) {
+			struct shmrdma_cqe *e = ring_entry(&cq.ring, j);
+			uint32_t i = e->wr_id - BASE;
+
+			CHECK(i < N);
+			if (i >= N)
+				continue;
+			count[i]++;
+			CHECK(cons > i);
+		}
+		if (done != cons &&
+			shmrdma_limbo_owed(done, cons,
+					sq ? r->sq_limbo_op : r->rq_limbo_op,
+					sq ? r->sq_limbo_pos : r->rq_limbo_pos,
+					prod)) {
+			uint64_t id = sq ? r->sq_limbo_wr_id : r->rq_limbo_wr_id;
+
+			CHECK(id - BASE < N);
+			if (id - BASE < N)
+				count[id - BASE]++;
+		}
+		for (uint32_t c = cons; c < N; c++)
+			count[c]++;
+		for (int i = 0; i < N; i++) {
+			if (count[i] > 1 || (must[i] && count[i] != 1) ||
+				(!count[i] && (uint32_t)i >= cons)) {
+				printf("FAIL %s snapshot %d wr %d count %d\n",
+					sq ? "sq" : "rq", k, i, count[i]);
+				fails++;
+			}
+		}
+	}
+}
+
+static void post_sends(void)
+{
+	for (int i = 0; i < N; i++) {
+		struct shmrdma_sq_wqe *w = ring_entry(&qp.sq, i);
+
+		w->wr_id = BASE + i;
+		w->opcode = SHMRDMA_OP_SEND;
+		w->flags = (i % 3) ? SHMRDMA_WQE_SIGNALED : 0;
+	}
+	rec.sq_prod = N;
+}
+
+/* sends a UD QP drops (no source GID), signaled or not */
+static void test_send_retire(void)
+{
+	bool must[N];
+	bool stalled = false;
+
+	setup(QPS_RTS);
+	post_sends();
+	for (int i = 0; i < N; i++)
+		must[i] = i % 3;
+	CHECK(qp_process(&qp, 64, &stalled) == N);
+	CHECK(rec.sq_cons == N && rec.sq_done == N);
+	check_flush(true, must);
+}
+
+/* sends of a QP in error: every one completes */
+static void test_send_flush(void)
+{
+	bool must[N];
+	bool stalled = false;
+
+	setup(QPS_ERR);
+	post_sends();
+	for (int i = 0; i < N; i++)
+		must[i] = true;
+	CHECK(qp_process(&qp, 64, &stalled) == N);
+	CHECK(cqr.prod == N);
+	check_flush(true, must);
+}
+
+static void test_recv_flush(void)
+{
+	bool must[N];
+
+	setup(QPS_ERR);
+	for (int i = 0; i < N; i++) {
+		struct shmrdma_rq_wqe *w = ring_entry(&qp.rq, i);
+
+		w->wr_id = BASE + i;
+		must[i] = true;
+	}
+	rec.rq_prod = N;
+	qp_flush_rq(&qp);
+	CHECK(rec.rq_cons == N && rec.rq_done == N && cqr.prod == N);
+	check_flush(false, must);
+}
+
+/* a CQ with no room: the WR's slot is freed with nothing owed */
+static void test_overflow(void)
+{
+	bool must[N] = {0};
+	bool stalled = false;
+
+	setup(QPS_ERR);
+	post_sends();
+	cq.ring.entries = 4;
+	CHECK(qp_process(&qp, 64, &stalled) == N);
+	CHECK(cqr.prod == 4 && rec.sq_cons == N);
+	CHECK(rec.sq_limbo_op == SHMRDMA_LIMBO_NONE);
+	for (int i = 0; i < 4; i++)
+		must[i] = true;
+	check_flush(true, must);
+}
+
+int main(void)
+{
+	plat_spin_init(&dev.evq_lock);
+	plat_spin_init(&dev.log_lock);
+	test_send_retire();
+	test_send_flush();
+	test_recv_flush();
+	test_overflow();
+	printf("fails=%d\n", fails);
+	return fails != 0;
+}
+"""
+
+
+def test_completion_order(tmp_path: Path) -> None:
+    """A CQE means a free slot, and a flush after any death is exact, in C."""
+    cc = shutil.which("cc") or shutil.which("gcc")
+    if not cc:
+        pytest.skip("needs a C compiler")
+    src = tmp_path / "harness.c"
+    src.write_text(_RETIRE_HARNESS)
     exe = tmp_path / "harness"
     r = subprocess.run(
         [
@@ -1623,6 +2041,50 @@ class TestRequirements:
             sr._qemu_caps(str(qemu))
         assert qh.call_count == 4
         assert not sr._caps_cache().exists()
+
+    def test_no_builds_under_sudo(self, monkeypatch) -> None:
+        """doctor --fix under sudo does not build as root."""
+        from ltvm_pkg import shmrdma_req as sr
+
+        monkeypatch.setenv("SUDO_USER", "tester")
+        with (
+            patch("ltvm_pkg.shmrdma_req.os.geteuid", return_value=0),
+            patch("ltvm_pkg.shmrdma_req.subprocess.run") as run,
+            pytest.raises(RuntimeError, match="as tester, without sudo"),
+        ):
+            sr._ltvm("build", "image", "rocky9")
+        run.assert_not_called()
+
+    def test_timed_out_probe_not_cached(self, tmp_path: Path) -> None:
+        """A probe that timed out is not taken for a QEMU without it."""
+        from ltvm_pkg import shmrdma_req as sr
+
+        qemu = tmp_path / "qemu"
+        qemu.write_text("v1")
+        helps = {"device": '"vhost-user-fs-pci"', "object": None}
+        with (
+            patch(
+                "ltvm_pkg.shmrdma_req._qemu_help",
+                side_effect=lambda what, q=None: helps[what],
+            ),
+            patch(
+                "ltvm_pkg.shmrdma_req._qemu_has_vhost_user_netdev",
+                return_value=None,
+            ),
+            patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=False),
+        ):
+            caps = sr._qemu_caps(str(qemu))
+            assert not caps["shared-ram"] and not caps["vhost-user-netdev"]
+            assert not sr._caps_cache().exists()
+            helps["object"] = shmrdma.SHARED_RAM_BACKEND
+            assert sr._qemu_caps(str(qemu))["shared-ram"]
+        assert not sr._caps_cache().exists()
+        with patch(
+            "ltvm_pkg.shmrdma_req.subprocess.run",
+            side_effect=subprocess.TimeoutExpired("qemu", 30),
+        ):
+            assert sr._qemu_help("object", str(qemu)) is None
+            assert sr._qemu_has_vhost_user_netdev(str(qemu)) is None
 
     def test_compiler_not_needed_once_built(self, tmp_path: Path) -> None:
         from ltvm_pkg import shmrdma_req as sr

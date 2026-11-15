@@ -98,7 +98,7 @@ ltvm llmount co1-single                 # mount Lustre inside the VM
 ```
 
 `ltvm uninstall` takes off the host what `ltvm install` put there: it
-destroys the VMs, stops and removes the bridge and dnsmasq (systemd units
+destroys the VMs, stops every user's shmrdmad, stops and removes the bridge and dnsmasq (systemd units
 on Linux, LaunchDaemons on macOS) with their iptables and ufw/firewalld
 rules, ltvm's files in `/etc`, `/opt/qemu`, `/opt/qemu-vms` and the
 `ltvm` group, tab completion, the agent skill links, ltvm's config and
