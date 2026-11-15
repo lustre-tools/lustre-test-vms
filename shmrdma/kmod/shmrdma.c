@@ -35,6 +35,7 @@ MODULE_PARM_DESC(netdev, "netdev whose IP addresses give the GIDs");
 #define SHMRDMA_EQ_ENTRIES	16384
 #define SHMRDMA_NEVBUF		8
 #define SHMRDMA_CQE_SIZE	32
+#define SHMRDMA_QPN_NONE	U32_MAX	/* a cleaned CQE: no QP has it */
 
 #ifndef HAVE_VIRTIO_RESET_DEVICE
 static inline void virtio_reset_device(struct virtio_device *vdev)
@@ -59,11 +60,16 @@ struct shmrdma_dev {
 	struct shmrdma_cmd *cmdbuf;
 	struct shmrdma_resp *respbuf;
 	bool broken;
+	/* the device was reset: the backend holds nothing of ours */
+	bool reset_done;
+	bool fatal_sent;
+	struct work_struct fatal_work;
 
 	spinlock_t eq_lock;
 	struct shmrdma_dev_shared *shared;
 	struct shmrdma_eqe *eq;
 	u32 eq_cons;
+	bool eq_bad;
 	u64 *evbufs;
 
 	struct xarray qps;
@@ -162,6 +168,51 @@ static void shmrdma_ctrl_cb(struct virtqueue *vq)
 	complete(&dev->ctrl_done);
 }
 
+/*
+ * Stop the backend using this guest's memory: QEMU forwards the reset
+ * to it and waits for its reply, and it drops every QP, CQ and MR of
+ * the device first.  Memory it was given may be freed after this.
+ * Caller holds ctrl_mutex.
+ */
+static void shmrdma_reset_locked(struct shmrdma_dev *dev)
+{
+	dev->broken = true;
+	if (dev->reset_done)
+		return;
+	virtio_break_device(dev->vdev);
+	virtio_reset_device(dev->vdev);
+	WRITE_ONCE(dev->reset_done, true);
+}
+
+static void shmrdma_fatal_work(struct work_struct *work)
+{
+	struct shmrdma_dev *dev = container_of(work, struct shmrdma_dev,
+					       fatal_work);
+	struct ib_event ev = {
+		.device = &dev->ibdev,
+		.event = IB_EVENT_DEVICE_FATAL,
+		.element.port_num = 1,
+	};
+	bool send;
+
+	mutex_lock(&dev->ctrl_mutex);
+	shmrdma_reset_locked(dev);
+	send = !dev->fatal_sent && READ_ONCE(dev->registered);
+	dev->fatal_sent = true;
+	mutex_unlock(&dev->ctrl_mutex);
+	if (send)
+		ib_dispatch_event(&ev);
+}
+
+/* a command was not carried out: reset now, report it from a work item */
+static void shmrdma_fatal(struct shmrdma_dev *dev)
+{
+	mutex_lock(&dev->ctrl_mutex);
+	shmrdma_reset_locked(dev);
+	mutex_unlock(&dev->ctrl_mutex);
+	schedule_work(&dev->fatal_work);
+}
+
 static int shmrdma_cmd(struct shmrdma_dev *dev, struct shmrdma_cmd *cmd,
 		       struct shmrdma_resp *resp)
 {
@@ -188,9 +239,11 @@ static int shmrdma_cmd(struct shmrdma_dev *dev, struct shmrdma_cmd *cmd,
 	virtqueue_kick(dev->ctrl_vq);
 	for (;;) {
 		if (!wait_for_completion_timeout(&dev->ctrl_done, 30 * HZ)) {
-			dev_err(&dev->vdev->dev, "command %u timed out\n",
+			dev_err(&dev->vdev->dev,
+				"command %u timed out, resetting the device\n",
 				cmd->cmd);
-			dev->broken = true;
+			shmrdma_reset_locked(dev);
+			schedule_work(&dev->fatal_work);
 			rc = -ETIMEDOUT;
 			goto out;
 		}
@@ -208,15 +261,17 @@ out:
 }
 
 /*
- * A command that timed out may still be carried out, and the device
- * may then use the memory it names: such memory is never freed.
+ * A destroy the backend did not carry out leaves it using the object's
+ * memory, so the device is reset before that memory is freed.
  */
-static void cmd_leak(struct shmrdma_dev *dev, const char *what, u32 n,
-		     int rc)
+static void shmrdma_destroy_failed(struct shmrdma_dev *dev, const char *what,
+				   u32 n, int rc)
 {
-	dev_warn_ratelimited(&dev->vdev->dev,
-			     "%s %u: no answer from the device (%d), its memory is not freed\n",
-			     what, n, rc);
+	if (READ_ONCE(dev->reset_done))
+		return;
+	dev_err(&dev->vdev->dev, "%s %u failed (%d), resetting the device\n",
+		what, n, rc);
+	shmrdma_fatal(dev);
 }
 
 /* ---------------------------------------------------------------- */
@@ -292,10 +347,19 @@ static void shmrdma_event_cb(struct virtqueue *vq)
 	}
 	if (kick)
 		virtqueue_kick(vq);
-	if (!sh)
+	if (!sh || dev->eq_bad)
 		goto out;
 	for (;;) {
-		while (dev->eq_cons != smp_load_acquire(&sh->eq_prod)) {
+		u32 prod = smp_load_acquire(&sh->eq_prod);
+
+		if (prod - dev->eq_cons > SHMRDMA_EQ_ENTRIES) {
+			dev_err(&dev->vdev->dev, "EQ producer %u is %u past %u\n",
+				prod, prod - dev->eq_cons, dev->eq_cons);
+			dev->eq_bad = true;
+			schedule_work(&dev->fatal_work);
+			goto out;
+		}
+		while (dev->eq_cons != prod) {
 			struct shmrdma_eqe *e =
 				&dev->eq[dev->eq_cons & (SHMRDMA_EQ_ENTRIES - 1)];
 			u32 cqn = READ_ONCE(e->cqn);
@@ -501,10 +565,6 @@ err_xa:
 	spin_lock_irqsave(&dev->eq_lock, flags);
 	xa_erase(&dev->cqs, cq->cqn);
 	spin_unlock_irqrestore(&dev->eq_lock, flags);
-	if (rc == -ETIMEDOUT) {
-		cmd_leak(dev, "create cq", cq->cqn, rc);
-		return rc;
-	}
 err_ring:
 	ring_free(&cq->ring);
 err_rec:
@@ -524,14 +584,12 @@ static int shmrdma_destroy_cq(struct ib_cq *ibcq, struct ib_udata *udata)
 
 	cmd.destroy_cq.cqn = cq->cqn;
 	rc = shmrdma_cmd(dev, &cmd, NULL);
+	if (rc)
+		shmrdma_destroy_failed(dev, "destroy cq", cq->cqn, rc);
 	/* no completion handler may run after this */
 	spin_lock_irqsave(&dev->eq_lock, flags);
 	xa_erase(&dev->cqs, cq->cqn);
 	spin_unlock_irqrestore(&dev->eq_lock, flags);
-	if (rc) {
-		cmd_leak(dev, "destroy cq", cq->cqn, rc);
-		return 0;
-	}
 	ring_free(&cq->ring);
 	kfree(cq->rec);
 	ida_free(&dev->cqn_ida, cq->cqn);
@@ -736,10 +794,6 @@ static int shmrdma_create_qp(struct ib_qp *ibqp,
 
 err_xa:
 	xa_erase_irq(&dev->qps, qpn);
-	if (rc == -ETIMEDOUT) {
-		cmd_leak(dev, "create qp", qpn, rc);
-		return rc;
-	}
 err_rq:
 	ring_free(&qp->rq);
 err_sq:
@@ -856,6 +910,29 @@ static int shmrdma_query_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 	return 0;
 }
 
+/*
+ * The backend no longer completes anything for qpn: its unpolled CQEs
+ * must not reach a later QP given the same number.
+ */
+static void shmrdma_cq_clean(struct ib_cq *ibcq, u32 qpn)
+{
+	struct shmrdma_cq *cq = to_scq(ibcq);
+	unsigned long flags;
+	u32 i, prod;
+
+	spin_lock_irqsave(&cq->lock, flags);
+	prod = smp_load_acquire(&cq->rec->prod);
+	if (prod - cq->cons > cq->ring.entries)
+		prod = cq->cons + cq->ring.entries;
+	for (i = cq->cons; i != prod; i++) {
+		struct shmrdma_cqe *e = ring_at(&cq->ring, i);
+
+		if (READ_ONCE(e->qpn) == qpn)
+			WRITE_ONCE(e->qpn, SHMRDMA_QPN_NONE);
+	}
+	spin_unlock_irqrestore(&cq->lock, flags);
+}
+
 static int shmrdma_destroy_qp(struct ib_qp *ibqp, struct ib_udata *udata)
 {
 	struct shmrdma_dev *dev = to_sdev(ibqp->device);
@@ -865,11 +942,12 @@ static int shmrdma_destroy_qp(struct ib_qp *ibqp, struct ib_udata *udata)
 
 	cmd.destroy_qp.qpn = ibqp->qp_num;
 	rc = shmrdma_cmd(dev, &cmd, NULL);
+	if (rc)
+		shmrdma_destroy_failed(dev, "destroy qp", ibqp->qp_num, rc);
 	xa_erase_irq(&dev->qps, ibqp->qp_num);
-	if (rc) {
-		cmd_leak(dev, "destroy qp", ibqp->qp_num, rc);
-		return 0;
-	}
+	shmrdma_cq_clean(ibqp->send_cq, ibqp->qp_num);
+	if (ibqp->recv_cq != ibqp->send_cq)
+		shmrdma_cq_clean(ibqp->recv_cq, ibqp->qp_num);
 	ring_free(&qp->sq);
 	ring_free(&qp->rq);
 	kfree(qp->rec);
@@ -1160,16 +1238,16 @@ static int shmrdma_dereg_mr(struct ib_mr *ibmr, struct ib_udata *udata)
 {
 	struct shmrdma_dev *dev = to_sdev(ibmr->device);
 	struct shmrdma_mr *mr = to_smr(ibmr);
+	int rc;
 
 	if (mr->index) {
 		struct shmrdma_cmd cmd = { .cmd = SHMRDMA_CMD_DEREG_MR };
 
 		cmd.dereg_mr.key = ibmr->lkey;
-		/* the device copied the page list; keep only the key taken */
-		if (shmrdma_cmd(dev, &cmd, NULL))
-			cmd_leak(dev, "dereg mr", mr->index, -EIO);
-		else
-			ida_free(&dev->mr_ida, mr->index);
+		rc = shmrdma_cmd(dev, &cmd, NULL);
+		if (rc)
+			shmrdma_destroy_failed(dev, "dereg mr", mr->index, rc);
+		ida_free(&dev->mr_ida, mr->index);
 	}
 	kfree(mr->pages);
 	kfree(mr);
@@ -1223,7 +1301,7 @@ static void shmrdma_init_attr(struct shmrdma_dev *dev)
 
 	memset(a, 0, sizeof(*a));
 	a->max_mr_size = 1ull << 40;
-	a->page_size_cap = 0xfffff000;
+	a->page_size_cap = 0x7ffff000;	/* the backend takes 4 KB to 1 GB */
 	a->vendor_id = 0x1af4;
 	a->vendor_part_id = SHMRDMA_VIRTIO_ID;
 	a->hw_ver = SHMRDMA_ABI_VERSION;
@@ -1327,6 +1405,7 @@ static int shmrdma_probe(struct virtio_device *vdev)
 	RCU_INIT_POINTER(dev->ndev, ndev);
 	vdev->priv = dev;
 	mutex_init(&dev->ctrl_mutex);
+	INIT_WORK(&dev->fatal_work, shmrdma_fatal_work);
 	init_completion(&dev->ctrl_done);
 	spin_lock_init(&dev->eq_lock);
 	xa_init_flags(&dev->qps, XA_FLAGS_LOCK_IRQ);
@@ -1380,7 +1459,6 @@ static int shmrdma_probe(struct virtio_device *vdev)
 		goto err_reset;
 	}
 
-	shmrdma_init_attr(dev);
 	strscpy(dev->ibdev.node_desc, "shmrdma", sizeof(dev->ibdev.node_desc));
 	dev->ibdev.node_type = RDMA_NODE_IB_CA;
 	dev->ibdev.phys_port_cnt = 1;
@@ -1388,6 +1466,7 @@ static int shmrdma_probe(struct virtio_device *vdev)
 	dev->ibdev.local_dma_lkey = SHMRDMA_LOCAL_DMA_LKEY;
 	addrconf_addr_eui48((unsigned char *)&dev->ibdev.node_guid,
 			    ndev->dev_addr);
+	shmrdma_init_attr(dev);
 	ib_set_device_ops(&dev->ibdev, &shmrdma_dev_ops);
 	dev->nb.notifier_call = shmrdma_netdev_event;
 	rc = register_netdevice_notifier(&dev->nb);
@@ -1413,7 +1492,10 @@ static int shmrdma_probe(struct virtio_device *vdev)
 err_reset:
 	if (dev->nb_registered)
 		unregister_netdevice_notifier(&dev->nb);
-	virtio_reset_device(vdev);
+	mutex_lock(&dev->ctrl_mutex);
+	shmrdma_reset_locked(dev);
+	mutex_unlock(&dev->ctrl_mutex);
+	cancel_work_sync(&dev->fatal_work);
 	vdev->config->del_vqs(vdev);
 err_free:
 	if (dev->eq)
@@ -1424,6 +1506,9 @@ err_free:
 	kfree(dev->respbuf);
 	kfree(dev->cmdbuf);
 	shmrdma_put_ndev(dev);
+	ida_destroy(&dev->qpn_ida);
+	ida_destroy(&dev->cqn_ida);
+	ida_destroy(&dev->mr_ida);
 	ib_dealloc_device(&dev->ibdev);
 	return rc;
 }
@@ -1435,10 +1520,15 @@ static void shmrdma_remove(struct virtio_device *vdev)
 
 	if (dev->nb_registered)
 		unregister_netdevice_notifier(&dev->nb);
-	if (dev->registered)
+	if (dev->registered) {
 		ib_unregister_device(&dev->ibdev);
+		WRITE_ONCE(dev->registered, false);
+	}
 	shmrdma_cmd(dev, &cmd, NULL);
-	virtio_reset_device(vdev);
+	mutex_lock(&dev->ctrl_mutex);
+	shmrdma_reset_locked(dev);
+	mutex_unlock(&dev->ctrl_mutex);
+	cancel_work_sync(&dev->fatal_work);
 	vdev->config->del_vqs(vdev);
 	free_pages_exact(dev->eq, SHMRDMA_EQ_ENTRIES *
 			 sizeof(struct shmrdma_eqe));
@@ -1447,8 +1537,25 @@ static void shmrdma_remove(struct virtio_device *vdev)
 	kfree(dev->respbuf);
 	kfree(dev->cmdbuf);
 	shmrdma_put_ndev(dev);
+	ida_destroy(&dev->qpn_ida);
+	ida_destroy(&dev->cqn_ida);
+	ida_destroy(&dev->mr_ida);
 	ib_dealloc_device(&dev->ibdev);
 }
+
+#ifndef HAVE_VIRTIO_DRIVER_SHUTDOWN
+/*
+ * kexec: the backend must stop writing into memory the next kernel will
+ * reuse.  Newer virtio cores reset every device at shutdown themselves.
+ */
+static void shmrdma_shutdown(struct device *d)
+{
+	struct virtio_device *vdev = dev_to_virtio(d);
+
+	virtio_break_device(vdev);
+	virtio_reset_device(vdev);
+}
+#endif
 
 static const struct virtio_device_id id_table[] = {
 	{ SHMRDMA_VIRTIO_ID, VIRTIO_DEV_ANY_ID },
@@ -1461,6 +1568,9 @@ static struct virtio_driver shmrdma_driver = {
 	.feature_table = features,
 	.feature_table_size = ARRAY_SIZE(features),
 	.driver.name = KBUILD_MODNAME,
+#ifndef HAVE_VIRTIO_DRIVER_SHUTDOWN
+	.driver.shutdown = shmrdma_shutdown,
+#endif
 	.id_table = id_table,
 	.probe = shmrdma_probe,
 	.remove = shmrdma_remove,

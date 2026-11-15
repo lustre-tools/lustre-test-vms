@@ -12,6 +12,10 @@ endif
 ifneq ($(shell grep -s "struct virtqueue_info {" $(srctree)/include/linux/virtio_config.h),)
 ccflags-y += -DHAVE_VIRTQUEUE_INFO
 endif
+# virtio drivers got a shutdown method with the core's shutdown reset
+ifneq ($(shell grep -s "void (\*shutdown)(struct virtio_device \*dev);" $(srctree)/include/linux/virtio.h),)
+ccflags-y += -DHAVE_VIRTIO_DRIVER_SHUTDOWN
+endif
 # virtio_reset_device replaced config->reset in 5.16 (not in EL8)
 ifneq ($(shell grep -s "void virtio_reset_device" $(srctree)/include/linux/virtio.h),)
 ccflags-y += -DHAVE_VIRTIO_RESET_DEVICE
