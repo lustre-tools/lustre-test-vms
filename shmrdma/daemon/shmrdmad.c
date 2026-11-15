@@ -2435,8 +2435,10 @@ static int handle_msg(struct vdev *d)
 	case VU_SET_VRING_NUM: {
 		struct vq *q;
 
+		/* ring positions are u16 counters taken modulo num */
 		if (pl->state.index >= MAX_VQS || !pl->state.num ||
-		    pl->state.num > 32768) {
+		    pl->state.num > 32768 ||
+		    (pl->state.num & (pl->state.num - 1))) {
 			ack = 1;
 			break;
 		}

@@ -210,6 +210,16 @@ static void cur_write(struct cursor *dst, const void *in, uint32_t len)
 
 enum { DLV_OK, DLV_NOBUF, DLV_DROP };
 
+/* an avail idx more than the ring ahead: stop the queue until
+ * SET_VRING_BASE */
+static void vq_set_broken(struct vdev *d, struct vq *q, uint16_t ai)
+{
+	if (!q->broken)
+		LOG("dev%d: net vq%d avail %u is past %u", d->id,
+		    (int)(q - d->vq), ai, q->last_avail);
+	q->broken = true;
+}
+
 static uint16_t *vq_avail_event(struct vq *q)
 {
 	return (uint16_t *)&q->used->ring[q->num];
@@ -267,6 +277,10 @@ static int rx_take(struct rxtake *t, uint64_t need, struct cursor *dst,
 	int fb = t->nb, fs = t->ns;
 	uint64_t got = 0;
 
+	if ((uint16_t)(t->ai - q->last_avail) > q->num) {
+		vq_set_broken(t->d, q, t->ai);
+		return DLV_DROP;
+	}
 	while (got < need) {
 		uint64_t cap;
 		int n;
@@ -404,7 +418,7 @@ static int net_deliver(struct netport *dp, int rqi, const struct vnet_hdr *th,
 	uint16_t nbufs;
 	int rc, fd;
 
-	if (d->dead || !vq_ready(q))
+	if (d->dead || !vq_ready(q) || q->broken)
 		return DLV_DROP;
 	if (!(d->features & VNET_F_MRG_RXBUF))
 		return DLV_DROP;
@@ -802,13 +816,17 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 	struct vq *q = &d->vq[NET_TXQ(nq->qi)];
 	int done = 0;
 
-	if (d->dead || !vq_ready(q))
+	if (d->dead || !vq_ready(q) || q->broken)
 		return 0;
 	while (done < budget) {
 		uint16_t ai = ACQ(&q->avail->idx);
 
 		if (q->last_avail == ai)
 			break;
+		if ((uint16_t)(ai - q->last_avail) > q->num) {
+			vq_set_broken(d, q, ai);
+			break;
+		}
 
 		uint16_t head = q->avail->ring[q->last_avail % q->num];
 		struct seg segs[MAX_SEGS];
@@ -901,7 +919,7 @@ static bool net_has_work(struct netq *nq)
 {
 	struct vq *q = &nq->p->dev->vq[NET_TXQ(nq->qi)];
 
-	return !nq->p->dev->dead && vq_ready(q) &&
+	return !nq->p->dev->dead && vq_ready(q) && !q->broken &&
 	       q->last_avail != ACQ(&q->avail->idx);
 }
 
