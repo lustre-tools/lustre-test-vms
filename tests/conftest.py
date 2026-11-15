@@ -148,6 +148,21 @@ def _isolate_user_state(
         "CLAUDE_PID",
     ):
         monkeypatch.delenv(var, raising=False)
+    # The host setup record is read by every main() and by doctor and
+    # update: point it at a tmpdir holding a current one, so a test
+    # neither sees this host's real record nor, finding none, reruns
+    # install.  A real install through sudo is stubbed out as well;
+    # tests/test_host_setup_version.py covers both.
+    from ltvm_pkg import host_setup_version
+
+    record = root / "host-setup.json"
+    record.write_text(
+        f'{{"version": {host_setup_version.HOST_SETUP_VERSION}}}\n'
+    )
+    monkeypatch.setenv("LTVM_HOST_SETUP_RECORD", str(record))
+    monkeypatch.setattr(
+        "ltvm_pkg.update_check.run_install", lambda *a, **kw: True
+    )
     claims = root / "claims"
     claims.mkdir()
     claims.chmod(0o1777)

@@ -3804,6 +3804,33 @@ def _check_ssh_client_config(fix: bool) -> tuple[int, int]:
     return 1, 0
 
 
+def _check_host_setup_version(fix: bool) -> tuple[int, int]:
+    """Report the host setup version; with ``fix``, rerun install if behind.
+
+    Returns (issues found, repairs that failed).
+    """
+    from . import host_setup_version as hsv
+
+    rep = hsv.doctor_report()
+    print(
+        f"host setup version: {rep['recorded']} recorded in {rep['path']}, "
+        f"{rep['current']} in this ltvm"
+    )
+    if not rep["stale"]:
+        return 0, 0
+    print(f"host setup is behind this ltvm: run {hsv.install_command()}")
+    if not fix:
+        return 1, 0
+    from . import update_check
+
+    repo = Path(__file__).resolve().parent.parent
+    if update_check.run_install(repo) and not hsv.is_stale():
+        print("  fixed: ran ltvm install")
+        return 1, 0
+    print(f"  FAILED: run {hsv.install_command()}")
+    return 1, 1
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     issues = 0
     # Counts repairs that were attempted and did not work, so --fix
@@ -4155,6 +4182,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(line)
         issues += vrep.issues
         fix_failures += vrep.failures
+
+    found, failed = _check_host_setup_version(args.fix)
+    issues += found
+    fix_failures += failed
 
     if issues == 0:
         print("no issues found")
