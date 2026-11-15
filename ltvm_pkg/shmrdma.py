@@ -801,25 +801,35 @@ def ensure_daemon(d: Daemon | None = None) -> Daemon:
             logfd = _open_private(
                 d.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, d.uid
             )
-            with os.fdopen(logfd, "a") as logf:
-                logf.write(
-                    f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} "
-                    f"starting {binary}\n"
+            proc = None
+            # Only the pid file lets a stop find the daemon: one started
+            # without it (Ctrl-C, a failed write) is killed here.
+            try:
+                with os.fdopen(logfd, "a") as logf:
+                    logf.write(
+                        f"--- {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                        f"starting {binary}\n"
+                    )
+                    logf.flush()
+                    logged = os.fstat(logf.fileno()).st_size
+                    proc = subprocess.Popen(
+                        [*prefix, *argv],
+                        stdin=subprocess.DEVNULL,
+                        stdout=logf,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                    )
+                pidfd = _open_private(
+                    d.pid_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, d.uid
                 )
-                logf.flush()
-                logged = os.fstat(logf.fileno()).st_size
-                proc = subprocess.Popen(
-                    [*prefix, *argv],
-                    stdin=subprocess.DEVNULL,
-                    stdout=logf,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                )
-            pidfd = _open_private(
-                d.pid_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, d.uid
-            )
-            with os.fdopen(pidfd, "w") as f:
-                f.write(f"{proc.pid} {digest} {binary}\n")
+                with os.fdopen(pidfd, "w") as f:
+                    f.write(f"{proc.pid} {digest} {binary}\n")
+            except BaseException:
+                if proc is not None:
+                    proc.kill()
+                    proc.wait()
+                    d.pid_path.unlink(missing_ok=True)
+                raise
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 if proc.poll() is not None:
@@ -900,9 +910,27 @@ def _stop_locked(d: Daemon, force: bool) -> str:
             f"Stop them first, or pass --force"
         )
     _kill(d, pid)
-    for p in (d.pid_path, d.rdma_socket, d.net_socket):
-        p.unlink(missing_ok=True)
+    _remove_files(d)
     return f"stopped shmrdmad (pid {pid})"
+
+
+def _remove_files(d: Daemon) -> None:
+    """Unlink the pid file and sockets of *d*, possibly as root: through
+    the directory *d.uid* owns, never a path the user can repoint."""
+    try:
+        fd = os.open(d.dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return
+    try:
+        if os.fstat(fd).st_uid != d.uid:
+            return
+        for p in (d.pid_path, d.rdma_socket, d.net_socket):
+            try:
+                os.unlink(p.name, dir_fd=fd)
+            except FileNotFoundError:
+                pass
+    finally:
+        os.close(fd)
 
 
 _SYS_PIDFD_SEND_SIGNAL = 424  # the same on every Linux arch
@@ -975,14 +1003,20 @@ def _kill(d: Daemon, pid: int) -> None:
 
 
 def _kill_by_pid(d: Daemon, pid: int) -> None:
-    os.kill(pid, signal.SIGTERM)
-    for _ in range(50):
-        if not d.pid():
+    # A numeric pid can be reused at any time: vouch for it just before
+    # each signal.
+    try:
+        if d.pid() != pid:
             return
-        time.sleep(0.1)
-    # it may have exited, and the pid gone to another process, since
-    if d.pid() == pid:
-        os.kill(pid, signal.SIGKILL)
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(50):
+            if d.pid() != pid:
+                return
+            time.sleep(0.1)
+        if d.pid() == pid:
+            os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def stop_dir(d: Path, uid: int) -> str | None:
