@@ -118,8 +118,11 @@ static inline void cpu_relax(void)
 /*
  * Bulk copies into another guest's buffer can use non-temporal stores:
  * the destination is not in this CPU's cache, and streaming stores skip
- * reading each destination line first.  AVX2 on x86_64; elsewhere there
- * is no such path yet and plat_have_nt stays false.
+ * reading each destination line first.  AVX2 on x86_64.  On aarch64
+ * plain memcpy is kept: on an Apple M5, NEON ldp/stp, stnp and
+ * ldnp/stnp copies all measured within 2% of libc memcpy, about
+ * 50 GB/s per thread from DRAM (tools/memcpy_bw.c), so plat_have_nt
+ * stays false there.
  */
 static bool plat_have_nt;
 
