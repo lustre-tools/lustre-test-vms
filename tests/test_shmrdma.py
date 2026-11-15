@@ -351,6 +351,20 @@ class TestPrivateDir:
         assert shmrdma.run_dir(os.geteuid()) == d
         assert stat.S_IMODE(os.lstat(d).st_mode) == 0o700
 
+    def test_loose_mode_tightened_without_lchmod(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+    ) -> None:
+        """glibc before 2.32 (EL8) has no chmod that refuses symlinks."""
+        d = tmp_vmdir / f"shmrdma-{os.geteuid()}"
+        d.mkdir()
+        os.chmod(d, 0o755)
+        with patch(
+            "ltvm_pkg.shmrdma.os.chmod", side_effect=NotImplementedError
+        ):
+            assert shmrdma.run_dir(os.geteuid()) == d
+        assert stat.S_IMODE(os.lstat(d).st_mode) == 0o700
+
     def test_planted_symlink_refused(
         self,
         tmp_vmdir: Path,  # noqa: F811
@@ -493,6 +507,17 @@ class TestPidFile:
         ):
             assert shmrdma._proc_info(1) == (-1, "", "")
 
+    def test_symlinked_cache_dir(self, tmp_path: Path) -> None:
+        """/proc names the resolved binary; a pid file may not."""
+        real = tmp_path / "real"
+        real.mkdir()
+        (real / "shmrdmad").write_text("")
+        (tmp_path / "link").symlink_to(real)
+        exe = tmp_path / "link" / "shmrdmad"
+        d = self._daemon(tmp_path, f"{os.getpid()} abc {exe}\n")
+        with self._proc(os.geteuid(), str(real / "shmrdmad")):
+            assert d.pid() == os.getpid()
+
     def test_symlinked_pid_file_ignored(self, tmp_path: Path) -> None:
         target = tmp_path / "target"
         target.write_text(f"{os.getpid()} abc x\n")
@@ -529,6 +554,69 @@ def test_start_timeout_kills(tmp_vmdir: Path) -> None:  # noqa: F811
             shmrdma.ensure_daemon()
     proc.kill.assert_called_once()
     assert not d.pid_path.exists()
+
+
+def test_pid_file_names_the_resolved_binary(
+    tmp_vmdir: Path,  # noqa: F811
+) -> None:
+    real = tmp_vmdir / "real"
+    real.mkdir()
+    (real / "shmrdmad").write_text("")
+    (tmp_vmdir / "cache").symlink_to(real)
+    d = shmrdma.Daemon("tester", os.geteuid(), tmp_vmdir)
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.pid = 4242
+    recorded = []
+
+    def popen(*a, **k):
+        return proc
+
+    def sleep(_s: float) -> None:
+        recorded.append(d.pid_path.read_text())
+        raise RuntimeError("stop here")
+
+    with (
+        patch("ltvm_pkg.shmrdma.daemon", return_value=d),
+        patch(
+            "ltvm_pkg.shmrdma.build_daemon",
+            return_value=(tmp_vmdir / "cache" / "shmrdmad", "h"),
+        ),
+        patch("ltvm_pkg.qemu_run._guest_scope", return_value=[]),
+        patch("ltvm_pkg.shmrdma.subprocess.Popen", side_effect=popen),
+        patch("ltvm_pkg.shmrdma.time.sleep", side_effect=sleep),
+        pytest.raises(RuntimeError, match="stop here"),
+    ):
+        shmrdma.ensure_daemon()
+    assert recorded == [f"4242 h {(real / 'shmrdmad').resolve()}\n"]
+
+
+def test_stop_holds_the_daemon_lock(tmp_vmdir: Path) -> None:  # noqa: F811
+    """A `vm shmrdmad start` waits until stop has removed the files."""
+    import fcntl
+
+    d = shmrdma.Daemon("tester", os.geteuid(), tmp_vmdir)
+    held = []
+
+    def kill(pid: int, sig: int) -> None:
+        fd = os.open(d.lock_path, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held.append(False)
+        except BlockingIOError:
+            held.append(True)
+        finally:
+            os.close(fd)
+
+    with (
+        patch("ltvm_pkg.qemu_run._launch_lock"),
+        patch("ltvm_pkg.shmrdma.daemon", return_value=d),
+        patch.object(shmrdma.Daemon, "pid", side_effect=[4242, 4242, 0]),
+        patch("ltvm_pkg.shmrdma.attached_vms", return_value=[]),
+        patch("ltvm_pkg.shmrdma.os.kill", side_effect=kill),
+    ):
+        assert shmrdma.stop_daemon() == "stopped shmrdmad (pid 4242)"
+    assert held == [True]
 
 
 @pytest.mark.parametrize(

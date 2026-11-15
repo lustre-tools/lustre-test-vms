@@ -223,7 +223,14 @@ def _check_private(d: Path, uid: int) -> None:
     if stat.S_IMODE(st.st_mode) & 0o077:
         if os.geteuid() != uid and os.geteuid() != 0:
             raise UnsafeDir(f"{d} is open to other users")
-        os.chmod(d, 0o700, follow_symlinks=False)
+        # os.chmod(follow_symlinks=False) needs glibc 2.32 (not EL8)
+        fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            if not os.path.samestat(os.fstat(fd), st):
+                raise UnsafeDir(f"{d} changed while it was checked")
+            os.fchmod(fd, 0o700)
+        finally:
+            os.close(fd)
 
 
 def _candidate_dirs(uid: int) -> list[Path]:
@@ -356,7 +363,11 @@ class Daemon:
         uid, comm, exe = _proc_info(pid)
         if comm != "shmrdmad" or uid != self.uid:
             return 0
-        return pid if exe == exe_want else 0
+        if exe == exe_want or os.path.realpath(exe) == os.path.realpath(
+            exe_want
+        ):
+            return pid
+        return 0
 
     def binary_hash(self) -> str:
         """Source hash the running daemon was built from, or ""."""
@@ -466,7 +477,9 @@ def attached_vms(d: Daemon) -> list[str]:
 
 @contextmanager
 def _daemon_lock(d: Daemon) -> Iterator[None]:
-    fd = _open_private(d.lock_path, os.O_RDWR | os.O_CREAT)
+    # root only opens the user's lock: a file it created would be root's
+    flags = os.O_RDWR | os.O_CREAT if os.geteuid() == d.uid else os.O_RDONLY
+    fd = _open_private(d.lock_path, flags)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
@@ -495,6 +508,8 @@ def ensure_daemon() -> Daemon:
                 )
             return d
         binary, digest = build_daemon()
+        # /proc/<pid>/exe is the resolved path, which pid() compares
+        binary = binary.resolve()
         for s in (d.rdma_socket, d.net_socket):
             s.unlink(missing_ok=True)
         from .qemu_run import _guest_scope, _scope_refused
@@ -596,27 +611,36 @@ def stop_daemon(force: bool = False) -> str:
 
     d = daemon(create=False)
     # Under the launch lock: a VM whose launch got past ensure_daemon
-    # has no QEMU pid recorded until that lock is released.
+    # has no QEMU pid recorded until that lock is released.  Then the
+    # daemon's lock, in the order a launch takes them, so a `vm shmrdmad
+    # start` cannot slip a new daemon in before the files are removed.
     with _launch_lock():
-        pid = d.pid()
-        if not pid:
+        if not d.pid():
             return "shmrdmad is not running"
-        users = attached_vms(d)
-        if users and not force:
-            raise RuntimeError(
-                f"shmrdmad is in use by {', '.join(users)}: their shmrdma "
-                f"devices and shmnet NICs stop working until they restart.  "
-                f"Stop them first, or pass --force"
-            )
-        os.kill(pid, signal.SIGTERM)
-        for _ in range(50):
-            if not d.pid():
-                break
-            time.sleep(0.1)
-        else:
-            os.kill(pid, signal.SIGKILL)
-        for p in (d.pid_path, d.rdma_socket, d.net_socket):
-            p.unlink(missing_ok=True)
+        with _daemon_lock(d):
+            return _stop_locked(d, force)
+
+
+def _stop_locked(d: Daemon, force: bool) -> str:
+    pid = d.pid()
+    if not pid:
+        return "shmrdmad is not running"
+    users = attached_vms(d)
+    if users and not force:
+        raise RuntimeError(
+            f"shmrdmad is in use by {', '.join(users)}: their shmrdma "
+            f"devices and shmnet NICs stop working until they restart.  "
+            f"Stop them first, or pass --force"
+        )
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(50):
+        if not d.pid():
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(pid, signal.SIGKILL)
+    for p in (d.pid_path, d.rdma_socket, d.net_socket):
+        p.unlink(missing_ok=True)
     return f"stopped shmrdmad (pid {pid})"
 
 
