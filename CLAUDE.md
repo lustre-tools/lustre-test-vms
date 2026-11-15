@@ -434,7 +434,8 @@ QEMU passes it via `-kernel`.
 
 The shmrdma guest driver (`shmrdma/kmod/`) is built per kernel in the
 build container (`ltvm_pkg/shmrdma.py`, cached under
-`kernels/<k>/shmrdma/`) and copied into `/lib/modules/<kver>/extra/`
+`kernels/<k>/shmrdma/`, or `~/.cache/ltvm/shmrdma/` for a user who does
+not own the kernel, by ZFS's ownership rules) and copied into `/lib/modules/<kver>/extra/`
 in the final stage; its sources are an image hash input.  A kernel it
 does not build for gets an image without it (`shmrdma_kmod: false` in
 meta.json), which `create --shmrdma` refuses; so does an image that

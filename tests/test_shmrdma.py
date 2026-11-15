@@ -1429,3 +1429,59 @@ class TestFetchKeepsKmodImages:
         assert cur is not None
         meta = json.loads((d / "meta.json").read_text())
         assert meta["shmrdma_kmod_images"] == {cur.name: True}
+
+
+class TestKmodCache:
+    @pytest.fixture
+    def tc(self, tmp_path: Path) -> MagicMock:
+        kdir = tmp_path / "kernels" / "6.12"
+        (kdir / "build-tree").mkdir(parents=True)
+        (kdir / "meta.json").write_text('{"input_hash": "k"}')
+        tc = MagicMock()
+        tc.name, tc.arch, tc.container_tag = "rocky10", "x86_64", "tag"
+        tc.kernel_output_dir.return_value = kdir
+        tc.meta_path.return_value = kdir / "meta.json"
+        return tc
+
+    @pytest.fixture
+    def podman(self) -> Iterator[MagicMock]:
+        def run(cmd, **kw):
+            src = Path(cmd[cmd.index("-v", 6) + 1].split(":")[0])
+            (src / "kmod" / "shmrdma.ko").write_bytes(b"ko")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with patch("ltvm_pkg.shmrdma.subprocess.run", side_effect=run) as r:
+            yield r
+
+    def test_owner_builds_into_the_kernel_dir(self, tc, podman) -> None:
+        ko = shmrdma.build_kmod(tc, None, "6.12.0")
+        assert ko == shmrdma.kmod_dir(tc) / "shmrdma.ko"
+        assert shmrdma.build_kmod(tc, None, "6.12.0") == ko
+        assert podman.call_count == 1
+
+    def test_others_build_their_own(self, tc, podman) -> None:
+        with patch("ltvm_pkg.zfs_build._shared_is_ours", return_value=False):
+            ko = shmrdma.build_kmod(tc, None, "6.12.0")
+        assert ko == shmrdma.user_kmod_dir(tc) / "shmrdma.ko"
+        assert not shmrdma.kmod_dir(tc).exists()
+
+    def test_untrusted_shared_module_ignored(self, tc, podman) -> None:
+        shmrdma.build_kmod(tc, None, "6.12.0")
+        with (
+            patch("ltvm_pkg.zfs_build._untrusted", return_value="planted"),
+            patch("ltvm_pkg.zfs_build._shared_is_ours", return_value=False),
+        ):
+            ko = shmrdma.build_kmod(tc, None, "6.12.0")
+        assert ko == shmrdma.user_kmod_dir(tc) / "shmrdma.ko"
+        assert podman.call_count == 2
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root writes anywhere")
+    def test_unwritable_kernel_dir_warns(self, tc, podman) -> None:
+        kdir = tc.kernel_output_dir.return_value
+        kdir.chmod(0o555)
+        try:
+            with patch("ltvm_pkg.zfs_build._shared_is_ours", return_value=True):
+                assert shmrdma.build_kmod(tc, None, "6.12.0") is None
+        finally:
+            kdir.chmod(0o755)
+        podman.assert_not_called()

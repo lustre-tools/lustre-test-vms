@@ -119,25 +119,75 @@ def _kmod_input_hash(kver: str, kernel_hash: str) -> str:
     return h.hexdigest()
 
 
+def user_kmod_dir(tc: TargetConfig, kernel: str | None = None) -> Path:
+    """The per-user fallback for :func:`kmod_dir`, as ZFS has."""
+    from .zfs_build import user_cache_root
+
+    kdir = tc.kernel_output_dir(kernel)
+    return user_cache_root() / "shmrdma" / tc.name / str(tc.arch) / kdir.name
+
+
 def build_kmod(tc: TargetConfig, kernel: str | None, kver: str) -> Path | None:
     """shmrdma.ko for *kernel*, built if missing or stale.
 
-    Returns None, with a warning, when it cannot be built: the image is
-    then built without it, and ``create --shmrdma`` refuses that image.
+    The kernel artifact's owner builds into it, anyone else into
+    :func:`user_kmod_dir`, by the rules ZFS follows (zfs_build): a
+    shared module is used only when nobody but that owner could have
+    written it.  Returns None, with a warning, when it cannot be built:
+    the image is then built without it, and ``create --shmrdma``
+    refuses that image.
     """
-    out = kmod_dir(tc, kernel)
-    ko = out / "shmrdma.ko"
-    build_tree = tc.kernel_output_dir(kernel) / "build-tree"
+    from .zfs_build import _no_more_writable_than, _shared_is_ours, _untrusted
+
+    kdir = tc.kernel_output_dir(kernel)
+    shared = kmod_dir(tc, kernel)
+    user = user_kmod_dir(tc, kernel)
+    build_tree = kdir / "build-tree"
     kmeta = load_meta_safe(tc.meta_path("kernel", kernel)) or {}
     kh = kmeta.get("input_hash")
     want = _kmod_input_hash(kver, kh if isinstance(kh, str) else "")
-    meta = load_meta_safe(out / "meta.json") or {}
-    if meta.get("input_hash") == want and ko.is_file():
-        return ko
+
+    def fresh(d: Path) -> bool:
+        meta = load_meta_safe(d / "meta.json") or {}
+        return meta.get("input_hash") == want and (d / "shmrdma.ko").is_file()
+
+    if fresh(shared):
+        why = _untrusted(shared, kdir)
+        if why is None:
+            return shared / "shmrdma.ko"
+        log.warning(
+            "shmrdma: ignoring the shared module in %s: %s", shared, why
+        )
+    if fresh(user):
+        return user / "shmrdma.ko"
     if not build_tree.is_dir():
         log.warning("shmrdma: no kernel build tree at %s", build_tree)
         return None
+    ours = _shared_is_ours(shared, kdir)
+    out = shared if ours else user
+    try:
+        ko = _build_kmod_into(tc, build_tree, kver, want, out)
+    except OSError as e:
+        log.warning(
+            "shmrdma.ko could not be built into %s (%s); the image will "
+            "not have it, and create --shmrdma will refuse it",
+            out,
+            e,
+        )
+        return None
+    if ours:
+        try:
+            _no_more_writable_than(out, kdir)
+        except OSError:
+            pass
+    return ko
+
+
+def _build_kmod_into(
+    tc: TargetConfig, build_tree: Path, kver: str, want: str, out: Path
+) -> Path | None:
     out.mkdir(parents=True, exist_ok=True)
+    ko = out / "shmrdma.ko"
     ko.unlink(missing_ok=True)
     with tempfile.TemporaryDirectory(prefix="shmrdma-kmod-") as tmp:
         src = Path(tmp)
