@@ -12,6 +12,10 @@ endif
 ifneq ($(shell grep -s "struct virtqueue_info {" $(srctree)/include/linux/virtio_config.h),)
 ccflags-y += -DHAVE_VIRTQUEUE_INFO
 endif
+# virtio_reset_device replaced config->reset in 5.16 (not in EL8)
+ifneq ($(shell grep -s "void virtio_reset_device" $(srctree)/include/linux/virtio.h),)
+ccflags-y += -DHAVE_VIRTIO_RESET_DEVICE
+endif
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
