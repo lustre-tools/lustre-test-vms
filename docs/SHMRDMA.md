@@ -36,17 +36,19 @@ ltvm vm shmrdmad [status|start|stop]
 ```
 
 - **The daemon.** ltvm builds `shmrdmad` with the host's C compiler
-  (cached under `~/.cache/ltvm/shmrdmad/<hash of sources and flags>/`,
-  and rebuilt when the compiler found differs) and runs one
+  (cached under `~/.cache/ltvm/shmrdmad/<hash>/`, the hash of its
+  sources, flags and the host's arch and libc, and rebuilt when the
+  compiler found differs) and runs one
   per user, started when a VM that needs it starts. Its sockets, pid
   file and log are in `/opt/qemu-vms/shmrdma-<uid>/`, a 0700 directory
-  of the user's (or `~/.local/state/ltvm/shmrdma/` when that cannot be
-  used), so it survives logout, and a QEMU running as the user or as
+  of the user's (or `~/.local/state/ltvm/shmrdma-<host>/` when that
+  cannot be used), so it survives logout, and a QEMU running as the user or as
   root can reach it. The sockets are 0600: they hand over guest RAM,
   so no other user may connect, and ltvm only trusts a daemon that runs
   as the user from the binary its pid file names. A QEMU run through
   sudo is not held back by the mode, so ltvm also refuses a socket that
-  is not the VM owner's (or root's), and on a classic host, where QEMU
+  is not the VM owner's (root's only for a VM root owns), and on a
+  classic host, where QEMU
   runs as root, a socket root cannot reach (a root-squashed NFS home
   holding the fallback directory). It runs in a systemd
   user scope of its own, like the guests. Under `sudo ltvm` it uses the
@@ -104,7 +106,12 @@ ltvm vm shmrdmad [status|start|stop]
   shmnet:SOCKET` connect to a daemon you run yourself
   (`shmrdmad -s RDMA_SOCKET -n NET_SOCKET`); ltvm does not start it,
   and a start refuses while nothing listens there.  A socket path must
-  be shorter than 108 bytes (104 on macOS).
+  be shorter than 108 bytes (104 on macOS) and hold no `,`, `|`, `:`,
+  `=` or blanks.
+  A start also refuses a socket another user could replace before QEMU
+  connects: every directory on its path, symlinks followed, must be
+  root's or the VM owner's and not writable by others unless sticky
+  (`/tmp` itself is fine, a shared group-writable directory is not).
 - **The guest module** is built per kernel in the target's build
   container and baked into the image (`/lib/modules/<kver>/extra/`,
   with `softdep virtiofs pre: shmrdma` in modprobe.d), so it is there
@@ -113,7 +120,10 @@ ltvm vm shmrdmad [status|start|stop]
   first, which the softdep cannot prevent, so the boot hook moves it
   to shmrdma. Where the module does not build, the image build warns
   and goes on, and `create --shmrdma` refuses that image. Fetched
-  images predate it: rebuild with `ltvm build image <target>`.
+  images predate it: rebuild with `ltvm build image <target>`.  An
+  image cross-built for another arch (`--arch aarch64` on an x86_64
+  host) never has it, since the module builds only in a native build
+  container: build that image on a host of its own arch.
 - **LNet.** `--shmrdma` adds `fc_shmrdma=1` to the guest's command
   line, and the boot-time lnet.conf emitter then puts eth0 on `o2ib`
   (the device takes its GIDs from eth0's addresses). An extra tcp or
@@ -151,7 +161,7 @@ command; they never build anything themselves.
 | a private runtime directory for the daemon | shmrdma, shmnet | creates it |
 | taskset (Linux) | --host-node | installs util-linux |
 | QEMU with libnuma, or numactl (Linux; optional: pinned vCPUs place most memory anyway) | --host-node | installs numactl |
-| TARGET's image built with the guest module (a fetched one is not) | shmrdma | `ltvm build image` |
+| TARGET's image built with the guest module (a fetched one is not) | shmrdma | `ltvm build image`; not a cross-arch image, which never has it |
 | TARGET's kernel built with SMC (optional: without it SMC falls back to TCP) | SMC | `ltvm build kernel` with `--lustre-tree`, then the image |
 
 `ltvm install` installs gcc and numactl with its other prerequisites.
@@ -296,8 +306,9 @@ exit tears down that VM's state in the daemon, with all worker threads
 stopped.  Pausing the VM (QMP `stop`) only stops its device, and `cont`
 resumes it with every QP, CQ and MR as it was; a peer sending to it
 meanwhile waits as on a receiver not ready, so a pause longer than 2 s
-fails the peer's QPs unless their `rnr_retry` is 7.  A CQ that overflows raises a CQ error event and moves its QPs
-to error.
+fails the peer's QPs unless their `rnr_retry` is 7.  A CQ that
+overflows raises a CQ error event and moves its QPs to error, and
+every later completion it loses fails the QPs on it again.
 
 **When the daemon stops answering.** A control command with no reply
 after 30 s makes the guest reset its own device.  QEMU stops the
@@ -357,6 +368,18 @@ a guest that is merely slow to refill.
 - One host; no live migration.
 - The daemon can read and write all guest memory of the VMs attached
   to it. That is acceptable only because every VM is the user's own.
+- The VMs on one daemon trust each other as hosts on one Ethernet
+  segment do.  A GID goes to the first device that adds it, so a guest
+  can take another VM's address-based GID before that VM boots or
+  while it resets; the other VM's add then fails, and RDMA CM traffic
+  for that address reaches the first guest.  No memory is exposed by
+  it: remote access still needs a QP the victim connected and an MR it
+  registered.
+- A worker copies one work request whole while holding its lock, and
+  the control plane (every VM's start, stop, reset and memory table
+  change) waits for every worker.  A single multi-GB SEND or RDMA
+  WRITE/READ therefore stalls the control plane for all VMs on the
+  daemon for the length of its copy, 0.1 to 0.7 s at 2 GB.
 - Kernel verbs only (no userspace verbs, so no perftest); no SRQ,
   atomics or memory windows.
 - x86_64 hosts: the daemon uses AVX2 non-temporal stores when the CPU
