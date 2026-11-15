@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -670,13 +671,14 @@ static void dev_raise_eq(struct vdev *d, uint32_t cqn, uint32_t type)
 
 static void qp_err_req(struct qp *qp);
 
-/* a CQE was lost: tell the guest, and fail every QP that uses the CQ */
-static void cq_overflow(struct cq *cq)
+/* a CQE was lost: fail every QP on the CQ, each time; tell the guest once */
+static void cq_overflow(struct cq *cq, bool first)
 {
 	struct vdev *d = cq->dev;
 
 	REL(&cq->rec->err, 1);
-	dev_raise_eq(d, cq->cqn, SHMRDMA_EQE_CQ_ERR);
+	if (first)
+		dev_raise_eq(d, cq->cqn, SHMRDMA_EQE_CQ_ERR);
 	for (int i = 0; i < SHMRDMA_MAX_QP; i++) {
 		struct qp *qp = d->qps[i];
 
@@ -700,8 +702,7 @@ static void cq_post(struct cq *cq, const struct shmrdma_cqe *cqe, bool solicited
 			    cq->dev->id, cq->cqn, cq->prod, cons);
 		cq->overflowed = true;
 		plat_spin_unlock(&cq->lock);
-		if (first)
-			cq_overflow(cq);
+		cq_overflow(cq, first);
 		return;
 	}
 	memcpy(ring_entry(&cq->ring, cq->prod), cqe, sizeof(*cqe));
@@ -2099,12 +2100,13 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		return 0;
 	}
 	case SHMRDMA_CMD_ADD_GID:
-		if (c->gid.index >= SHMRDMA_MAX_GID)
+		if (!d->initialized || c->gid.index >= SHMRDMA_MAX_GID)
 			return -EINVAL;
 		wlock();
 		/* a GID names one device: taking another's takes its traffic */
 		for (struct vdev *o = g_devs; o; o = o->next) {
-			if (o == d || o->dead || !dev_has_gid(o, c->gid.gid))
+			if (o == d || o->dead || !o->initialized ||
+			    !dev_has_gid(o, c->gid.gid))
 				continue;
 			wunlock();
 			gid_str(c->gid.gid, gs, sizeof(gs));
@@ -2644,21 +2646,27 @@ static int set_mem_table(struct vdev *d, struct vu_memtab *mt, int *fds, int nfd
 	d->nmap = mt->nregions;
 	/* before any worker runs again: the old maps may be gone */
 	for (int i = 0; i < MAX_VQS; i++)
-		if (d->vq[i].num && d->vq[i].desc_ua)
+		if (d->vq[i].desc_ua)
 			vq_map(d, &d->vq[i]);
 	wunlock();
 	return 0;
 }
 
+/* a vring that cannot be mapped whole is left with no pointers at all */
 static int vq_map(struct vdev *d, struct vq *q)
 {
-	bool aligned = !(q->desc_ua & 15) && !(q->avail_ua & 1) &&
-		       !(q->used_ua & 3);
+	bool ok = q->num && !(q->desc_ua & 15) && !(q->avail_ua & 1) &&
+		  !(q->used_ua & 3);
 
-	q->desc = aligned ? uaddr_hva(d, q->desc_ua, 16ull * q->num) : NULL;
-	q->avail = aligned ? uaddr_hva(d, q->avail_ua, 6 + 2ull * q->num) : NULL;
-	q->used = aligned ? uaddr_hva(d, q->used_ua, 6 + 8ull * q->num) : NULL;
-	return (q->desc && q->avail && q->used) ? 0 : -1;
+	q->desc = ok ? uaddr_hva(d, q->desc_ua, 16ull * q->num) : NULL;
+	q->avail = ok ? uaddr_hva(d, q->avail_ua, 6 + 2ull * q->num) : NULL;
+	q->used = ok ? uaddr_hva(d, q->used_ua, 6 + 8ull * q->num) : NULL;
+	if (q->desc && q->avail && q->used)
+		return 0;
+	q->desc = NULL;
+	q->avail = NULL;
+	q->used = NULL;
+	return -1;
 }
 
 static int handle_msg(struct vdev *d)
@@ -2694,6 +2702,12 @@ static int handle_msg(struct vdev *d)
 					close(in[i]);
 			}
 		}
+	}
+	/* the fds that did not fit are gone: the message cannot be obeyed */
+	if (mh.msg_flags & MSG_CTRUNC) {
+		LOG("dev%d: file descriptors lost (out of fds?)", d->id);
+		rc = -1;
+		goto out;
 	}
 	if (n != sizeof(h)) {
 		LOG("dev%d: short header", d->id);
@@ -2808,7 +2822,8 @@ static int handle_msg(struct vdev *d)
 		q->desc_ua = pl->addr.desc;
 		q->avail_ua = pl->addr.avail;
 		q->used_ua = pl->addr.used;
-		if (vq_map(d, q))
+		/* with no size yet, SET_VRING_NUM maps it */
+		if (vq_map(d, q) && q->num)
 			ack = 1;
 		wunlock();
 		if (ack)
@@ -2979,13 +2994,41 @@ out:
 	return rc;
 }
 
+/* held so that a connection can still be taken and closed with no fds left */
+static int g_spare_fd = -1;
+
+/* each VM costs a few fds per queue: take what the hard limit allows */
+static void raise_nofile(void)
+{
+	struct rlimit rl;
+
+	if (getrlimit(RLIMIT_NOFILE, &rl) || rl.rlim_cur >= rl.rlim_max)
+		return;
+	rl.rlim_cur = rl.rlim_max;
+	/* macOS refuses a soft limit above OPEN_MAX */
+	if (setrlimit(RLIMIT_NOFILE, &rl) && rl.rlim_max > 10240) {
+		rl.rlim_cur = 10240;
+		setrlimit(RLIMIT_NOFILE, &rl);
+	}
+}
+
 static void accept_conn(int lsock, int kind)
 {
 	int s = plat_accept(lsock);
 	struct vdev *d;
 
-	if (s < 0)
+	if (s < 0) {
+		/* else the listener stays readable and the main loop spins */
+		if ((errno == EMFILE || errno == ENFILE) && g_spare_fd >= 0) {
+			close(g_spare_fd);
+			s = plat_accept(lsock);
+			if (s >= 0)
+				close(s);
+			g_spare_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+			LOG("connection refused: out of file descriptors");
+		}
 		return;
+	}
 	d = calloc(1, sizeof(*d));
 	if (!d) {
 		LOG("connection refused: out of memory");
@@ -3134,6 +3177,8 @@ int main(int argc, char **argv)
 			return 2;
 		}
 	}
+	raise_nofile();
+	g_spare_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
 	plat_init();
 	plat_spin_init(&g_mac_lock);
 

@@ -1034,6 +1034,8 @@ static int shmrdma_create_qp(struct ib_qp *ibqp,
 
 	if (udata || init->srq || init->create_flags)
 		return -EOPNOTSUPP;
+	if (!init->send_cq || !init->recv_cq)
+		return -EINVAL;
 	switch (init->qp_type) {
 	case IB_QPT_RC:
 		qp->type = SHMRDMA_QPT_RC;
@@ -1182,53 +1184,27 @@ static int shmrdma_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 		cmd.modify_qp.mask |= SHMRDMA_MQ_STATE;
 		cmd.modify_qp.state = next;
 	}
-	if (mask & IB_QP_AV) {
-		const struct ib_global_route *grh = rdma_ah_read_grh(&attr->ah_attr);
-
-		memcpy(qp->dgid, grh->dgid.raw, 16);
-	}
-	if (mask & IB_QP_DEST_QPN)
-		qp->attr.dest_qp_num = attr->dest_qp_num;
 	if (mask & (IB_QP_AV | IB_QP_DEST_QPN)) {
 		cmd.modify_qp.mask |= SHMRDMA_MQ_DEST;
-		memcpy(cmd.modify_qp.dgid, qp->dgid, 16);
-		cmd.modify_qp.dest_qpn = qp->attr.dest_qp_num;
+		memcpy(cmd.modify_qp.dgid, mask & IB_QP_AV ?
+		       rdma_ah_read_grh(&attr->ah_attr)->dgid.raw : qp->dgid,
+		       16);
+		cmd.modify_qp.dest_qpn = mask & IB_QP_DEST_QPN ?
+					 attr->dest_qp_num :
+					 qp->attr.dest_qp_num;
 	}
 	if (mask & IB_QP_QKEY) {
 		cmd.modify_qp.mask |= SHMRDMA_MQ_QKEY;
 		cmd.modify_qp.qkey = attr->qkey;
-		qp->attr.qkey = attr->qkey;
 	}
 	if (mask & IB_QP_RNR_RETRY) {
 		cmd.modify_qp.mask |= SHMRDMA_MQ_RETRY;
 		cmd.modify_qp.rnr_retry = attr->rnr_retry;
-		qp->attr.rnr_retry = attr->rnr_retry;
 	}
-	if (mask & IB_QP_RETRY_CNT)
-		qp->attr.retry_cnt = attr->retry_cnt;
-	if (mask & IB_QP_TIMEOUT)
-		qp->attr.timeout = attr->timeout;
-	if (mask & IB_QP_PATH_MTU)
-		qp->attr.path_mtu = attr->path_mtu;
-	if (mask & IB_QP_SQ_PSN)
-		qp->attr.sq_psn = attr->sq_psn;
-	if (mask & IB_QP_RQ_PSN)
-		qp->attr.rq_psn = attr->rq_psn;
 	if (mask & IB_QP_ACCESS_FLAGS) {
 		cmd.modify_qp.mask |= SHMRDMA_MQ_ACCESS;
 		cmd.modify_qp.access = acc_bits(attr->qp_access_flags);
-		qp->attr.qp_access_flags = attr->qp_access_flags;
 	}
-	if (mask & IB_QP_PKEY_INDEX)
-		qp->attr.pkey_index = attr->pkey_index;
-	if (mask & IB_QP_PORT)
-		qp->attr.port_num = attr->port_num;
-	if (mask & IB_QP_MIN_RNR_TIMER)
-		qp->attr.min_rnr_timer = attr->min_rnr_timer;
-	if (mask & IB_QP_MAX_QP_RD_ATOMIC)
-		qp->attr.max_rd_atomic = attr->max_rd_atomic;
-	if (mask & IB_QP_MAX_DEST_RD_ATOMIC)
-		qp->attr.max_dest_rd_atomic = attr->max_dest_rd_atomic;
 
 	if (cmd.modify_qp.mask) {
 		rc = shmrdma_cmd(dev, &cmd, NULL);
@@ -1240,6 +1216,39 @@ static int shmrdma_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 		if (rc)
 			goto out;
 	}
+
+	/* only what the backend took: query_qp and later modifies read it */
+	if (mask & IB_QP_AV)
+		memcpy(qp->dgid, rdma_ah_read_grh(&attr->ah_attr)->dgid.raw,
+		       16);
+	if (mask & IB_QP_DEST_QPN)
+		qp->attr.dest_qp_num = attr->dest_qp_num;
+	if (mask & IB_QP_QKEY)
+		qp->attr.qkey = attr->qkey;
+	if (mask & IB_QP_RNR_RETRY)
+		qp->attr.rnr_retry = attr->rnr_retry;
+	if (mask & IB_QP_ACCESS_FLAGS)
+		qp->attr.qp_access_flags = attr->qp_access_flags;
+	if (mask & IB_QP_RETRY_CNT)
+		qp->attr.retry_cnt = attr->retry_cnt;
+	if (mask & IB_QP_TIMEOUT)
+		qp->attr.timeout = attr->timeout;
+	if (mask & IB_QP_PATH_MTU)
+		qp->attr.path_mtu = attr->path_mtu;
+	if (mask & IB_QP_SQ_PSN)
+		qp->attr.sq_psn = attr->sq_psn;
+	if (mask & IB_QP_RQ_PSN)
+		qp->attr.rq_psn = attr->rq_psn;
+	if (mask & IB_QP_PKEY_INDEX)
+		qp->attr.pkey_index = attr->pkey_index;
+	if (mask & IB_QP_PORT)
+		qp->attr.port_num = attr->port_num;
+	if (mask & IB_QP_MIN_RNR_TIMER)
+		qp->attr.min_rnr_timer = attr->min_rnr_timer;
+	if (mask & IB_QP_MAX_QP_RD_ATOMIC)
+		qp->attr.max_rd_atomic = attr->max_rd_atomic;
+	if (mask & IB_QP_MAX_DEST_RD_ATOMIC)
+		qp->attr.max_dest_rd_atomic = attr->max_dest_rd_atomic;
 	if (mask & IB_QP_STATE) {
 		qp->attr.qp_state = next;
 		qp->attr.cur_qp_state = next;
@@ -1876,7 +1885,9 @@ static int shmrdma_probe(struct virtio_device *vdev)
 	dev->nb_registered = true;
 	rtnl_lock();
 	ndev = rtnl_dereference(dev->ndev);
-	rc = ndev ? ib_device_set_netdev(&dev->ibdev, ndev, 1) : -ENODEV;
+	/* an unregister before the notifier was registered was not seen */
+	rc = ndev && ndev->reg_state == NETREG_REGISTERED ?
+	     ib_device_set_netdev(&dev->ibdev, ndev, 1) : -ENODEV;
 	rtnl_unlock();
 	if (rc)
 		goto err_reset;
@@ -1891,8 +1902,9 @@ static int shmrdma_probe(struct virtio_device *vdev)
 	if (dev->broken)
 		schedule_work(&dev->fatal_work);
 	mutex_unlock(&dev->ctrl_mutex);
-	dev_info(&vdev->dev, "%s on %s, backend dev%llu\n",
-		 dev_name(&dev->ibdev.dev), netdev, resp.val);
+	dev_info(&vdev->dev, "%s on %s, backend dev%llu, ABI %u\n",
+		 dev_name(&dev->ibdev.dev), netdev, resp.val,
+		 SHMRDMA_ABI_VERSION);
 	return 0;
 
 err_reset:

@@ -415,6 +415,18 @@ def _run_dir_check() -> Req:
     )
 
 
+def _selection(t: Target) -> list[str]:
+    """The options that pick *t*'s artifacts on a build command line."""
+    return (["--kernel", t.kernel] if t.kernel else []) + (
+        ["--arch", t.arch] if t.arch else []
+    )
+
+
+def _cross(t: Target) -> bool:
+    """An image of another arch than the host's: built without the module."""
+    return bool(t.arch) and t.arch != _native_arch()
+
+
 def _build_image(t: Target, force: bool = False) -> None:
     """Rebuild *t*'s image with the Lustre tree doctor was given."""
     if not t.lustre_tree:
@@ -422,12 +434,11 @@ def _build_image(t: Target, force: bool = False) -> None:
             "an image build bakes in Lustre from a source tree: pass "
             "--lustre-tree"
         )
-    k = ["--kernel", t.kernel] if t.kernel else []
     _ltvm(
         "build",
         "image",
         t.name,
-        *k,
+        *_selection(t),
         "--lustre-tree",
         t.lustre_tree,
         *(["--force"] if force else []),
@@ -437,15 +448,14 @@ def _build_image(t: Target, force: bool = False) -> None:
 def target_checks(t: Target) -> list[Req]:
     """What the image and kernel of target *t* need."""
     reqs = []
-    k = f" --kernel {t.kernel}" if t.kernel else ""
+    sel = _selection(t)
+    k = "".join(f" {a}" for a in sel)
     if t.image is None or t.kernel_dir is None:
         tree = t.lustre_tree
 
         def build() -> None:
             if tree:
-                _ltvm(
-                    "build", "kernel", t.name, *k.split(), "--lustre-tree", tree
-                )
+                _ltvm("build", "kernel", t.name, *sel, "--lustre-tree", tree)
             _build_image(t)
 
         reqs.append(
@@ -461,22 +471,36 @@ def target_checks(t: Target) -> list[Req]:
             )
         )
         return reqs
-    reqs.append(
-        Req(
-            f"{t.name} image has the shmrdma guest module",
-            frozenset({SHMRDMA}),
-            shmrdma.image_has_kmod(t.image)
-            if t.has_kmod is None
-            else t.has_kmod,
-            str(t.image),
-            # Its inputs may be unchanged (the module failed to build
-            # last time), so only a forced rebuild retries it.
-            fix=lambda: _build_image(t, force=True),
-            how=f"ltvm build image {t.name}{k} --lustre-tree <tree> "
-            f"--force (a fetched image predates it)",
-            recheck=lambda: _current_has_kmod(t),
-        )
+    has_kmod = (
+        shmrdma.image_has_kmod(t.image) if t.has_kmod is None else t.has_kmod
     )
+    if _cross(t) and not has_kmod:
+        reqs.append(
+            Req(
+                f"{t.name} image has the shmrdma guest module",
+                frozenset({SHMRDMA}),
+                False,
+                f"{t.image}: a {t.arch} image built on a "
+                f"{_native_arch()} host has no guest module",
+                how=f"build the {t.arch} image on a {t.arch} host; a "
+                f"rebuild here leaves it out again",
+            )
+        )
+    else:
+        reqs.append(
+            Req(
+                f"{t.name} image has the shmrdma guest module",
+                frozenset({SHMRDMA}),
+                has_kmod,
+                str(t.image),
+                # Its inputs may be unchanged (the module failed to build
+                # last time), so only a forced rebuild retries it.
+                fix=lambda: _build_image(t, force=True),
+                how=f"ltvm build image {t.name}{k} --lustre-tree <tree> "
+                f"--force (a fetched image predates it)",
+                recheck=lambda: _current_has_kmod(t),
+            )
+        )
     smc = _kernel_has_smc(t.kernel_dir)
     tree = t.lustre_tree
 
@@ -486,7 +510,7 @@ def target_checks(t: Target) -> list[Req]:
                 "a kernel rebuild needs the Lustre tree whose patches it "
                 "carries: pass --lustre-tree"
             )
-        _ltvm("build", "kernel", t.name, *k.split(), "--lustre-tree", tree)
+        _ltvm("build", "kernel", t.name, *sel, "--lustre-tree", tree)
         _build_image(t)
 
     reqs.append(
@@ -549,10 +573,12 @@ def refusal(
     asked = ", ".join(flags[f] for f in sorted(feats) if f in flags)
     target = ""
     if t is not None:
-        target = f" {t.name}" + (f" --kernel {t.kernel}" if t.kernel else "")
+        target = f" {t.name}" + "".join(f" {a}" for a in _selection(t))
     lines = [f"{asked} needs what this host does not have yet:"]
     lines += [f"  {r.name}: {r.detail}" for r in missing]
-    if any(r is not running for r in missing):
+    # what doctor cannot fix says what will, and doctor is not offered
+    lines += [f"  ({r.how})" for r in missing if r.fix is None and r.how]
+    if any(r is not running and r.fix is not None for r in missing):
         lines.append(f"run `ltvm doctor --fix --shmrdma{target}` to set it up")
     return "\n".join(lines)
 

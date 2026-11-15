@@ -255,6 +255,90 @@ def test_launch_refuses_another_users_socket(
             _run_launch(vm, _LaunchHarness())
 
 
+def test_launch_refuses_a_root_socket_for_a_users_vm(
+    tmp_vmdir: Path,  # noqa: F811
+    daemon_socket: Path,
+) -> None:
+    vm = _make_vm(tmp_vmdir)
+    vm.shmrdma = str(daemon_socket)
+    vm.save()
+    real = os.lstat
+
+    def lstat(p, *a, **kw):
+        st = real(p, *a, **kw)
+        if str(p) != str(daemon_socket):
+            return st
+        f = list(st[:10])
+        f[4] = 0
+        return os.stat_result(f)
+
+    with patch("ltvm_pkg.shmrdma.os.lstat", side_effect=lstat):
+        with pytest.raises(SystemExit):
+            _run_launch(vm, _LaunchHarness())
+
+
+class TestReplaceable:
+    """A socket is trusted only where nobody else can swap it."""
+
+    def test_private_dirs_pass(self, tmp_path: Path) -> None:
+        d = tmp_path / "d"
+        d.mkdir(mode=0o700)
+        assert shmrdma.replaceable(str(d / "s.sock"), {0, os.geteuid()}) is None
+
+    def test_writable_dir(self, tmp_path: Path) -> None:
+        d = tmp_path / "d"
+        d.mkdir()
+        d.chmod(0o777)
+        why = shmrdma.replaceable(str(d / "s.sock"), {0, os.geteuid()})
+        assert why == f"{d} is writable by other users"
+        d.chmod(0o1777)
+        assert shmrdma.replaceable(str(d / "s.sock"), {0, os.geteuid()}) is None
+
+    def test_foreign_dir(self, tmp_path: Path) -> None:
+        d = tmp_path / "d"
+        d.mkdir(mode=0o700)
+        why = shmrdma.replaceable(str(d / "s.sock"), {0})
+        assert why is not None and "belongs to uid" in why
+
+    def test_through_a_symlink(self, tmp_path: Path) -> None:
+        """The directory holding a symlink counts, and its target's too."""
+        open_dir = tmp_path / "open"
+        open_dir.mkdir()
+        safe = tmp_path / "safe"
+        safe.mkdir(mode=0o700)
+        (open_dir / "link").symlink_to(safe)
+        open_dir.chmod(0o777)
+        why = shmrdma.replaceable(
+            str(open_dir / "link" / "s.sock"), {0, os.geteuid()}
+        )
+        assert why == f"{open_dir.resolve()} is writable by other users"
+        open_dir.chmod(0o755)
+        (safe / "in").mkdir()
+        (safe / "in").chmod(0o777)
+        (open_dir / "link2").symlink_to(safe / "in")
+        why = shmrdma.replaceable(
+            str(open_dir / "link2" / "s.sock"), {0, os.geteuid()}
+        )
+        assert why == f"{(safe / 'in').resolve()} is writable by other users"
+
+    def test_launch_refuses(self, tmp_vmdir: Path, tmp_path: Path) -> None:  # noqa: F811
+        d = tmp_path / "shared"
+        d.mkdir()
+        path = d / "rdma.sock"
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.bind(str(path))
+        d.chmod(0o777)
+        try:
+            vm = _make_vm(tmp_vmdir)
+            vm.shmrdma = str(path)
+            vm.save()
+            with pytest.raises(SystemExit):
+                _run_launch(vm, _LaunchHarness())
+        finally:
+            d.chmod(0o755)
+            s.close()
+
+
 def test_long_socket_path_refused(tmp_vmdir: Path) -> None:  # noqa: F811
     from ltvm_pkg.nic_spec import SUN_PATH_SIZE, socket_path_problem
 
@@ -544,7 +628,8 @@ class TestPrivateDir:
             shmrdma, "_state_home", lambda uid: tmp_vmdir / "state"
         )
         d = shmrdma.run_dir(os.geteuid())
-        assert d == tmp_vmdir / "state" / "ltvm" / "shmrdma"
+        assert d == shmrdma._candidate_dirs(os.geteuid())[1]
+        assert d.parent == tmp_vmdir / "state" / "ltvm"
 
     def test_foreign_owner_refused(self, tmp_vmdir: Path, monkeypatch) -> None:  # noqa: F811
         d = tmp_vmdir / f"shmrdma-{os.geteuid()}"
@@ -572,7 +657,7 @@ class TestPrivateDir:
             shmrdma, "_state_home", lambda uid: tmp_vmdir / "state"
         )
         first = tmp_vmdir / f"shmrdma-{os.geteuid()}"
-        state = tmp_vmdir / "state" / "ltvm" / "shmrdma"
+        state = shmrdma._candidate_dirs(os.geteuid())[1]
         first.mkdir(mode=0o700)
         state.mkdir(mode=0o700, parents=True)
 
@@ -591,7 +676,16 @@ class TestPrivateDir:
         with patch("ltvm_pkg.shmrdma.os.geteuid", return_value=uid + 1):
             assert shmrdma._candidate_dirs(uid) == mine
         home = Path(shmrdma.pwd.getpwuid(uid).pw_dir)
-        assert mine[1] == home / ".local/state/ltvm/shmrdma"
+        host = socket.gethostname().split(".")[0]
+        assert mine[1] == home / f".local/state/ltvm/shmrdma-{host}"
+
+    def test_hosts_sharing_a_home_do_not_share_it(self) -> None:
+        uid = os.geteuid()
+        with patch("ltvm_pkg.shmrdma.socket.gethostname", return_value="a.x"):
+            a = shmrdma._candidate_dirs(uid)
+        with patch("ltvm_pkg.shmrdma.socket.gethostname", return_value="b.x"):
+            b = shmrdma._candidate_dirs(uid)
+        assert a[1] != b[1] and a[1].name == "shmrdma-a"
 
     def test_root_never_creates(self, tmp_vmdir: Path) -> None:  # noqa: F811
         uid = os.geteuid()
@@ -708,6 +802,21 @@ class TestPidFile:
         d.pid_path.symlink_to(target)
         assert d.pid() == 0
 
+    def test_fifo_pid_file_does_not_hang(self, tmp_path: Path) -> None:
+        import threading
+
+        d = shmrdma.Daemon("tester", os.geteuid(), tmp_path)
+        os.mkfifo(d.pid_path)
+        got = []
+        t = threading.Thread(target=lambda: got.append(d.pid()), daemon=True)
+        t.start()
+        t.join(5)
+        assert got == [0]
+        os.mkfifo(d.lock_path)
+        with pytest.raises(OSError, match="not a regular file"):
+            with shmrdma._daemon_lock(d):
+                pass
+
 
 def test_root_does_not_start_a_daemon(tmp_vmdir: Path) -> None:  # noqa: F811
     d = shmrdma.Daemon("tester", os.geteuid() + 1, tmp_vmdir)
@@ -774,6 +883,21 @@ def test_pid_file_names_the_resolved_binary(
     assert recorded == [f"4242 h {(real / 'shmrdmad').resolve()}\n"]
 
 
+def test_stop_kills_only_the_daemon(tmp_vmdir: Path) -> None:  # noqa: F811
+    """No SIGKILL for a pid the daemon gave up after the last look."""
+    d = shmrdma.Daemon("tester", os.geteuid(), tmp_vmdir)
+    with (
+        patch.object(shmrdma.Daemon, "pid", side_effect=[4242] * 51 + [0]),
+        patch("ltvm_pkg.shmrdma.attached_vms", return_value=[]),
+        patch("ltvm_pkg.shmrdma.time.sleep"),
+        patch("ltvm_pkg.shmrdma.os.kill") as kill,
+    ):
+        shmrdma._stop_locked(d, force=False)
+    assert [c.args for c in kill.call_args_list] == [
+        (4242, shmrdma.signal.SIGTERM)
+    ]
+
+
 def test_stop_holds_the_daemon_lock(tmp_vmdir: Path) -> None:  # noqa: F811
     """A `vm shmrdmad start` waits until stop has removed the files."""
     import fcntl
@@ -803,7 +927,7 @@ def test_stop_holds_the_daemon_lock(tmp_vmdir: Path) -> None:  # noqa: F811
 
 
 @pytest.mark.parametrize(
-    "bad", ["/a,b", "/a|b", "/a\nNICS=x", "/a\tb", "rel/x", "/a:b"]
+    "bad", ["/a,b", "/a|b", "/a\nNICS=x", "/a\tb", "rel/x", "/a:b", "/a=b"]
 )
 def test_socket_paths_rejected(bad: str) -> None:
     from ltvm_pkg import vm_commands
@@ -853,13 +977,42 @@ def test_daemon_rebuilt_for_another_compiler(
         monkeypatch.setenv("CC", "")
         with patch("ltvm_pkg.shmrdma.shutil.which", return_value=None):
             assert shmrdma.build_daemon() == (out, digest)
-    # build_daemon records the compiler's real path; /tmp is a symlink on macOS
-    assert calls == [
-        str((tmp_path / "gcc").resolve()),
-        str((tmp_path / "clang").resolve()),
-    ]
+    assert calls == [str(tmp_path / "gcc"), str(tmp_path / "clang")]
     with patch("ltvm_pkg.shmrdma.DAEMON_CFLAGS", ("-O0",)):
         assert shmrdma.daemon_digest() != digest
+    with patch("ltvm_pkg.shmrdma._host_abi", return_value="Linux riscv64"):
+        assert shmrdma.daemon_digest() != digest
+
+
+def test_daemon_builds_through_a_ccache_wrapper(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """ccache's masquerade link compiles only when run by its own name."""
+    real = shutil.which("cc") or shutil.which("gcc")
+    if not real:
+        pytest.skip("needs a C compiler")
+    wrapper = tmp_path / "ccache"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        'case "${0##*/}" in\n'
+        f'cc) exec {real} "$@" ;;\n'
+        '*) echo "ccache: invalid option -- O" >&2; exit 1 ;;\n'
+        "esac\n"
+    )
+    wrapper.chmod(0o755)
+    masq = tmp_path / "masq"
+    masq.mkdir()
+    (masq / "cc").symlink_to(wrapper)
+    monkeypatch.setenv("PATH", f"{masq}:{os.environ['PATH']}")
+    monkeypatch.delenv("CC", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    out, _digest = shmrdma.build_daemon()
+    assert out.is_file()
+    # the stamp names the real compiler, so a relinked masquerade rebuilds
+    assert out.with_name("cc").read_text().strip() == str(wrapper.resolve())
+    with patch("ltvm_pkg.shmrdma.subprocess.run") as run:
+        assert shmrdma.build_daemon()[0] == out
+    run.assert_not_called()
 
 
 _SHMNET_HARNESS = r"""
@@ -954,6 +1107,39 @@ static void test_vq_chain(void)
 	/* TX: a loop of empty descriptors ends at the step budget */
 	t[0] = (struct vring_desc){ 4096, 0, VRING_DESC_F_NEXT, 0 };
 	CHECK(chain(&d, &q, false) == -1);
+	/* an indirect table needs only the 8-byte alignment kmalloc gives */
+	struct vring_desc *it = (struct vring_desc *)(mem + 8200);
+
+	it[0] = (struct vring_desc){ 4096, 10, VRING_DESC_F_NEXT, 1 };
+	it[1] = (struct vring_desc){ 4196, 10, 0, 0 };
+	t[0] = (struct vring_desc){ 8200, 2 * sizeof(*it),
+		VRING_DESC_F_INDIRECT, 0 };
+	CHECK(chain(&d, &q, false) == 2);
+	memmove(mem + 8204, it, 2 * sizeof(*it));
+	t[0].addr = 8204;
+	CHECK(chain(&d, &q, false) == -1);
+}
+
+static void test_vq_map(void)
+{
+	static uint8_t mem[1 << 16];
+	static struct vdev d;
+	struct vq q = { .desc_ua = 0x1000, .avail_ua = 0x2000,
+			.used_ua = 0x3000 };
+
+	d.nmap = 1;
+	d.map[0].size = sizeof(mem);
+	d.map[0].uaddr = 0;
+	d.map[0].hva = mem;
+	/* an address with no size maps nothing a later table could leave */
+	CHECK(vq_map(&d, &q) == -1);
+	CHECK(!q.desc && !q.avail && !q.used);
+	q.num = 8;
+	CHECK(vq_map(&d, &q) == 0);
+	CHECK(q.desc && q.avail && q.used);
+	q.used_ua = sizeof(mem) - 8;
+	CHECK(vq_map(&d, &q) == -1);
+	CHECK(!q.desc && !q.avail && !q.used);
 }
 
 static void test_mac_claim(void)
@@ -974,12 +1160,17 @@ static void test_mac_claim(void)
 	CHECK(net_claim_mac(&p2, m));
 	CHECK(p1.mac == 0 && p2.mac == mac_key(m));
 	CHECK(!net_claim_mac(&p1, m));
+	/* the holder sent after the claimer read the clock */
+	p2.mac_ns = now_ns() + 1000000;
+	CHECK(!net_claim_mac(&p1, m));
+	CHECK(p2.mac == mac_key(m));
 }
 
 int main(void)
 {
 	test_fill_csum();
 	test_vq_chain();
+	test_vq_map();
 	test_mac_claim();
 	printf("fails=%d\n", fails);
 	return fails != 0;
@@ -1207,7 +1398,7 @@ class TestRequirements:
         from ltvm_pkg import shmrdma_req as sr
 
         reqs = [
-            self._req("cc", {sr.SHMRDMA, sr.SHMNET}, False),
+            self._req("cc", {sr.SHMRDMA, sr.SHMNET}, False, fix=lambda: None),
             self._req("numactl", {sr.HOST_NODE}, False, hard=False),
             self._req("taskset", {sr.HOST_NODE}, True),
         ]
@@ -1298,6 +1489,60 @@ class TestRequirements:
         t = sr.Target("rocky10", problem="No kernel matching 'x'\nRun: ...")
         (r,) = sr.target_checks(t)
         assert not r.ok and r.detail == "No kernel matching 'x'"
+
+    def test_repairs_keep_the_arch(self, tmp_path: Path) -> None:
+        """doctor --fix --arch builds the artifacts it was asked about."""
+        from ltvm_pkg import shmrdma_req as sr
+
+        arch = sr._native_arch()
+        calls: list[tuple[str, ...]] = []
+        with patch(
+            "ltvm_pkg.shmrdma_req._ltvm", side_effect=lambda *a: calls.append(a)
+        ):
+            t = sr.Target("rocky10", "6.12", "/src", arch=arch)
+            (r,) = sr.target_checks(t)
+            assert r.fix is not None
+            r.fix()
+            assert f"--kernel 6.12 --arch {arch}" in r.how
+            _image_dir(tmp_path, {"shmrdma_kmod": False})
+            (tmp_path / "build-tree").mkdir()
+            (tmp_path / "build-tree" / ".config").write_text("\n")
+            t = sr.Target(
+                "rocky10",
+                "6.12",
+                "/src",
+                image=tmp_path / NEW_IMG,
+                kernel_dir=tmp_path,
+                arch=arch,
+            )
+            for r in sr.target_checks(t):
+                assert r.fix is not None
+                r.fix()
+        assert len(calls) == 5
+        for c in calls:
+            assert c[c.index("--arch") + 1] == arch, c
+            assert c[c.index("--kernel") + 1] == "6.12", c
+        why = sr.refusal({sr.SHMRDMA}, t)
+        assert why is not None
+        assert f"--shmrdma rocky10 --kernel 6.12 --arch {arch}`" in why
+
+    def test_cross_arch_image_offers_no_fix(self, tmp_path: Path) -> None:
+        """A cross-built image never has the module: no rebuild is offered."""
+        from ltvm_pkg import shmrdma_req as sr
+
+        other = "x86_64" if sr._native_arch() != "x86_64" else "aarch64"
+        _image_dir(tmp_path, {"shmrdma_kmod": False})
+        t = sr.Target(
+            "rocky10", image=tmp_path / NEW_IMG, kernel_dir=tmp_path, arch=other
+        )
+        kmod = [r for r in sr.target_checks(t) if "module" in r.name][0]
+        assert not kmod.ok and kmod.fix is None
+        assert f"on a {other} host" in kmod.how
+        with patch("ltvm_pkg.shmrdma_req.host_checks", return_value=[]):
+            why = sr.refusal({sr.SHMRDMA}, t)
+        assert why is not None
+        assert f"on a {other} host" in why
+        assert "doctor --fix" not in why
 
     def test_host_checks_read_qemu(self) -> None:
         from ltvm_pkg import shmrdma_req as sr
