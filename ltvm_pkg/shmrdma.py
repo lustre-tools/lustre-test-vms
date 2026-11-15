@@ -19,6 +19,7 @@ Two halves, both built from the sources under ``shmrdma/``:
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import getpass
 import hashlib
@@ -28,6 +29,7 @@ import os
 import pwd
 import shutil
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -347,9 +349,11 @@ def _state_home(uid: int) -> Path:
 
 
 def _candidate_dirs(uid: int) -> list[Path]:
+    # a home shared over NFS must not give two hosts' daemons one directory
+    host = socket.gethostname().split(".")[0] or "localhost"
     return [
         vm_state.VM_DIR / f"shmrdma-{uid}",
-        _state_home(uid) / "ltvm" / "shmrdma",
+        _state_home(uid) / "ltvm" / f"shmrdma-{host}",
     ]
 
 
@@ -413,9 +417,17 @@ def run_dir(uid: int, create: bool = True) -> Path:
     return next((d for d in cands if not os.path.lexists(d)), cands[0])
 
 
-def _open_private(path: Path, flags: int) -> int:
-    """os.open *path* in a checked directory, refusing symlinks."""
-    return os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+def _open_private(path: Path, flags: int, uid: int) -> int:
+    """os.open *path* in a checked directory: only a regular file of
+    *uid*, never a symlink, and never waiting on a FIFO planted there."""
+    fd = os.open(
+        path, flags | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, 0o600
+    )
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != uid:
+        os.close(fd)
+        raise OSError(errno.EPERM, "not a regular file of the daemon's", path)
+    return fd
 
 
 @dataclass(frozen=True)
@@ -448,7 +460,7 @@ class Daemon:
 
     def _record(self) -> list[str]:
         try:
-            fd = _open_private(self.pid_path, os.O_RDONLY)
+            fd = _open_private(self.pid_path, os.O_RDONLY, self.uid)
         except OSError:
             return []
         with os.fdopen(fd) as f:
@@ -569,18 +581,38 @@ def _cache_dir(uid: int | None = None) -> Path:
     return base / "ltvm" / "shmrdmad"
 
 
+def _host_abi() -> str:
+    """What a binary built here needs to run: another host sharing the
+    cache in an NFS home may have another arch or an older libc."""
+    import platform
+
+    libc = ""
+    if _LINUX:
+        try:
+            libc = os.confstr("CS_GNU_LIBC_VERSION") or ""
+        except (ValueError, OSError):
+            libc = ""
+    else:
+        libc = platform.mac_ver()[0]
+    return f"{platform.system()} {platform.machine()} {libc}"
+
+
 def daemon_digest() -> str:
-    """What the daemon binary is built from: its sources and flags."""
+    """What the daemon binary is built from: its sources and flags, for
+    this host's arch and libc."""
     h = hashlib.sha256(_source_hash(_DAEMON_FILES).encode())
     h.update("\0".join(DAEMON_CFLAGS).encode())
+    h.update(b"\0" + _host_abi().encode())
     return h.hexdigest()[:16]
 
 
 def _compiler() -> str | None:
+    """The compiler as found: run by this name, since a ccache wrapper is
+    a compiler only when its argv[0] names one."""
     cc = os.environ.get("CC") or shutil.which("cc") or shutil.which("gcc")
     if not cc:
         return None
-    return os.path.realpath(shutil.which(cc) or cc)
+    return shutil.which(cc) or cc
 
 
 def build_daemon() -> tuple[Path, str]:
@@ -593,12 +625,13 @@ def build_daemon() -> tuple[Path, str]:
     out = _cache_dir() / digest / "shmrdmad"
     stamp = out.with_name("cc")
     cc = _compiler()
+    real_cc = os.path.realpath(cc) if cc else None
     if out.is_file():
         try:
             built_by = stamp.read_text().strip()
         except OSError:
             built_by = ""
-        if cc is None or built_by == cc:
+        if cc is None or built_by == real_cc:
             return out, digest
     if not cc:
         raise RuntimeError(
@@ -616,7 +649,7 @@ def build_daemon() -> tuple[Path, str]:
         tmp.unlink(missing_ok=True)
         raise RuntimeError(f"building shmrdmad failed:\n{r.stderr.strip()}")
     tmp.replace(out)
-    stamp.write_text(cc + "\n")
+    stamp.write_text(f"{real_cc}\n")
     return out, digest
 
 
@@ -679,7 +712,7 @@ def _attached(d: Daemon) -> list[VMInfo]:
 def _daemon_lock(d: Daemon) -> Iterator[None]:
     # root only opens the user's lock: a file it created would be root's
     flags = os.O_RDWR | os.O_CREAT if os.geteuid() == d.uid else os.O_RDONLY
-    fd = _open_private(d.lock_path, flags)
+    fd = _open_private(d.lock_path, flags, d.uid)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
@@ -743,7 +776,7 @@ def ensure_daemon(d: Daemon | None = None) -> Daemon:
         # without one rather than not at all.
         for prefix in (scope, []) if scope else ([],):
             logfd = _open_private(
-                d.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND
+                d.log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, d.uid
             )
             with os.fdopen(logfd, "a") as logf:
                 logf.write(
@@ -760,7 +793,7 @@ def ensure_daemon(d: Daemon | None = None) -> Daemon:
                     start_new_session=True,
                 )
             pidfd = _open_private(
-                d.pid_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                d.pid_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, d.uid
             )
             with os.fdopen(pidfd, "w") as f:
                 f.write(f"{proc.pid} {digest} {binary}\n")
@@ -849,7 +882,9 @@ def _stop_locked(d: Daemon, force: bool) -> str:
             break
         time.sleep(0.1)
     else:
-        os.kill(pid, signal.SIGKILL)
+        # it may have exited, and the pid gone to another process, since
+        if d.pid() == pid:
+            os.kill(pid, signal.SIGKILL)
     for p in (d.pid_path, d.rdma_socket, d.net_socket):
         p.unlink(missing_ok=True)
     return f"stopped shmrdmad (pid {pid})"
@@ -891,8 +926,9 @@ def start_for(vm: VMInfo) -> None:
 
 
 def verify_sockets(vm: VMInfo) -> list[str]:
-    """Every socket *vm* connects to, each checked to be listening and to
-    belong to the VM's owner (or root).
+    """Every socket *vm* connects to, each checked to be listening, to
+    belong to the VM's owner (root's VMs: root or the invoking user), and
+    to sit where nobody else could replace it.
 
     Run under the launch lock, after ``start_for``: a socket given by
     hand belongs to a daemon run by hand, so it must already be there.
@@ -906,7 +942,7 @@ def verify_sockets(vm: VMInfo) -> list[str]:
     except (RuntimeError, OSError, KeyError) as e:
         die(f"{vm.name}: {e}")
     owner = _vm_uid(vm)
-    allowed = {0, d.uid if owner in (None, 0) else owner}
+    allowed = {0, d.uid} if owner is None or owner == 0 else {owner}
     socks = vm_sockets(vm, d)
     for s in socks:
         problem = sun_path_problem(s)
@@ -928,7 +964,39 @@ def verify_sockets(vm: VMInfo) -> list[str]:
                 f"{vm.name}: {s} belongs to uid {st.st_uid}, not to the "
                 f"VM's owner: another user's daemon would map its RAM"
             )
+        problem = replaceable(s, allowed | {0})
+        if problem:
+            die(
+                f"{vm.name}: {problem}, so another user could put their "
+                f"own socket at {s} before QEMU connects"
+            )
     return socks
+
+
+def replaceable(path: str, uids: set[int]) -> str | None:
+    """Why a uid outside *uids* could replace the entry at *path*, or None.
+
+    Every directory the path is resolved through, symlinks followed, must
+    belong to one of *uids* and be writable by nobody else, unless it is
+    sticky.
+    """
+    seen = set()
+    p = Path(os.path.abspath(path))
+    for lexical in p.parents:
+        real = Path(os.path.realpath(lexical))
+        for d in (real, *real.parents):
+            if d in seen:
+                continue
+            seen.add(d)
+            try:
+                st = os.stat(d)
+            except OSError as e:
+                return f"{d} cannot be checked ({e.strerror})"
+            if st.st_uid not in uids:
+                return f"{d} belongs to uid {st.st_uid}"
+            if st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX:
+                return f"{d} is writable by other users"
+    return None
 
 
 def daemon_identity(vm: VMInfo, socks: list[str]) -> str:

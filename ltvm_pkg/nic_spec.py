@@ -207,15 +207,16 @@ def socket_path_problem(value: str) -> str | None:
     """Why *value* cannot be a shmrdmad socket path, or None.
 
     ',' would split QEMU's -chardev options, '|' the NICS= list in the
-    .info file, ':' a --nic spec, and a control character could start
-    a new .info line.
+    .info file, ':' and '=' a --nic spec (the positional form str()
+    writes would read back as a key), and a control character could
+    start a new .info line.
     """
     if not value.startswith("/") or any(
-        c in ",|: " or not c.isprintable() for c in value
+        c in ",|:= " or not c.isprintable() for c in value
     ):
         return (
             "absolute path of a shmrdmad socket, without ',', '|', ':', "
-            "blanks or control characters"
+            "'=', blanks or control characters"
         )
     if sun_path_problem(value):
         return f"absolute path of a shmrdmad socket, shorter than {SUN_PATH_SIZE} bytes"
