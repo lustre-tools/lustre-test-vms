@@ -95,7 +95,13 @@ static inline void plat_spin_lock(plat_spinlock_t *l)
 {
 	while (__atomic_exchange_n(l, 1, __ATOMIC_ACQUIRE))
 		while (__atomic_load_n(l, __ATOMIC_RELAXED))
+#if defined(__aarch64__)
 			__asm__ volatile("yield");
+#elif defined(__x86_64__)
+			__builtin_ia32_pause();
+#else
+			;
+#endif
 }
 
 static inline void plat_spin_unlock(plat_spinlock_t *l)

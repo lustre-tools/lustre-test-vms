@@ -929,8 +929,16 @@ static void netq_serve(struct netq *nq)
 		    best->nqps + best->nnq)
 			best = &g_workers[i];
 	if (best->nnq == best->nqcap) {
-		best->nqcap = best->nqcap ? best->nqcap * 2 : 8;
-		best->nqs = realloc(best->nqs, best->nqcap * sizeof(*best->nqs));
+		int cap = best->nqcap ? best->nqcap * 2 : 8;
+		struct netq **nqs = realloc(best->nqs, cap * sizeof(*nqs));
+
+		if (!nqs) {
+			LOG("dev%d: no memory to serve net queue %d", d->id,
+			    nq->qi);
+			return;
+		}
+		best->nqs = nqs;
+		best->nqcap = cap;
 	}
 	best->nqs[best->nnq++] = nq;
 	worker_watch(best, d->vq[NET_TXQ(nq->qi)].kickfd);
@@ -984,10 +992,12 @@ static void net_detach(struct vdev *d)
 	p->mac_known = false;
 }
 
-static void net_port_new(struct vdev *d)
+static int net_port_new(struct vdev *d)
 {
 	struct netport *p = calloc(1, sizeof(*p));
 
+	if (!p)
+		return -1;
 	p->dev = d;
 	for (int i = 0; i < NET_MAX_QP; i++) {
 		plat_spin_init(&p->rx_lock[i]);
@@ -999,6 +1009,7 @@ static void net_port_new(struct vdev *d)
 	p->next = g_ports;
 	g_ports = p;
 	wunlock();
+	return 0;
 }
 
 /* caller holds wlock */
@@ -1027,15 +1038,25 @@ static void net_write_stats(void)
 	/* a socket path fits in sun_path */
 	char path[160], tmp[168];
 	FILE *f;
+	int fd;
 
 	if (!*g_net_sock_path ||
 	    snprintf(path, sizeof(path), "%s.stats", g_net_sock_path) >=
 		    (int)sizeof(path) ||
 	    snprintf(tmp, sizeof(tmp), "%s.tmp", path) >= (int)sizeof(tmp))
 		return;
-	f = fopen(tmp, "w");
-	if (!f)
+	/* the socket's directory may be another user's to write in too */
+	unlink(tmp);
+	fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+		  0600);
+	if (fd < 0)
 		return;
+	f = fdopen(fd, "w");
+	if (!f) {
+		close(fd);
+		unlink(tmp);
+		return;
+	}
 	for (struct netport *p = g_ports; p; p = p->next) {
 		uint64_t ft = p->dev->features;
 

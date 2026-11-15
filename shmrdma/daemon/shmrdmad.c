@@ -1306,10 +1306,8 @@ static int deliver_recv(struct qp *qp, struct qp *peer,
 	REL(&peer->rec->rq_cons, peer->rq_cons);
 	plat_spin_unlock(&peer->rq_lock);
 	cq_post(peer->rcq, &c, w->flags & SHMRDMA_WQE_SOLICITED);
-	if (c.status != WC_SUCCESS) {
-		peer->state = QPS_ERR;
-		dev_raise_eq(peer->dev, peer->qpn, SHMRDMA_EQE_QP_FATAL);
-	}
+	if (c.status != WC_SUCCESS)
+		qp_to_err(peer);
 	return rc;
 }
 
@@ -1675,7 +1673,7 @@ static void *worker_main(void *arg)
 }
 
 /* caller holds wlock */
-static void worker_add_qp(struct qp *qp)
+static int worker_add_qp(struct qp *qp)
 {
 	struct worker *best = &g_workers[0];
 
@@ -1684,13 +1682,19 @@ static void worker_add_qp(struct qp *qp)
 		    best->nqps + best->nnq)
 			best = &g_workers[i];
 	if (best->nqps == best->cap) {
-		best->cap = best->cap ? best->cap * 2 : 16;
-		best->qps = realloc(best->qps, best->cap * sizeof(*best->qps));
+		int cap = best->cap ? best->cap * 2 : 16;
+		struct qp **qps = realloc(best->qps, cap * sizeof(*qps));
+
+		if (!qps)
+			return -ENOMEM;
+		best->qps = qps;
+		best->cap = cap;
 	}
 	best->qps[best->nqps++] = qp;
 	worker_watch(best, qp->dev->vq[SHMRDMA_VQ_DOORBELL].kickfd);
 	qp->w = best;
 	REL(&qp->rec->need_kick, ACQ(&best->sleeping) ? 1 : 0);
+	return 0;
 }
 
 static void worker_del_qp(struct qp *qp)
@@ -1838,14 +1842,19 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 
 		if (!sh || !eq)
 			return -EFAULT;
+		struct mr **mrs = d->mrs ? NULL :
+				  calloc(SHMRDMA_MAX_MR, sizeof(*mrs));
+
+		if (!d->mrs && !mrs)
+			return -ENOMEM;
 		wlock();
 		dev_reset_state(d);
+		if (mrs)
+			d->mrs = mrs;
 		d->shared = sh;
 		d->eq = eq;
 		d->eq_entries = n;
 		d->eq_prod = RLX(&d->shared->eq_cons);
-		if (!d->mrs)
-			d->mrs = calloc(SHMRDMA_MAX_MR, sizeof(*d->mrs));
 		d->initialized = true;
 		wunlock();
 		r->val = d->id;
@@ -1977,8 +1986,12 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		qp->rq_cons = RLX(&qp->rec->rq_cons);
 		qp->rnr_retry = 7;
 		wlock();
+		if (worker_add_qp(qp)) {
+			wunlock();
+			qp_free(qp);
+			return -ENOMEM;
+		}
 		d->qps[qpn] = qp;
-		worker_add_qp(qp);
 		__atomic_add_fetch(&g_gen, 1, __ATOMIC_SEQ_CST);
 		wunlock();
 		DBG("dev%d: qp%u type %u sq %u rq %u", d->id, qpn, qp->type,
@@ -2138,15 +2151,23 @@ struct ep_tag {
 	int vq;
 };
 
-static void ep_add(int fd, int kind, struct vdev *d, int vq)
+static int ep_add(int fd, int kind, struct vdev *d, int vq)
 {
 	struct ep_tag *t = calloc(1, sizeof(*t));
 
+	if (!t) {
+		LOG("poller add %d: out of memory", fd);
+		return -1;
+	}
 	t->kind = kind;
 	t->d = d;
 	t->vq = vq;
-	if (plat_poller_add(g_epfd, fd, t, false))
+	if (plat_poller_add(g_epfd, fd, t, false)) {
 		LOG("poller add %d: %s", fd, strerror(errno));
+		free(t);
+		return -1;
+	}
+	return 0;
 }
 
 static void ep_del(int fd)
@@ -2595,6 +2616,11 @@ static void accept_conn(int lsock, int kind)
 	if (s < 0)
 		return;
 	d = calloc(1, sizeof(*d));
+	if (!d) {
+		LOG("connection refused: out of memory");
+		close(s);
+		return;
+	}
 	d->id = g_next_dev_id++;
 	d->sock = s;
 	d->kind = kind;
@@ -2608,10 +2634,9 @@ static void accept_conn(int lsock, int kind)
 	d->next = g_devs;
 	g_devs = d;
 	wunlock();
-	if (kind == KIND_NET)
-		net_port_new(d);
-	ep_add(s, EP_SOCK, d, 0);
 	LOG("dev%d: %s connected", d->id, kind == KIND_NET ? "net" : "rdma");
+	if ((kind == KIND_NET && net_port_new(d)) || ep_add(s, EP_SOCK, d, 0))
+		dev_destroy(d);
 }
 
 static void on_kick(struct vdev *d, int idx)
@@ -2722,6 +2747,10 @@ int main(int argc, char **argv)
 	setvbuf(stderr, NULL, _IOLBF, 0);
 
 	g_workers = calloc(g_nworkers, sizeof(*g_workers));
+	if (!g_workers) {
+		LOG("out of memory");
+		return 1;
+	}
 	for (int i = 0; i < g_nworkers; i++) {
 		struct worker *w = &g_workers[i];
 
