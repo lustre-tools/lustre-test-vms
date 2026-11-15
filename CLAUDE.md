@@ -72,6 +72,36 @@ the top-level parser and in `common`, with `default=SUPPRESS`: a
 subparser's False default would otherwise overwrite the top-level True,
 so `ltvm --no-update list` and `ltvm list --no-update` both work.
 
+`ltvm update` reruns `ltvm install` after the pull, as the automatic
+path does, through one helper (`update_check.run_install`: a new
+process on the current interpreter; sudo on Linux unless already root;
+on macOS as the user, dropping from `SUDO_UID` under `sudo ltvm
+update`).  It skips install when nothing was pulled and the host setup
+is current; `--no-install` skips it always, and a failed install fails
+the update.
+
+**Adding or changing an install step means bumping
+`HOST_SETUP_VERSION`** in
+[ltvm_pkg/host_setup_version.py](ltvm_pkg/host_setup_version.py), with
+a line in its history.  A full `ltvm install` (no step flags) records
+the value in `/var/lib/ltvm/host-setup.json` (macOS: `/Library/
+Application Support/ltvm/`; `LTVM_HOST_SETUP_RECORD` moves it, and
+`tests/conftest.py` points it at a current record).  No record counts as
+0, so every host installed before the record existed is behind version
+1 (vhost-net for the ltvm group, #63).  Every command the update check
+runs for (same exclusions and `--no-update`), less `update` and
+`doctor`, then prints "ltvm: host setup is older than this ltvm (N <
+M). Run: sudo ltvm install" on stderr, with or without a TTY, at most
+once a day per user (`last_host_setup_notice_iso` in the update
+check's state file).  This is what reaches a host updated by a plain
+`git pull`.  `ltvm doctor` reports both versions and counts a stale
+host as an issue; `--fix` runs install.
+
+Install steps must stay safe to rerun, since update and doctor now run
+them unasked.  ltvm-dnsmasq, for one, is restarted only when its config
+or unit changed or it is not running, so a rerun leaves the guests'
+DNS alone.
+
 ## Agent Skills
 
 `skills/ltvm/` is the skill that teaches an agent to use this

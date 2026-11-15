@@ -3824,6 +3824,7 @@ def _run_setup_macos(
             log.info("ltvm launcher already current at %s", link)
 
     if all_steps:
+        _record_host_setup()
         log.info("")
         log.info("Install complete.")
         log.info("")
@@ -3835,6 +3836,28 @@ def _run_setup_macos(
         log.info("")
         log.info("Next:")
         log.info("  ltvm target fetch rocky9")
+
+
+def _record_host_setup() -> None:
+    """Note that this host now has every install step this ltvm knows.
+
+    Only a full install records: one step alone leaves the others as
+    they were.  A failure costs a stale-host notice, not the install.
+    """
+    from ltvm_pkg import host_setup_version as hsv
+
+    try:
+        hsv.write_record()
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "could not record host setup in %s: %s", hsv.record_path(), e
+        )
+        return
+    log.info(
+        "Host setup version %d recorded in %s",
+        hsv.HOST_SETUP_VERSION,
+        hsv.record_path(),
+    )
 
 
 def run_setup(
@@ -3936,6 +3959,7 @@ def run_setup(
                 )
 
     if all_steps:
+        _record_host_setup()
         log.info("")
         log.info("Install complete.")
         log.info("")
