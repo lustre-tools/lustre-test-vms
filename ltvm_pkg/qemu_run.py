@@ -1142,6 +1142,7 @@ def _start_qemu(vm: VMInfo) -> None:
             image=Path(vm.image) if vm.image else None,
             kernel_dir=kernel.parent,
             arch=vm.arch or None,
+            has_kmod=shmrdma.vm_has_kmod(vm) if vm.shmrdma else None,
         )
         why = shmrdma_req.refusal(
             feats,

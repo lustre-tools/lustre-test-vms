@@ -673,6 +673,9 @@ class VMInfo:
     # RDMA device through which the daemon copies between guests.
     # Empty is none.
     shmrdma: str = ""
+    # Whether the image file the VM was created on has the shmrdma
+    # guest module.  None on older .info files: ask the image's meta.
+    shmrdma_kmod: bool | None = None
 
     # Host NUMA node the VM is bound to (--host-node): its memory is
     # allocated there and its QEMU runs on that node's CPUs.  -1 is
@@ -815,6 +818,7 @@ class VMInfo:
             f"NUMA_NODES={self.numa_nodes}\n"
             f"NUMA_DIST={self.numa_dist}\n"
             f"SHMRDMA={self.shmrdma}\n"
+            f"SHMRDMA_KMOD={'' if self.shmrdma_kmod is None else int(self.shmrdma_kmod)}\n"
             f"HOST_NODE={'' if self.host_node < 0 else self.host_node}\n"
             f"SHM_SOCKETS={'|'.join(self.shm_sockets)}\n"
             f"SHARE_DISKS={int(self.share_disks)}\n"
@@ -1007,6 +1011,11 @@ class VMInfo:
             numa_nodes=int(vals.get("NUMA_NODES") or 0),
             numa_dist=vals.get("NUMA_DIST", ""),
             shmrdma=vals.get("SHMRDMA", ""),
+            shmrdma_kmod=(
+                vals["SHMRDMA_KMOD"] == "1"
+                if vals.get("SHMRDMA_KMOD")
+                else None
+            ),
             host_node=int(vals.get("HOST_NODE") or -1),
             shm_sockets=[
                 s for s in vals.get("SHM_SOCKETS", "").split("|") if s

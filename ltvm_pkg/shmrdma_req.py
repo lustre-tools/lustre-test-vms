@@ -65,6 +65,9 @@ class Target:
     arch: str | None = None
     problem: str = ""
     extra: dict[str, str] = field(default_factory=dict)
+    # A VM's own record of whether its image has the guest module;
+    # None asks the image's meta.json.
+    has_kmod: bool | None = None
 
 
 def resolve_target(
@@ -411,7 +414,9 @@ def target_checks(t: Target) -> list[Req]:
         Req(
             f"{t.name} image has the shmrdma guest module",
             frozenset({SHMRDMA}),
-            shmrdma.image_has_kmod(t.image),
+            shmrdma.image_has_kmod(t.image)
+            if t.has_kmod is None
+            else t.has_kmod,
             str(t.image),
             # Its inputs may be unchanged (the module failed to build
             # last time), so only a forced rebuild retries it.

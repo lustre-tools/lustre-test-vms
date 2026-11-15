@@ -200,6 +200,24 @@ def image_has_kmod(image: str | Path) -> bool:
     )
 
 
+def vm_has_kmod(vm: VMInfo) -> bool:
+    """Whether *vm*'s image has shmrdma.ko, by the VM's own record.
+
+    A VM created before the record asks the image's meta.json, and
+    records a yes, which a later fetch or build cannot then lose.
+    """
+    if vm.shmrdma_kmod is not None:
+        return vm.shmrdma_kmod
+    has = bool(vm.image) and image_has_kmod(vm.image)
+    if has:
+        try:
+            vm._update_fields({"SHMRDMA_KMOD": 1}, noninteractive=True)
+            vm.shmrdma_kmod = True
+        except (OSError, RuntimeError, vm_state.VMNotFound):
+            pass
+    return has
+
+
 # --- the host daemon --------------------------------------------------
 
 

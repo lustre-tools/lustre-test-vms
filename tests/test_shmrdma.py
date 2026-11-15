@@ -215,6 +215,7 @@ NEW_IMG = "base-20261101T000000-bbbbbb.ext4"
 
 
 def _image_dir(tmp_path: Path, meta: dict) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     for name in (OLD_IMG, NEW_IMG):
         (tmp_path / name).write_bytes(b"")
     (tmp_path / "current.ext4").symlink_to(NEW_IMG)
@@ -1173,3 +1174,129 @@ class TestImageLines:
         lines, build = self._lines(tmp_path, cross=True)
         assert lines == []
         build.assert_not_called()
+
+
+class TestVMKmodRecord:
+    def test_round_trip(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        vm = _make_vm(tmp_vmdir)
+        vm.save()
+        assert VMInfo.load(vm.name).shmrdma_kmod is None
+        for has in (True, False):
+            vm.shmrdma_kmod = has
+            vm.save()
+            assert VMInfo.load(vm.name).shmrdma_kmod is has
+
+    def test_record_wins_over_the_image_meta(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+        tmp_path: Path,
+    ) -> None:
+        d = _image_dir(tmp_path / "img", {"shmrdma_kmod": True})
+        vm = _make_vm(tmp_vmdir)
+        vm.image = str(d / OLD_IMG)
+        vm.shmrdma_kmod = True
+        vm.save()
+        # a fetch replaced meta.json: it no longer names OLD_IMG
+        assert not shmrdma.image_has_kmod(vm.image)
+        assert shmrdma.vm_has_kmod(vm)
+
+    def test_older_vm_adopts_a_yes(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+        tmp_path: Path,
+    ) -> None:
+        d = _image_dir(tmp_path / "img", {"shmrdma_kmod": True})
+        vm = _make_vm(tmp_vmdir)
+        vm.image = str(d / NEW_IMG)
+        vm.save()
+        assert shmrdma.vm_has_kmod(vm)
+        assert VMInfo.load(vm.name).shmrdma_kmod is True
+
+    def test_older_vm_never_records_a_no(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+        tmp_path: Path,
+    ) -> None:
+        d = _image_dir(tmp_path / "img", {"shmrdma_kmod": True})
+        vm = _make_vm(tmp_vmdir)
+        vm.image = str(d / OLD_IMG)
+        vm.save()
+        assert not shmrdma.vm_has_kmod(vm)
+        assert VMInfo.load(vm.name).shmrdma_kmod is None
+
+    def test_target_takes_the_record(self, tmp_path: Path) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        _image_dir(tmp_path, {"shmrdma_kmod": True})
+        t = sr.Target(
+            "rocky10",
+            image=tmp_path / OLD_IMG,
+            kernel_dir=tmp_path,
+            has_kmod=True,
+        )
+        kmod = [r for r in sr.target_checks(t) if "module" in r.name][0]
+        assert kmod.ok
+        t.has_kmod = None
+        kmod = [r for r in sr.target_checks(t) if "module" in r.name][0]
+        assert not kmod.ok
+
+
+class TestFetchKeepsKmodImages:
+    def _fetch(self, out: Path, fetched_meta: dict) -> Path:
+        from ltvm_pkg.image_store import LEGACY
+        from ltvm_pkg.release_package import _install_fetched_images
+
+        staging = out / ".ltvm-fetch-image-x"
+        sd = staging / "rocky9" / "x86_64" / "images" / "5.14"
+        sd.mkdir(parents=True)
+        (sd / LEGACY).write_bytes(b"fetched")
+        (sd / "meta.json").write_text(json.dumps(fetched_meta))
+        _install_fetched_images(staging, out)
+        return out / "rocky9" / "x86_64" / "images" / "5.14"
+
+    def test_older_files_carried(self, tmp_path: Path) -> None:
+        from ltvm_pkg.image_store import current_image
+
+        out = tmp_path / "artifacts"
+        d = _image_dir(
+            out / "rocky9" / "x86_64" / "images" / "5.14",
+            {
+                "shmrdma_kmod": False,
+                "shmrdma_kmod_images": {OLD_IMG: True, NEW_IMG: False},
+            },
+        )
+        self._fetch(out, {"shmrdma_kmod": True, "new": 1})
+        cur = current_image(d)
+        assert cur is not None and cur.name not in (OLD_IMG, NEW_IMG)
+        meta = json.loads((d / "meta.json").read_text())
+        assert meta["new"] == 1
+        assert meta["shmrdma_kmod_images"] == {
+            OLD_IMG: True,
+            NEW_IMG: False,
+            cur.name: True,
+        }
+        assert shmrdma.image_has_kmod(d / OLD_IMG)
+        assert shmrdma.image_has_kmod(cur)
+
+    def test_older_flag_names_the_old_current(self, tmp_path: Path) -> None:
+        out = tmp_path / "artifacts"
+        d = _image_dir(
+            out / "rocky9" / "x86_64" / "images" / "5.14",
+            {"shmrdma_kmod": True},
+        )
+        self._fetch(out, {"shmrdma_kmod": False})
+        assert shmrdma.image_has_kmod(d / NEW_IMG)
+        assert not shmrdma.image_has_kmod(d / "current.ext4")
+
+    def test_publishers_map_replaced(self, tmp_path: Path) -> None:
+        from ltvm_pkg.image_store import current_image
+
+        out = tmp_path / "artifacts"
+        d = self._fetch(
+            out,
+            {"shmrdma_kmod": True, "shmrdma_kmod_images": {"theirs": True}},
+        )
+        cur = current_image(d)
+        assert cur is not None
+        meta = json.loads((d / "meta.json").read_text())
+        assert meta["shmrdma_kmod_images"] == {cur.name: True}
