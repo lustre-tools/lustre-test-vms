@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from . import vm_state
-from .nic_spec import sun_path_problem
+from .nic_spec import socket_path_problem, sun_path_problem
 from .paths import load_meta_safe
 
 if TYPE_CHECKING:
@@ -944,10 +944,19 @@ def verify_sockets(vm: VMInfo) -> list[str]:
     owner = _vm_uid(vm)
     allowed = {0, d.uid} if owner is None or owner == 0 else {owner}
     socks = vm_sockets(vm, d)
+    own = {str(d.rdma_socket), str(d.net_socket)}
     for s in socks:
         problem = sun_path_problem(s)
         if problem:
             die(f"{vm.name}: {problem}")
+        problem = socket_path_problem(s)
+        if problem and s in own:
+            die(
+                f"{vm.name}: shmrdmad's directory {d.dir} cannot hold its "
+                f"sockets: QEMU needs an {problem}"
+            )
+        if problem:
+            die(f"{vm.name}: {s} is not an {problem}")
         try:
             st = os.lstat(s)
         except PermissionError:
@@ -970,32 +979,85 @@ def verify_sockets(vm: VMInfo) -> list[str]:
                 f"{vm.name}: {problem}, so another user could put their "
                 f"own socket at {s} before QEMU connects"
             )
+        # ltvm's own daemon was vouched for by its pid; a probe would
+        # make it set up and tear down a device
+        if s not in own and _refused(s):
+            die(f"{vm.name} needs shmrdmad, but nothing listens on {s}")
     return socks
+
+
+def _refused(path: str) -> bool:
+    """Whether a connect to the socket at *path* is refused: the socket
+    of a daemon that is gone."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
+        c.settimeout(5)
+        try:
+            c.connect(path)
+        except ConnectionRefusedError:
+            return True
+        except OSError:
+            return False
+    return False
 
 
 def replaceable(path: str, uids: set[int]) -> str | None:
     """Why a uid outside *uids* could replace the entry at *path*, or None.
 
-    Every directory the path is resolved through, symlinks followed, must
-    belong to one of *uids* and be writable by nobody else, unless it is
-    sticky.
+    The path is walked as the kernel resolves it.  Every directory on the
+    way must belong to one of *uids* and be writable by nobody else,
+    unless it is sticky; so must every symlink, whose owner can repoint
+    it, before its target is walked in turn.
     """
-    seen = set()
-    p = Path(os.path.abspath(path))
-    for lexical in p.parents:
-        real = Path(os.path.realpath(lexical))
-        for d in (real, *real.parents):
-            if d in seen:
-                continue
-            seen.add(d)
-            try:
-                st = os.stat(d)
-            except OSError as e:
-                return f"{d} cannot be checked ({e.strerror})"
+    parts = path.split("/")
+    if not path.startswith("/"):
+        parts = os.getcwd().split("/") + parts
+    parts.reverse()
+    cur = "/"
+    hops = 0
+    problem = _dir_problem(cur, uids)
+    while parts and not problem:
+        name = parts.pop()
+        if name in ("", "."):
+            continue
+        if name == "..":
+            cur = os.path.dirname(cur)
+            continue
+        nxt = os.path.join(cur, name)
+        try:
+            st = os.lstat(nxt)
+        except OSError as e:
+            if not any(p not in ("", ".") for p in parts):
+                return None
+            return f"{nxt} cannot be checked ({e.strerror})"
+        if stat.S_ISLNK(st.st_mode):
             if st.st_uid not in uids:
-                return f"{d} belongs to uid {st.st_uid}"
-            if st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX:
-                return f"{d} is writable by other users"
+                return f"{nxt} is a symlink belonging to uid {st.st_uid}"
+            hops += 1
+            if hops > 40:
+                return f"{path} has too many levels of symlinks"
+            target = os.readlink(nxt)
+            if target.startswith("/"):
+                cur = "/"
+            parts.extend(reversed(target.split("/")))
+            continue
+        if not any(p not in ("", ".") for p in parts):
+            return None
+        if not stat.S_ISDIR(st.st_mode):
+            return f"{nxt} is not a directory"
+        cur = nxt
+        problem = _dir_problem(cur, uids)
+    return problem
+
+
+def _dir_problem(d: str, uids: set[int]) -> str | None:
+    try:
+        st = os.lstat(d)
+    except OSError as e:
+        return f"{d} cannot be checked ({e.strerror})"
+    if st.st_uid not in uids:
+        return f"{d} belongs to uid {st.st_uid}"
+    if st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX:
+        return f"{d} is writable by other users"
     return None
 
 

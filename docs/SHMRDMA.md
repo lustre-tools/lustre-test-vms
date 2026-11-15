@@ -111,7 +111,8 @@ ltvm vm shmrdmad [status|start|stop]
   A start also refuses a socket another user could replace before QEMU
   connects: every directory on its path, symlinks followed, must be
   root's or the VM owner's and not writable by others unless sticky
-  (`/tmp` itself is fine, a shared group-writable directory is not).
+  (`/tmp` itself is fine, a shared group-writable directory is not),
+  and so must every symlink on it, since its owner can repoint it.
 - **The guest module** is built per kernel in the target's build
   container and baked into the image (`/lib/modules/<kver>/extra/`,
   with `softdep virtiofs pre: shmrdma` in modprobe.d), so it is there

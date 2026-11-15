@@ -166,6 +166,43 @@ def test_launch_refuses_without_daemon(tmp_vmdir: Path) -> None:  # noqa: F811
         _run_launch(vm, _LaunchHarness())
 
 
+def test_launch_refuses_a_dead_daemons_socket(
+    tmp_vmdir: Path,  # noqa: F811
+    tmp_path: Path,
+) -> None:
+    """The socket file a killed daemon left behind refuses connects."""
+    path = tmp_path / "stale.sock"
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(str(path))
+    try:
+        vm = _make_vm(tmp_vmdir)
+        vm.shmrdma = str(path)
+        vm.save()
+        with (
+            patch("ltvm_pkg.qemu_run.die", side_effect=SystemExit) as die,
+            pytest.raises(SystemExit),
+        ):
+            shmrdma.verify_sockets(vm)
+        assert "nothing listens" in die.call_args[0][0]
+    finally:
+        s.close()
+
+
+def test_own_sockets_checked_for_qemu(tmp_vmdir: Path) -> None:  # noqa: F811
+    """A daemon directory QEMU's -chardev cannot name is refused by name."""
+    d = shmrdma.Daemon("tester", os.geteuid(), tmp_vmdir / "a,b")
+    vm = _make_vm(tmp_vmdir)
+    vm.shmrdma = "auto"
+    with (
+        patch("ltvm_pkg.shmrdma.daemon_for", return_value=d),
+        patch("ltvm_pkg.qemu_run.die", side_effect=SystemExit) as die,
+        pytest.raises(SystemExit),
+    ):
+        shmrdma.verify_sockets(vm)
+    msg = die.call_args[0][0]
+    assert f"directory {d.dir} cannot hold its sockets" in msg
+
+
 def test_launch_own_daemon(tmp_vmdir: Path, own_daemon) -> None:  # noqa: F811
     d, ensure = own_daemon
     vm = _make_vm(tmp_vmdir)
@@ -321,6 +358,54 @@ class TestReplaceable:
             str(open_dir / "link2" / "s.sock"), {0, os.geteuid()}
         )
         assert why == f"{(safe / 'in').resolve()} is writable by other users"
+
+    def test_foreign_symlink(self, tmp_path: Path) -> None:
+        """A symlink another user owns can be repointed after the check."""
+        safe = tmp_path / "safe"
+        safe.mkdir(mode=0o700)
+        link = tmp_path / "link"
+        link.symlink_to(safe)
+        real_lstat = os.lstat
+        walked = str(tmp_path.resolve() / "link")
+
+        def lstat(p, *a, **kw):
+            st = real_lstat(p, *a, **kw)
+            if str(p) == walked:
+                return os.stat_result((st.st_mode, *st[1:4], 4242, *st[5:]))
+            return st
+
+        uids = {0, os.geteuid()}
+        assert shmrdma.replaceable(str(link / "s.sock"), uids) is None
+        with patch("ltvm_pkg.shmrdma.os.lstat", side_effect=lstat):
+            why = shmrdma.replaceable(str(link / "s.sock"), uids)
+        assert why is not None and "symlink belonging to uid 4242" in why
+
+    def test_dotdot_after_symlink(self, tmp_path: Path) -> None:
+        """'..' leaves the symlink's target, not the symlink's directory."""
+        top = tmp_path / "top"
+        (top / "in").mkdir(parents=True)
+        top.chmod(0o777)
+        safe = tmp_path / "safe"
+        safe.mkdir(mode=0o700)
+        (safe / "link").symlink_to(top / "in")
+        try:
+            why = shmrdma.replaceable(
+                str(safe / "link" / ".." / "s.sock"), {0, os.geteuid()}
+            )
+        finally:
+            top.chmod(0o755)
+        assert why == f"{top.resolve()} is writable by other users"
+
+    def test_relative_path(self, tmp_path: Path, monkeypatch) -> None:
+        d = tmp_path / "d"
+        d.mkdir()
+        d.chmod(0o777)
+        monkeypatch.chdir(tmp_path)
+        try:
+            why = shmrdma.replaceable("d/s.sock", {0, os.geteuid()})
+        finally:
+            d.chmod(0o755)
+        assert why == f"{d.resolve()} is writable by other users"
 
     def test_launch_refuses(self, tmp_vmdir: Path, tmp_path: Path) -> None:  # noqa: F811
         d = tmp_path / "shared"
