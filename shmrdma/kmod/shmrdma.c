@@ -64,12 +64,13 @@ struct shmrdma_dev {
 	bool reset_done;
 	bool fatal_sent;
 	struct work_struct fatal_work;
+	/* work posted after the reset: have its CQs polled for the flush */
+	struct work_struct flush_work;
 
 	spinlock_t eq_lock;
 	struct shmrdma_dev_shared *shared;
 	struct shmrdma_eqe *eq;
 	u32 eq_cons;
-	bool eq_bad;
 	u64 *evbufs;
 
 	struct xarray qps;
@@ -108,10 +109,12 @@ struct shmrdma_cq {
 	struct shmrdma_cq_rec *rec;
 	struct shmrdma_ring ring;
 	u32 cons;
+	bool ring_bad;		/* the backend's producer ran past the ring */
 };
 
 struct shmrdma_qp {
 	struct ib_qp ibqp;
+	struct shmrdma_cq *scq, *rcq;
 	u32 type;
 	struct shmrdma_qp_rec *rec;
 	struct shmrdma_ring sq, rq;
@@ -181,7 +184,35 @@ static void shmrdma_reset_locked(struct shmrdma_dev *dev)
 		return;
 	virtio_break_device(dev->vdev);
 	virtio_reset_device(dev->vdev);
-	WRITE_ONCE(dev->reset_done, true);
+	smp_store_release(&dev->reset_done, true);
+}
+
+/* an event nobody asked for; a polled-only CQ WARNs on one */
+static void shmrdma_cq_comp(struct shmrdma_cq *cq)
+{
+	if (cq->ibcq.comp_handler && cq->ibcq.poll_ctx != IB_POLL_DIRECT)
+		cq->ibcq.comp_handler(&cq->ibcq, cq->ibcq.cq_context);
+}
+
+/*
+ * After the reset: the event every armed CQ waits for, so its ULP
+ * polls the flushes.  An unarmed one is found by req_notify_cq.
+ */
+static void shmrdma_kick_cqs(struct shmrdma_dev *dev)
+{
+	struct shmrdma_cq *cq;
+	unsigned long flags, i;
+
+	spin_lock_irqsave(&dev->eq_lock, flags);
+	xa_for_each(&dev->cqs, i, cq)
+		if (xchg(&cq->rec->arm, 0))
+			shmrdma_cq_comp(cq);
+	spin_unlock_irqrestore(&dev->eq_lock, flags);
+}
+
+static void shmrdma_flush_work(struct work_struct *work)
+{
+	shmrdma_kick_cqs(container_of(work, struct shmrdma_dev, flush_work));
 }
 
 static void shmrdma_fatal_work(struct work_struct *work)
@@ -202,6 +233,7 @@ static void shmrdma_fatal_work(struct work_struct *work)
 	mutex_unlock(&dev->ctrl_mutex);
 	if (send)
 		ib_dispatch_event(&ev);
+	shmrdma_kick_cqs(dev);
 }
 
 /* a command was not carried out: reset now, report it from a work item */
@@ -329,6 +361,40 @@ static inline void *ring_at(struct shmrdma_ring *r, u32 idx)
 /* ---------------------------------------------------------------- */
 /* events                                                           */
 
+/* caller holds eq_lock, which destroy_cq and destroy_qp take to erase */
+static void shmrdma_eqe(struct shmrdma_dev *dev, u32 n, u32 type)
+{
+	struct ib_event ev = { .device = &dev->ibdev };
+	struct shmrdma_qp *qp;
+	struct shmrdma_cq *cq;
+
+	switch (type) {
+	case SHMRDMA_EQE_QP_FATAL:
+		qp = xa_load(&dev->qps, n);
+		if (!qp)
+			return;
+		WRITE_ONCE(qp->attr.qp_state, IB_QPS_ERR);
+		if (qp->ibqp.event_handler) {
+			ev.event = IB_EVENT_QP_FATAL;
+			ev.element.qp = &qp->ibqp;
+			qp->ibqp.event_handler(&ev, qp->ibqp.qp_context);
+		}
+		return;
+	case SHMRDMA_EQE_CQ_ERR:
+		cq = xa_load(&dev->cqs, n);
+		dev_err(&dev->vdev->dev, "cq %u overflowed\n", n);
+		if (cq && cq->ibcq.event_handler) {
+			ev.event = IB_EVENT_CQ_ERR;
+			ev.element.cq = &cq->ibcq;
+			cq->ibcq.event_handler(&ev, cq->ibcq.cq_context);
+		}
+		return;
+	}
+	cq = xa_load(&dev->cqs, n);
+	if (cq && cq->ibcq.comp_handler)
+		cq->ibcq.comp_handler(&cq->ibcq, cq->ibcq.cq_context);
+}
+
 static void shmrdma_event_cb(struct virtqueue *vq)
 {
 	struct shmrdma_dev *dev = vq->vdev->priv;
@@ -347,35 +413,34 @@ static void shmrdma_event_cb(struct virtqueue *vq)
 	}
 	if (kick)
 		virtqueue_kick(vq);
-	if (!sh || dev->eq_bad)
+	if (!sh)
 		goto out;
 	for (;;) {
 		u32 prod = smp_load_acquire(&sh->eq_prod);
 
 		if (prod - dev->eq_cons > SHMRDMA_EQ_ENTRIES) {
-			dev_err(&dev->vdev->dev, "EQ producer %u is %u past %u\n",
-				prod, prod - dev->eq_cons, dev->eq_cons);
-			dev->eq_bad = true;
-			schedule_work(&dev->fatal_work);
-			goto out;
+			struct shmrdma_cq *cq;
+			unsigned long i;
+
+			/* events were overwritten: any CQ may have one */
+			dev_warn_ratelimited(&dev->vdev->dev,
+					     "EQ producer %u is %u past %u\n",
+					     prod, prod - dev->eq_cons,
+					     dev->eq_cons);
+			dev->eq_cons = prod;
+			WRITE_ONCE(sh->eq_cons, dev->eq_cons);
+			xa_for_each(&dev->cqs, i, cq)
+				shmrdma_cq_comp(cq);
 		}
 		while (dev->eq_cons != prod) {
 			struct shmrdma_eqe *e =
 				&dev->eq[dev->eq_cons & (SHMRDMA_EQ_ENTRIES - 1)];
 			u32 cqn = READ_ONCE(e->cqn);
 			u32 type = READ_ONCE(e->type);
-			struct shmrdma_cq *cq;
 
 			dev->eq_cons++;
 			WRITE_ONCE(sh->eq_cons, dev->eq_cons);
-			if (type == SHMRDMA_EQE_QP_FATAL) {
-				dev_dbg(&dev->vdev->dev, "qp %u fatal\n", cqn);
-				continue;
-			}
-			cq = xa_load(&dev->cqs, cqn);
-			if (cq && cq->ibcq.comp_handler)
-				cq->ibcq.comp_handler(&cq->ibcq,
-						      cq->ibcq.cq_context);
+			shmrdma_eqe(dev, cqn, type);
 		}
 		WRITE_ONCE(sh->eq_armed, 1);
 		smp_mb();
@@ -416,7 +481,8 @@ static int shmrdma_query_port(struct ib_device *ibdev, u32 port,
 		return -EINVAL;
 	rcu_read_lock();
 	ndev = rcu_dereference(dev->ndev);
-	up = ndev && netif_running(ndev) && netif_carrier_ok(ndev);
+	up = ndev && netif_running(ndev) && netif_carrier_ok(ndev) &&
+	     !READ_ONCE(dev->broken);
 	rcu_read_unlock();
 	attr->state = up ? IB_PORT_ACTIVE : IB_PORT_DOWN;
 	attr->phys_state = up ? IB_PORT_PHYS_STATE_LINK_UP :
@@ -606,15 +672,105 @@ static const enum ib_wc_opcode wc_opcode[] = {
 	[SHMRDMA_WC_RECV_RDMA_IMM] = IB_WC_RECV_RDMA_WITH_IMM,
 };
 
+static const enum ib_wc_opcode sq_wc_opcode[] = {
+	[SHMRDMA_OP_SEND] = IB_WC_SEND,
+	[SHMRDMA_OP_SEND_IMM] = IB_WC_SEND,
+	[SHMRDMA_OP_SEND_INV] = IB_WC_SEND,
+	[SHMRDMA_OP_RDMA_WRITE] = IB_WC_RDMA_WRITE,
+	[SHMRDMA_OP_RDMA_WRITE_IMM] = IB_WC_RDMA_WRITE,
+	[SHMRDMA_OP_RDMA_READ] = IB_WC_RDMA_READ,
+	[SHMRDMA_OP_REG_MR] = IB_WC_REG_MR,
+	[SHMRDMA_OP_LOCAL_INV] = IB_WC_LOCAL_INV,
+};
+
+static void flush_wc(struct ib_wc *w, struct shmrdma_qp *qp, u64 wr_id,
+		     enum ib_wc_opcode op)
+{
+	memset(w, 0, sizeof(*w));
+	w->wr_id = wr_id;
+	w->status = IB_WC_WR_FLUSH_ERR;
+	w->opcode = op;
+	w->qp = &qp->ibqp;
+	w->port_num = 1;
+}
+
+/*
+ * Once the device is reset the backend completes nothing more, so the
+ * work still posted on cq's QPs is flushed here, from the consumer
+ * indexes the backend left; with wc NULL, only say whether there is
+ * any.  Caller holds cq->lock, which destroy_qp takes before freeing.
+ */
+static int shmrdma_flush_cq(struct shmrdma_dev *dev, struct shmrdma_cq *cq,
+			    int num, struct ib_wc *wc)
+{
+	struct shmrdma_qp *qp;
+	unsigned long i;
+	int n = 0;
+	u32 c;
+
+	xa_for_each(&dev->qps, i, qp) {
+		if (qp->scq == cq) {
+			spin_lock(&qp->sq_lock);
+			c = READ_ONCE(qp->rec->sq_cons);
+			if (!wc && c != qp->sq_prod)
+				n = 1;
+			for (; wc && n < num && c != qp->sq_prod; c++, n++) {
+				struct shmrdma_sq_wqe *e = ring_at(&qp->sq, c);
+
+				flush_wc(&wc[n], qp, e->wr_id,
+					 e->opcode < ARRAY_SIZE(sq_wc_opcode) ?
+					 sq_wc_opcode[e->opcode] : IB_WC_SEND);
+			}
+			WRITE_ONCE(qp->rec->sq_cons, c);
+			spin_unlock(&qp->sq_lock);
+		}
+		if (qp->rcq == cq) {
+			spin_lock(&qp->rq_lock);
+			c = READ_ONCE(qp->rec->rq_cons);
+			if (!wc && c != qp->rq_prod)
+				n = 1;
+			for (; wc && n < num && c != qp->rq_prod; c++, n++) {
+				struct shmrdma_rq_wqe *e = ring_at(&qp->rq, c);
+
+				flush_wc(&wc[n], qp, e->wr_id, IB_WC_RECV);
+			}
+			WRITE_ONCE(qp->rec->rq_cons, c);
+			spin_unlock(&qp->rq_lock);
+		}
+		if (n == num)
+			break;
+	}
+	return n;
+}
+
+/* the ring's producer, or its consumer when the backend broke it */
+static u32 shmrdma_cq_prod(struct shmrdma_dev *dev, struct shmrdma_cq *cq)
+{
+	u32 prod = smp_load_acquire(&cq->rec->prod);
+
+	if (!cq->ring_bad && prod - cq->cons > cq->ring.entries) {
+		dev_err(&dev->vdev->dev, "cq %u producer %u is %u past %u\n",
+			cq->cqn, prod, prod - cq->cons, cq->cons);
+		cq->ring_bad = true;
+		schedule_work(&dev->fatal_work);
+	}
+	return cq->ring_bad ? cq->cons : prod;
+}
+
 static int shmrdma_poll_cq(struct ib_cq *ibcq, int num, struct ib_wc *wc)
 {
 	struct shmrdma_dev *dev = to_sdev(ibcq->device);
 	struct shmrdma_cq *cq = to_scq(ibcq);
 	unsigned long flags;
+	bool reset;
 	int n = 0;
+	u32 prod;
 
 	spin_lock_irqsave(&cq->lock, flags);
-	while (n < num && cq->cons != smp_load_acquire(&cq->rec->prod)) {
+	/* before the producer: after the reset it moves no more */
+	reset = smp_load_acquire(&dev->reset_done);
+	prod = shmrdma_cq_prod(dev, cq);
+	while (n < num && cq->cons != prod) {
 		struct shmrdma_cqe *e = ring_at(&cq->ring, cq->cons);
 		struct shmrdma_qp *qp;
 		struct ib_wc *w = &wc[n];
@@ -649,6 +805,8 @@ static int shmrdma_poll_cq(struct ib_cq *ibcq, int num, struct ib_wc *wc)
 		n++;
 	}
 	smp_store_release(&cq->rec->cons, cq->cons);
+	if (reset && n < num && cq->cons == prod)
+		n += shmrdma_flush_cq(dev, cq, num - n, wc + n);
 	spin_unlock_irqrestore(&cq->lock, flags);
 	return n;
 }
@@ -656,6 +814,7 @@ static int shmrdma_poll_cq(struct ib_cq *ibcq, int num, struct ib_wc *wc)
 static int shmrdma_req_notify_cq(struct ib_cq *ibcq,
 				 enum ib_cq_notify_flags flags)
 {
+	struct shmrdma_dev *dev = to_sdev(ibcq->device);
 	struct shmrdma_cq *cq = to_scq(ibcq);
 	u32 arm = (flags & IB_CQ_SOLICITED_MASK) == IB_CQ_SOLICITED ?
 		  SHMRDMA_CQ_ARM_SOLICITED : SHMRDMA_CQ_ARM_NEXT;
@@ -665,6 +824,21 @@ static int shmrdma_req_notify_cq(struct ib_cq *ibcq,
 		arm = SHMRDMA_CQ_ARM_NEXT;
 	WRITE_ONCE(cq->rec->arm, arm);
 	smp_mb();
+	if (smp_load_acquire(&dev->reset_done)) {
+		unsigned long irqf;
+		bool pending;
+
+		/* no event will come: report the flushes, or deliver one */
+		spin_lock_irqsave(&cq->lock, irqf);
+		pending = cq->cons != shmrdma_cq_prod(dev, cq) ||
+			  shmrdma_flush_cq(dev, cq, 1, NULL);
+		spin_unlock_irqrestore(&cq->lock, irqf);
+		if (pending && (flags & IB_CQ_REPORT_MISSED_EVENTS))
+			return 1;
+		if (pending)
+			schedule_work(&dev->flush_work);
+		return 0;
+	}
 	if ((flags & IB_CQ_REPORT_MISSED_EVENTS) &&
 	    READ_ONCE(cq->cons) != READ_ONCE(cq->rec->prod))
 		return 1;
@@ -673,6 +847,8 @@ static int shmrdma_req_notify_cq(struct ib_cq *ibcq,
 
 /* ---------------------------------------------------------------- */
 /* queue pairs                                                      */
+
+static void shmrdma_qp_erase(struct shmrdma_dev *dev, struct shmrdma_qp *qp);
 
 /*
  * Round robin, not lowest free: a QPN freed just now is still in the
@@ -760,6 +936,8 @@ static int shmrdma_create_qp(struct ib_qp *ibqp,
 		qp->max_recv_sge = SHMRDMA_MAX_SGE;
 	qp->max_inline = qp->type == SHMRDMA_QPT_RC ? sq_esz - SHMRDMA_WQE_HDR : 0;
 	qp->attr.qp_state = IB_QPS_RESET;
+	qp->scq = to_scq(init->send_cq);
+	qp->rcq = to_scq(init->recv_cq);
 
 	qp->rec = kzalloc(sizeof(*qp->rec), GFP_KERNEL);
 	if (!qp->rec) {
@@ -775,8 +953,8 @@ static int shmrdma_create_qp(struct ib_qp *ibqp,
 
 	cmd.create_qp.qpn = qpn;
 	cmd.create_qp.type = qp->type;
-	cmd.create_qp.send_cqn = to_scq(init->send_cq)->cqn;
-	cmd.create_qp.recv_cqn = to_scq(init->recv_cq)->cqn;
+	cmd.create_qp.send_cqn = qp->scq->cqn;
+	cmd.create_qp.recv_cqn = qp->rcq->cqn;
 	cmd.create_qp.rec_gpa = virt_to_phys(qp->rec);
 	ring_desc(&qp->sq, &cmd.create_qp.sq);
 	ring_desc(&qp->rq, &cmd.create_qp.rq);
@@ -796,7 +974,7 @@ static int shmrdma_create_qp(struct ib_qp *ibqp,
 	return 0;
 
 err_xa:
-	xa_erase_irq(&dev->qps, qpn);
+	shmrdma_qp_erase(dev, qp);
 err_rq:
 	ring_free(&qp->rq);
 err_sq:
@@ -807,6 +985,22 @@ err_qpn:
 	if (qpn != 1)
 		ida_free(&dev->qpn_ida, qpn);
 	return rc;
+}
+
+/* on a reset device; RESET drops what is posted, as the backend does */
+static int shmrdma_qp_drop(struct shmrdma_qp *qp, enum ib_qp_state next)
+{
+	unsigned long flags;
+
+	if (next != IB_QPS_RESET)
+		return 0;
+	spin_lock_irqsave(&qp->sq_lock, flags);
+	WRITE_ONCE(qp->rec->sq_cons, qp->sq_prod);
+	spin_unlock_irqrestore(&qp->sq_lock, flags);
+	spin_lock_irqsave(&qp->rq_lock, flags);
+	WRITE_ONCE(qp->rec->rq_cons, qp->rq_prod);
+	spin_unlock_irqrestore(&qp->rq_lock, flags);
+	return 0;
 }
 
 static int shmrdma_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
@@ -881,6 +1075,11 @@ static int shmrdma_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 
 	if (cmd.modify_qp.mask) {
 		rc = shmrdma_cmd(dev, &cmd, NULL);
+		/* a reset device holds no QPs: going down needs nothing of it */
+		if (rc && smp_load_acquire(&dev->reset_done) &&
+		    (mask & IB_QP_STATE) &&
+		    (next == IB_QPS_ERR || next == IB_QPS_RESET))
+			rc = shmrdma_qp_drop(qp, next);
 		if (rc)
 			goto out;
 	}
@@ -936,6 +1135,22 @@ static void shmrdma_cq_clean(struct ib_cq *ibcq, u32 qpn)
 	spin_unlock_irqrestore(&cq->lock, flags);
 }
 
+/*
+ * No event handler runs for qp after this, and no poll_cq, which looks
+ * QPs up under the CQ's lock, still uses it.
+ */
+static void shmrdma_qp_erase(struct shmrdma_dev *dev, struct shmrdma_qp *qp)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&dev->eq_lock, flags);
+	xa_erase(&dev->qps, qp->ibqp.qp_num);
+	spin_unlock_irqrestore(&dev->eq_lock, flags);
+	shmrdma_cq_clean(&qp->scq->ibcq, qp->ibqp.qp_num);
+	if (qp->rcq != qp->scq)
+		shmrdma_cq_clean(&qp->rcq->ibcq, qp->ibqp.qp_num);
+}
+
 static int shmrdma_destroy_qp(struct ib_qp *ibqp, struct ib_udata *udata)
 {
 	struct shmrdma_dev *dev = to_sdev(ibqp->device);
@@ -947,10 +1162,7 @@ static int shmrdma_destroy_qp(struct ib_qp *ibqp, struct ib_udata *udata)
 	rc = shmrdma_cmd(dev, &cmd, NULL);
 	if (rc)
 		shmrdma_destroy_failed(dev, "destroy qp", ibqp->qp_num, rc);
-	xa_erase_irq(&dev->qps, ibqp->qp_num);
-	shmrdma_cq_clean(ibqp->send_cq, ibqp->qp_num);
-	if (ibqp->recv_cq != ibqp->send_cq)
-		shmrdma_cq_clean(ibqp->recv_cq, ibqp->qp_num);
+	shmrdma_qp_erase(dev, qp);
 	ring_free(&qp->sq);
 	ring_free(&qp->rq);
 	kfree(qp->rec);
@@ -1111,7 +1323,10 @@ static int shmrdma_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 	}
 	smp_store_release(&qp->rec->sq_prod, qp->sq_prod);
 	spin_unlock_irqrestore(&qp->sq_lock, flags);
-	shmrdma_doorbell(dev, qp->rec);
+	if (smp_load_acquire(&dev->reset_done))
+		schedule_work(&dev->flush_work);
+	else
+		shmrdma_doorbell(dev, qp->rec);
 	if (rc)
 		*bad = wr;
 	return rc;
@@ -1155,7 +1370,10 @@ static int shmrdma_post_recv(struct ib_qp *ibqp, const struct ib_recv_wr *wr,
 	}
 	smp_store_release(&qp->rec->rq_prod, qp->rq_prod);
 	spin_unlock_irqrestore(&qp->rq_lock, flags);
-	shmrdma_doorbell(dev, qp->rec);
+	if (smp_load_acquire(&dev->reset_done))
+		schedule_work(&dev->flush_work);
+	else
+		shmrdma_doorbell(dev, qp->rec);
 	if (rc)
 		*bad = wr;
 	return rc;
@@ -1414,6 +1632,7 @@ static int shmrdma_probe(struct virtio_device *vdev)
 	vdev->priv = dev;
 	mutex_init(&dev->ctrl_mutex);
 	INIT_WORK(&dev->fatal_work, shmrdma_fatal_work);
+	INIT_WORK(&dev->flush_work, shmrdma_flush_work);
 	init_completion(&dev->ctrl_done);
 	spin_lock_init(&dev->eq_lock);
 	xa_init_flags(&dev->qps, XA_FLAGS_LOCK_IRQ);
@@ -1504,6 +1723,7 @@ err_reset:
 	shmrdma_reset_locked(dev);
 	mutex_unlock(&dev->ctrl_mutex);
 	cancel_work_sync(&dev->fatal_work);
+	cancel_work_sync(&dev->flush_work);
 	vdev->config->del_vqs(vdev);
 err_free:
 	if (dev->eq)
@@ -1537,6 +1757,7 @@ static void shmrdma_remove(struct virtio_device *vdev)
 	shmrdma_reset_locked(dev);
 	mutex_unlock(&dev->ctrl_mutex);
 	cancel_work_sync(&dev->fatal_work);
+	cancel_work_sync(&dev->flush_work);
 	vdev->config->del_vqs(vdev);
 	free_pages_exact(dev->eq, SHMRDMA_EQ_ENTRIES *
 			 sizeof(struct shmrdma_eqe));

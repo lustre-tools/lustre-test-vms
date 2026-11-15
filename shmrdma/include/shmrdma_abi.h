@@ -111,7 +111,7 @@ struct shmrdma_qp_rec {
 	__u32 sq_prod;
 	__u32 rq_prod;
 	__u32 pad0[14];
-	/* written by the backend */
+	/* written by the backend; by the guest once it reset the device */
 	__u32 sq_cons;
 	__u32 rq_cons;
 	__u32 need_kick;	/* backend idle: guest must ring the doorbell */
