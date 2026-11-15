@@ -91,6 +91,26 @@ def test_installs_and_links(
     assert len(fetched) == 1
 
 
+def test_extracts_the_copy_it_hashed(
+    prefix: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: the download was hashed in the user's temporary
+    directory and then opened there again by root's tar, so another of
+    the user's processes could swap it between the two."""
+    run, _ = _downloads(_tarball(tmp_path), monkeypatch)
+    sources: list[Path] = []
+
+    def watch(cmd, check=True, quiet=False, cwd=None, env=None):
+        if cmd[0] == "tar":
+            sources.append(Path(cmd[2]))
+        return run(cmd, check=check, quiet=quiet, cwd=cwd, env=env)
+
+    with patch.object(hs, "_run", side_effect=watch):
+        hs.install_qemu_macos_vhost()
+    assert len(sources) == 1 and sources[0].parent == prefix
+    assert not sources[0].exists()
+
+
 def test_relinks_after_brew(
     prefix: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

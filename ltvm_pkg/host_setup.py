@@ -2137,6 +2137,9 @@ def install_qemu_macos_vhost(force: bool = False) -> None:
         )
         log.info("Downloading ltvm's QEMU %s for macOS...", QEMU_MACOS_VERSION)
         tmpdir = Path(tempfile.mkdtemp(prefix="qemu-fetch."))
+        # Hashed and extracted from a copy in QEMU_PREFIX, which the
+        # user's other processes cannot change once root owns it.
+        staged = QEMU_PREFIX / f".{_QEMU_MACOS_ASSET}.{os.getpid()}"
         try:
             local = tmpdir / _QEMU_MACOS_ASSET
             r = _run(
@@ -2150,7 +2153,9 @@ def install_qemu_macos_vhost(force: bool = False) -> None:
                     f"(curl rc={r.returncode}); check access to github.com "
                     f"and retry"
                 )
-            actual = _sha256_file(local)
+            _prefix_run(["mkdir", "-p", str(QEMU_PREFIX)])
+            _prefix_run(["install", "-m", "0644", str(local), str(staged)])
+            actual = _sha256_file(staged)
             if actual != _QEMU_MACOS_SHA256:
                 raise RuntimeError(
                     f"Checksum mismatch for {_QEMU_MACOS_ASSET}:\n"
@@ -2161,10 +2166,12 @@ def install_qemu_macos_vhost(force: bool = False) -> None:
             _prefix_run(["rm", "-rf", str(dest)])
             _prefix_run(["mkdir", "-p", str(dest)])
             _prefix_run(
-                ["tar", "xf", str(local), "-C", str(dest), "--no-same-owner"]
+                ["tar", "xf", str(staged), "-C", str(dest), "--no-same-owner"]
             )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+            if staged.exists():
+                _prefix_run(["rm", "-f", str(staged)])
     r = _run_quiet([str(target), "-M", "none", "-device", "help"], check=False)
     if '"vhost-user-fs-pci"' not in r.stdout:
         raise RuntimeError(
