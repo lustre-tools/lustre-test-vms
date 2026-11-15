@@ -112,9 +112,12 @@ ltvm vm shmrdmad [status|start|stop]
   names a net (`--nic shmnet:net=tcp1`): unnamed, it would reach the
   same peers as a second rail, and LNet then sends the traffic
   addressed to it over o2ib. `cluster deploy` reads the MGS's
-  lnet.conf, so NETTYPE and the MGS NID follow. lnet.conf is written
-  at first boot only, so after `vm set --shmrdma` on an existing VM,
-  remove `/etc/modprobe.d/lnet.conf` in the guest and reboot it.
+  lnet.conf, so NETTYPE and the MGS NID follow; for a single VM,
+  `deploy-lustre` and `ltvm llmount` read its own and write them in an
+  LNet block of cfg/local.sh (the stock file says tcp). lnet.conf is
+  written at first boot only, so after `vm set --shmrdma` on an
+  existing VM, remove `/etc/modprobe.d/lnet.conf` in the guest and
+  reboot it.
 - **Memory.** Guest RAM is a shared memfd, which KSM cannot merge, so
   where `/etc/ltvm.conf` sets `[memory] overcommit`, a shmrdma or
   shmnet VM counts against the limit at overcommit times its size.

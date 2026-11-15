@@ -784,3 +784,35 @@ class TestDoctorSshClientConfig:
         ) as probe:
             assert vm_commands.cmd_doctor(_make_args(fix=False)) == 0
         probe.assert_called_once_with(f"{SUBNET}.2")
+
+
+# -- shmrdmad ---------------------------------------------------------
+
+
+class TestDoctorShmrdmad:
+    def test_no_passwd_entry_skips_the_check(
+        self,
+        tmp_vmdir: Path,
+        doctor_env: dict,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with patch(
+            "ltvm_pkg.shmrdma.daemon",
+            side_effect=KeyError("getpwuid(): uid not found: 4242"),
+        ):
+            rc = vm_commands.cmd_doctor(_make_args(fix=False))
+        assert rc == 0
+        assert "no issues found" in capsys.readouterr().out
+
+    def test_orphans_reported(
+        self,
+        tmp_vmdir: Path,
+        doctor_env: dict,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with patch("ltvm_pkg.shmrdma.attached_vms", return_value=["co1-a"]):
+            rc = vm_commands.cmd_doctor(_make_args(fix=False))
+        assert rc != 0
+        assert "shmrdmad is not running but co1-a use it" in (
+            capsys.readouterr().out
+        )

@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import Any
 
 from . import numa_dist, rootless, shmrdma, shmrdma_req, vm_claim
-from .deploy import configure_test_disks, premount_cleanup_script
+from .deploy import (
+    configure_single_lnet,
+    configure_test_disks,
+    premount_cleanup_script,
+    uses_own_lnet,
+)
 from .host_setup import is_macos
 from .nic_guest import wait_for_layout as guest_nic_layout
 from .nic_spec import NicSpec, NicSpecError
@@ -1231,7 +1236,7 @@ def _check_shmrdma_image(vm: VMInfo, shm: str) -> None:
     t = shmrdma_req.Target(
         vm.os_id,
         image=Path(vm.image),
-        kernel_dir=Path(vm.image).parent,
+        kernel_dir=Path(vm.kernel).parent,
         arch=vm.arch or None,
         has_kmod=shmrdma.vm_has_kmod(vm),
     )
@@ -2186,6 +2191,8 @@ def cmd_llmount(args: argparse.Namespace) -> None:
                 disk_size_bytes=vm.disk_size,
                 os_family=os_family,
             )
+            if uses_own_lnet(vm):
+                configure_single_lnet(vm.ip, os_family=os_family)
         except (RuntimeError, subprocess.TimeoutExpired) as e:
             print(f"error: {e}", file=sys.stderr)
             sys.exit(EXIT_ERROR)
@@ -4064,16 +4071,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     # Running VMs whose shmrdmad is gone: their shmrdma device and
     # shmnet NICs are dead until each VM restarts and starts it again.
-    shm = shmrdma.daemon(create=False)
-    if not shm.pid():
-        orphans = []
-        for name in VMInfo.all_names():
-            try:
-                vm = VMInfo.load(name)
-            except (VMNotFound, ValueError):
-                continue
-            if vm.shared_ram and shmrdma.vm_uses(vm, shm) and is_running(vm):
-                orphans.append(name)
+    try:
+        shm: shmrdma.Daemon | None = shmrdma.daemon(create=False)
+    except (KeyError, OSError, RuntimeError):
+        # a uid with no passwd entry (a container) has no daemon dir
+        shm = None
+    if shm is not None and not shm.pid():
+        orphans = shmrdma.attached_vms(shm)
         if orphans:
             print(
                 f"shmrdmad is not running but {', '.join(orphans)} use it: "

@@ -27,6 +27,8 @@ from tests.test_qemu_run import (  # noqa: F401
     tmp_vmdir,
 )
 
+_REAL_STATE_HOME = shmrdma._state_home
+
 # sun_path holds 104 bytes on macOS, 108 on Linux; the tests' sockets
 # go at most this far below tmp_path (shmrdma-<uid>/rdma.sock).
 _SOCKET_SUFFIX_MAX = 32
@@ -380,6 +382,30 @@ def test_stop_refuses_with_vms(tmp_vmdir: Path) -> None:  # noqa: F811
         launch_lock.assert_called_once()
 
 
+def test_attached_vms_only_the_users(tmp_vmdir: Path) -> None:  # noqa: F811
+    d = shmrdma.Daemon("tester", os.geteuid(), tmp_vmdir)
+    for name in ("co1-mine", "co1-theirs"):
+        vm = _make_vm(tmp_vmdir, name=name)
+        vm.shmrdma = "auto"
+        vm.shm_sockets = [str(d.rdma_socket)]
+        vm.save()
+    real = os.stat
+
+    def stat_(path, *a, **k):
+        st = real(path, *a, **k)
+        if Path(path).name == "co1-theirs.info":
+            fake = list(st)
+            fake[stat.ST_UID] = os.geteuid() + 1
+            return os.stat_result(fake)
+        return st
+
+    with (
+        patch("ltvm_pkg.shmrdma.os.stat", side_effect=stat_),
+        patch("ltvm_pkg.qemu_run.is_running", return_value=True),
+    ):
+        assert shmrdma.attached_vms(d) == ["co1-mine"]
+
+
 class TestPrivateDir:
     def test_created_private(self, tmp_vmdir: Path) -> None:  # noqa: F811
         d = shmrdma.run_dir(os.geteuid())
@@ -419,14 +445,18 @@ class TestPrivateDir:
         elsewhere = tmp_vmdir / "elsewhere"
         elsewhere.mkdir()
         (tmp_vmdir / f"shmrdma-{os.geteuid()}").symlink_to(elsewhere)
-        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_vmdir / "state"))
+        monkeypatch.setattr(
+            shmrdma, "_state_home", lambda uid: tmp_vmdir / "state"
+        )
         d = shmrdma.run_dir(os.geteuid())
         assert d == tmp_vmdir / "state" / "ltvm" / "shmrdma"
 
     def test_foreign_owner_refused(self, tmp_vmdir: Path, monkeypatch) -> None:  # noqa: F811
         d = tmp_vmdir / f"shmrdma-{os.geteuid()}"
         d.mkdir(mode=0o700)
-        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_vmdir / "state"))
+        monkeypatch.setattr(
+            shmrdma, "_state_home", lambda uid: tmp_vmdir / "state"
+        )
         real = os.lstat
 
         def lstat(path, *a, **k):
@@ -443,7 +473,9 @@ class TestPrivateDir:
             assert shmrdma.run_dir(os.geteuid(), create=False) != d
 
     def test_live_daemon_wins(self, tmp_vmdir: Path, monkeypatch) -> None:  # noqa: F811
-        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_vmdir / "state"))
+        monkeypatch.setattr(
+            shmrdma, "_state_home", lambda uid: tmp_vmdir / "state"
+        )
         first = tmp_vmdir / f"shmrdma-{os.geteuid()}"
         state = tmp_vmdir / "state" / "ltvm" / "shmrdma"
         first.mkdir(mode=0o700)
@@ -455,6 +487,16 @@ class TestPrivateDir:
         with patch.object(shmrdma.Daemon, "pid", pid):
             assert shmrdma.run_dir(os.geteuid()) == state
             assert shmrdma.run_dir(os.geteuid(), create=False) == state
+
+    def test_root_and_user_agree_on_the_state_dir(self, monkeypatch) -> None:
+        monkeypatch.setattr(shmrdma, "_state_home", _REAL_STATE_HOME)
+        monkeypatch.setenv("XDG_STATE_HOME", "/elsewhere")
+        uid = os.geteuid()
+        mine = shmrdma._candidate_dirs(uid)
+        with patch("ltvm_pkg.shmrdma.os.geteuid", return_value=uid + 1):
+            assert shmrdma._candidate_dirs(uid) == mine
+        home = Path(shmrdma.pwd.getpwuid(uid).pw_dir)
+        assert mine[1] == home / ".local/state/ltvm/shmrdma"
 
     def test_root_never_creates(self, tmp_vmdir: Path) -> None:  # noqa: F811
         uid = os.geteuid()
@@ -894,6 +936,29 @@ class TestRequirements:
         assert "--nic shmnet" in why and "cc: detail" in why
         assert "numactl" not in why
         assert "ltvm doctor --fix --shmrdma" in why
+
+    def test_root_needs_the_users_daemon_running(self, tmp_path: Path) -> None:
+        from ltvm_pkg import shmrdma_req as sr
+
+        d = shmrdma.Daemon("alice", os.geteuid() + 1, tmp_path)
+        with (
+            patch("ltvm_pkg.shmrdma_req.host_checks", return_value=[]),
+            patch("ltvm_pkg.shmrdma.daemon", return_value=d),
+        ):
+            why = sr.refusal({sr.SHMRDMA, sr.OWN_DAEMON})
+            assert why is not None
+            assert "ltvm vm shmrdmad start` as alice" in why
+            assert "doctor --fix" not in why
+            # a hand-run daemon's socket needs nothing of ltvm's
+            assert sr.refusal({sr.SHMRDMA}) is None
+            with patch.object(shmrdma.Daemon, "pid", return_value=42):
+                assert sr.refusal({sr.SHMRDMA, sr.OWN_DAEMON}) is None
+        own = shmrdma.Daemon("me", os.geteuid(), tmp_path)
+        with (
+            patch("ltvm_pkg.shmrdma_req.host_checks", return_value=[]),
+            patch("ltvm_pkg.shmrdma.daemon", return_value=own),
+        ):
+            assert sr.refusal({sr.OWN_DAEMON}) is None
 
     def test_target_in_the_fix_command(self, tmp_path: Path) -> None:
         from ltvm_pkg import shmrdma_req as sr
@@ -1489,3 +1554,21 @@ class TestKmodCache:
         finally:
             kdir.chmod(0o755)
         podman.assert_not_called()
+
+
+def test_vm_set_checks_the_vms_kernel_dir(tmp_path: Path) -> None:
+    from ltvm_pkg import vm_commands
+
+    vm = VMInfo(
+        name="co1-a",
+        ip="192.168.100.50",
+        image=str(tmp_path / "images" / "base.ext4"),
+        kernel=str(tmp_path / "kernels" / "k1" / "vmlinuz"),
+    )
+    with (
+        patch("ltvm_pkg.shmrdma.vm_has_kmod", return_value=True),
+        patch("ltvm_pkg.shmrdma_req.refusal", return_value=None) as refusal,
+    ):
+        vm_commands._check_shmrdma_image(vm, "auto")
+    t = refusal.call_args.args[1]
+    assert t.kernel_dir == tmp_path / "kernels" / "k1"

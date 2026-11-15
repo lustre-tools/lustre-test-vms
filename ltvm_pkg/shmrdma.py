@@ -301,16 +301,16 @@ def _check_private(d: Path, uid: int) -> None:
             os.close(fd)
 
 
+def _state_home(uid: int) -> Path:
+    # Not $XDG_STATE_HOME: sudo drops it, and root must look where the
+    # user put the daemon.
+    return Path(pwd.getpwuid(uid).pw_dir) / ".local" / "state"
+
+
 def _candidate_dirs(uid: int) -> list[Path]:
-    home = Path(pwd.getpwuid(uid).pw_dir)
-    state = (
-        Path(os.environ["XDG_STATE_HOME"])
-        if os.environ.get("XDG_STATE_HOME") and os.geteuid() == uid
-        else home / ".local" / "state"
-    )
     return [
         vm_state.VM_DIR / f"shmrdma-{uid}",
-        state / "ltvm" / "shmrdma",
+        _state_home(uid) / "ltvm" / "shmrdma",
     ]
 
 
@@ -539,7 +539,11 @@ def vm_sockets(vm: VMInfo, d: Daemon) -> list[str]:
 
 
 def attached_vms(d: Daemon) -> list[str]:
-    """Running VMs that use daemon *d*."""
+    """Running VMs of *d*'s user (or root's) that use daemon *d*.
+
+    Anyone can write a socket path into a ``.info`` of their own, so
+    another user's VM never counts.
+    """
     from .qemu_run import is_running
     from .vm_state import VMInfo, VMNotFound
 
@@ -547,7 +551,10 @@ def attached_vms(d: Daemon) -> list[str]:
     for name in VMInfo.all_names():
         try:
             vm = VMInfo.load(name)
-        except (VMNotFound, ValueError):
+            owner = os.stat(vm.info_path).st_uid
+        except (VMNotFound, ValueError, OSError):
+            continue
+        if owner not in (d.uid, 0):
             continue
         if vm.shared_ram and vm_uses(vm, d) and is_running(vm):
             names.append(name)

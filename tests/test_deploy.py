@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ltvm_pkg import deploy
+from ltvm_pkg.nic_spec import NicSpec
 from ltvm_pkg.vm_state import VMInfo
 from tests.host_marks import needs_gnu_sed
 
@@ -3094,3 +3095,59 @@ class TestTarCreateArgv:
         assert "./lib/modules/5.14/libcfs.ko" in names.split()
         assert "._" not in names
         assert b"LIBARCHIVE.xattr" not in out
+
+
+class TestSingleLnet:
+    """A single VM whose LNet is not tcp on eth0 gets NETTYPE and MGSNID
+    from its lnet.conf, as a cluster's MGS does."""
+
+    ADDRS = (
+        "1: lo    inet 127.0.0.1/8 scope host lo\n"
+        "2: eth0    inet 192.168.100.50/24 brd 192.168.100.255 scope global\n"
+    )
+
+    def _run(self, networks: str) -> list[str]:
+        sent: list[str] = []
+
+        def fake(ip, script, timeout=30):
+            sent.append(script)
+            if len(sent) == 1:
+                return _ok(stdout=f"{networks}\n--\n{self.ADDRS}")
+            return _ok()
+
+        with patch("ltvm_pkg.deploy.run_ssh", side_effect=fake):
+            deploy.configure_single_lnet("192.168.100.50")
+        return sent
+
+    def test_shmrdma_vm_mounts_over_o2ib(self) -> None:
+        probe, script = self._run("o2ib0(eth0)")
+        assert "lnet.conf" in probe
+        assert "NETTYPE=o2ib\\nMGSNID=192.168.100.50@o2ib\\n" in script
+        # rewritten, not stacked, on every deploy
+        assert f"/^{deploy.LNET_BEGIN}/,/^{deploy.LNET_END}/d" in script
+
+    def test_cluster_member_left_alone(self) -> None:
+        from ltvm_pkg.vm_cluster import CLUSTER_BLOCK_BEGIN
+
+        _, script = self._run("o2ib0(eth0)")
+        guard = f"grep -q '^{CLUSTER_BLOCK_BEGIN}'"
+        assert script.index(guard) < script.index("NETTYPE=")
+
+    def test_no_address_is_an_error(self) -> None:
+        with (
+            patch(
+                "ltvm_pkg.deploy.run_ssh",
+                return_value=_ok(stdout="o2ib0(eth1)\n--\n"),
+            ),
+            pytest.raises(RuntimeError, match="no IPv4 address on eth1"),
+        ):
+            deploy.configure_single_lnet("192.168.100.50")
+
+    def test_only_vms_with_their_own_lnet(self) -> None:
+        plain = VMInfo(name="co1-a", ip="192.168.100.50")
+        assert not deploy.uses_own_lnet(plain)
+        plain.shmrdma = "auto"
+        assert deploy.uses_own_lnet(plain)
+        assert deploy.uses_own_lnet(
+            VMInfo(name="co1-b", ip="192.168.100.51", nics=[NicSpec("tcp")])
+        )
