@@ -727,6 +727,9 @@ static int shmrdma_create_qp(struct ib_qp *ibqp,
 	    cap->max_recv_sge > SHMRDMA_MAX_SGE ||
 	    cap->max_inline_data > 4096 - SHMRDMA_WQE_HDR)
 		return -EINVAL;
+	/* a UD WQE's address fields overlap the inline length */
+	if (qp->type != SHMRDMA_QPT_RC && cap->max_inline_data)
+		return -EINVAL;
 
 	sq_entries = roundup_pow_of_two(max(cap->max_send_wr, 1u));
 	rq_entries = roundup_pow_of_two(max(cap->max_recv_wr, 1u));
@@ -755,7 +758,7 @@ static int shmrdma_create_qp(struct ib_qp *ibqp,
 	qp->max_recv_sge = (rq_esz - sizeof(struct shmrdma_rq_wqe)) / 16;
 	if (qp->max_recv_sge > SHMRDMA_MAX_SGE)
 		qp->max_recv_sge = SHMRDMA_MAX_SGE;
-	qp->max_inline = sq_esz - SHMRDMA_WQE_HDR;
+	qp->max_inline = qp->type == SHMRDMA_QPT_RC ? sq_esz - SHMRDMA_WQE_HDR : 0;
 	qp->attr.qp_state = IB_QPS_RESET;
 
 	qp->rec = kzalloc(sizeof(*qp->rec), GFP_KERNEL);
@@ -1052,7 +1055,7 @@ static int build_wqe(struct shmrdma_qp *qp, const struct ib_send_wr *wr,
 		u32 len = 0;
 
 		for (i = 0; i < wr->num_sge; i++) {
-			if (len + wr->sg_list[i].length > qp->max_inline)
+			if (wr->sg_list[i].length > qp->max_inline - len)
 				return -EINVAL;
 			memcpy(p + len, (void *)(uintptr_t)wr->sg_list[i].addr,
 			       wr->sg_list[i].length);
@@ -1163,8 +1166,13 @@ static int shmrdma_post_recv(struct ib_qp *ibqp, const struct ib_recv_wr *wr,
 
 static struct ib_mr *shmrdma_get_dma_mr(struct ib_pd *pd, int access)
 {
-	struct shmrdma_mr *mr = kzalloc(sizeof(*mr), GFP_KERNEL);
+	struct shmrdma_mr *mr;
 
+	/* the backend never takes key 0 from a remote peer */
+	if (access & (IB_ACCESS_REMOTE_READ | IB_ACCESS_REMOTE_WRITE |
+		      IB_ACCESS_REMOTE_ATOMIC))
+		return ERR_PTR(-EOPNOTSUPP);
+	mr = kzalloc(sizeof(*mr), GFP_KERNEL);
 	if (!mr)
 		return ERR_PTR(-ENOMEM);
 	mr->ibmr.lkey = SHMRDMA_LOCAL_DMA_LKEY;
