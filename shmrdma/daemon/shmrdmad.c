@@ -1775,8 +1775,7 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 			done++;
 		}
 	}
-	if (qp->state != QPS_RTS && qp->state != QPS_ERR &&
-	    qp->state != QPS_SQD && qp->state != QPS_SQE)
+	if (qp->state != QPS_RTS && qp->state != QPS_ERR)
 		return done;
 
 	uint32_t prod = ACQ(&qp->rec->sq_prod);
@@ -1874,8 +1873,8 @@ static bool qp_has_work(struct qp *qp)
 		return true;
 	if (qp->state == QPS_ERR && ACQ(&qp->rec->rq_prod) != qp->rq_cons)
 		return true;
-	if ((qp->state != QPS_RTS && qp->state != QPS_ERR &&
-	     qp->state != QPS_SQD && qp->state != QPS_SQE) || qp->stall_since)
+	if ((qp->state != QPS_RTS && qp->state != QPS_ERR) ||
+	    qp->stall_since)
 		return false;
 	return ACQ(&qp->rec->sq_prod) != qp->sq_cons;
 }
@@ -2157,7 +2156,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		REL(&d->shared->eq_lost, 0);
 		d->initialized = true;
 		wunlock();
-		r->val = (uint32_t)d->id | SHMRDMA_INIT_F_LIMBO;
+		r->val = (uint32_t)d->id;
 		GLOG(d, "dev%d: initialized, eq %u entries", d->id, n);
 		return 0;
 	}
@@ -2306,6 +2305,13 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 
 		if (qpn >= SHMRDMA_MAX_QP || !(qp = d->qps[qpn]))
 			return -EINVAL;
+		if ((c->modify_qp.mask & SHMRDMA_MQ_STATE) &&
+		    c->modify_qp.state != QPS_RESET &&
+		    c->modify_qp.state != QPS_INIT &&
+		    c->modify_qp.state != QPS_RTR &&
+		    c->modify_qp.state != QPS_RTS &&
+		    c->modify_qp.state != QPS_ERR)
+			return -EOPNOTSUPP;
 		wlock();
 		/* other QPs' cached peers may name this one */
 		if (c->modify_qp.mask & SHMRDMA_MQ_DEST) {
