@@ -195,24 +195,26 @@ static void shmrdma_cq_comp(struct shmrdma_cq *cq)
 }
 
 /*
- * After the reset: the event every armed CQ waits for, so its ULP
- * polls the flushes.  An unarmed one is found by req_notify_cq.
+ * After the reset: the event an armed CQ waits for, so its ULP polls
+ * the flushes.  With all, every CQ: the backend may have consumed an
+ * arm for an event the broken event queue never delivered.
  */
-static void shmrdma_kick_cqs(struct shmrdma_dev *dev)
+static void shmrdma_kick_cqs(struct shmrdma_dev *dev, bool all)
 {
 	struct shmrdma_cq *cq;
 	unsigned long flags, i;
 
 	spin_lock_irqsave(&dev->eq_lock, flags);
 	xa_for_each(&dev->cqs, i, cq)
-		if (xchg(&cq->rec->arm, 0))
+		if (xchg(&cq->rec->arm, 0) || all)
 			shmrdma_cq_comp(cq);
 	spin_unlock_irqrestore(&dev->eq_lock, flags);
 }
 
 static void shmrdma_flush_work(struct work_struct *work)
 {
-	shmrdma_kick_cqs(container_of(work, struct shmrdma_dev, flush_work));
+	shmrdma_kick_cqs(container_of(work, struct shmrdma_dev, flush_work),
+			 false);
 }
 
 static void shmrdma_fatal_work(struct work_struct *work)
@@ -233,7 +235,7 @@ static void shmrdma_fatal_work(struct work_struct *work)
 	mutex_unlock(&dev->ctrl_mutex);
 	if (send)
 		ib_dispatch_event(&ev);
-	shmrdma_kick_cqs(dev);
+	shmrdma_kick_cqs(dev, true);
 }
 
 /* a command was not carried out: reset now, report it from a work item */
