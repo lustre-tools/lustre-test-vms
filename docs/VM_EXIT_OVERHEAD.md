@@ -26,6 +26,27 @@ to 7,469 RPC/s.  The cost is idle: 4,000 timer exits and 4,000 halt
 wake-ups a second for a 4-vCPU guest, 0.15 of a host CPU where a
 tickless guest takes 0.01.  `--kernel-args nohz=on` turns it back off.
 
+On the host, the cpufreq governor matters as much.  A vCPU thread runs
+in short bursts between halts, on whichever CPU the scheduler picks, so
+schedutil never sees enough load on any one CPU to clock it up.  With
+`nohz=off` guests, unpinned, on Sookie's node 6 only:
+
+| node 6 CPUs | sanity subset | LNet 4K write x1 | ping x1 |
+|---|---|---|---|
+| schedutil (Sookie's default) | 185 s, 298 host CPU-s | 1,858 RPC/s | 1,560/s |
+| performance | 152 s, 260 | 3,328 | 3,162 |
+| schedutil, C2 disabled | 191 s, 305 | 1,890 | 1,605 |
+
+So `ltvm doctor` reports a load-following governor (schedutil, ondemand,
+conservative, or powersave on a driver that uses the generic governors)
+and `--fix` sets performance, now and at boot through
+`/etc/tmpfiles.d/ltvm-cpufreq.conf`.  `ltvm install` only warns: the
+governor is the host owner's power policy.  `[host] cpufreq = leave` in
+/etc/ltvm.conf keeps a host's choice and turns the report into a note.
+intel_pstate and amd-pstate-epp in active mode are left alone; they
+were not measured.  The C-state made no difference: C2's exit latency
+is not what a woken vCPU waits for.
+
 ## Where the host CPU goes
 
 The receiving guest of a 1 MB LNet write over TCP (default settings):

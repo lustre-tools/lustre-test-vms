@@ -970,6 +970,17 @@ CPU-seconds.  The price is idle: a 4-vCPU guest doing nothing takes
 0.15 of a host CPU instead of 0.01.  `--kernel-args nohz=on` undoes it (the last
 `nohz=` wins).  Not under TCG or HVF, where it was not measured.
 
+**Host cpufreq:** `ltvm doctor` reports a load-following governor
+(schedutil, ondemand, conservative, powersave) and `--fix` sets
+performance, now and at boot (`/etc/tmpfiles.d/ltvm-cpufreq.conf`;
+[ltvm_pkg/host_cpufreq.py](ltvm_pkg/host_cpufreq.py)).  A vCPU runs in
+bursts on whichever CPU it lands, so schedutil never clocks one up: on
+Sookie performance took the sanity subset from 185 s to 152 s.  `ltvm
+install` only warns, since the governor is the owner's power policy, and
+`[host] cpufreq = leave` in /etc/ltvm.conf silences both.  intel_pstate
+and amd-pstate-epp (active mode) are not touched.  `tests/conftest.py`
+points the module at an empty sysfs.
+
 **NMI:** an x86 guest boots with the NMI panic knobs set
 (`qemu_run.NMI_PANIC_ARGS`: `unknown_nmi_panic` and `sysctl.kernel.*`
 on the cmdline, which needs 5.8; create and start also write

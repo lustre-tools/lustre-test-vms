@@ -3958,6 +3958,18 @@ def run_setup(
                     result.detail,
                 )
 
+    # Reported, not changed: the governor is the host owner's power
+    # policy, and doctor --fix is the explicit step that changes it.
+    from ltvm_pkg import host_cpufreq, site_config
+
+    if host_cpufreq.slow_cpus() and not host_cpufreq.left_alone():
+        log.warning(
+            "cpufreq governor leaves vCPUs at a low clock; `ltvm doctor "
+            "--fix` sets performance, or [host] cpufreq = leave in %s "
+            "keeps it",
+            site_config.path(),
+        )
+
     if all_steps:
         _record_host_setup()
         log.info("")

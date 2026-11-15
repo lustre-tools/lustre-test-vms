@@ -207,6 +207,22 @@ def _isolate_vm_state(tmp_path_factory: pytest.TempPathFactory) -> object:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_cpufreq(tmp_path_factory: pytest.TempPathFactory) -> object:
+    """Keep doctor and install off the host's real cpufreq sysfs.
+
+    On a host running schedutil every doctor test would see an issue,
+    and a --fix test would set the real governor and write the real
+    /etc/tmpfiles.d line.
+    """
+    tmp = tmp_path_factory.mktemp("cpufreq")
+    with (
+        patch("ltvm_pkg.host_cpufreq.SYSFS_CPU", tmp / "cpu"),
+        patch("ltvm_pkg.host_cpufreq.TMPFILES", tmp / "ltvm-cpufreq.conf"),
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_podman_preflight() -> object:
     """Suppress the macOS podman-machine preflight for unit tests.
 
