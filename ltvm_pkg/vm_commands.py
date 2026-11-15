@@ -3876,7 +3876,8 @@ def _check_ssh_client_config(fix: bool) -> tuple[int, int]:
 
 
 def _check_host_setup_version(fix: bool) -> tuple[int, int]:
-    """Report the host setup version; with ``fix``, rerun install if behind.
+    """Report the host setup version; with ``fix``, rerun install if behind
+    and this is the installed ltvm.
 
     Returns (issues found, repairs that failed).
     """
@@ -3888,6 +3889,13 @@ def _check_host_setup_version(fix: bool) -> tuple[int, int]:
         f"{rep['current']} in this ltvm"
     )
     if not rep["stale"]:
+        return 0, 0
+    if not hsv.is_installed_copy():
+        print(
+            f"note: host setup is behind this checkout, but the installed "
+            f"ltvm is {hsv.installed_script() or 'none'}, so doctor leaves "
+            f"it (to install this one: {hsv.this_script()} install)"
+        )
         return 0, 0
     print(f"host setup is behind this ltvm: run {hsv.install_command()}")
     if not fix:
@@ -4215,6 +4223,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     for line in comp_notes:
         print(line)
     fix_failures += comp_failures
+
+    from ltvm_pkg import host_cpufreq
+
+    cpu_issues, cpu_notes, cpu_failures = host_cpufreq.doctor_report(args.fix)
+    for line in cpu_issues:
+        print(line)
+        issues += 1
+    for line in cpu_notes:
+        print(line)
+    fix_failures += cpu_failures
 
     # Disk-usage probe.  Always prints the info line so the user has a
     # capacity reference; counts as an issue only when free space is

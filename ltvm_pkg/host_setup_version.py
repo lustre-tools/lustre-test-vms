@@ -14,7 +14,8 @@ record was installed before this existed and counts as 0.
 
 History:
   1: /dev/vhost-net for the ltvm group (PR #63), and the first record.
-  2: numactl for --host-node, and ltvm's own QEMU on macOS, which
+  2: the performance cpufreq governor, now and at boot (PR #66).
+  3: numactl for --host-node, and ltvm's own QEMU on macOS, which
      shmrdma and shmnet need (PR #60).
 """
 
@@ -24,6 +25,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -31,13 +33,17 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-HOST_SETUP_VERSION = 2
+HOST_SETUP_VERSION = 3
 
 NOTICE_INTERVAL = timedelta(hours=24)
 
 _LINUX_RECORD = Path("/var/lib/ltvm/host-setup.json")
 # macOS has no /var/lib; ltvm's root-owned files live here already.
 _MACOS_RECORD = Path("/Library/Application Support/ltvm/host-setup.json")
+
+# The launcher ``ltvm install`` writes: a wrapper that execs one checkout.
+LAUNCHER = Path("/usr/local/bin/ltvm")
+_LAUNCHER_EXEC = re.compile(r"^exec '[^']*' '([^']+)'", re.M)
 
 # Key in the per-user update-check state that throttles the notice.
 _STATE_KEY = "last_host_setup_notice_iso"
@@ -57,6 +63,30 @@ def record_path() -> Path:
 def install_command() -> str:
     """What to tell the user to run: install refuses root on macOS."""
     return "ltvm install" if _is_macos() else "sudo ltvm install"
+
+
+def installed_script() -> Path | None:
+    """The ltvm script the installed launcher runs, or None."""
+    try:
+        if LAUNCHER.is_symlink():
+            return LAUNCHER.resolve()
+        m = _LAUNCHER_EXEC.search(LAUNCHER.read_text())
+    except OSError:
+        return None
+    return Path(m.group(1)).resolve() if m else None
+
+
+def this_script() -> Path:
+    return (Path(__file__).resolve().parent.parent / "ltvm").resolve()
+
+
+def is_installed_copy() -> bool:
+    """Whether this ltvm is the one on PATH, whose setup the record holds.
+
+    Any other checkout (a worktree, a test copy) running install would
+    repoint the launcher and skill links at itself.
+    """
+    return installed_script() == this_script()
 
 
 def recorded_version() -> int:
@@ -117,7 +147,7 @@ def maybe_notify() -> None:
     file, which is per user and already written by every invocation.
     """
     recorded = recorded_version()
-    if not is_stale(recorded):
+    if not is_stale(recorded) or not is_installed_copy():
         return
     from ltvm_pkg import update_check
 

@@ -967,6 +967,28 @@ Root's filesystem only: a whole `sync` on a Lustre client whose
 servers are gone would hang.  An unreachable guest is warned about and
 stopped anyway; `--force` skips the sync.
 
+**Guest tick:** an x86_64 guest under KVM boots with `nohz=off`
+(`qemu_run.KVM_TICK_ARGS`).  Tickless idle reprograms the TSC deadline
+timer on every idle entry and exit, a trapped MSR write each, so every
+wake-up of an RPC-bound guest paid two exits; on Sookie (Zen 1) the
+fixed sanity subset in
+[docs/VM_EXIT_OVERHEAD.md](docs/VM_EXIT_OVERHEAD.md) went from 251 s to
+196 s and small LNet RPC rates rose a third, on a fifth fewer host
+CPU-seconds.  The price is idle: a 4-vCPU guest doing nothing takes
+0.15 of a host CPU instead of 0.01.  `--kernel-args nohz=on` undoes it (the last
+`nohz=` wins).  Not under TCG or HVF, where it was not measured.
+
+**Host cpufreq:** `ltvm doctor` reports a load-following governor
+(schedutil, ondemand, conservative, powersave) and `--fix` sets
+performance, now and at boot (`/etc/tmpfiles.d/ltvm-cpufreq.conf`;
+[ltvm_pkg/host_cpufreq.py](ltvm_pkg/host_cpufreq.py)).  A vCPU runs in
+bursts on whichever CPU it lands, so schedutil never clocks one up: on
+Sookie performance took the sanity subset from 185 s to 152 s.  `ltvm
+install` sets it too, and `[host] cpufreq = leave` in /etc/ltvm.conf
+opts out of both.  intel_pstate
+and amd-pstate-epp (active mode) are not touched.  `tests/conftest.py`
+points the module at an empty sysfs.
+
 **NMI:** an x86 guest boots with the NMI panic knobs set
 (`qemu_run.NMI_PANIC_ARGS`: `unknown_nmi_panic` and `sysctl.kernel.*`
 on the cmdline, which needs 5.8; create and start also write
@@ -1858,5 +1880,7 @@ gh issue list / view <n> / create --title ... --body ...
   o2iblnd over SoftRoCE.
 - [docs/SYSTEM_TEST_PLAN.md](docs/SYSTEM_TEST_PLAN.md) --
   end-to-end test matrix.
+- [docs/VM_EXIT_OVERHEAD.md](docs/VM_EXIT_OVERHEAD.md) -- what a
+  guest costs the host in KVM exits and polling, and what changes it.
 - [docs/VM_OWNERSHIP.md](docs/VM_OWNERSHIP.md) -- the
   advisory `owner_id` a VM records, and who sets it.

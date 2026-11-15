@@ -4076,6 +4076,19 @@ def run_setup(
                     result.detail,
                 )
 
+    from ltvm_pkg import host_cpufreq, site_config
+
+    if host_cpufreq.slow_cpus() and not host_cpufreq.left_alone():
+        ok, done = host_cpufreq.apply()
+        if ok:
+            log.info(
+                "cpufreq governor: %s ([host] cpufreq = leave in %s opts out)",
+                done,
+                site_config.path(),
+            )
+        else:
+            log.warning("cpufreq governor: %s", done)
+
     if all_steps:
         _record_host_setup()
         log.info("")

@@ -995,6 +995,10 @@ NMI_PANIC_ARGS = (
     " sysctl.kernel.panic_on_io_nmi=1"
 )
 
+# A tickless guest reprograms its TSC deadline timer, a trapped MSR
+# write, on every idle entry and exit (docs/VM_EXIT_OVERHEAD.md).
+KVM_TICK_ARGS = " nohz=off"
+
 
 def _start_qemu(vm: VMInfo) -> None:
     """Launch QEMU for ``vm``, under the launch lock, its memory admitted."""
@@ -1073,6 +1077,8 @@ def _start_qemu(vm: VMInfo) -> None:
     )
     if vm.arch in ("", "x86_64"):
         boot_args += NMI_PANIC_ARGS
+        if "accel=kvm" in qemu_machine_for_arch("x86_64"):
+            boot_args += KVM_TICK_ARGS
     # Quiet kernel boot messages: each console byte is a VM exit, and
     # nested on a loaded host the kernel's boot log alone cost 2.5s of
     # every create.  journald still forwards to the console, so a boot
