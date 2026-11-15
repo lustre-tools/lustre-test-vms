@@ -706,7 +706,6 @@ _RESOURCE_FLAGS = {
     "disk_dir": "--disk-dir",
     "disk_cache": "--disk-cache",
     "disk_prealloc": "--disk-prealloc",
-    "eth0_speed": "--eth0-speed",
 }
 
 # Flags whose typed spelling differs from the stored one only cosmetically.
@@ -746,6 +745,7 @@ def _warn_ignored_resource_flags(
     existing stopped VM just restarted it with the stored 4096/3 and
     printed "started", with no hint that the flags did nothing.
     """
+    _warn_ignored_eth0_speed(vm, getattr(args, "eth0_speed", None))
     ignored = []
     for dest in sorted(_explicit_flags(argv)):
         requested = getattr(args, dest, None)
@@ -779,6 +779,27 @@ def _warn_ignored_resource_flags(
     print(
         f"  these are fixed at create time -- "
         f"`ltvm destroy {vm.name}` first to change them",
+        file=sys.stderr,
+    )
+
+
+def _warn_ignored_eth0_speed(vm: VMInfo, requested: int | None) -> None:
+    """Warn when create gives an existing VM another eth0 speed.
+
+    The speed is not fixed at create time, so the warning names
+    `vm set`.  An unset speed is DEFAULT_SPEED on both sides.
+    """
+    if requested is None:
+        return
+    current = DEFAULT_SPEED if vm.eth0_speed is None else vm.eth0_speed
+    if requested == current:
+        return
+    label = _speed_label(requested)
+    print(
+        f"warning: {vm.name} already exists; --eth0-speed was ignored: "
+        f"requested {label}, VM has {_speed_label(vm.eth0_speed)}\n"
+        f"  `ltvm vm set {vm.name} --eth0-speed {label}` changes it "
+        f"on a stopped VM",
         file=sys.stderr,
     )
 

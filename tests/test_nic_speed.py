@@ -179,6 +179,48 @@ class TestVmSet:
             self._set("fast")
 
 
+class TestIgnoredOnExistingVm:
+    """`create` on an existing VM does not change its eth0 speed."""
+
+    def _warning(self, capsys: Any, requested: int | None, **vm_kw: Any) -> str:
+        vm = _vm("s-a", **vm_kw)
+        vm_commands._warn_ignored_resource_flags(
+            vm, argparse.Namespace(eth0_speed=requested), ["ltvm", "create"]
+        )
+        return capsys.readouterr().err
+
+    def test_none_on_a_default_vm_warns(
+        self,
+        vm_dirs: Any,  # noqa: F811
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        err = self._warning(capsys, 0)
+        assert "requested none, VM has default (100000)" in err
+        assert "ltvm vm set s-a --eth0-speed none" in err
+        assert "fixed at create time" not in err
+
+    def test_speed_on_a_no_speed_vm_warns(
+        self,
+        vm_dirs: Any,  # noqa: F811
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        err = self._warning(capsys, 10000, eth0_speed=0)
+        assert "requested 10000, VM has none" in err
+
+    @pytest.mark.parametrize(
+        "requested, stored",
+        [(None, 0), (DEFAULT_SPEED, None), (0, 0), (25000, 25000)],
+    )
+    def test_same_speed_is_silent(
+        self,
+        vm_dirs: Any,  # noqa: F811
+        capsys: pytest.CaptureFixture[str],
+        requested: int | None,
+        stored: int | None,
+    ) -> None:
+        assert self._warning(capsys, requested, eth0_speed=stored) == ""
+
+
 class TestCluster:
     def _argv(self, **kw: Any) -> list[str]:
         node = vm_cluster.parse_node_spec("oss:s-oss:2")
