@@ -47,7 +47,9 @@ static int g_verbose;
 
 #define ACQ(p)		__atomic_load_n((p), __ATOMIC_ACQUIRE)
 #define RLX(p)		__atomic_load_n((p), __ATOMIC_RELAXED)
+#ifndef REL
 #define REL(p, v)	__atomic_store_n((p), (v), __ATOMIC_RELEASE)
+#endif
 #define FENCE()		__atomic_thread_fence(__ATOMIC_SEQ_CST)
 
 /* ib_wc_status values */
@@ -687,7 +689,16 @@ static void cq_overflow(struct cq *cq, bool first)
 	}
 }
 
-static void cq_post(struct cq *cq, const struct shmrdma_cqe *cqe, bool solicited)
+/* a WR's slot in the guest's QP record, freed before its CQE is seen */
+struct wr_slot {
+	uint32_t *cons;
+	uint32_t next;
+	uint32_t *pos;
+	uint32_t *op;
+};
+
+static void cq_post(struct cq *cq, const struct shmrdma_cqe *cqe,
+		    bool solicited, const struct wr_slot *s)
 {
 	bool event = false;
 
@@ -701,11 +712,19 @@ static void cq_post(struct cq *cq, const struct shmrdma_cqe *cqe, bool solicited
 			GLOG(cq->dev, "dev%d cq%u overflow (prod %u cons %u)",
 			    cq->dev->id, cq->cqn, cq->prod, cons);
 		cq->overflowed = true;
+		if (s) {
+			REL(s->op, SHMRDMA_LIMBO_NONE);
+			REL(s->cons, s->next);
+		}
 		plat_spin_unlock(&cq->lock);
 		cq_overflow(cq, first);
 		return;
 	}
 	memcpy(ring_entry(&cq->ring, cq->prod), cqe, sizeof(*cqe));
+	if (s) {
+		REL(s->pos, cq->prod);
+		REL(s->cons, s->next);
+	}
 	cq->prod++;
 	REL(&cq->rec->prod, cq->prod);
 	FENCE();
@@ -722,6 +741,45 @@ static void cq_post(struct cq *cq, const struct shmrdma_cqe *cqe, bool solicited
 	plat_spin_unlock(&cq->lock);
 	if (event)
 		dev_raise_eq(cq->dev, cq->cqn, SHMRDMA_EQE_COMP);
+}
+
+/*
+ * Publish qp's consumer index next for one WR, completing it with c on
+ * cq when c is given.  The guest may refill the slot as soon as its
+ * CQE is visible, and a guest whose backend died flushes from what the
+ * record says, so the order of the stores here is the protocol.
+ */
+static void wr_retire(struct qp *qp, bool sq, uint32_t next, struct cq *cq,
+		      const struct shmrdma_cqe *c, bool solicited)
+{
+	struct shmrdma_qp_rec *r = qp->rec;
+	struct wr_slot s = {
+		.cons = sq ? &r->sq_cons : &r->rq_cons,
+		.next = next,
+		.pos = sq ? &r->sq_limbo_pos : &r->rq_limbo_pos,
+		.op = sq ? &r->sq_limbo_op : &r->rq_limbo_op,
+	};
+
+	if (c) {
+		REL(sq ? &r->sq_limbo_wr_id : &r->rq_limbo_wr_id, c->wr_id);
+		REL(s.op, c->opcode);
+		cq_post(cq, c, solicited, &s);
+	} else {
+		REL(s.op, SHMRDMA_LIMBO_NONE);
+		REL(s.cons, next);
+	}
+	REL(sq ? &r->sq_done : &r->rq_done, next);
+}
+
+/* consumer indexes set outright, while no worker can reach the QP */
+static void qp_set_cons(struct qp *qp, uint32_t sq, uint32_t rq)
+{
+	qp->sq_cons = sq;
+	qp->rq_cons = rq;
+	REL(&qp->rec->sq_cons, sq);
+	REL(&qp->rec->rq_cons, rq);
+	REL(&qp->rec->sq_done, sq);
+	REL(&qp->rec->rq_done, rq);
 }
 
 /* ---------------------------------------------------------------- */
@@ -1223,8 +1281,11 @@ static void qp_flush_rq(struct qp *qp)
 	uint32_t prod = ACQ(&qp->rec->rq_prod);
 
 	/* more posted than the ring holds: nothing valid to complete */
-	if (prod - qp->rq_cons > qp->rq.entries)
+	if (prod - qp->rq_cons > qp->rq.entries) {
 		qp->rq_cons = prod;
+		REL(&qp->rec->rq_cons, prod);
+		REL(&qp->rec->rq_done, prod);
+	}
 	while (qp->rq_cons != prod) {
 		struct shmrdma_rq_wqe *w = ring_entry(&qp->rq, qp->rq_cons);
 
@@ -1232,10 +1293,9 @@ static void qp_flush_rq(struct qp *qp)
 		c.qpn = qp->qpn;
 		c.opcode = SHMRDMA_WC_RECV;
 		c.status = WC_WR_FLUSH_ERR;
-		cq_post(qp->rcq, &c, false);
 		qp->rq_cons++;
+		wr_retire(qp, false, qp->rq_cons, qp->rcq, &c, false);
 	}
-	REL(&qp->rec->rq_cons, qp->rq_cons);
 	plat_spin_unlock(&qp->rq_lock);
 }
 
@@ -1377,9 +1437,9 @@ static int exec_ud_send(struct qp *qp, struct shmrdma_sq_wqe *w,
 	}
 	c.byte_len = len + SHMRDMA_GRH_BYTES;
 	peer->rq_cons++;
-	REL(&peer->rec->rq_cons, peer->rq_cons);
+	wr_retire(peer, false, peer->rq_cons, peer->rcq, &c,
+		  w->flags & SHMRDMA_WQE_SOLICITED);
 	plat_spin_unlock(&peer->rq_lock);
-	cq_post(peer->rcq, &c, w->flags & SHMRDMA_WQE_SOLICITED);
 	return rc;
 }
 
@@ -1470,9 +1530,9 @@ static int deliver_recv(struct qp *qp, struct qp *peer,
 		plat_spin_unlock(&peer->dev->mr_lock);
 	}
 	peer->rq_cons++;
-	REL(&peer->rec->rq_cons, peer->rq_cons);
+	wr_retire(peer, false, peer->rq_cons, peer->rcq, &c,
+		  w->flags & SHMRDMA_WQE_SOLICITED);
 	plat_spin_unlock(&peer->rq_lock);
-	cq_post(peer->rcq, &c, w->flags & SHMRDMA_WQE_SOLICITED);
 	if (c.status != WC_SUCCESS)
 		qp_err_req(peer);
 	return rc;
@@ -1727,7 +1787,8 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 		    qp->sq.entries);
 		qp_to_err(qp);
 		qp->sq_cons = prod;
-		REL(&qp->rec->sq_cons, qp->sq_cons);
+		REL(&qp->rec->sq_cons, prod);
+		REL(&qp->rec->sq_done, prod);
 		return done;
 	}
 	while (qp->sq_cons != prod && done < budget) {
@@ -1780,21 +1841,22 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 			}
 			qp->stall_since = 0;
 		}
-		if (st != WC_SUCCESS || (w->flags & SHMRDMA_WQE_SIGNALED)) {
-			c.wr_id = w->wr_id;
-			c.qpn = qp->qpn;
-			c.opcode = opc;
-			c.status = st;
-			cq_post(qp->scq, &c, false);
-		}
+		bool cqe = st != WC_SUCCESS ||
+			   (w->flags & SHMRDMA_WQE_SIGNALED);
+
+		c.wr_id = w->wr_id;
+		c.qpn = qp->qpn;
+		c.opcode = opc;
+		c.status = st;
+		qp->tx_wr++;
+		qp->sq_cons++;
+		wr_retire(qp, true, qp->sq_cons, qp->scq, cqe ? &c : NULL,
+			  false);
 		if (st != WC_SUCCESS && st != WC_WR_FLUSH_ERR) {
 			GLOG(qp->dev, "dev%d qp%u: wqe op %u failed status %d",
 			    qp->dev->id, qp->qpn, w->opcode, st);
 			qp_to_err(qp);
 		}
-		qp->tx_wr++;
-		qp->sq_cons++;
-		REL(&qp->rec->sq_cons, qp->sq_cons);
 		done++;
 		if (qp->tx_bytes - bytes0 >= QP_PASS_BYTES ||
 		    __atomic_load_n(&g_wwait, __ATOMIC_SEQ_CST))
@@ -2095,7 +2157,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		REL(&d->shared->eq_lost, 0);
 		d->initialized = true;
 		wunlock();
-		r->val = d->id;
+		r->val = (uint32_t)d->id | SHMRDMA_INIT_F_LIMBO;
 		GLOG(d, "dev%d: initialized, eq %u entries", d->id, n);
 		return 0;
 	}
@@ -2222,8 +2284,8 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 			return rc ? rc : -EINVAL;
 		}
 		plat_spin_init(&qp->rq_lock);
-		qp->sq_cons = RLX(&qp->rec->sq_cons);
-		qp->rq_cons = RLX(&qp->rec->rq_cons);
+		qp_set_cons(qp, RLX(&qp->rec->sq_cons),
+			    RLX(&qp->rec->rq_cons));
 		qp->rnr_retry = 7;
 		wlock();
 		if (worker_add_qp(qp)) {
@@ -2262,10 +2324,8 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 
 			if (ns == QPS_RESET) {
 				/* drop everything outstanding, no completions */
-				qp->sq_cons = ACQ(&qp->rec->sq_prod);
-				qp->rq_cons = ACQ(&qp->rec->rq_prod);
-				REL(&qp->rec->sq_cons, qp->sq_cons);
-				REL(&qp->rec->rq_cons, qp->rq_cons);
+				qp_set_cons(qp, ACQ(&qp->rec->sq_prod),
+					    ACQ(&qp->rec->rq_prod));
 				qp->fatal_sent = false;
 				REL(&qp->rec->fatal, 0);
 				qp->err_req = 0;

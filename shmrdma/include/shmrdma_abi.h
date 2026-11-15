@@ -117,8 +117,36 @@ struct shmrdma_qp_rec {
 	__u32 rq_cons;
 	__u32 need_kick;	/* backend idle: guest must ring the doorbell */
 	__u32 fatal;		/* 1: QP_FATAL raised, read after eq_lost */
-	__u32 pad1[12];
+	/*
+	 * SHMRDMA_INIT_F_LIMBO.  A backend frees a WR's slot (*_cons), then
+	 * makes its CQE visible, then moves *_done up to *_cons.  WR *_done
+	 * of a backend that died between the two is described here, since
+	 * its slot may hold a new WR: *_limbo_op is SHMRDMA_LIMBO_NONE when
+	 * it has no CQE, else its CQE is at CQ index *_limbo_pos.
+	 */
+	__u32 sq_done;
+	__u32 rq_done;
+	__u32 sq_limbo_pos;
+	__u32 rq_limbo_pos;
+	__u64 sq_limbo_wr_id;
+	__u64 rq_limbo_wr_id;
+	__u32 sq_limbo_op;	/* SHMRDMA_WC_* */
+	__u32 rq_limbo_op;
+	__u32 pad1[2];
 };
+
+#define SHMRDMA_LIMBO_NONE	0xffffffffu
+
+/*
+ * After the backend died, with the CQ's producer final: whether the
+ * WR *_done still needs a flush completion.
+ */
+static inline int shmrdma_limbo_owed(__u32 done, __u32 cons, __u32 op,
+				     __u32 pos, __u32 cq_prod)
+{
+	return cons == done + 1 && op != SHMRDMA_LIMBO_NONE &&
+	       (__s32)(cq_prod - pos) <= 0;
+}
 
 /* Per-CQ record, 128 bytes. */
 struct shmrdma_cq_rec {
@@ -343,8 +371,11 @@ enum {
 struct shmrdma_resp {
 	__s32 status;		/* 0 or -errno */
 	__u32 abi;		/* INIT: the backend's SHMRDMA_ABI_VERSION */
-	__u64 val;
+	__u64 val;		/* INIT: device number | SHMRDMA_INIT_F_* */
 };
+
+/* INIT's val: the low 32 bits are the backend's device number */
+#define SHMRDMA_INIT_F_LIMBO	(1ull << 32)	/* fills qp_rec *_done */
 
 #define SHMRDMA_ABI_SIZE(t, n) \
 	_Static_assert(sizeof(struct t) == (n), #t " size is ABI")
@@ -353,6 +384,8 @@ SHMRDMA_ABI_SIZE(shmrdma_ring_desc, 24);
 SHMRDMA_ABI_SIZE(shmrdma_dev_shared, 128);
 SHMRDMA_ABI_SIZE(shmrdma_eqe, 8);
 SHMRDMA_ABI_SIZE(shmrdma_qp_rec, 128);
+_Static_assert(offsetof(struct shmrdma_qp_rec, sq_limbo_wr_id) % 8 == 0,
+	       "limbo wr_ids are 8-aligned");
 SHMRDMA_ABI_SIZE(shmrdma_cq_rec, 128);
 SHMRDMA_ABI_SIZE(shmrdma_sge, 16);
 SHMRDMA_ABI_SIZE(shmrdma_sq_wqe, SHMRDMA_WQE_HDR);

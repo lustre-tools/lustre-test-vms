@@ -64,6 +64,8 @@ struct shmrdma_dev {
 	bool broken;
 	/* the device was reset: the backend holds nothing of ours */
 	bool reset_done;
+	/* the backend fills the QP records' *_done */
+	bool limbo;
 	bool fatal_sent;
 	struct work_struct fatal_work;
 	/* work posted after the reset: have its CQs polled for the flush */
@@ -829,11 +831,42 @@ static void flush_wc(struct ib_wc *w, struct shmrdma_qp *qp, u64 wr_id,
 }
 
 /*
+ * The WR a dead backend freed the slot of without making its CQE
+ * visible, which only the QP record still describes; cons is the
+ * queue's consumer index.  With wc NULL, only say whether there is one.
+ */
+static int shmrdma_flush_limbo(struct shmrdma_dev *dev, struct shmrdma_cq *cq,
+			       struct shmrdma_qp *qp, bool sq, u32 cons,
+			       struct ib_wc *wc)
+{
+	struct shmrdma_qp_rec *r = qp->rec;
+	u32 *done = sq ? &r->sq_done : &r->rq_done;
+	u32 *op = sq ? &r->sq_limbo_op : &r->rq_limbo_op;
+	u32 *pos = sq ? &r->sq_limbo_pos : &r->rq_limbo_pos;
+	u64 *wr_id = sq ? &r->sq_limbo_wr_id : &r->rq_limbo_wr_id;
+	u32 o = READ_ONCE(*op);
+	int owed;
+
+	if (!dev->limbo || READ_ONCE(*done) == cons)
+		return 0;
+	owed = shmrdma_limbo_owed(READ_ONCE(*done), cons, o, READ_ONCE(*pos),
+				  READ_ONCE(cq->rec->prod));
+	if (!wc)
+		return owed;
+	if (owed)
+		flush_wc(wc, qp, READ_ONCE(*wr_id),
+			 o < ARRAY_SIZE(wc_opcode) ? wc_opcode[o] :
+			 sq ? IB_WC_SEND : IB_WC_RECV);
+	WRITE_ONCE(*done, cons);
+	return owed;
+}
+
+/*
  * Once the device is reset the backend completes nothing more, so the
  * work still posted on cq's QPs is flushed here, from the consumer
  * indexes the backend left; with wc NULL, only say whether there is
  * any.  Caller holds cq->lock, under which destroy_qp unlinks the QP
- * before freeing it.
+ * before freeing it, and has polled every CQE the backend made visible.
  */
 static int shmrdma_flush_cq(struct shmrdma_dev *dev, struct shmrdma_cq *cq,
 			    int num, struct ib_wc *wc)
@@ -847,6 +880,12 @@ static int shmrdma_flush_cq(struct shmrdma_dev *dev, struct shmrdma_cq *cq,
 			return n;
 		spin_lock(&qp->sq_lock);
 		c = READ_ONCE(qp->rec->sq_cons);
+		n += shmrdma_flush_limbo(dev, cq, qp, true, c,
+					 wc ? &wc[n] : NULL);
+		if (!wc && n) {
+			spin_unlock(&qp->sq_lock);
+			return n;
+		}
 		if (qp->sq_prod - c > qp->sq.entries) {
 			dev_err(&dev->vdev->dev, "qp %u sq consumer %u is %u behind %u\n",
 				qp->ibqp.qp_num, c, qp->sq_prod - c, qp->sq_prod);
@@ -862,6 +901,8 @@ static int shmrdma_flush_cq(struct shmrdma_dev *dev, struct shmrdma_cq *cq,
 				 sq_wc_opcode[e->opcode] : IB_WC_SEND);
 		}
 		WRITE_ONCE(qp->rec->sq_cons, c);
+		if (dev->limbo)
+			WRITE_ONCE(qp->rec->sq_done, c);
 		spin_unlock(&qp->sq_lock);
 	}
 	list_for_each_entry(qp, &cq->rq_qps, rcq_node) {
@@ -869,6 +910,12 @@ static int shmrdma_flush_cq(struct shmrdma_dev *dev, struct shmrdma_cq *cq,
 			return n;
 		spin_lock(&qp->rq_lock);
 		c = READ_ONCE(qp->rec->rq_cons);
+		n += shmrdma_flush_limbo(dev, cq, qp, false, c,
+					 wc ? &wc[n] : NULL);
+		if (!wc && n) {
+			spin_unlock(&qp->rq_lock);
+			return n;
+		}
 		if (qp->rq_prod - c > qp->rq.entries) {
 			dev_err(&dev->vdev->dev, "qp %u rq consumer %u is %u behind %u\n",
 				qp->ibqp.qp_num, c, qp->rq_prod - c, qp->rq_prod);
@@ -882,6 +929,8 @@ static int shmrdma_flush_cq(struct shmrdma_dev *dev, struct shmrdma_cq *cq,
 			flush_wc(&wc[n], qp, e->wr_id, IB_WC_RECV);
 		}
 		WRITE_ONCE(qp->rec->rq_cons, c);
+		if (dev->limbo)
+			WRITE_ONCE(qp->rec->rq_done, c);
 		spin_unlock(&qp->rq_lock);
 	}
 	return n;
@@ -1863,6 +1912,7 @@ static int shmrdma_probe(struct virtio_device *vdev)
 	rc = shmrdma_cmd(dev, &cmd, &resp);
 	if (!rc && resp.abi != SHMRDMA_ABI_VERSION)
 		rc = -EPROTO;
+	dev->limbo = !!(resp.val & SHMRDMA_INIT_F_LIMBO);
 	if (rc) {
 		dev_err(&vdev->dev, "backend init failed: %d (ABI %u, backend %u)\n",
 			rc, SHMRDMA_ABI_VERSION, resp.abi);
@@ -1902,8 +1952,8 @@ static int shmrdma_probe(struct virtio_device *vdev)
 	if (dev->broken)
 		schedule_work(&dev->fatal_work);
 	mutex_unlock(&dev->ctrl_mutex);
-	dev_info(&vdev->dev, "%s on %s, backend dev%llu, ABI %u\n",
-		 dev_name(&dev->ibdev.dev), netdev, resp.val,
+	dev_info(&vdev->dev, "%s on %s, backend dev%u, ABI %u\n",
+		 dev_name(&dev->ibdev.dev), netdev, (u32)resp.val,
 		 SHMRDMA_ABI_VERSION);
 	return 0;
 

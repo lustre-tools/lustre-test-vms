@@ -1207,6 +1207,246 @@ def test_shmnet_helpers(tmp_path: Path) -> None:
     assert r.returncode == 0, r.stdout + r.stderr
 
 
+_RETIRE_HARNESS = r"""
+static void rel_hook(void *p);
+#define REL(p, v) do { __atomic_store_n((p), (v), __ATOMIC_RELEASE); \
+	rel_hook((void *)(p)); } while (0)
+#define main shmrdmad_main
+#include "shmrdmad.c"
+#undef main
+
+static int fails;
+#define CHECK(c) do { if (!(c)) { printf("FAIL line %d\n", __LINE__); \
+	fails++; } } while (0)
+
+enum { N = 8, BASE = 1000 };
+
+static uint8_t sqpage[4096], rqpage[4096], cqpage[4096];
+static uint8_t *sqp[1] = { sqpage }, *rqp[1] = { rqpage }, *cqp[1] = { cqpage };
+static struct shmrdma_qp_rec rec __attribute__((aligned(128)));
+static struct shmrdma_cq_rec cqr __attribute__((aligned(128)));
+static struct vdev dev;
+static struct cq cq;
+static struct qp qp;
+
+/* what a guest would find after the backend died just after a store */
+static struct snap {
+	struct shmrdma_qp_rec r;
+	uint32_t cq_prod;
+} snaps[256];
+static int nsnap;
+
+static void take(void)
+{
+	if (nsnap < 256) {
+		snaps[nsnap].r = rec;
+		snaps[nsnap].cq_prod = cqr.prod;
+		nsnap++;
+	}
+}
+
+static void rel_hook(void *p)
+{
+	if ((p >= (void *)&rec && p < (void *)(&rec + 1)) ||
+		(p >= (void *)&cqr && p < (void *)(&cqr + 1)))
+		take();
+}
+
+static void setup(uint32_t state)
+{
+	memset(&rec, 0, sizeof(rec));
+	memset(&cqr, 0, sizeof(cqr));
+	memset(sqpage, 0, sizeof(sqpage));
+	memset(rqpage, 0, sizeof(rqpage));
+	memset(cqpage, 0, sizeof(cqpage));
+	memset(&cq, 0, sizeof(cq));
+	memset(&qp, 0, sizeof(qp));
+	cq.dev = &dev;
+	cq.rec = &cqr;
+	cq.ring = (struct ring){ .entries = 64, .esz = 32, .npages = 1,
+					.pages = cqp };
+	plat_spin_init(&cq.lock);
+	qp.dev = &dev;
+	qp.type = SHMRDMA_QPT_UD;
+	qp.state = state;
+	qp.scq = qp.rcq = &cq;
+	qp.rec = &rec;
+	qp.sq = (struct ring){ .entries = N, .esz = 64, .npages = 1,
+				.pages = sqp };
+	qp.rq = (struct ring){ .entries = N, .esz = 32, .npages = 1,
+				.pages = rqp };
+	plat_spin_init(&qp.rq_lock);
+	nsnap = 0;
+	take();
+}
+
+/*
+ * The guest's flush after a backend death at every snapshot: each WR
+ * completes once, through a visible CQE, the limbo record or its slot;
+ * an unsignaled one that ran may complete never.  A visible CQE always
+ * means its slot is free.
+ */
+static void check_flush(bool sq, const bool *must)
+{
+	for (int k = 0; k < nsnap; k++) {
+		const struct shmrdma_qp_rec *r = &snaps[k].r;
+		uint32_t prod = snaps[k].cq_prod;
+		uint32_t cons = sq ? r->sq_cons : r->rq_cons;
+		uint32_t done = sq ? r->sq_done : r->rq_done;
+		int count[N] = {0};
+
+		for (uint32_t j = 0; j < prod; j++) {
+			struct shmrdma_cqe *e = ring_entry(&cq.ring, j);
+			uint32_t i = e->wr_id - BASE;
+
+			CHECK(i < N);
+			if (i >= N)
+				continue;
+			count[i]++;
+			CHECK(cons > i);
+		}
+		if (done != cons &&
+			shmrdma_limbo_owed(done, cons,
+					sq ? r->sq_limbo_op : r->rq_limbo_op,
+					sq ? r->sq_limbo_pos : r->rq_limbo_pos,
+					prod)) {
+			uint64_t id = sq ? r->sq_limbo_wr_id : r->rq_limbo_wr_id;
+
+			CHECK(id - BASE < N);
+			if (id - BASE < N)
+				count[id - BASE]++;
+		}
+		for (uint32_t c = cons; c < N; c++)
+			count[c]++;
+		for (int i = 0; i < N; i++) {
+			if (count[i] > 1 || (must[i] && count[i] != 1) ||
+				(!count[i] && (uint32_t)i >= cons)) {
+				printf("FAIL %s snapshot %d wr %d count %d\n",
+					sq ? "sq" : "rq", k, i, count[i]);
+				fails++;
+			}
+		}
+	}
+}
+
+static void post_sends(void)
+{
+	for (int i = 0; i < N; i++) {
+		struct shmrdma_sq_wqe *w = ring_entry(&qp.sq, i);
+
+		w->wr_id = BASE + i;
+		w->opcode = SHMRDMA_OP_SEND;
+		w->flags = (i % 3) ? SHMRDMA_WQE_SIGNALED : 0;
+	}
+	rec.sq_prod = N;
+}
+
+/* sends a UD QP drops (no source GID), signaled or not */
+static void test_send_retire(void)
+{
+	bool must[N];
+	bool stalled = false;
+
+	setup(QPS_RTS);
+	post_sends();
+	for (int i = 0; i < N; i++)
+		must[i] = i % 3;
+	CHECK(qp_process(&qp, 64, &stalled) == N);
+	CHECK(rec.sq_cons == N && rec.sq_done == N);
+	check_flush(true, must);
+}
+
+/* sends of a QP in error: every one completes */
+static void test_send_flush(void)
+{
+	bool must[N];
+	bool stalled = false;
+
+	setup(QPS_ERR);
+	post_sends();
+	for (int i = 0; i < N; i++)
+		must[i] = true;
+	CHECK(qp_process(&qp, 64, &stalled) == N);
+	CHECK(cqr.prod == N);
+	check_flush(true, must);
+}
+
+static void test_recv_flush(void)
+{
+	bool must[N];
+
+	setup(QPS_ERR);
+	for (int i = 0; i < N; i++) {
+		struct shmrdma_rq_wqe *w = ring_entry(&qp.rq, i);
+
+		w->wr_id = BASE + i;
+		must[i] = true;
+	}
+	rec.rq_prod = N;
+	qp_flush_rq(&qp);
+	CHECK(rec.rq_cons == N && rec.rq_done == N && cqr.prod == N);
+	check_flush(false, must);
+}
+
+/* a CQ with no room: the WR's slot is freed with nothing owed */
+static void test_overflow(void)
+{
+	bool must[N] = {0};
+	bool stalled = false;
+
+	setup(QPS_ERR);
+	post_sends();
+	cq.ring.entries = 4;
+	CHECK(qp_process(&qp, 64, &stalled) == N);
+	CHECK(cqr.prod == 4 && rec.sq_cons == N);
+	CHECK(rec.sq_limbo_op == SHMRDMA_LIMBO_NONE);
+	for (int i = 0; i < 4; i++)
+		must[i] = true;
+	check_flush(true, must);
+}
+
+int main(void)
+{
+	plat_spin_init(&dev.evq_lock);
+	plat_spin_init(&dev.log_lock);
+	test_send_retire();
+	test_send_flush();
+	test_recv_flush();
+	test_overflow();
+	printf("fails=%d\n", fails);
+	return fails != 0;
+}
+"""
+
+
+def test_completion_order(tmp_path: Path) -> None:
+    """A CQE means a free slot, and a flush after any death is exact, in C."""
+    cc = shutil.which("cc") or shutil.which("gcc")
+    if not cc:
+        pytest.skip("needs a C compiler")
+    src = tmp_path / "harness.c"
+    src.write_text(_RETIRE_HARNESS)
+    exe = tmp_path / "harness"
+    r = subprocess.run(
+        [
+            cc,
+            "-O1",
+            "-pthread",
+            "-Wno-unused-function",
+            "-I",
+            str(shmrdma.SRC_DIR / "daemon"),
+            "-o",
+            str(exe),
+            str(src),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    r = subprocess.run([str(exe)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
 class TestHostNode:
     def test_backend_bound(self) -> None:
         args = qemu_run.smp_args(2, 2048, 0, host_node=3)
