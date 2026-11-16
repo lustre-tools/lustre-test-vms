@@ -373,6 +373,12 @@ targets:
         CONFIG_XFS_FS: m
         CONFIG_XFS_QUOTA: y
         CONFIG_XFS_POSIX_ACL: y
+      arch_config:
+        aarch64:
+          # linux-source-6.8.0 6.8.0-149 does not build coresight-catu.c
+          # on arm64 (csdev->refcnt became atomic_t, catu still does
+          # arithmetic on it); x86 does not build CoreSight.
+          CONFIG_CORESIGHT_CATU: n
       default: 6.8-ubuntu2404
     lustre:
       mode: client
