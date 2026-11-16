@@ -31,6 +31,27 @@ def usable_cpus() -> int:
         return os.cpu_count() or 4
 
 
+def ext4_whole(path: Path) -> bool:
+    """Whether an ext4 image holds every block its superblock declares,
+    so one cut short by an interrupted copy is not taken as whole."""
+    import struct
+
+    try:
+        with open(path, "rb") as f:
+            f.seek(1024)
+            sb = f.read(1024)
+        size = path.stat().st_size
+    except OSError:
+        return False
+    if len(sb) < 1024 or struct.unpack_from("<H", sb, 56)[0] != 0xEF53:
+        return False
+    blocks = int(struct.unpack_from("<I", sb, 4)[0])
+    if struct.unpack_from("<I", sb, 96)[0] & 0x80:  # INCOMPAT_64BIT
+        blocks |= int(struct.unpack_from("<I", sb, 0x150)[0]) << 32
+    block_size = 1024 << int(struct.unpack_from("<I", sb, 24)[0])
+    return size >= blocks * block_size
+
+
 def load_meta_safe(meta_file: Path) -> dict[str, Any] | None:
     """Read and parse a meta.json file, tolerating corruption.
 

@@ -101,8 +101,12 @@ def _ccache_room(todo: list[rb.Build], arch: str, work: Path) -> int:
     grow by in ``work``, up to ccache's default cap, given what each
     already holds (lustre_build keeps them beside the trees, named for
     the container)."""
+    from ltvm_pkg import build_volumes
     from ltvm_pkg.target_config import TargetConfig
 
+    # On macOS the caches are podman volumes, in the podman machine
+    if build_volumes.enabled():
+        return 0
     room = 0
     for t in dict.fromkeys(b.target for b in todo):
         try:

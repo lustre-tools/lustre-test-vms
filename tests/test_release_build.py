@@ -1582,3 +1582,31 @@ def test_a_release_candidate_is_unmatched() -> None:
         _is_base,
     )
     assert builds == [] and unmatched == ["rocky10-x86_64-6.12.0-rc5"]
+
+
+def test_a_truncated_image_is_not_whole(tmp_path: Path) -> None:
+    from ltvm_pkg.paths import ext4_whole
+    from tests.conftest import fake_ext4
+
+    img = tmp_path / "base.ext4"
+    img.write_bytes(fake_ext4(8))
+    assert ext4_whole(img)
+    img.write_bytes(fake_ext4(8)[:4096])
+    assert not ext4_whole(img)
+    img.write_bytes(b"not ext4" * 300)
+    assert not ext4_whole(img)
+
+
+def test_podman_volume_caches_are_not_charged_to_the_host(
+    tmp_path: Path,
+) -> None:
+    from ltvm_pkg.cli import release
+
+    builds = [rb.Build("rocky9", "k")]
+    with patch("ltvm_pkg.build_volumes.enabled", return_value=True):
+        assert release._ccache_room(builds, "x86_64", tmp_path) == 0
+    with patch("ltvm_pkg.build_volumes.enabled", return_value=False):
+        assert (
+            release._ccache_room(builds, "x86_64", tmp_path)
+            == rb.CCACHE_BYTES_PER_TARGET
+        )

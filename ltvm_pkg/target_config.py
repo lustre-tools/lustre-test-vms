@@ -18,7 +18,7 @@ from typing import Any
 
 import yaml
 
-from .paths import find_ltvm_root, load_meta_safe
+from .paths import ext4_whole, find_ltvm_root, load_meta_safe
 
 
 class LustreMode(str, Enum):
@@ -1391,7 +1391,7 @@ class TargetConfig:
         fails partway -- so the hash alone cannot tell "built" from
         "was built once, then destroyed".  A copy cut short leaves a
         file whose size differs from the one meta.json records, or an
-        empty image, so sizes are checked too.  Container images live
+        image shorter than its filesystem, so sizes are checked too.  Container images live
         in podman's store rather than the filesystem, so they are not
         checked here.
         """
@@ -1419,7 +1419,7 @@ class TargetConfig:
 
             image_dir = self.image_output_dir(kernel, variant=v)
             image = current_image(image_dir)
-            return image is not None and image.stat().st_size > 0
+            return image is not None and ext4_whole(image)
         return True
 
     def write_meta(
