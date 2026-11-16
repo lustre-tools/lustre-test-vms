@@ -151,6 +151,29 @@ _KVER_PREFIX_RE = re.compile(r"^(\d+\.\d+)")
 _KERNEL_RELEASE_TAILS = ("_lustre-default", "-lustre")
 
 
+def _is_base_stem(stem: str, known_variants: list[str]) -> bool:
+    """Whether a release asset's name, less its extensions, is a base
+    release rather than a variant's.
+
+    Two complementary rules, because neither alone is enough: an exact
+    match against the variants the target declares (catches mofed-24,
+    whose trailing segment "24" the heuristic below reads as a kver),
+    plus a heuristic for variants we don't know about (a kver's last
+    segment always carries a digit, a name like "-mofed" does not).
+    Some kernel releases end in a word: the flavor of a SUSE kernel
+    (6.4.0-150700.53.66_lustre-default), the CONFIG_LOCALVERSION of a
+    Debian one (6.12.107-lustre).
+    """
+    if any(stem.endswith(f"-{v}") for v in known_variants):
+        return False
+    last_seg = stem.rsplit("-", 1)[-1]
+    return not (
+        last_seg
+        and not any(ch.isdigit() for ch in last_seg)
+        and not stem.endswith(_KERNEL_RELEASE_TAILS)
+    )
+
+
 def _kernel_release_signature(kname: str) -> str | None:
     """Derive a substring found in release tag/asset names for ``kname``.
 
@@ -307,25 +330,7 @@ def _find_release_url(
                 continue
             stem = _asset_stem(name)
             if variant == "base":
-                # A base lookup must not pick up a variant's asset.
-                # Two complementary rules, because neither alone is
-                # enough: an exact match against the variants this
-                # target declares (catches mofed-24, whose trailing
-                # segment "24" the heuristic below reads as a kver),
-                # plus a heuristic for variants we don't know about
-                # (a kver's last segment always carries a digit, a
-                # name like "-mofed" does not).
-                if any(stem.endswith(f"-{v}") for v in known_variants):
-                    continue
-                # Some kernel releases end in a word: the flavor of a
-                # SUSE kernel (6.4.0-150700.53.66_lustre-default), the
-                # CONFIG_LOCALVERSION of a Debian one (6.12.107-lustre).
-                last_seg = stem.rsplit("-", 1)[-1]
-                if (
-                    last_seg
-                    and not any(ch.isdigit() for ch in last_seg)
-                    and not stem.endswith(_KERNEL_RELEASE_TAILS)
-                ):
+                if not _is_base_stem(stem, known_variants):
                     continue
             elif not stem.endswith(f"-{variant}"):
                 continue

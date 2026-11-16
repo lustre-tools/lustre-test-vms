@@ -62,7 +62,7 @@ from ltvm_pkg.deploy import (
     retire_stale_zfs,
     targets_unformatted,
 )
-from ltvm_pkg.image_build import build_image, image_status
+from ltvm_pkg.image_build import build_image, build_image_base, image_status
 from ltvm_pkg.kernel_build import (
     SrpmNotFoundError,
     build_kernel,
@@ -116,10 +116,12 @@ from ltvm_pkg.cli.deploy import (  # noqa: E402
 from ltvm_pkg.cli.fetch import (  # noqa: E402
     _KVER_PREFIX_RE,
     _RHEL_RE,
+    _fetched_kernel_name,
     _find_release_url,
     _gh_api,
     _gh_next_link,
     _gh_release_upload,
+    _is_base_stem,
     _kernel_release_signature,
     _list_releases,
     _release_matches_kernel,
@@ -132,6 +134,7 @@ from ltvm_pkg.cli.make import (  # noqa: E402
     cmd_make_reinstall,
     cmd_make_uninstall,
 )
+from ltvm_pkg.cli.release import cmd_build_release  # noqa: E402
 from ltvm_pkg.cli.setup import (  # noqa: E402
     _current_version,
     _git,
@@ -205,7 +208,9 @@ __all__ = [
     "_error",
     "_find_release_url",
     "_gate_lustre_validation",
+    "_fetched_kernel_name",
     "_gh_api",
+    "_is_base_stem",
     "_gh_next_link",
     "_gh_release_upload",
     "_git",
@@ -227,9 +232,11 @@ __all__ = [
     "_vm_call",
     "argparse",
     "build_image",
+    "build_image_base",
     "build_kernel",
     "build_lustre",
     "cmd_build_all",
+    "cmd_build_release",
     "cmd_build_container",
     "cmd_build_image",
     "cmd_build_kernel",

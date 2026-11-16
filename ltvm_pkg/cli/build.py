@@ -69,9 +69,11 @@ def _warn_low_disk() -> None:
     A build that runs out of space fails late, deep in make or
     podman, with nothing pointing at the cause.
     """
+    from ltvm_pkg.release_build import podman_store
     from ltvm_pkg.target_config import ARTIFACTS_DIR
 
-    roots = [ARTIFACTS_DIR, Path.home() / ".local/share/containers"]
+    store = podman_store()
+    roots = [ARTIFACTS_DIR] + ([store] if store else [])
     seen: set[int] = set()
     for root in roots:
         p = root
@@ -892,6 +894,16 @@ def cmd_build_image(args: argparse.Namespace) -> int:
     err = _preflight_container(tc, use_json)
     if err is not None:
         return err
+
+    if getattr(args, "base_only", False):
+        with _podman_machine_autostop() as autostop:
+            try:
+                tag = _cli_attr("build_image_base")(tc)
+            except Exception as e:
+                return _error(f"Image build failed: {e}", use_json)
+            _output({"target": args.target, "base_tag": tag}, use_json)
+            autostop.success = True
+            return EXIT_OK
 
     timer = StepTimer(f"build image {args.target}", quiet=use_json)
     with _podman_machine_autostop() as autostop:

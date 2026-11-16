@@ -123,7 +123,11 @@ if [[ -z "$CROSS_TRIPLE" ]]; then
 	# metabench, for parallel-scale and parallel-scale-nfs*: the 2005
 	# NERSC release with Whamcloud's patches, as its toolkit RPM builds it
 	mkdir /tmp/metabench && cd /tmp/metabench
-	curl -fsSL "https://review.whamcloud.com/plugins/gitiles/build/toolkit/+archive/${TOOLKIT_REF}/benchmark/metabench.tar.gz" | tar xz
+	git init -q /tmp/toolkit
+	git -C /tmp/toolkit fetch -q --depth 1 \
+		https://review.whamcloud.com/build/toolkit "$TOOLKIT_REF"
+	git -C /tmp/toolkit archive FETCH_HEAD:benchmark/metabench | tar x
+	rm -rf /tmp/toolkit
 	sha256sum -c - <<-EOF
 	e4e1efefe65912d295964844e41055dea1bde05cfe2614ad63ec2b809730e73c  metabench.tgz
 	b5f9f60ca8d4a025477eab16164c2e61f83875321aeb88d4dc202b15d2f2bedd  wc-custom.patch

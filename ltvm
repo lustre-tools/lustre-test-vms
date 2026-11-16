@@ -185,6 +185,7 @@ try:
         cmd_build_kernel,
         cmd_build_lustre,
         cmd_build_mofed_kmods,
+        cmd_build_release,
         cmd_build_shell,
         cmd_build_zfs,
         cmd_claim,
@@ -955,7 +956,80 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to Lustre source tree (default: cwd) -- used to "
         "find per-kernel Lustre staging to bake into the image",
     )
+    bip.add_argument(
+        "--base-only",
+        action="store_true",
+        help="Build only the image's package layers (no kernel modules or "
+        "Lustre), which podman caches for the full image build",
+    )
     bip.set_defaults(func=cmd_build_image)
+
+    brp = build_sub.add_parser(
+        "release",
+        parents=[common],
+        help="Rebuild every published target release for this arch "
+        "(see docs/RELEASING.md)",
+    )
+    brp.add_argument(
+        "--lustre-tree",
+        help="Lustre tree whose HEAD commit to build (default: cwd)",
+    )
+    brp.add_argument(
+        "--only",
+        action="append",
+        metavar="TARGET[:KERNEL]",
+        help="Build only this target, or one kernel of it (repeatable)",
+    )
+    brp.add_argument(
+        "--jobs",
+        type=int,
+        default=None,
+        help="Builds at once (default: one per 32 CPUs, at most 4; 1 on macOS)",
+    )
+    brp.add_argument(
+        "--cpus",
+        metavar="SET:SET...",
+        help="CPU set per job, colon separated, e.g. 0-15,64-79:16-31,80-95 "
+        "(default: whole NUMA nodes shared out)",
+    )
+    brp.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Run every build, forcing its kernel, Lustre and image, not "
+        "only those not yet finished at these commits (after something "
+        "outside the ltvm and Lustre commits changed)",
+    )
+    brp.add_argument(
+        "--stall-minutes",
+        type=int,
+        default=60,
+        metavar="N",
+        help="Stop a build whose log has not grown for N minutes and report "
+        "it as stalled (default 60; 0 never stops one)",
+    )
+    brp.add_argument(
+        "--no-preflight",
+        action="store_true",
+        help="Skip building every container and image package layer first",
+    )
+    brp.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the plan, CPU sets and disk check, and build nothing",
+    )
+    brp.add_argument(
+        "--work-dir",
+        metavar="DIR",
+        help="Lustre clones and the ledger of finished builds "
+        "(default: <artifacts>/.release-build)",
+    )
+    brp.add_argument(
+        "--log-dir",
+        metavar="DIR",
+        help="Per-build logs and summary.json "
+        "(default: <work-dir>/logs/<time>)",
+    )
+    brp.set_defaults(func=cmd_build_release)
 
     # Note: build lustre's --force has a slightly different meaning
     # ("Clean and reconfigure before building") than the shared help text,
@@ -3152,7 +3226,7 @@ def parse_cli(
 # not become group-writable.
 _ARTIFACT_WRITERS: dict[str, frozenset[str] | None] = {
     "build": frozenset(
-        {"all", "container", "kernel", "image", "zfs", "mofed-kmods"}
+        {"all", "container", "kernel", "image", "zfs", "mofed-kmods", "release"}
     ),
     "target": frozenset(
         {"build", "fetch", "clean", "delete", "archive", "restore"}
