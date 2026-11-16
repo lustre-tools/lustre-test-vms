@@ -134,6 +134,7 @@ def published_builds(
     found: set[Build] = set()
     unmatched: list[str] = []
     with_zfs: list[str] = []
+    zfs_builds: set[Build] = set()
     for rel in releases:
         # The manifest names the target, arch and kernel; the tag is
         # whatever publish was given (`target publish --tag`).
@@ -163,6 +164,9 @@ def published_builds(
             if any(m.startswith(f"zfs-{target}-{arch}-{kver}-") for m in names):
                 if tag not in with_zfs:
                     with_zfs.append(tag)
+                zfs_kernel = kernel_of(target, stem, arch)
+                if zfs_kernel is not None:
+                    zfs_builds.add(Build(target, zfs_kernel))
                 continue
             kernel = kernel_of(target, stem, arch)
             if kernel is None:
@@ -177,7 +181,9 @@ def published_builds(
         pos = names.index(b.kernel) if b.kernel in names else len(names)
         return (rank[b.target], pos, b.kernel)
 
-    return sorted(found, key=key), unmatched, with_zfs
+    # Another manifest of a kernel published with ZFS must not bring it
+    # back: its build would replace the ZFS one without ZFS.
+    return sorted(found - zfs_builds, key=key), unmatched, with_zfs
 
 
 def breadth_first(builds: list[Build]) -> list[Build]:
@@ -557,29 +563,40 @@ def built_kernel_dir(log_text: str) -> str | None:
     return m.group(1) if m else None
 
 
-def snapshot_modules(snap_dir: Path) -> str:
-    """The Lustre modules a snapshot holds, by path and contents.  Not
-    their times, which a snapshot copy need not keep to the nanosecond."""
+def payload_digest(kdir: Path) -> str:
+    """What a build left in kernel directory ``kdir`` for publishing:
+    every file of its Lustre snapshot by contents, and its installed
+    kernel modules by path and size.  Not file times, which a copy need
+    not keep to the nanosecond."""
     import hashlib
 
     h = hashlib.sha256()
-    for ko in sorted(snap_dir.rglob("*.ko")):
-        h.update(f"{ko.relative_to(snap_dir)}\0".encode())
-        try:
-            with ko.open("rb") as f:
-                for chunk in iter(lambda: f.read(1 << 20), b""):
-                    h.update(chunk)
-        except OSError:
-            h.update(b"\0unreadable")
-        h.update(b"\0")
+    snap = kdir / "lustre-artifacts"
+    for p in sorted(snap.rglob("*")):
+        rel = p.relative_to(kdir)
+        if p.is_symlink():
+            h.update(f"L {rel}\0{os.readlink(p)}\0".encode())
+        elif p.is_file():
+            h.update(f"F {rel}\0".encode())
+            try:
+                with p.open("rb") as f:
+                    for chunk in iter(lambda: f.read(1 << 20), b""):
+                        h.update(chunk)
+            except OSError:
+                h.update(b"\0unreadable")
+            h.update(b"\0")
+    for p in sorted((kdir / "modules").rglob("*")):
+        if p.is_file() and not p.is_symlink():
+            h.update(f"M {p.relative_to(kdir)}\0{p.stat().st_size}\0".encode())
     return h.hexdigest()
 
 
-def snapshot_dir(build: Build, arch: str, kdir_name: str) -> Path:
+def kernel_dir(build: Build, arch: str, kdir_name: str) -> Path:
     from .target_config import TargetConfig
 
-    tc = TargetConfig(build.target, arch=arch)
-    return tc.kernel_output_dir(kernel=kdir_name) / "lustre-artifacts"
+    return TargetConfig(build.target, arch=arch).kernel_output_dir(
+        kernel=kdir_name
+    )
 
 
 def verify(
@@ -587,12 +604,12 @@ def verify(
     arch: str,
     head: str,
     kdir_name: str,
-    modules: str | None = None,
+    payload: str | None = None,
 ) -> list[str]:
     """Read a build's artifacts back from kernel directory ``kdir_name``:
     a complete kernel, the Lustre snapshot beside it (from ``head``,
-    with modules, and when ``modules`` is given the same ones as when it
-    was built), and an image current against both."""
+    with modules), an image current against both, and when ``payload``
+    is given, the same files as when the build was verified."""
     from .image_build import _lustre_staging_hash_input
     from .paths import load_meta_safe
     from .target_config import TargetConfig
@@ -615,10 +632,6 @@ def verify(
         )
     elif not any(snap_dir.rglob("*.ko")):
         problems.append(f"Lustre snapshot in {kdir} has no modules")
-    elif modules is not None and snapshot_modules(snap_dir) != modules:
-        problems.append(
-            f"Lustre snapshot in {kdir} no longer holds the modules it was built with"
-        )
     from .lustre_build import _hash_file
 
     staged_meta = load_meta_safe(snap_dir / ".ltvm-staging-meta.json") or {}
@@ -637,6 +650,8 @@ def verify(
         "image", kernel=kdir_name, extra_hash=extra
     ):
         problems.append("image does not match its inputs and this Lustre")
+    if payload is not None and payload_digest(kdir) != payload:
+        problems.append(f"files in {kdir} changed since the build was verified")
     return problems
 
 
@@ -659,7 +674,7 @@ class Ledger:
     def done(
         self, arch: str, b: Build, ltvm: str, lustre: str
     ) -> tuple[str, str | None] | None:
-        """The kernel directory and snapshot modules of a matching
+        """The kernel directory and payload digest of a matching
         finished build, or None."""
         e = self.data.get(self._key(arch, b))
         if (
@@ -668,7 +683,7 @@ class Ledger:
             and e.get("lustre") == lustre
             and isinstance(e.get("kernel_dir"), str)
         ):
-            m = e.get("modules")
+            m = e.get("payload")
             return str(e["kernel_dir"]), m if isinstance(m, str) else None
         return None
 
@@ -690,14 +705,14 @@ class Ledger:
         ltvm: str,
         lustre: str,
         kernel_dir: str,
-        modules: str | None = None,
+        payload: str | None = None,
     ) -> None:
         with self._lock:
             self.data[self._key(arch, b)] = {
                 "ltvm": ltvm,
                 "lustre": lustre,
                 "kernel_dir": kernel_dir,
-                "modules": modules,
+                "payload": payload,
                 "at": datetime.now().isoformat(timespec="seconds"),
             }
             self._write()

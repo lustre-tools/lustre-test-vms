@@ -458,7 +458,7 @@ def _run(
                     ltvm_version,
                     head,
                     kdir,
-                    rb.snapshot_modules(rb.snapshot_dir(b, arch, kdir)),
+                    rb.payload_digest(rb.kernel_dir(b, arch, kdir)),
                 )
                 if ltvm_version
                 else None

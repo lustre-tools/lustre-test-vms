@@ -80,7 +80,9 @@ one per user runs at all (see below for why); a second is refused.
 
 - **x86_64** on a large Linux host.  One with 128 threads in 8 NUMA
   nodes runs four slots, each on two nodes.
-- **aarch64** on an Apple Silicon Mac, one slot.
+- **aarch64** on an Apple Silicon Mac, one slot.  Give its podman
+  machine 8 GiB of memory: BTF generation for the SLES 6.4 kernels
+  (pahole) needs about 3.5 GiB, and is killed in a 4 GiB machine.
 
 Neither needs the other: run both at once.
 

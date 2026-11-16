@@ -737,27 +737,38 @@ class TestVerify:
             "was built against another kernel ABI"
         )
 
-    def test_snapshot_missing_a_module(self, tmp_path: Path) -> None:
+    def test_payload_changed_since_verified(self, tmp_path: Path) -> None:
         tc, snap = self._setup(tmp_path)
-        built = rb.snapshot_modules(snap)
+        kdir = snap.parent
+        (kdir / "modules" / "lib").mkdir(parents=True)
+        (kdir / "modules" / "lib" / "ext4.ko").write_text("e")
+        (snap / "sbin").mkdir()
+        (snap / "sbin" / "mount.lustre").write_text("m")
+        b = rb.Build("rocky9", "5.14-rhel9.8")
         with patch("ltvm_pkg.target_config.TargetConfig", return_value=tc):
-            b = rb.Build("rocky9", "5.14-rhel9.8")
+            built = rb.payload_digest(kdir)
             assert (
                 rb.verify(b, "x86_64", "abc123", "5.14-rhel9.8-x", built) == []
             )
-            (snap / "lib" / "lustre.ko").unlink()
-            (problem,) = rb.verify(
-                b, "x86_64", "abc123", "5.14-rhel9.8-x", built
-            )
-        assert problem.endswith("no longer holds the modules it was built with")
+            for gone in (
+                snap / "sbin" / "mount.lustre",
+                kdir / "modules" / "lib" / "ext4.ko",
+            ):
+                content = gone.read_text()
+                gone.unlink()
+                (problem,) = rb.verify(
+                    b, "x86_64", "abc123", "5.14-rhel9.8-x", built
+                )
+                assert problem.endswith("changed since the build was verified")
+                gone.write_text(content)
 
-    def test_module_digest_ignores_file_times(self, tmp_path: Path) -> None:
+    def test_payload_ignores_file_times(self, tmp_path: Path) -> None:
         import os
 
         _, snap = self._setup(tmp_path)
-        before = rb.snapshot_modules(snap)
+        before = rb.payload_digest(snap.parent)
         os.utime(snap / "lib" / "lustre.ko", (1, 1))
-        assert rb.snapshot_modules(snap) == before
+        assert rb.payload_digest(snap.parent) == before
 
     def test_snapshot_without_modules(self, tmp_path: Path) -> None:
         tc, snap = self._setup(tmp_path)
@@ -1531,11 +1542,12 @@ def test_a_failed_wait_does_not_orphan_the_build(tmp_path: Path) -> None:
     assert not runner._procs
 
 
-def test_module_digest_sees_same_size_changes(tmp_path: Path) -> None:
-    (tmp_path / "lustre.ko").write_bytes(b"old code")
-    before = rb.snapshot_modules(tmp_path)
-    (tmp_path / "lustre.ko").write_bytes(b"new code")
-    assert rb.snapshot_modules(tmp_path) != before
+def test_payload_sees_same_size_changes(tmp_path: Path) -> None:
+    (tmp_path / "lustre-artifacts").mkdir()
+    (tmp_path / "lustre-artifacts" / "lustre.ko").write_bytes(b"old code")
+    before = rb.payload_digest(tmp_path)
+    (tmp_path / "lustre-artifacts" / "lustre.ko").write_bytes(b"new code")
+    assert rb.payload_digest(tmp_path) != before
 
 
 def test_zfs_is_judged_per_kernel() -> None:
@@ -1610,3 +1622,16 @@ def test_podman_volume_caches_are_not_charged_to_the_host(
             release._ccache_room(builds, "x86_64", tmp_path)
             == rb.CCACHE_BYTES_PER_TARGET
         )
+
+
+def test_a_zfs_kernel_is_not_brought_back_by_another_manifest() -> None:
+    plain = _rel("rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre")
+    zfs = _rel("rocky9-x86_64-5.14.0-611.55.1.el9_7_lustre")
+    zfs["assets"].append(
+        {"name": "zfs-rocky9-x86_64-5.14.0-611.55.1.el9_7_lustre-2.3.4.tar.zst"}
+    )
+    builds, _, with_zfs = rb.published_builds(
+        [plain, zfs], "x86_64", DECLARED, _kernel_of, _is_base
+    )
+    assert builds == []
+    assert with_zfs == ["rocky9-x86_64-5.14.0-611.55.1.el9_7_lustre"]
