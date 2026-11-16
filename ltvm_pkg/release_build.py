@@ -58,6 +58,8 @@ CCACHE_BYTES_PER_TARGET = 5 * GIB
 # a cross build's preflight: prebuilt tools and the copied build context
 CROSS_PREFLIGHT_BYTES = 2 * GIB
 STOP_GRACE_SECONDS = 120
+# exit status of a build the stall watchdog stopped
+STALLED = 124
 MARGIN_BYTES = 10 * GIB
 
 _IMAGE_KERNEL_RE = re.compile(
@@ -656,6 +658,11 @@ class Runner:
     _procs: set[subprocess.Popen[bytes]] = field(default_factory=set)
     _plock: threading.Lock = field(default_factory=threading.Lock)
     stopping: threading.Event = field(default_factory=threading.Event)
+    # A build whose log has not grown for this long is stopped and
+    # reported as stalled (a wedged podman or fuse-overlayfs otherwise
+    # holds the run forever).  None never stops one.
+    stall_seconds: float | None = 3600
+    poll_seconds: float = 30
 
     def run(self, slot: int, argv: list[str], log: Path) -> int:
         cmd = list(self.ltvm) + argv + ["--arch", self.arch, "--no-update"]
@@ -684,10 +691,47 @@ class Runner:
                 )
                 self._procs.add(proc)
             try:
-                return proc.wait()
+                return self._wait(proc, log, f)
             finally:
                 with self._plock:
                     self._procs.discard(proc)
+
+    def _wait(self, proc: subprocess.Popen[bytes], log: Path, f: Any) -> int:
+        last_size, last_change = -1, time.monotonic()
+        while True:
+            try:
+                return proc.wait(timeout=self.poll_seconds)
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                size = log.stat().st_size
+            except OSError:
+                size = last_size
+            now = time.monotonic()
+            if size != last_size:
+                last_size, last_change = size, now
+                continue
+            if (
+                self.stall_seconds is None
+                or now - last_change < self.stall_seconds
+            ):
+                continue
+            mins = round(self.stall_seconds / 60)
+            self.say(
+                f"{_clock()} {log.name}: no output for {mins} min, stopping it"
+            )
+            f.write(
+                f"\nltvm build release: no output for {mins} min; stopped\n".encode()
+            )
+            f.flush()
+            _signal_group(proc, signal.SIGINT)
+            try:
+                proc.wait(timeout=STOP_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                _signal_group(proc, signal.SIGKILL)
+                proc.wait()
+            _signal_group(proc, signal.SIGKILL)
+            return STALLED
 
     def stop(self, grace: float = STOP_GRACE_SECONDS) -> None:
         """Interrupt every running command's process group, as Ctrl-C in
@@ -884,6 +928,8 @@ def build_all(
                 step = failed_step(log.read_text(errors="replace"))
             except OSError:
                 step = None
+            if rc == STALLED:
+                step = "stalled"
             runner.say(
                 f"{_clock()} FAILED {b.name} at {step or 'an unknown step'} "
                 f"after {_mins(secs)} ({log})"

@@ -828,6 +828,7 @@ class TestCommand:
             cpus=None,
             no_preflight=False,
             fresh=False,
+            stall_minutes=60,
             dry_run=True,
             work_dir=str(tmp_path / "work"),
             log_dir=str(tmp_path / "logs"),
@@ -1337,3 +1338,40 @@ def test_cross_preflight_needs_artifact_space(tmp_path: Path) -> None:
     )
     # 2 * 2 + 10 margin
     assert "about 14 GiB needed for artifacts" in problem
+
+
+def test_a_silent_build_is_stopped_as_stalled(tmp_path: Path) -> None:
+    pidfile = tmp_path / "child.pid"
+    script = tmp_path / "quiet.sh"
+    script.write_text(f"echo started\nsleep 60 & echo $! > {pidfile}\nwait\n")
+    runner = rb.Runner(
+        ltvm=["bash", str(script)],
+        arch="x86_64",
+        cpus=[None],
+        say=lambda m: None,
+        stall_seconds=0.5,
+        poll_seconds=0.1,
+    )
+    t0 = time.monotonic()
+    assert runner.run(0, [], tmp_path / "log") == rb.STALLED
+    assert time.monotonic() - t0 < 30
+    assert "no output for" in (tmp_path / "log").read_text()
+    child = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    while _alive(child):
+        assert time.monotonic() < deadline, "the stalled build's child survived"
+        time.sleep(0.05)
+
+
+def test_a_build_that_keeps_writing_is_not_stalled(tmp_path: Path) -> None:
+    script = tmp_path / "chatty.sh"
+    script.write_text("for i in 1 2 3 4 5 6 7 8; do echo $i; sleep 0.2; done\n")
+    runner = rb.Runner(
+        ltvm=["bash", str(script)],
+        arch="x86_64",
+        cpus=[None],
+        say=lambda m: None,
+        stall_seconds=0.5,
+        poll_seconds=0.1,
+    )
+    assert runner.run(0, [], tmp_path / "log") == 0

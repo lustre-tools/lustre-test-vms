@@ -39,7 +39,9 @@ It runs in three passes, so what breaks shows early:
    against its inputs are all there; an exit status of 0 is not enough.
 
 Each build logs to its own file, and the run ends with a table and a
-`summary.json` beside the logs.  The exit status is 0 only when every
+`summary.json` beside the logs.  A build whose log stops growing for an
+hour (`--stall-minutes`) is stopped and reported as stalled: a wedged
+podman or fuse-overlayfs would otherwise hold the run for good.  The exit status is 0 only when every
 build is good.  Before starting it checks that the artifacts and
 podman storage, TMPDIR and the work directory have room for the run,
 and refuses when they do not.  On macOS podman's storage is inside the

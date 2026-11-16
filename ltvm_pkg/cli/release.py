@@ -402,6 +402,7 @@ def _run(
         arch=arch,
         cpus=cpus,
         say=say,
+        stall_seconds=args.stall_minutes * 60 if args.stall_minutes else None,
     )
     t0 = time.monotonic()
     pre: dict[str, rb.Result] = {}

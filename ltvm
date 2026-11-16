@@ -1000,6 +1000,14 @@ def build_parser() -> argparse.ArgumentParser:
         "outside the ltvm and Lustre commits changed)",
     )
     brp.add_argument(
+        "--stall-minutes",
+        type=int,
+        default=60,
+        metavar="N",
+        help="Stop a build whose log has not grown for N minutes and report "
+        "it as stalled (default 60; 0 never stops one)",
+    )
+    brp.add_argument(
         "--no-preflight",
         action="store_true",
         help="Skip building every container and image package layer first",
