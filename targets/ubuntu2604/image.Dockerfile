@@ -15,6 +15,15 @@ COPY common/packages-server.txt /tmp/packages-server.txt
 COPY ubuntu2604/packages-os.txt /tmp/packages-os.txt
 COPY ubuntu2604/package-map.txt /tmp/package-map.txt
 
+# The base image ships /etc/default/locale as a file, and the locales
+# postinst's "ln -sfr" then fails under 26.04's uutils ln.  Make it the
+# symlink to /etc/locale.conf that the postinst would create.
+RUN if [ -f /etc/default/locale ] && [ ! -L /etc/default/locale ] \
+        && [ ! -e /etc/locale.conf ]; then \
+        mv /etc/default/locale /etc/locale.conf \
+        && ln -s ../locale.conf /etc/default/locale; \
+    fi
+
 # Parse the shared lists, translate RHEL names to Debian names via
 # package-map.txt, drop "skip" entries (mapped to "-"), and install.
 # Packages without a mapping pass through unchanged (assumes the
