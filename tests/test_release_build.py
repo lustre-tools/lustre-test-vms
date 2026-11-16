@@ -1243,16 +1243,17 @@ def test_one_build_left_is_not_pinned_to_a_slice(
     assert plan["jobs"] == 1 and plan["cpus"] == [None]
 
 
-def test_ledger_forgets_before_an_attempt(tmp_path: Path) -> None:
+def test_ledger_marks_an_attempt_until_it_verifies(tmp_path: Path) -> None:
     b = rb.Build("rocky9", "k")
     led = rb.Ledger(tmp_path / "done.json")
     led.record("x86_64", b, "v", "c", "kd")
     runner = _runner(1)
-    seen: list[str | None] = []
+    seen: list[Any] = []
 
     def fake_run(slot: int, argv: list[str], log: Path) -> int:
+        again = rb.Ledger(tmp_path / "done.json")
         seen.append(
-            rb.Ledger(tmp_path / "done.json").done("x86_64", b, "v", "c")
+            (again.done("x86_64", b, "v", "c"), again.unfinished("x86_64", b))
         )
         return 1
 
@@ -1265,10 +1266,16 @@ def test_ledger_forgets_before_an_attempt(tmp_path: Path) -> None:
             tmp_path,
             "c",
             lambda b, k: None,
-            on_start=lambda b: led.forget("x86_64", b),
+            on_start=lambda b: led.start("x86_64", b),
         )
-    assert seen == [None]
-    assert rb.Ledger(tmp_path / "done.json").done("x86_64", b, "v", "c") is None
+    # during the attempt, and after it failed, nothing counts as done and
+    # the next run is told to force it
+    assert seen == [(None, True)]
+    after = rb.Ledger(tmp_path / "done.json")
+    assert after.done("x86_64", b, "v", "c") is None
+    assert after.unfinished("x86_64", b)
+    after.record("x86_64", b, "v", "c", "kd")
+    assert not rb.Ledger(tmp_path / "done.json").unfinished("x86_64", b)
 
 
 def test_preflight_alone_needs_working_room(tmp_path: Path) -> None:
@@ -1702,3 +1709,26 @@ def test_a_build_that_failed_its_check_is_forced(tmp_path: Path) -> None:
         )
     assert "--force" not in argvs["rocky9"]
     assert argvs["rocky10"][-1] == "--force"
+
+
+def test_an_unfinished_attempt_is_forced_on_resume(
+    lustre_repo: Path, tmp_path: Path
+) -> None:
+    from ltvm_pkg.cli.release import cmd_build_release
+
+    t = TestCommand()
+    rb.Ledger(tmp_path / "work" / "done-x86_64.json").start(
+        "x86_64", rb.Build("rocky9", "5.14-rhel9.8")
+    )
+    with (
+        t._patches([]),
+        patch.object(rb, "disk_problems", return_value=[]),
+        patch.object(rb, "preflight", return_value={}),
+        patch.object(rb, "build_all", return_value={}) as ball,
+        patch("ltvm_pkg.cli.release._ltvm_version", return_value="0.5.1+abc"),
+        patch("ltvm_pkg.cli.release._new_targets", return_value=0),
+    ):
+        cmd_build_release(t._args(lustre_repo, tmp_path, dry_run=False))
+    assert ball.call_args.kwargs["force"] == {
+        rb.Build("rocky9", "5.14-rhel9.8")
+    }

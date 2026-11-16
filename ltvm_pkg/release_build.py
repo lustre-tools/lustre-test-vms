@@ -712,10 +712,18 @@ class Ledger:
             return str(e["kernel_dir"]), m if isinstance(m, str) else None
         return None
 
-    def forget(self, arch: str, b: Build) -> None:
+    def start(self, arch: str, b: Build) -> None:
+        """Mark an attempt at ``b`` begun: until one verifies, its
+        outputs may be half replaced, so every run forces it."""
         with self._lock:
-            if self.data.pop(self._key(arch, b), None) is not None:
-                self._write()
+            self.data[self._key(arch, b)] = {
+                "attempt": datetime.now().isoformat(timespec="seconds")
+            }
+            self._write()
+
+    def unfinished(self, arch: str, b: Build) -> bool:
+        e = self.data.get(self._key(arch, b))
+        return isinstance(e, dict) and "attempt" in e
 
     def _write(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

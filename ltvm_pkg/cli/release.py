@@ -124,7 +124,11 @@ def _ccache_room(todo: list[rb.Build], arch: str, work: Path) -> int:
         except (ValueError, KeyError):
             room += rb.CCACHE_BYTES_PER_TARGET
             continue
-        if build_volumes.enabled():
+        d = work / ".ltvm-ccache" / tag.removeprefix("ltvm-build-")
+        used = _dir_bytes(d)
+        # a volume in use leaves the host directory empty; one the build
+        # could not write sends it here
+        if build_volumes.enabled() and used == 0:
             try:
                 r = subprocess.run(
                     [
@@ -140,8 +144,7 @@ def _ccache_room(todo: list[rb.Build], arch: str, work: Path) -> int:
                     continue
             except (OSError, subprocess.TimeoutExpired):
                 pass
-        d = work / ".ltvm-ccache" / tag.removeprefix("ltvm-build-")
-        room += max(0, rb.CCACHE_BYTES_PER_TARGET - _dir_bytes(d))
+        room += max(0, rb.CCACHE_BYTES_PER_TARGET - used)
     return room
 
 
@@ -301,7 +304,9 @@ def _plan_and_run(
     ltvm_version = _ltvm_version()
     ledger = rb.Ledger(work / f"done-{arch}.json")
     done: dict[rb.Build, str] = {}
-    rejected: set[rb.Build] = set()
+    # forced: an attempt that never verified, or a verified build whose
+    # files have changed since
+    rejected = {b for b in order if ledger.unfinished(arch, b)}
     for b in order:
         if args.fresh or not ltvm_version:
             break
@@ -500,7 +505,7 @@ def _run(
             # A build whose verified files changed is rebuilt outright:
             # its caches may hold what changed.
             force=True if args.fresh else rejected,
-            on_start=lambda b: ledger.forget(arch, b),
+            on_start=lambda b: ledger.start(arch, b),
             on_ok=lambda b, kdir: (
                 ledger.record(
                     arch,
