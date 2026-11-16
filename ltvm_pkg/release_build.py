@@ -55,6 +55,8 @@ STAGING_BYTES_PER_BUILD = 1 * GIB
 TREE_BYTES_PER_SLOT = 2 * GIB
 # a target's Lustre ccache in the work directory, at ccache's default cap
 CCACHE_BYTES_PER_TARGET = 5 * GIB
+# a cross build's preflight: prebuilt tools and the copied build context
+CROSS_PREFLIGHT_BYTES = 2 * GIB
 STOP_GRACE_SECONDS = 120
 MARGIN_BYTES = 10 * GIB
 
@@ -115,18 +117,20 @@ def published_builds(
     declared: dict[str, list[str]],
     kernel_of: Callable[[str, str, str], str | None],
     is_base: Callable[[str, str, str], bool],
-) -> tuple[list[Build], list[str]]:
+) -> tuple[list[Build], list[str], list[str]]:
     """The (target, kernel) pairs published for ``arch``, in the order
     targets.yaml declares them (``declared`` maps each target to its
     kernels), and the release tags that matched no declared kernel.
     ``kernel_of(target, tag, arch)`` maps a tag to a kernel, and
     ``is_base(target, arch, manifest_stem)`` tells a base release from
-    a variant's.
+    a variant's.  Also returns the tags of releases carrying ZFS, which
+    a plain ``build all`` would rebuild without it.
     """
     targets = list(declared)
     by_length = sorted(targets, key=len, reverse=True)
     found: set[Build] = set()
     unmatched: list[str] = []
+    with_zfs: list[str] = []
     for rel in releases:
         tag = rel.get("tag_name", "")
         target = next(
@@ -138,6 +142,12 @@ def published_builds(
             if n.startswith(f"manifest-{target}-{arch}-")
             and n.endswith(".json")
         ):
+            continue
+        if any(
+            a.get("name", "").startswith(f"zfs-{target}-{arch}-")
+            for a in rel.get("assets", [])
+        ):
+            with_zfs.append(tag)
             continue
         kernel = kernel_of(target, tag, arch)
         if kernel is None:
@@ -151,7 +161,7 @@ def published_builds(
         pos = names.index(b.kernel) if b.kernel in names else len(names)
         return (rank[b.target], pos, b.kernel)
 
-    return sorted(found, key=key), unmatched
+    return sorted(found, key=key), unmatched, with_zfs
 
 
 def breadth_first(builds: list[Build]) -> list[Build]:
@@ -327,6 +337,7 @@ def disk_problems(
     new_targets: int = 0,
     preflight_slots: int = 0,
     new_caches: int = 0,
+    cross_preflight: list[Path] | None = None,
 ) -> list[str]:
     """What will not fit, per filesystem.  Artifacts grow by one set per
     build, in that build's ``artifacts`` directory (an archived target's
@@ -337,10 +348,12 @@ def disk_problems(
     build's staging.  The preflight needs working room in podman's
     storage for each of its ``preflight_slots`` even with no builds, and
     each target without a Lustre ccache yet (``new_caches``) grows one
-    in the work directory.  ``store`` None leaves podman's storage
-    unchecked."""
+    in the work directory.  A cross build's preflight writes tools into
+    its target's artifacts (``cross_preflight``).  ``store`` None leaves
+    podman's storage unchecked."""
     if builds == 0 and new_targets == 0 and preflight_slots == 0:
         return []
+    cross_preflight = cross_preflight or []
     jobs = min(jobs, builds)
     tmp = Path(tempfile.gettempdir()) if tmp is None else tmp
     needs: dict[int, list[Any]] = {}
@@ -359,6 +372,8 @@ def disk_problems(
         add(
             a, ARTIFACT_BYTES_PER_BUILD, f"artifacts ({_existing(a).resolve()})"
         )
+    for a in cross_preflight:
+        add(a, CROSS_PREFLIGHT_BYTES, f"artifacts ({_existing(a).resolve()})")
     if store is not None:
         add(
             store,
@@ -414,43 +429,55 @@ def lustre_head(src: Path) -> str:
 
 
 def lock_paths(
-    artifacts: Path, work: Path, store: Path | None
+    artifacts: Path, work: Path, store: Path | None, home: Path | None = None
 ) -> list[tuple[Path, str]]:
-    """The directories a run holds, each once: its artifacts, its Lustre
-    trees, and the podman storage whose image tags its builds retag
-    (the one shared by runs with other artifacts and work directories)."""
-    store_dir = store.parent if store else Path.home() / ".cache" / "ltvm"
+    """The lock files a run holds, each once: for its artifacts, its
+    Lustre trees, and the podman storage whose image tags its builds
+    retag (shared by runs with other artifacts and work directories).
+    The storage's lock is in the user's cache, named for the storage,
+    since the storage's own directories need not be writable."""
+    import hashlib
+
+    cache = (home or Path.home()) / ".cache" / "ltvm"
+    key = str(store.resolve()) if store else "podman-machine"
+    digest = hashlib.sha1(key.encode()).hexdigest()[:16]
     out: list[tuple[Path, str]] = []
     seen: set[Path] = set()
     for p, why in (
-        (artifacts, "its artifacts"),
-        (work, "its Lustre trees"),
-        (store_dir, "podman's image tags"),
+        (artifacts / ".release-build.lock", str(artifacts)),
+        (work / ".release-build.lock", str(work)),
+        (
+            cache / f"release-build-{digest}.lock",
+            f"podman storage {store or '(podman machine)'}",
+        ),
     ):
-        key = p.resolve()
-        if key not in seen:
-            seen.add(key)
+        k = p.parent.resolve() / p.name
+        if k not in seen:
+            seen.add(k)
             out.append((p, why))
     return out
 
 
 def lock_dir(path: Path, why: str) -> Any:
-    """Hold ``path`` for this run, or raise naming ``why`` another run
-    there would collide.  Returns the open lock file, which holds the
-    lock until it is closed."""
+    """Hold lock file ``path`` (or ``path``/.release-build.lock for a
+    directory) for this run, or raise naming ``why`` another run would
+    collide.  Returns the open lock file, which holds the lock until it
+    is closed."""
     import fcntl
 
+    if path.suffix != ".lock":
+        path = path / ".release-build.lock"
     try:
-        path.mkdir(parents=True, exist_ok=True)
-        f = open(path / ".release-build.lock", "w")  # noqa: SIM115 -- held for the run
+        path.parent.mkdir(parents=True, exist_ok=True)
+        f = open(path, "w")  # noqa: SIM115 -- held for the run
     except OSError as e:
-        raise ReleaseBuildError(f"cannot lock {path} ({why}): {e}") from None
+        raise ReleaseBuildError(f"cannot lock {why} at {path}: {e}") from None
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         f.close()
         raise ReleaseBuildError(
-            f"another `ltvm build release` is using {path} ({why}); wait for it"
+            f"another `ltvm build release` is using {why}; wait for it"
         ) from None
     return f
 
@@ -767,6 +794,10 @@ def run_parallel(
             f"{_clock()} interrupted: stopping the running builds "
             f"(up to {STOP_GRACE_SECONDS} s)"
         )
+        # No build may start with SIGINT ignored: mark the runner stopped
+        # under its launch lock first, so none starts after this.
+        with runner._plock:
+            runner.stopping.set()
         old = signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
             runner.stop()

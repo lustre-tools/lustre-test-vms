@@ -104,6 +104,22 @@ def _new_caches(todo: list[rb.Build], arch: str, work: Path) -> int:
     return n
 
 
+def _cross_preflight_dirs(targets: list[str], arch: str) -> list[Path]:
+    """Artifacts directories a cross build's preflight writes tools to."""
+    from ltvm_pkg.image_build import _is_cross_build
+    from ltvm_pkg.target_config import TargetConfig
+
+    out = []
+    for t in targets:
+        try:
+            tc = TargetConfig(t, arch=arch)
+            if _is_cross_build(tc):
+                out.append(tc.image_output_dir(None))
+        except (ValueError, KeyError):
+            continue
+    return out
+
+
 def _raise_interrupt(signum: int, frame: Any) -> None:
     raise KeyboardInterrupt
 
@@ -143,7 +159,7 @@ def cmd_build_release(args: argparse.Namespace) -> int:
         declared = _declared(arch)
     except Exception as e:  # noqa: BLE001 -- any targets.yaml error
         return _error(f"targets.yaml: {e}", use_json)
-    builds, unmatched = rb.published_builds(
+    builds, unmatched, with_zfs = rb.published_builds(
         releases,
         arch,
         declared,
@@ -188,7 +204,16 @@ def cmd_build_release(args: argparse.Namespace) -> int:
             return _error(str(e), use_json)
     try:
         return _plan_and_run(
-            args, arch, tree, head, work, order, unmatched, use_json, say
+            args,
+            arch,
+            tree,
+            head,
+            work,
+            order,
+            unmatched,
+            with_zfs,
+            use_json,
+            say,
         )
     finally:
         if old_term is not None:
@@ -206,6 +231,7 @@ def _plan_and_run(
     work: Path,
     order: list[rb.Build],
     unmatched: list[str],
+    with_zfs: list[str],
     use_json: bool,
     say: Any,
 ) -> int:
@@ -250,9 +276,22 @@ def _plan_and_run(
         work,
         jobs,
         len(todo),
-        new_targets=_new_targets(targets, arch) if store else 0,
+        # without a preflight, only the builds make containers
+        new_targets=(
+            _new_targets(
+                list(dict.fromkeys(b.target for b in todo))
+                if args.no_preflight
+                else targets,
+                arch,
+            )
+            if store
+            else 0
+        ),
         preflight_slots=0 if args.no_preflight else min(jobs, len(targets)),
         new_caches=_new_caches(todo, arch, work),
+        cross_preflight=(
+            [] if args.no_preflight else _cross_preflight_dirs(targets, arch)
+        ),
     )
 
     plan: dict[str, Any] = {
@@ -265,6 +304,7 @@ def _plan_and_run(
         "builds": [b.name for b in order],
         "already_done": [b.name for b in done],
         "unmatched_releases": unmatched,
+        "zfs_releases_not_built": with_zfs,
         "artifacts": str(ARTIFACTS_DIR),
         "podman_store": str(store) if store else None,
         "work_dir": str(work),
@@ -286,6 +326,11 @@ def _plan_and_run(
     say(f"  {len(order)} builds, {len(done)} already done:")
     for b in order:
         say(f"    {b.name}" + ("  (done)" if b in done else ""))
+    for tag in with_zfs:
+        say(
+            f"  WARNING: release {tag} carries ZFS, which this command does "
+            f"not build; rebuild it with `ltvm build all --zfs`"
+        )
     for tag in unmatched:
         say(
             f"  WARNING: release {tag} matches no kernel in targets.yaml; not built"

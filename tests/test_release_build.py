@@ -76,7 +76,7 @@ RELEASES = [
 
 class TestPlan:
     def test_published_builds_for_one_arch(self) -> None:
-        builds, unmatched = rb.published_builds(
+        builds, unmatched, _ = rb.published_builds(
             RELEASES, "x86_64", DECLARED, _kernel_of, _is_base
         )
         assert [b.name for b in builds] == [
@@ -92,7 +92,7 @@ class TestPlan:
         assert unmatched == ["rocky9-x86_64-5.14.0-503.40.1.el9_5_lustre"]
 
     def test_aarch64_takes_the_longest_target_prefix(self) -> None:
-        builds, _ = rb.published_builds(
+        builds, _, _ = rb.published_builds(
             RELEASES, "aarch64", DECLARED, _kernel_of, _is_base
         )
         assert [b.name for b in builds] == [
@@ -101,7 +101,7 @@ class TestPlan:
         ]
 
     def test_variant_only_release_is_not_built(self) -> None:
-        builds, _ = rb.published_builds(
+        builds, _, _ = rb.published_builds(
             [RELEASES[3]], "x86_64", DECLARED, _kernel_of, _is_base
         )
         assert builds == []
@@ -126,7 +126,7 @@ class TestPlan:
         assert _is_base_stem(stem, []) is base
 
     def test_breadth_first(self) -> None:
-        builds, _ = rb.published_builds(
+        builds, _, _ = rb.published_builds(
             RELEASES, "x86_64", DECLARED, _kernel_of, _is_base
         )
         assert [b.name for b in rb.breadth_first(builds)] == [
@@ -1232,11 +1232,20 @@ def test_preflight_alone_needs_working_room(tmp_path: Path) -> None:
 
 
 def test_lock_paths_are_each_taken_once(tmp_path: Path) -> None:
-    store = tmp_path / "containers"
-    paths = rb.lock_paths(tmp_path, tmp_path / "w", store)
-    # the store's parent is the artifacts directory here: locked once
-    assert [p for p, _ in paths] == [tmp_path, tmp_path / "w"]
+    home = tmp_path / "home"
+    store = tmp_path / "containers" / "storage"
+    paths = rb.lock_paths(tmp_path / "a", tmp_path / "a", store, home=home)
+    # artifacts and work coincide: one lock; the store's is in the cache
+    assert len(paths) == 2
+    assert paths[1][0].parent == home / ".cache" / "ltvm"
+    # two stores under one parent get their own locks
+    other = rb.lock_paths(
+        tmp_path / "b", tmp_path / "c", tmp_path / "containers" / "x", home=home
+    )
+    assert other[2][0] != paths[1][0]
     locks = [rb.lock_dir(p, why) for p, why in paths]
+    with pytest.raises(rb.ReleaseBuildError, match="podman storage"):
+        rb.lock_dir(*paths[1])
     for f in locks:
         f.close()
 
@@ -1300,3 +1309,31 @@ def test_zero_need_filesystems_are_not_checked(tmp_path: Path) -> None:
     # only the preflight's podman room, plus the margin
     assert "about 35 GiB needed for podman storage" in problem
     assert "Lustre trees" not in problem and "temporary" not in problem
+
+
+def test_zfs_release_is_reported_not_built() -> None:
+    rel = _rel("rocky9-x86_64-5.14.0-687.39.1.el9_8_lustre")
+    rel["assets"].append(
+        {"name": "zfs-rocky9-x86_64-5.14.0-687.39.1.el9_8_lustre-2.3.4.tar.zst"}
+    )
+    builds, unmatched, with_zfs = rb.published_builds(
+        [rel], "x86_64", DECLARED, _kernel_of, _is_base
+    )
+    assert builds == [] and unmatched == []
+    assert with_zfs == ["rocky9-x86_64-5.14.0-687.39.1.el9_8_lustre"]
+
+
+def test_cross_preflight_needs_artifact_space(tmp_path: Path) -> None:
+    (problem,) = rb.disk_problems(
+        [],
+        None,
+        tmp_path,
+        1,
+        0,
+        usage=lambda p: SimpleNamespace(free=0),
+        tmp=tmp_path,
+        preflight_slots=1,
+        cross_preflight=[tmp_path / "a", tmp_path / "b"],
+    )
+    # 2 * 2 + 10 margin
+    assert "about 14 GiB needed for artifacts" in problem
