@@ -441,24 +441,17 @@ def lock_paths(
     artifacts: Path, work: Path, store: Path | None, home: Path | None = None
 ) -> list[tuple[Path, str]]:
     """The lock files a run holds, each once: for its artifacts, its
-    Lustre trees, and the podman storage whose image tags its builds
-    retag (shared by runs with other artifacts and work directories).
-    The storage's lock is in the user's cache, named for the storage,
-    since the storage's own directories need not be writable."""
-    import hashlib
-
+    Lustre trees, and the user's podman.  Rootless podman keeps one run
+    directory per user (its locks and mount state) whatever storage it
+    is pointed at, so two runs by one user collide even on separate
+    storage; the lock is per user, in the user's cache."""
     cache = (home or Path.home()) / ".cache" / "ltvm"
-    key = str(store.resolve()) if store else "podman-machine"
-    digest = hashlib.sha1(key.encode()).hexdigest()[:16]
     out: list[tuple[Path, str]] = []
     seen: set[Path] = set()
     for p, why in (
         (artifacts / ".release-build.lock", str(artifacts)),
         (work / ".release-build.lock", str(work)),
-        (
-            cache / f"release-build-{digest}.lock",
-            f"podman storage {store or '(podman machine)'}",
-        ),
+        (cache / "release-build-podman.lock", "this user's podman"),
     ):
         k = p.parent.resolve() / p.name
         if k not in seen:
@@ -946,6 +939,9 @@ def build_all(
             log,
         )
         secs = time.monotonic() - t0
+        if rc != 0 and runner.stopping.is_set():
+            runner.say(f"{_clock()} interrupted {b.name} after {_mins(secs)}")
+            return Result(b, "interrupted", None, secs, str(log))
         if rc != 0:
             try:
                 step = failed_step(log.read_text(errors="replace"))

@@ -1254,19 +1254,18 @@ def test_preflight_alone_needs_working_room(tmp_path: Path) -> None:
 
 def test_lock_paths_are_each_taken_once(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    store = tmp_path / "containers" / "storage"
-    paths = rb.lock_paths(tmp_path / "a", tmp_path / "a", store, home=home)
-    # artifacts and work coincide: one lock; the store's is in the cache
+    paths = rb.lock_paths(tmp_path / "a", tmp_path / "a", None, home=home)
+    # artifacts and work coincide: one lock; podman's is per user
     assert len(paths) == 2
-    assert paths[1][0].parent == home / ".cache" / "ltvm"
-    # two stores under one parent get their own locks
+    assert paths[1][0] == home / ".cache" / "ltvm" / "release-build-podman.lock"
+    # another store is still this user's podman
     other = rb.lock_paths(
-        tmp_path / "b", tmp_path / "c", tmp_path / "containers" / "x", home=home
+        tmp_path / "b", tmp_path / "c", tmp_path / "store", home=home
     )
-    assert other[2][0] != paths[1][0]
+    assert other[2][0] == paths[1][0]
     locks = [rb.lock_dir(p, why) for p, why in paths]
-    with pytest.raises(rb.ReleaseBuildError, match="podman storage"):
-        rb.lock_dir(*paths[1])
+    with pytest.raises(rb.ReleaseBuildError, match="this user's podman"):
+        rb.lock_dir(*other[2])
     for f in locks:
         f.close()
 
@@ -1463,3 +1462,25 @@ def test_a_wedged_podman_fails_the_plan() -> None:
         pytest.raises(rb.ReleaseBuildError, match="podman did not answer"),
     ):
         release._new_targets(["rocky9"], "x86_64")
+
+
+def test_a_build_stopped_by_the_run_is_interrupted_not_failed(
+    tmp_path: Path,
+) -> None:
+    runner = _runner(1)
+
+    def fake_run(slot: int, argv: list[str], log: Path) -> int:
+        runner.stopping.set()
+        return 130
+
+    with patch.object(runner, "run", side_effect=fake_run):
+        res = rb.build_all(
+            [rb.Build("rocky9", "k")],
+            1,
+            runner,
+            [tmp_path],
+            tmp_path,
+            "h",
+            lambda b, k: None,
+        )
+    assert [r.status for r in res.values()] == ["interrupted"]

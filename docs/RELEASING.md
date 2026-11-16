@@ -71,8 +71,8 @@ The preflight runs for every target, finished ones too, so each still
 has its build container for publishing.  A release that carries ZFS is
 listed and not built: rebuild it with `ltvm build all --zfs`.
 
-One run at a time uses an artifacts directory, a work directory and a
-podman storage; a second is refused.
+One run at a time uses an artifacts directory or a work directory, and
+one per user runs at all (see below for why); a second is refused.
 
 ### Where to run it
 
@@ -105,7 +105,13 @@ export LTVM_ARTIFACTS_DIR=/mnt/data/$USER-ltvm/artifacts
 ```
 
 `graphroot` does not move rootless storage (podman 4.9 ignores it);
-`rootless_storage_path` does.
+`rootless_storage_path` does.  `runroot` is ignored too: every rootless
+podman of one user keeps its locks and mount state in
+`$XDG_RUNTIME_DIR/containers`, whatever storage it uses.  So a second
+storage does not keep two sets of builds by one user apart, and
+running two at once (two storages, or a release run beside other podman
+builds) can wedge fuse-overlayfs.  `build release` therefore runs one
+at a time per user.
 
 ### Publishing
 
