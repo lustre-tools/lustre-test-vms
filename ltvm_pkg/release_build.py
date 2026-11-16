@@ -323,6 +323,7 @@ def disk_problems(
     usage: Callable[[Path], Any] = shutil.disk_usage,
     tmp: Path | None = None,
     new_targets: int = 0,
+    preflight_slots: int = 0,
 ) -> list[str]:
     """What will not fit, per filesystem.  Artifacts grow by one set per
     build, in that build's ``artifacts`` directory (an archived target's
@@ -330,8 +331,10 @@ def disk_problems(
     podman's store, for an image export in TMPDIR, and for its Lustre
     tree's build.  Podman also keeps each target's container and image
     layers (``new_targets`` have none yet), and the trees keep each
-    build's staging.  ``store`` None leaves podman's storage unchecked."""
-    if builds == 0 and new_targets == 0:
+    build's staging.  The preflight needs working room in podman's
+    storage for each of its ``preflight_slots`` even with no builds.
+    ``store`` None leaves podman's storage unchecked."""
+    if builds == 0 and new_targets == 0 and preflight_slots == 0:
         return []
     jobs = min(jobs, builds)
     tmp = Path(tempfile.gettempdir()) if tmp is None else tmp
@@ -352,7 +355,8 @@ def disk_problems(
     if store is not None:
         add(
             store,
-            jobs * WORK_BYTES_PER_SLOT + new_targets * TARGET_STORE_BYTES,
+            max(jobs, preflight_slots) * WORK_BYTES_PER_SLOT
+            + new_targets * TARGET_STORE_BYTES,
             f"podman storage ({store})",
         )
     add(tmp, jobs * TMP_BYTES_PER_SLOT, f"temporary files ({tmp})")
@@ -493,6 +497,16 @@ def verify(build: Build, arch: str, head: str, kdir_name: str) -> list[str]:
         )
     elif not any(snap_dir.rglob("*.ko")):
         problems.append(f"Lustre snapshot in {kdir} has no modules")
+    else:
+        from .lustre_build import _hash_staged_modules, read_staging_meta
+
+        staged = read_staging_meta(snap_dir) or {}
+        if _hash_staged_modules(snap_dir) != staged.get(
+            "lustre_modules_sha256"
+        ):
+            problems.append(
+                f"Lustre snapshot in {kdir} does not hold the modules it records"
+            )
     try:
         extra = _lustre_staging_hash_input(snap_dir)
     except FileNotFoundError:
@@ -534,6 +548,17 @@ class Ledger:
             return str(e["kernel_dir"])
         return None
 
+    def forget(self, arch: str, b: Build) -> None:
+        with self._lock:
+            if self.data.pop(self._key(arch, b), None) is not None:
+                self._write()
+
+    def _write(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.data, indent=2, sort_keys=True) + "\n")
+        tmp.replace(self.path)
+
     def record(
         self, arch: str, b: Build, ltvm: str, lustre: str, kernel_dir: str
     ) -> None:
@@ -544,12 +569,7 @@ class Ledger:
                 "kernel_dir": kernel_dir,
                 "at": datetime.now().isoformat(timespec="seconds"),
             }
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(
-                json.dumps(self.data, indent=2, sort_keys=True) + "\n"
-            )
-            tmp.replace(self.path)
+            self._write()
 
 
 # ------------------------------------------------------------------
@@ -766,6 +786,7 @@ def build_all(
     head: str,
     on_ok: Callable[[Build, str], None],
     force: bool = False,
+    on_start: Callable[[Build], None] = lambda b: None,
 ) -> dict[Build, Result]:
     def work(slot: int, b: Build) -> Result:
         log = log_dir / f"{b.target}-{b.kernel}.log"
@@ -774,6 +795,9 @@ def build_all(
             f", cpus {format_cpulist(cpus)}" if cpus else ""
         )
         runner.say(f"{_clock()} start {b.name} ({where})")
+        # A failed attempt can leave old and new outputs mixed, so the
+        # earlier success must not stand while this one runs.
+        on_start(b)
         t0 = time.monotonic()
         rc = runner.run(
             slot,

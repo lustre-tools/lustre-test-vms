@@ -224,6 +224,7 @@ def _plan_and_run(
         jobs,
         len(todo),
         new_targets=_new_targets(targets, arch) if store else 0,
+        preflight_slots=0 if args.no_preflight else min(jobs, len(targets)),
     )
 
     plan: dict[str, Any] = {
@@ -349,6 +350,7 @@ def _run(
             log_dir,
             head,
             force=args.fresh,
+            on_start=lambda b: ledger.forget(arch, b),
             on_ok=lambda b, kdir: (
                 ledger.record(arch, b, ltvm_version, head, kdir)
                 if ltvm_version

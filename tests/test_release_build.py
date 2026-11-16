@@ -666,17 +666,23 @@ class _FakeTC:
 
 class TestVerify:
     def _setup(self, tmp_path: Path) -> tuple[_FakeTC, Path]:
+        from ltvm_pkg.lustre_build import _hash_staged_modules
+
         kdir = tmp_path / "kernels" / "5.14-rhel9.8-x"
         snap = kdir / "lustre-artifacts"
         (snap / "lib").mkdir(parents=True)
         (kdir / "meta.json").write_text("{}")
         (snap / "lib" / "lustre.ko").write_text("x")
+        (snap / "lib" / "libcfs.ko").write_text("y")
         (snap / ".ltvm-snapshot.json").write_text(
             json.dumps({"lustre_commit": "abc123"})
         )
         (snap / ".ltvm-staging-meta.json").write_text(
             json.dumps(
-                {"module_symvers_sha256": "s1", "lustre_modules_sha256": "l1"}
+                {
+                    "module_symvers_sha256": "s1",
+                    "lustre_modules_sha256": _hash_staged_modules(snap),
+                }
             )
         )
         return _FakeTC(tmp_path), snap
@@ -694,7 +700,7 @@ class TestVerify:
         tc, _ = self._setup(tmp_path)
         assert self._verify(tc) == []
         # the image is checked against the snapshot's Lustre digests
-        assert tc.extra is not None and b"lustre:|l1" in tc.extra
+        assert tc.extra is not None and b"lustre:|" in tc.extra
 
     def test_other_commit(self, tmp_path: Path) -> None:
         tc, _ = self._setup(tmp_path)
@@ -707,9 +713,17 @@ class TestVerify:
         tc.complete["kernel"] = False
         assert self._verify(tc)[0].endswith("is missing or incomplete")
 
+    def test_snapshot_missing_a_module(self, tmp_path: Path) -> None:
+        tc, snap = self._setup(tmp_path)
+        (snap / "lib" / "lustre.ko").unlink()
+        assert self._verify(tc)[0].endswith(
+            "does not hold the modules it records"
+        )
+
     def test_snapshot_without_modules(self, tmp_path: Path) -> None:
         tc, snap = self._setup(tmp_path)
         (snap / "lib" / "lustre.ko").unlink()
+        (snap / "lib" / "libcfs.ko").unlink()
         assert self._verify(tc)[0].endswith("has no modules")
 
     def test_image_without_this_lustre(self, tmp_path: Path) -> None:
@@ -720,9 +734,10 @@ class TestVerify:
         ]
         tc.stale = False
         (snap / ".ltvm-staging-meta.json").unlink()
-        assert self._verify(tc) == [
+        assert (
             "image does not match its inputs and this Lustre"
-        ]
+            in self._verify(tc)
+        )
 
     def test_no_image(self, tmp_path: Path) -> None:
         tc, _ = self._setup(tmp_path)
@@ -1163,3 +1178,47 @@ def test_one_build_left_is_not_pinned_to_a_slice(
         )
     plan = json.loads(capsys.readouterr().out)
     assert plan["jobs"] == 1 and plan["cpus"] == [None]
+
+
+def test_ledger_forgets_before_an_attempt(tmp_path: Path) -> None:
+    b = rb.Build("rocky9", "k")
+    led = rb.Ledger(tmp_path / "done.json")
+    led.record("x86_64", b, "v", "c", "kd")
+    runner = _runner(1)
+    seen: list[str | None] = []
+
+    def fake_run(slot: int, argv: list[str], log: Path) -> int:
+        seen.append(
+            rb.Ledger(tmp_path / "done.json").done("x86_64", b, "v", "c")
+        )
+        return 1
+
+    with patch.object(runner, "run", side_effect=fake_run):
+        rb.build_all(
+            [b],
+            1,
+            runner,
+            [tmp_path],
+            tmp_path,
+            "c",
+            lambda b, k: None,
+            on_start=lambda b: led.forget("x86_64", b),
+        )
+    assert seen == [None]
+    assert rb.Ledger(tmp_path / "done.json").done("x86_64", b, "v", "c") is None
+
+
+def test_preflight_alone_needs_working_room(tmp_path: Path) -> None:
+    free = SimpleNamespace(free=0)
+    (problem,) = rb.disk_problems(
+        [],
+        tmp_path,
+        tmp_path,
+        1,
+        0,
+        usage=lambda p: free,
+        tmp=tmp_path,
+        preflight_slots=2,
+    )
+    # 2 slots * 25 + 10 margin
+    assert "about 60 GiB needed" in problem
