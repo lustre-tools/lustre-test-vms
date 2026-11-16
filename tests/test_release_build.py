@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -860,7 +861,13 @@ class TestCommand:
             patch.object(rb, "available_cpus", return_value=None)
         )
         stack.enter_context(
-            patch.object(rb, "podman_store", return_value=Path("/nonexistent"))
+            patch.object(
+                rb,
+                "podman_store",
+                return_value=Path(tempfile.mkdtemp())
+                / "containers"
+                / "storage",
+            )
         )
         return stack
 
@@ -1222,3 +1229,74 @@ def test_preflight_alone_needs_working_room(tmp_path: Path) -> None:
     )
     # 2 slots * 25 + 10 margin
     assert "about 60 GiB needed" in problem
+
+
+def test_lock_paths_are_each_taken_once(tmp_path: Path) -> None:
+    store = tmp_path / "containers"
+    paths = rb.lock_paths(tmp_path, tmp_path / "w", store)
+    # the store's parent is the artifacts directory here: locked once
+    assert [p for p, _ in paths] == [tmp_path, tmp_path / "w"]
+    locks = [rb.lock_dir(p, why) for p, why in paths]
+    for f in locks:
+        f.close()
+
+
+def test_unwritable_lock_dir_is_an_error_not_a_crash(tmp_path: Path) -> None:
+    with patch("builtins.open", side_effect=PermissionError("denied")):
+        with pytest.raises(rb.ReleaseBuildError, match="cannot lock"):
+            rb.lock_dir(tmp_path, "x")
+
+
+def test_background_launch_gets_a_working_sigint(
+    lustre_repo: Path, tmp_path: Path
+) -> None:
+    import signal as sig
+
+    from ltvm_pkg.cli.release import cmd_build_release
+
+    seen: list[Any] = []
+    t = TestCommand()
+    old = sig.signal(sig.SIGINT, sig.SIG_IGN)
+    try:
+        with (
+            t._patches([]),
+            patch.object(rb, "disk_problems", return_value=[]),
+            patch("ltvm_pkg.cli.release._new_targets", return_value=0),
+            patch(
+                "ltvm_pkg.cli.release._plan_and_run",
+                side_effect=lambda *a: (
+                    seen.append(sig.getsignal(sig.SIGINT)) or 0
+                ),
+            ),
+        ):
+            cmd_build_release(t._args(lustre_repo, tmp_path, dry_run=False))
+        assert seen == [sig.default_int_handler]
+        assert sig.getsignal(sig.SIGINT) is sig.SIG_IGN
+    finally:
+        sig.signal(sig.SIGINT, old)
+
+
+def test_new_ccache_space_is_counted(tmp_path: Path) -> None:
+    free = SimpleNamespace(free=60 * rb.GIB)
+    args = ([tmp_path], tmp_path, tmp_path, 1, 1)
+    kw: dict[str, Any] = {"usage": lambda p: free, "tmp": tmp_path}
+    assert rb.disk_problems(*args, **kw) == []
+    (problem,) = rb.disk_problems(*args, **kw, new_caches=2)
+    # 56 + 2 * 5
+    assert "about 66 GiB needed" in problem
+
+
+def test_zero_need_filesystems_are_not_checked(tmp_path: Path) -> None:
+    (problem,) = rb.disk_problems(
+        [],
+        tmp_path / "store",
+        tmp_path / "work",
+        1,
+        0,
+        usage=lambda p: SimpleNamespace(free=0),
+        tmp=tmp_path / "tmp",
+        preflight_slots=1,
+    )
+    # only the preflight's podman room, plus the margin
+    assert "about 35 GiB needed for podman storage" in problem
+    assert "Lustre trees" not in problem and "temporary" not in problem

@@ -53,6 +53,8 @@ TARGET_STORE_BYTES = 6 * GIB
 # own build
 STAGING_BYTES_PER_BUILD = 1 * GIB
 TREE_BYTES_PER_SLOT = 2 * GIB
+# a target's Lustre ccache in the work directory, at ccache's default cap
+CCACHE_BYTES_PER_TARGET = 5 * GIB
 STOP_GRACE_SECONDS = 120
 MARGIN_BYTES = 10 * GIB
 
@@ -324,6 +326,7 @@ def disk_problems(
     tmp: Path | None = None,
     new_targets: int = 0,
     preflight_slots: int = 0,
+    new_caches: int = 0,
 ) -> list[str]:
     """What will not fit, per filesystem.  Artifacts grow by one set per
     build, in that build's ``artifacts`` directory (an archived target's
@@ -332,8 +335,10 @@ def disk_problems(
     tree's build.  Podman also keeps each target's container and image
     layers (``new_targets`` have none yet), and the trees keep each
     build's staging.  The preflight needs working room in podman's
-    storage for each of its ``preflight_slots`` even with no builds.
-    ``store`` None leaves podman's storage unchecked."""
+    storage for each of its ``preflight_slots`` even with no builds, and
+    each target without a Lustre ccache yet (``new_caches``) grows one
+    in the work directory.  ``store`` None leaves podman's storage
+    unchecked."""
     if builds == 0 and new_targets == 0 and preflight_slots == 0:
         return []
     jobs = min(jobs, builds)
@@ -341,6 +346,8 @@ def disk_problems(
     needs: dict[int, list[Any]] = {}
 
     def add(path: Path, n: int, what: str) -> None:
+        if n <= 0:
+            return
         p = _existing(path)
         dev = p.stat().st_dev
         entry = needs.setdefault(dev, [p, 0, []])
@@ -362,7 +369,9 @@ def disk_problems(
     add(tmp, jobs * TMP_BYTES_PER_SLOT, f"temporary files ({tmp})")
     add(
         work,
-        jobs * TREE_BYTES_PER_SLOT + builds * STAGING_BYTES_PER_BUILD,
+        jobs * TREE_BYTES_PER_SLOT
+        + builds * STAGING_BYTES_PER_BUILD
+        + new_caches * CCACHE_BYTES_PER_TARGET,
         f"Lustre trees ({work})",
     )
     out = []
@@ -404,14 +413,38 @@ def lustre_head(src: Path) -> str:
     return _git(src, "rev-parse", "HEAD")
 
 
+def lock_paths(
+    artifacts: Path, work: Path, store: Path | None
+) -> list[tuple[Path, str]]:
+    """The directories a run holds, each once: its artifacts, its Lustre
+    trees, and the podman storage whose image tags its builds retag
+    (the one shared by runs with other artifacts and work directories)."""
+    store_dir = store.parent if store else Path.home() / ".cache" / "ltvm"
+    out: list[tuple[Path, str]] = []
+    seen: set[Path] = set()
+    for p, why in (
+        (artifacts, "its artifacts"),
+        (work, "its Lustre trees"),
+        (store_dir, "podman's image tags"),
+    ):
+        key = p.resolve()
+        if key not in seen:
+            seen.add(key)
+            out.append((p, why))
+    return out
+
+
 def lock_dir(path: Path, why: str) -> Any:
     """Hold ``path`` for this run, or raise naming ``why`` another run
     there would collide.  Returns the open lock file, which holds the
     lock until it is closed."""
     import fcntl
 
-    path.mkdir(parents=True, exist_ok=True)
-    f = open(path / ".release-build.lock", "w")  # noqa: SIM115 -- held for the run
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        f = open(path / ".release-build.lock", "w")  # noqa: SIM115 -- held for the run
+    except OSError as e:
+        raise ReleaseBuildError(f"cannot lock {path} ({why}): {e}") from None
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:

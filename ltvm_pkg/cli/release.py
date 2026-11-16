@@ -86,6 +86,24 @@ def _new_targets(targets: list[str], arch: str) -> int:
     return n
 
 
+def _new_caches(todo: list[rb.Build], arch: str, work: Path) -> int:
+    """Targets with builds to run but no Lustre ccache in ``work`` yet
+    (lustre_build keeps it beside the trees, named for the container)."""
+    from ltvm_pkg.target_config import TargetConfig
+
+    n = 0
+    for t in dict.fromkeys(b.target for b in todo):
+        try:
+            tag = TargetConfig(t, arch=arch).container_tag
+        except (ValueError, KeyError):
+            n += 1
+            continue
+        n += not (
+            work / ".ltvm-ccache" / tag.removeprefix("ltvm-build-")
+        ).is_dir()
+    return n
+
+
 def _raise_interrupt(signum: int, frame: Any) -> None:
     raise KeyboardInterrupt
 
@@ -148,15 +166,23 @@ def cmd_build_release(args: argparse.Namespace) -> int:
     )
     locks: list[Any] = []
     old_term = None
+    old_int = signal.getsignal(signal.SIGINT)
     if not args.dry_run:
         # The finished builds are decided under the locks: another run
         # could replace what they verify before these were taken.
         old_term = signal.signal(signal.SIGTERM, _raise_interrupt)
+        # Launched in the background, SIGINT can arrive ignored, and the
+        # builds would inherit that and skip their cleanup when stopped.
+        if old_int is signal.SIG_IGN:
+            signal.signal(signal.SIGINT, signal.default_int_handler)
         try:
-            locks.append(rb.lock_dir(ARTIFACTS_DIR, "its artifacts"))
-            locks.append(rb.lock_dir(work, "its Lustre trees"))
+            for path, why in rb.lock_paths(
+                ARTIFACTS_DIR, work, rb.podman_store()
+            ):
+                locks.append(rb.lock_dir(path, why))
         except rb.ReleaseBuildError as e:
             signal.signal(signal.SIGTERM, old_term)
+            signal.signal(signal.SIGINT, old_int)
             for f in locks:
                 f.close()
             return _error(str(e), use_json)
@@ -167,6 +193,7 @@ def cmd_build_release(args: argparse.Namespace) -> int:
     finally:
         if old_term is not None:
             signal.signal(signal.SIGTERM, old_term)
+            signal.signal(signal.SIGINT, old_int)
         for f in locks:
             f.close()
 
@@ -225,6 +252,7 @@ def _plan_and_run(
         len(todo),
         new_targets=_new_targets(targets, arch) if store else 0,
         preflight_slots=0 if args.no_preflight else min(jobs, len(targets)),
+        new_caches=_new_caches(todo, arch, work),
     )
 
     plan: dict[str, Any] = {
