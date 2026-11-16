@@ -3596,10 +3596,19 @@ def _check_skill_links(
     `ltvm install` links them, so the hosts that need this check are the
     ones installed before the skills existed, or from a different
     checkout.  Returns (issue lines, repair notes, unfixable count).
+
+    The links belong to the installed ltvm, so from any other checkout
+    (a worktree) they are checked, and repaired, against that one.
     """
+    from ltvm_pkg import host_setup_version as hsv
     from ltvm_pkg import skills
 
-    root = repo_root or skills.default_repo_root()
+    installed = hsv.installed_script()
+    root = repo_root or (
+        installed.parent
+        if installed is not None
+        else skills.default_repo_root()
+    )
     status = skills.link_status(root, home=home)
     issues: list[str] = []
     notes: list[str] = []
