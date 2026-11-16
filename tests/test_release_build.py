@@ -202,7 +202,7 @@ class TestDisk:
     def test_one_filesystem_sums_every_need(self, tmp_path: Path) -> None:
         free = SimpleNamespace(free=100 * rb.GIB)
         problems = rb.disk_problems(
-            tmp_path / "a",
+            [tmp_path / "a"] * 10,
             tmp_path / "s",
             tmp_path / "w",
             2,
@@ -215,15 +215,40 @@ class TestDisk:
         assert "100 GiB free, about 158 GiB needed" in problems[0]
         for what in ("artifacts", "podman storage", "temporary files"):
             assert what in problems[0]
+        assert problems[0].count("artifacts (") == 1
+
+    def test_enough(self, tmp_path: Path) -> None:
+        free = SimpleNamespace(free=1000 * rb.GIB)
+        assert (
+            rb.disk_problems(
+                [tmp_path] * 12, tmp_path, tmp_path, 4, 12, usage=lambda p: free
+            )
+            == []
+        )
 
     def test_nothing_to_build_needs_nothing(self, tmp_path: Path) -> None:
         free = SimpleNamespace(free=0)
         assert (
-            rb.disk_problems(
-                tmp_path, tmp_path, tmp_path, 4, 0, usage=lambda p: free
-            )
+            rb.disk_problems([], tmp_path, tmp_path, 4, 0, usage=lambda p: free)
             == []
         )
+
+    def test_preflight_alone_still_needs_store_space(
+        self, tmp_path: Path
+    ) -> None:
+        free = SimpleNamespace(free=0)
+        (problem,) = rb.disk_problems(
+            [],
+            tmp_path,
+            tmp_path,
+            4,
+            0,
+            usage=lambda p: free,
+            tmp=tmp_path,
+            new_targets=10,
+        )
+        # 10 new targets * 6 + 10 margin
+        assert "about 70 GiB needed" in problem
 
     def test_slots_beyond_the_builds_reserve_nothing(
         self, tmp_path: Path
@@ -231,7 +256,7 @@ class TestDisk:
         free = SimpleNamespace(free=50 * rb.GIB)
         # 1 build: 6 + 1 + one slot of 39 + 10 margin = 56, not four slots
         (problem,) = rb.disk_problems(
-            tmp_path,
+            [tmp_path],
             tmp_path,
             tmp_path,
             4,
@@ -243,7 +268,7 @@ class TestDisk:
 
     def test_new_targets_need_store_space(self, tmp_path: Path) -> None:
         free = SimpleNamespace(free=60 * rb.GIB)
-        args = (tmp_path, tmp_path, tmp_path, 1, 1)
+        args = ([tmp_path], tmp_path, tmp_path, 1, 1)
         kw: dict[str, Any] = {"usage": lambda p: free, "tmp": tmp_path}
         # 6 + 1 + 25 + 12 + 2 + 10 margin = 56
         assert rb.disk_problems(*args, **kw) == []
@@ -251,31 +276,59 @@ class TestDisk:
         (problem,) = rb.disk_problems(*args, **kw, new_targets=2)
         assert "about 68 GiB needed" in problem
 
-    def test_podman_machine_store_is_not_checked(self, tmp_path: Path) -> None:
-        free = SimpleNamespace(free=1000 * rb.GIB)
+    def test_archived_target_counts_on_its_own_filesystem(
+        self, tmp_path: Path
+    ) -> None:
+        hot = tmp_path / "hot"
+        cold = tmp_path / "cold" / "rocky9" / "x86_64"
+        cold.mkdir(parents=True)
+        (hot / "rocky9").mkdir(parents=True)
+        (hot / "rocky9" / "x86_64").symlink_to(cold)
         seen: list[Path] = []
 
         def usage(p: Path) -> Any:
             seen.append(p)
-            return free
+            return SimpleNamespace(free=1000 * rb.GIB)
 
+        real_stat = Path.stat
+
+        def stat(self: Path, **kw: Any) -> Any:
+            st = real_stat(self, **kw)
+            dev = (
+                2
+                if str(self.resolve()).startswith(str(tmp_path / "cold"))
+                else 1
+            )
+            return SimpleNamespace(st_dev=dev, st_mode=st.st_mode)
+
+        with patch.object(Path, "stat", stat):
+            rb.disk_problems(
+                [hot / "rocky9" / "x86_64", hot / "rocky10" / "x86_64"],
+                None,
+                hot,
+                1,
+                2,
+                usage=usage,
+                tmp=hot,
+            )
+        assert any(p.resolve() == cold for p in seen)
+
+    def test_podman_machine_store_is_not_checked(self, tmp_path: Path) -> None:
+        free = SimpleNamespace(free=1000 * rb.GIB)
         assert (
             rb.disk_problems(
-                tmp_path, None, tmp_path, 1, 1, usage=usage, tmp=tmp_path
+                [tmp_path],
+                None,
+                tmp_path,
+                1,
+                1,
+                usage=lambda p: free,
+                tmp=tmp_path,
             )
             == []
         )
         with patch.object(rb.sys, "platform", "darwin"):
             assert rb.podman_store() is None
-
-    def test_enough(self, tmp_path: Path) -> None:
-        free = SimpleNamespace(free=1000 * rb.GIB)
-        assert (
-            rb.disk_problems(
-                tmp_path, tmp_path, tmp_path, 4, 12, usage=lambda p: free
-            )
-            == []
-        )
 
 
 class TestFailedStep:
@@ -1016,18 +1069,46 @@ def test_target_list_sees_word_ending_releases() -> None:
     assert remote == "6.12.107-lustre"
 
 
-def test_no_ltvm_commit_means_no_ledger() -> None:
+def test_ltvm_identity_is_a_clean_head() -> None:
     from ltvm_pkg.cli import release
 
-    with patch("ltvm_pkg.__version__", "0.5"):
-        assert release._ltvm_version() is None
     clean = subprocess.CompletedProcess([], 0, "", "")
     dirty = subprocess.CompletedProcess([], 0, " M ltvm\n", "")
-    with patch("ltvm_pkg.__version__", "0.5.367+da167a3"):
+    with patch(
+        "ltvm_pkg.version_info.git_version", return_value=("0.5.9+abc", "abc")
+    ):
         with patch.object(subprocess, "run", return_value=clean):
-            assert release._ltvm_version() == "0.5.367+da167a3"
+            assert release._ltvm_version() == "0.5.9+abc abc"
         with patch.object(subprocess, "run", return_value=dirty):
             assert release._ltvm_version() is None
+    with patch("ltvm_pkg.version_info.git_version", return_value=None):
+        assert release._ltvm_version() is None
+
+
+class TestCpuLimits:
+    def test_more_jobs_than_cpus(self) -> None:
+        with pytest.raises(rb.ReleaseBuildError, match="only 2 CPUs"):
+            rb.cpu_sets(3, None, [0, 1], [])
+
+    def test_empty_set_by_hand(self) -> None:
+        with pytest.raises(rb.ReleaseBuildError, match="empty"):
+            rb.cpu_sets(2, "0-1:", [0, 1, 2], [])
+
+
+def test_fresh_forces_the_builds(tmp_path: Path) -> None:
+    runner = _runner(1)
+    with patch.object(runner, "run", return_value=1) as run:
+        rb.build_all(
+            [rb.Build("rocky9", "k")],
+            1,
+            runner,
+            [tmp_path],
+            tmp_path,
+            "h",
+            lambda b, k: None,
+            force=True,
+        )
+    assert run.call_args.args[1][-1] == "--force"
 
 
 def test_borrowing_clone_is_recloned(lustre_repo: Path, tmp_path: Path) -> None:

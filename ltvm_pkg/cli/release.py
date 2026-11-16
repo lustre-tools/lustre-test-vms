@@ -36,16 +36,15 @@ def _declared(arch: str) -> dict[str, list[str]]:
 
 
 def _ltvm_version() -> str | None:
-    """ltvm's version with its commit, or None when it has no commit to
-    give (a copy without git or a baked version), which would let the
-    ledger mistake one ltvm for another."""
-    import ltvm_pkg
+    """ltvm's version from its checkout's HEAD, or None when there is no
+    clean commit to name it by: no git, or uncommitted changes.  Not
+    the baked version, which a branch checkout does not refresh."""
     from ltvm_pkg.target_config import REPO_ROOT
+    from ltvm_pkg.version_info import git_version
 
-    v = ltvm_pkg.__version__
-    if "+" not in v:
+    v = git_version(REPO_ROOT)
+    if v is None:
         return None
-    # uncommitted changes make the commit a poor name for what built it
     r = subprocess.run(
         [
             "git",
@@ -58,7 +57,9 @@ def _ltvm_version() -> str | None:
         capture_output=True,
         text=True,
     )
-    return v if r.returncode == 0 and not r.stdout.strip() else None
+    return (
+        f"{v[0]} {v[1]}" if r.returncode == 0 and not r.stdout.strip() else None
+    )
 
 
 def _new_targets(targets: list[str], arch: str) -> int:
@@ -138,6 +139,44 @@ def cmd_build_release(args: argparse.Namespace) -> int:
         if args.work_dir
         else ARTIFACTS_DIR / ".release-build"
     )
+    locks: list[Any] = []
+    old_term = None
+    if not args.dry_run:
+        # The finished builds are decided under the locks: another run
+        # could replace what they verify before these were taken.
+        old_term = signal.signal(signal.SIGTERM, _raise_interrupt)
+        try:
+            locks.append(rb.lock_dir(ARTIFACTS_DIR, "its artifacts"))
+            locks.append(rb.lock_dir(work, "its Lustre trees"))
+        except rb.ReleaseBuildError as e:
+            signal.signal(signal.SIGTERM, old_term)
+            for f in locks:
+                f.close()
+            return _error(str(e), use_json)
+    try:
+        return _plan_and_run(
+            args, arch, tree, head, work, order, unmatched, use_json, say
+        )
+    finally:
+        if old_term is not None:
+            signal.signal(signal.SIGTERM, old_term)
+        for f in locks:
+            f.close()
+
+
+def _plan_and_run(
+    args: argparse.Namespace,
+    arch: str,
+    tree: Path,
+    head: str,
+    work: Path,
+    order: list[rb.Build],
+    unmatched: list[str],
+    use_json: bool,
+    say: Any,
+) -> int:
+    from ltvm_pkg.target_config import ARTIFACTS_DIR
+
     ltvm_version = _ltvm_version()
     ledger = rb.Ledger(work / f"done-{arch}.json")
     done: dict[rb.Build, str] = {}
@@ -168,7 +207,7 @@ def cmd_build_release(args: argparse.Namespace) -> int:
     cpus = cpus[:jobs]
     store = rb.podman_store()
     disk = rb.disk_problems(
-        ARTIFACTS_DIR,
+        [ARTIFACTS_DIR / b.target / arch for b in todo],
         store,
         work,
         jobs,
@@ -230,37 +269,28 @@ def cmd_build_release(args: argparse.Namespace) -> int:
         if args.log_dir
         else work / "logs" / time.strftime("%Y%m%d-%H%M%S")
     )
-    locks: list[Any] = []
-    old_term = signal.signal(signal.SIGTERM, _raise_interrupt)
     try:
-        try:
-            locks.append(rb.lock_dir(ARTIFACTS_DIR, "its artifacts"))
-            locks.append(rb.lock_dir(work, "its Lustre trees"))
-            trees = rb.prepare_trees(tree, head, work, jobs) if todo else []
-        except rb.ReleaseBuildError as e:
-            return _error(str(e), use_json)
-        say(f"  logs in {log_dir}")
-        return _run(
-            args,
-            arch,
-            head,
-            ltvm_version,
-            ledger,
-            order,
-            done,
-            todo,
-            targets,
-            jobs,
-            cpus,
-            trees,
-            log_dir,
-            plan,
-            say,
-        )
-    finally:
-        signal.signal(signal.SIGTERM, old_term)
-        for f in locks:
-            f.close()
+        trees = rb.prepare_trees(tree, head, work, jobs) if todo else []
+    except rb.ReleaseBuildError as e:
+        return _error(str(e), use_json)
+    say(f"  logs in {log_dir}")
+    return _run(
+        args,
+        arch,
+        head,
+        ltvm_version,
+        ledger,
+        order,
+        done,
+        todo,
+        targets,
+        jobs,
+        cpus,
+        trees,
+        log_dir,
+        plan,
+        say,
+    )
 
 
 def _run(
@@ -307,6 +337,7 @@ def _run(
             trees,
             log_dir,
             head,
+            force=args.fresh,
             on_ok=lambda b, kdir: (
                 ledger.record(arch, b, ltvm_version, head, kdir)
                 if ltvm_version

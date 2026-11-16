@@ -246,6 +246,8 @@ def cpu_sets(
         sets: list[list[int] | None] = [
             parse_cpulist(s) for s in spec.split(":")
         ]
+        if any(not s for s in sets):
+            raise ReleaseBuildError(f"--cpus {spec} has an empty CPU set")
         if len(sets) != jobs:
             raise ReleaseBuildError(
                 f"--cpus gives {len(sets)} CPU sets for {jobs} jobs"
@@ -253,6 +255,10 @@ def cpu_sets(
         return sets
     if available is None or jobs == 1:
         return [None] * jobs
+    if jobs > len(available):
+        raise ReleaseBuildError(
+            f"{jobs} jobs but only {len(available)} CPUs to pin them to"
+        )
     avail = set(available)
     usable = [sorted(avail & set(n)) for n in nodes]
     usable = [n for n in usable if n]
@@ -309,7 +315,7 @@ def _existing(p: Path) -> Path:
 
 
 def disk_problems(
-    artifacts: Path,
+    artifacts: list[Path],
     store: Path | None,
     work: Path,
     jobs: int,
@@ -319,12 +325,13 @@ def disk_problems(
     new_targets: int = 0,
 ) -> list[str]:
     """What will not fit, per filesystem.  Artifacts grow by one set per
-    build; each running slot needs room for a kernel and an image in
+    build, in that build's ``artifacts`` directory (an archived target's
+    is on cold storage); each running slot needs room for a kernel and an image in
     podman's store, for an image export in TMPDIR, and for its Lustre
     tree's build.  Podman also keeps each target's container and image
     layers (``new_targets`` have none yet), and the trees keep each
     build's staging.  ``store`` None leaves podman's storage unchecked."""
-    if builds == 0:
+    if builds == 0 and new_targets == 0:
         return []
     jobs = min(jobs, builds)
     tmp = Path(tempfile.gettempdir()) if tmp is None else tmp
@@ -335,11 +342,13 @@ def disk_problems(
         dev = p.stat().st_dev
         entry = needs.setdefault(dev, [p, 0, []])
         entry[1] += n
-        entry[2].append(what)
+        if what not in entry[2]:
+            entry[2].append(what)
 
-    add(
-        artifacts, builds * ARTIFACT_BYTES_PER_BUILD, f"artifacts ({artifacts})"
-    )
+    for a in artifacts:
+        add(
+            a, ARTIFACT_BYTES_PER_BUILD, f"artifacts ({_existing(a).resolve()})"
+        )
     if store is not None:
         add(
             store,
@@ -685,9 +694,9 @@ def run_parallel(
         threading.Thread(target=worker, args=(i,), daemon=True)
         for i in range(jobs)
     ]
-    for t in threads:
-        t.start()
     try:
+        for t in threads:
+            t.start()
         for t in threads:
             while t.is_alive():
                 t.join(timeout=1)
@@ -704,7 +713,8 @@ def run_parallel(
         with cond:
             cond.notify_all()
         for t in threads:
-            t.join(timeout=120)
+            if t.ident is not None:
+                t.join(timeout=120)
     with cond:
         return dict(results)
 
@@ -746,6 +756,7 @@ def build_all(
     log_dir: Path,
     head: str,
     on_ok: Callable[[Build, str], None],
+    force: bool = False,
 ) -> dict[Build, Result]:
     def work(slot: int, b: Build) -> Result:
         log = log_dir / f"{b.target}-{b.kernel}.log"
@@ -766,7 +777,8 @@ def build_all(
                 "--lustre-tree",
                 str(trees[slot]),
                 "-y",
-            ],
+            ]
+            + (["--force"] if force else []),
             log,
         )
         secs = time.monotonic() - t0

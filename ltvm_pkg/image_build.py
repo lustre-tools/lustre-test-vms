@@ -293,7 +293,11 @@ def _prebuild_tools_native(
         "-c",
         script,
     ]
-    run_podman_with_cleanup(cmd, check=True)
+    # Not check=True: the wrapper lets a cleanup EOF through, and
+    # nothing here checks the tools came out whole.
+    r = run_podman_with_cleanup(cmd)
+    if r.returncode != 0:
+        raise subprocess.CalledProcessError(r.returncode, cmd)
     _drop_internal_blkid(output_dir)
     log.info("Pre-built tools at %s", output_dir)
 

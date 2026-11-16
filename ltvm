@@ -995,9 +995,9 @@ def build_parser() -> argparse.ArgumentParser:
     brp.add_argument(
         "--fresh",
         action="store_true",
-        help="Run every build, not only those this commit has not finished "
-        "(after a newer distro kernel, or anything else outside the ltvm "
-        "and Lustre commits, changed)",
+        help="Run every build, forcing its kernel, Lustre and image, not "
+        "only those not yet finished at these commits (after something "
+        "outside the ltvm and Lustre commits changed)",
     )
     brp.add_argument(
         "--no-preflight",

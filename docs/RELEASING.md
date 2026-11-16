@@ -14,7 +14,10 @@ ltvm build release --lustre-tree <lustre tree>
 
 The set to build comes from the GitHub releases: every base release
 for the arch, mapped back to its kernel in targets.yaml.  `--only
-rocky9` or `--only rocky9:5.14-rhel9.7` narrows it.  The Lustre tree
+rocky9` or `--only rocky9:5.14-rhel9.7` narrows it.  Releases whose
+kernel cannot be mapped back are listed as unmatched and not built;
+mainline's moving kernels (`stable`, `latest`) are among them, so build
+those with `ltvm build all`.  The Lustre tree
 must have no uncommitted changes to tracked files, since the release
 records its commit.
 
@@ -46,9 +49,13 @@ Finished builds go in a ledger in the work directory
 (`<artifacts>/.release-build`, with the Lustre clones).  Rerunning the
 same command with the same ltvm and Lustre commit skips them, so after
 a failure, fix the cause and run it again.  The ledger knows only those
-two commits: an ltvm checkout with uncommitted changes skips nothing,
-and after anything else changes (a newer distro kernel, say) `--fresh`
-runs every build.  The preflight runs for every target either way, so
+two commits: an ltvm checkout with uncommitted changes skips nothing.
+After anything else changes, `--fresh` runs every build with
+`--force`, rebuilding each kernel, Lustre and image.  A newer RHEL or
+SUSE kernel release is picked up without it, since the kernel build
+looks for the newest one each time it runs.  Podman's cached package
+layers are not rebuilt by either; `podman image rm` the target's
+`ltvm-image-*` image for that.  The preflight runs for every target either way, so
 each still has its build container for publishing.
 
 One run at a time uses an artifacts directory, and one a work
