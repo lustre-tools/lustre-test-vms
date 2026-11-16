@@ -250,6 +250,24 @@ def format_cpulist(cpus: list[int]) -> str:
     return ",".join(out)
 
 
+def stay_awake(
+    platform: str = sys.platform, pid: int | None = None
+) -> subprocess.Popen[bytes] | None:
+    """Keep a Mac out of idle sleep until this process exits.
+
+    macOS idle-sleeps a Mac left alone even on AC, and every build
+    pauses with it.
+    """
+    if platform != "darwin" or not shutil.which("caffeinate"):
+        return None
+    return subprocess.Popen(
+        ["caffeinate", "-ims", "-w", str(pid or os.getpid())],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def numa_nodes(
     sysfs: Path = Path("/sys/devices/system/node"),
 ) -> list[list[int]]:

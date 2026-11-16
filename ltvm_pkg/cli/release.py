@@ -247,6 +247,7 @@ def cmd_build_release(args: argparse.Namespace) -> int:
         else ARTIFACTS_DIR / ".release-build" / getpass.getuser()
     )
     locks: list[Any] = []
+    awake = None
     old_term = None
     old_int = signal.getsignal(signal.SIGINT)
     if not args.dry_run:
@@ -266,6 +267,7 @@ def cmd_build_release(args: argparse.Namespace) -> int:
             for f in locks:
                 f.close()
             return _error(str(e), use_json)
+        awake = rb.stay_awake()
     try:
         return _plan_and_run(
             args,
@@ -285,6 +287,8 @@ def cmd_build_release(args: argparse.Namespace) -> int:
             signal.signal(signal.SIGINT, old_int)
         for f in locks:
             f.close()
+        if awake is not None:
+            awake.terminate()
 
 
 def _plan_and_run(

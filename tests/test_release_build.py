@@ -199,6 +199,31 @@ class TestCpus:
         assert rb.default_jobs(None if n is None else list(range(n))) == jobs
 
 
+class TestStayAwake:
+    def test_only_on_macos(self) -> None:
+        with patch.object(rb.subprocess, "Popen") as popen:
+            assert rb.stay_awake("linux") is None
+        popen.assert_not_called()
+
+    def test_caffeinate_follows_this_process(self) -> None:
+        with (
+            patch.object(
+                rb.shutil, "which", return_value="/usr/bin/caffeinate"
+            ),
+            patch.object(rb.subprocess, "Popen") as popen,
+        ):
+            assert rb.stay_awake("darwin", pid=4242) is popen.return_value
+        assert popen.call_args.args[0] == ["caffeinate", "-ims", "-w", "4242"]
+
+    def test_no_caffeinate(self) -> None:
+        with (
+            patch.object(rb.shutil, "which", return_value=None),
+            patch.object(rb.subprocess, "Popen") as popen,
+        ):
+            assert rb.stay_awake("darwin") is None
+        popen.assert_not_called()
+
+
 class TestDisk:
     def test_one_filesystem_sums_every_need(self, tmp_path: Path) -> None:
         free = SimpleNamespace(free=100 * rb.GIB)
