@@ -248,6 +248,16 @@ def _ltvm(*args: str) -> None:
         )
 
 
+def _smc_excluded(target: str) -> bool:
+    """Whether *target*'s kernels leave SMC to the distro config."""
+    from .target_config import TargetConfig
+
+    try:
+        return "CONFIG_SMC" in TargetConfig(target).kernel_config_whiteouts
+    except (ValueError, KeyError, OSError):
+        return False
+
+
 def _kernel_has_smc(kernel_dir: Path) -> bool | None:
     """Whether the kernel was built with SMC; None if it cannot be told."""
     config = kernel_dir / "build-tree" / ".config"
@@ -546,6 +556,18 @@ def target_checks(t: Target) -> list[Req]:
             )
         )
     smc = _kernel_has_smc(t.kernel_dir)
+    if _smc_excluded(t.name):
+        reqs.append(
+            Req(
+                f"{t.name} kernel has SMC",
+                frozenset({SMC}),
+                bool(smc),
+                f"{t.name}'s kernels are built without SMC "
+                f"(targets.yaml); SMC connections fall back to TCP",
+                hard=False,
+            )
+        )
+        return reqs
     tree = t.lustre_tree
 
     def rebuild() -> None:

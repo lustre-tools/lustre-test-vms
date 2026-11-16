@@ -2012,6 +2012,23 @@ class TestRequirements:
         smc = [r for r in sr.target_checks(t) if "SMC" in r.name][0]
         assert not smc.ok and not smc.hard
 
+    def test_smc_excluded_target_offers_no_rebuild(
+        self, tmp_path: Path
+    ) -> None:
+        """rocky8 kernels go without SMC by config: a rebuild cannot add
+        it, so doctor reports it with no fix."""
+        from ltvm_pkg import shmrdma_req as sr
+
+        _image_dir(tmp_path, {"shmrdma_kmod": True})
+        (tmp_path / "build-tree").mkdir()
+        (tmp_path / "build-tree" / ".config").write_text(
+            "# CONFIG_SMC is not set\n"
+        )
+        t = sr.Target("rocky8", image=tmp_path / NEW_IMG, kernel_dir=tmp_path)
+        smc = [r for r in sr.target_checks(t) if "SMC" in r.name][0]
+        assert not smc.ok and not smc.hard and smc.fix is None
+        assert "built without SMC" in smc.detail
+
     def test_resolve_target_arch(self) -> None:
         """The target is looked up for --arch, else the host's arch."""
         from ltvm_pkg import shmrdma_req as sr
