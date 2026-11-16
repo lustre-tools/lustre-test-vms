@@ -490,7 +490,13 @@ class TestPrebuildToolsNative:
 
         # fake_run returns returncode=0 for the `podman image exists`
         # probe, so the native-container build branch is skipped.
-        with patch.object(image.subprocess, "run", side_effect=fake_run):
+        # The script's podman run goes through the cleanup wrapper.
+        with (
+            patch.object(image.subprocess, "run", side_effect=fake_run),
+            patch.object(
+                image, "run_podman_with_cleanup", side_effect=fake_run
+            ),
+        ):
             image._prebuild_tools_native(tc, tmp_path / "out")
         # The podman run that carries the script is the one with -c.
         for cmd in calls:

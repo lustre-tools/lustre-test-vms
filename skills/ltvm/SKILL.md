@@ -774,6 +774,11 @@ ltvm target publish rocky9                # bundle + upload a GitHub release
 ltvm target publish rocky9 --no-upload    # build the tarballs only
 ```
 
+`ltvm build release --lustre-tree <tree>` rebuilds every published
+target for the host's arch, in parallel, with a preflight and a check
+of each result (`--dry-run` shows the plan); docs/RELEASING.md has the
+procedure.
+
 `ltvm target fetch` finds the latest release for a target and downloads
 it; re-running when the local tree is current finishes in under a second.
 

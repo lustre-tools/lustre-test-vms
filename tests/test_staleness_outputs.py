@@ -37,6 +37,25 @@ class TestKernelOutputsGateStaleness:
         (out / "vmlinux").unlink()
         assert tc.is_stale("kernel") is True
 
+    def test_stale_when_a_kernel_file_was_cut_short(
+        self, tmp_targets: Path
+    ) -> None:
+        import json
+
+        tc = _make_config(tmp_targets)
+        tc.write_meta("kernel")
+        out = _make_kernel_outputs(tc)
+        meta = json.loads((out / "meta.json").read_text())
+        meta["vmlinuz_bytes"] = (out / "vmlinuz").stat().st_size
+        (out / "meta.json").write_text(json.dumps(meta))
+        assert tc.is_stale("kernel") is False
+        (out / "vmlinuz").write_bytes(b"k")
+        assert tc.is_stale("kernel") is True
+        (out / "vmlinuz").write_bytes(b"")
+        meta.pop("vmlinuz_bytes")
+        (out / "meta.json").write_text(json.dumps(meta))
+        assert tc.outputs_complete("kernel") is False
+
     def test_stale_when_modules_dir_emptied(self, tmp_targets: Path) -> None:
         """kernel-build-inner.sh rm -rf's modules/ before it rebuilds."""
         tc = _make_config(tmp_targets)

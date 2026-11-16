@@ -22,6 +22,39 @@ from typing import Any
 log = logging.getLogger("ltvm")
 
 
+def usable_cpus() -> int:
+    """CPUs this process may run on: taskset or a cpuset narrows them,
+    and os.cpu_count() does not see that."""
+    try:
+        return len(os.sched_getaffinity(0)) or 1
+    except AttributeError:
+        return os.cpu_count() or 4
+
+
+def ext4_whole(path: Path) -> bool:
+    """Whether an ext4 image holds every block its superblock declares,
+    so one cut short by an interrupted copy is not taken as whole."""
+    import struct
+
+    try:
+        with open(path, "rb") as f:
+            f.seek(1024)
+            sb = f.read(1024)
+        size = path.stat().st_size
+    except OSError:
+        return False
+    if len(sb) < 1024 or struct.unpack_from("<H", sb, 56)[0] != 0xEF53:
+        return False
+    blocks = int(struct.unpack_from("<I", sb, 4)[0])
+    if struct.unpack_from("<I", sb, 96)[0] & 0x80:  # INCOMPAT_64BIT
+        blocks |= int(struct.unpack_from("<I", sb, 0x150)[0]) << 32
+    log_block = int(struct.unpack_from("<I", sb, 24)[0])
+    if log_block > 6:  # ext4 blocks are 1 KiB to 64 KiB
+        return False
+    block_size = 1024 << log_block
+    return size >= blocks * block_size
+
+
 def load_meta_safe(meta_file: Path) -> dict[str, Any] | None:
     """Read and parse a meta.json file, tolerating corruption.
 

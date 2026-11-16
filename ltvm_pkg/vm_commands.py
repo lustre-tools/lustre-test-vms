@@ -55,6 +55,7 @@ from .vm_net import (
     ssh_never_connected,
     sshpass_scp_argv,
     tap_for_name,
+    taps_for_vm,
     unregister_ssh_name,
     wait_for_ssh,
 )
@@ -3691,10 +3692,19 @@ def _check_skill_links(
     `ltvm install` links them, so the hosts that need this check are the
     ones installed before the skills existed, or from a different
     checkout.  Returns (issue lines, repair notes, unfixable count).
+
+    The links belong to the installed ltvm, so from any other checkout
+    (a worktree) they are checked, and repaired, against that one.
     """
+    from ltvm_pkg import host_setup_version as hsv
     from ltvm_pkg import skills
 
-    root = repo_root or skills.default_repo_root()
+    installed = hsv.installed_script()
+    root = repo_root or (
+        installed.parent
+        if installed is not None
+        else skills.default_repo_root()
+    )
     status = skills.link_status(root, home=home)
     issues: list[str] = []
     notes: list[str] = []
@@ -3980,6 +3990,21 @@ def _check_host_setup_version(fix: bool) -> tuple[int, int]:
     return 1, 1
 
 
+def _unreadable_vm_taps(name: str) -> set[str]:
+    """The TAPs a VM whose .info will not load may own.
+
+    Counted from the raw NICS= line, which needs no NIC type to be known.
+    """
+    count = 0
+    try:
+        for line in (SOCKETS / f"{name}.info").read_text().splitlines():
+            if line.startswith("NICS="):
+                count = len([s for s in line[5:].split("|") if s])
+    except OSError:
+        pass
+    return taps_for_vm(name, count)
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     issues = 0
     # Counts repairs that were attempted and did not work, so --fix
@@ -4034,10 +4059,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         issues += found
         fix_failures += failed
 
+    # A VM this ltvm cannot read -- a damaged .info, or one written by
+    # another ltvm with a NIC type this one does not know -- is reported
+    # and left alone, as `ltvm list` does.  Doctor stopping at the first
+    # one checked nothing else on the host.
+    unreadable: list[str] = []
     for name in VMInfo.all_names():
         try:
             vm = VMInfo.load(name)
         except VMNotFound:
+            continue
+        except ValueError as e:
+            print(f"unreadable VM state: {name} ({e}); not checked")
+            issues += 1
+            unreadable.append(name)
             continue
         if vm.pid > 0 and not is_running(vm):
             print(f"stale PID: {name} (pid {vm.pid} dead)")
@@ -4215,10 +4250,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             # this set (and is currently visible to `ip link`) is an
             # orphan.
             live_taps: set[str] = set()
+            for name in unreadable:
+                # Its QEMU may be running; never take its TAPs for orphans.
+                live_taps |= _unreadable_vm_taps(name)
             for name in VMInfo.all_names():
                 try:
                     vm = VMInfo.load(name)
-                except VMNotFound:
+                except (VMNotFound, ValueError):
                     continue
                 if not is_running(vm):
                     continue

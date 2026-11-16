@@ -83,8 +83,19 @@ def _make_image_outputs(tc, kernel: str | None = None, variant=None) -> Path:
     out = tc.image_output_dir(kernel, variant=variant)
     out.mkdir(parents=True, exist_ok=True)
     img = out / "base.ext4"
-    img.write_bytes(b"ext4")
+    img.write_bytes(fake_ext4())
     return img
+
+
+def fake_ext4(blocks: int = 2) -> bytes:
+    """The smallest file the image completeness check takes as a whole
+    ext4 image: a superblock declaring ``blocks`` 1 KiB blocks."""
+    import struct
+
+    data = bytearray(blocks * 1024)
+    struct.pack_into("<I", data, 1024 + 4, blocks)
+    struct.pack_into("<H", data, 1024 + 56, 0xEF53)
+    return bytes(data)
 
 
 @pytest.fixture(autouse=True)
@@ -232,8 +243,12 @@ def _neutralize_podman_preflight() -> object:
     would fail tests that don't mock podman. The tests already stub the
     actual build functions, so the preflight is orthogonal.
     """
-    with patch(
-        "ltvm_pkg.cli.build.check_podman_machine_macos", return_value=None
+    with (
+        patch(
+            "ltvm_pkg.cli.build.check_podman_machine_macos",
+            return_value=None,
+        ),
+        patch("ltvm_pkg.release_package._ensure_podman", return_value=None),
     ):
         yield
 
