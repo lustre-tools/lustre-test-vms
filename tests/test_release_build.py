@@ -15,6 +15,7 @@ from unittest.mock import patch
 import pytest
 
 from ltvm_pkg import release_build as rb
+from ltvm_pkg.cli import release as release_mod
 from ltvm_pkg.cli.fetch import _is_base_stem
 
 DECLARED = {
@@ -209,9 +210,9 @@ class TestDisk:
             usage=lambda p: free,
             tmp=tmp_path / "t",
         )
-        # 10 builds * 6 + 2 slots * (25 + 12 + 2) + 10 margin = 148
+        # 10 builds * (6 + 1) + 2 slots * (25 + 12 + 2) + 10 margin = 158
         assert len(problems) == 1
-        assert "100 GiB free, about 148 GiB needed" in problems[0]
+        assert "100 GiB free, about 158 GiB needed" in problems[0]
         for what in ("artifacts", "podman storage", "temporary files"):
             assert what in problems[0]
 
@@ -228,7 +229,7 @@ class TestDisk:
         self, tmp_path: Path
     ) -> None:
         free = SimpleNamespace(free=50 * rb.GIB)
-        # 1 build: 6 + one slot of 39 + 10 margin = 55, not four slots
+        # 1 build: 6 + 1 + one slot of 39 + 10 margin = 56, not four slots
         (problem,) = rb.disk_problems(
             tmp_path,
             tmp_path,
@@ -238,7 +239,17 @@ class TestDisk:
             usage=lambda p: free,
             tmp=tmp_path,
         )
-        assert "about 55 GiB needed" in problem
+        assert "about 56 GiB needed" in problem
+
+    def test_new_targets_need_store_space(self, tmp_path: Path) -> None:
+        free = SimpleNamespace(free=60 * rb.GIB)
+        args = (tmp_path, tmp_path, tmp_path, 1, 1)
+        kw: dict[str, Any] = {"usage": lambda p: free, "tmp": tmp_path}
+        # 6 + 1 + 25 + 12 + 2 + 10 margin = 56
+        assert rb.disk_problems(*args, **kw) == []
+        # two targets with nothing in podman yet: 12 more
+        (problem,) = rb.disk_problems(*args, **kw, new_targets=2)
+        assert "about 68 GiB needed" in problem
 
     def test_podman_machine_store_is_not_checked(self, tmp_path: Path) -> None:
         free = SimpleNamespace(free=1000 * rb.GIB)
@@ -666,13 +677,13 @@ class TestVerify:
         assert self._verify(tc) == ["no image"]
 
 
-class TestWorkLock:
+class TestLocks:
     def test_second_run_refused(self, tmp_path: Path) -> None:
-        first = rb.lock_work_dir(tmp_path / "w")
-        with pytest.raises(rb.ReleaseBuildError, match="another"):
-            rb.lock_work_dir(tmp_path / "w")
+        first = rb.lock_dir(tmp_path / "w", "its trees")
+        with pytest.raises(rb.ReleaseBuildError, match="another.*its trees"):
+            rb.lock_dir(tmp_path / "w", "its trees")
         first.close()
-        rb.lock_work_dir(tmp_path / "w").close()
+        rb.lock_dir(tmp_path / "w", "its trees").close()
 
 
 def _alive(pid: int) -> bool:
@@ -728,6 +739,13 @@ def test_usable_cpus_follows_affinity() -> None:
         assert usable_cpus() == 3
 
 
+def rb_preflight_calls(summary: dict[str, Any]) -> list[rb.Build]:
+    return list(_PREFLIGHT_SEEN)
+
+
+_PREFLIGHT_SEEN: list[rb.Build] = []
+
+
 class TestCommand:
     def _args(
         self, tree: Path, tmp_path: Path, **kw: Any
@@ -740,6 +758,7 @@ class TestCommand:
             jobs=2,
             cpus=None,
             no_preflight=False,
+            fresh=False,
             dry_run=True,
             work_dir=str(tmp_path / "work"),
             log_dir=str(tmp_path / "logs"),
@@ -827,17 +846,21 @@ class TestCommand:
         tmp_path: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        from ltvm_pkg.cli.release import _ltvm_version, cmd_build_release
+        from ltvm_pkg.cli.release import cmd_build_release
 
         head = _git(lustre_repo, "rev-parse", "HEAD")
         led = rb.Ledger(tmp_path / "work" / "done-x86_64.json")
         led.record(
             "x86_64",
             rb.Build("debian13", "6.12-debian13"),
-            _ltvm_version(),
+            "0.5.1+abc",
             head,
             "6.12-debian13-6.12.107",
         )
+
+        def fake_pre_record(todo: list[rb.Build], *a: Any) -> Any:
+            _PREFLIGHT_SEEN[:] = todo
+            return fake_pre(todo, *a)
 
         def fake_pre(todo: list[rb.Build], *a: Any) -> dict[str, rb.Result]:
             return {
@@ -863,8 +886,12 @@ class TestCommand:
         with (
             self._patches([]),
             patch.object(rb, "disk_problems", return_value=[]),
-            patch.object(rb, "preflight", side_effect=fake_pre),
+            patch.object(rb, "preflight", side_effect=fake_pre_record),
             patch.object(rb, "build_all", side_effect=fake_all) as ball,
+            patch(
+                "ltvm_pkg.cli.release._ltvm_version", return_value="0.5.1+abc"
+            ),
+            patch("ltvm_pkg.cli.release._new_targets", return_value=0),
         ):
             rc = cmd_build_release(
                 self._args(lustre_repo, tmp_path, dry_run=False)
@@ -879,7 +906,71 @@ class TestCommand:
         assert by["opensuse156:6.4-sles15sp6"]["status"] == "skipped"
         assert by["rocky10:6.12-rhel10.0"]["status"] == "failed"
         assert by["rocky9:5.14-rhel9.8"]["status"] == "ok"
+        assert (
+            by["debian13:6.12-debian13"]["kernel_dir"]
+            == "6.12-debian13-6.12.107"
+        )
         assert len(list((tmp_path / "work").glob("lustre-*"))) == 2
+        # the finished target still gets its preflight (its container)
+        pre_targets = [b.target for b in rb_preflight_calls(summary)]
+        assert "debian13" in pre_targets
+        # the handlers and locks are put back
+        import signal as _signal
+
+        assert (
+            _signal.getsignal(_signal.SIGTERM)
+            is not release_mod._raise_interrupt
+        )
+        rb.lock_dir(tmp_path / "work", "x").close()
+
+    def test_fresh_ignores_the_ledger(
+        self,
+        lustre_repo: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from ltvm_pkg.cli.release import cmd_build_release
+
+        led = rb.Ledger(tmp_path / "work" / "done-x86_64.json")
+        led.record(
+            "x86_64",
+            rb.Build("debian13", "6.12-debian13"),
+            "0.5.1+abc",
+            _git(lustre_repo, "rev-parse", "HEAD"),
+            "k",
+        )
+        with (
+            self._patches([]),
+            patch.object(rb, "disk_problems", return_value=[]),
+            patch(
+                "ltvm_pkg.cli.release._ltvm_version", return_value="0.5.1+abc"
+            ),
+            patch("ltvm_pkg.cli.release._new_targets", return_value=0),
+        ):
+            cmd_build_release(self._args(lustre_repo, tmp_path))
+            plain = json.loads(capsys.readouterr().out)
+            cmd_build_release(self._args(lustre_repo, tmp_path, fresh=True))
+            fresh = json.loads(capsys.readouterr().out)
+        assert plain["already_done"] == ["debian13:6.12-debian13"]
+        assert fresh["already_done"] == []
+
+    def test_bad_targets_yaml_stops_the_run(
+        self,
+        lustre_repo: Path,
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from ltvm_pkg.cli.release import cmd_build_release
+
+        with (
+            self._patches([]),
+            patch(
+                "ltvm_pkg.cli.release._declared",
+                side_effect=ValueError("rocky9: no kernel 'x'"),
+            ),
+        ):
+            assert cmd_build_release(self._args(lustre_repo, tmp_path)) == 1
+        assert "rocky9: no kernel" in capsys.readouterr().err
 
 
 class TestBaseOnly:
@@ -930,5 +1021,21 @@ def test_no_ltvm_commit_means_no_ledger() -> None:
 
     with patch("ltvm_pkg.__version__", "0.5"):
         assert release._ltvm_version() is None
+    clean = subprocess.CompletedProcess([], 0, "", "")
+    dirty = subprocess.CompletedProcess([], 0, " M ltvm\n", "")
     with patch("ltvm_pkg.__version__", "0.5.367+da167a3"):
-        assert release._ltvm_version() == "0.5.367+da167a3"
+        with patch.object(subprocess, "run", return_value=clean):
+            assert release._ltvm_version() == "0.5.367+da167a3"
+        with patch.object(subprocess, "run", return_value=dirty):
+            assert release._ltvm_version() is None
+
+
+def test_borrowing_clone_is_recloned(lustre_repo: Path, tmp_path: Path) -> None:
+    head = rb.lustre_head(lustre_repo)
+    work = tmp_path / "work"
+    t = work / "lustre-0"
+    _git(tmp_path, "clone", "-q", "--shared", str(lustre_repo), str(t))
+    assert (t / ".git/objects/info/alternates").exists()
+    (trees,) = [rb.prepare_trees(lustre_repo, head, work, 1)]
+    assert not (trees[0] / ".git/objects/info/alternates").exists()
+    assert _git(trees[0], "rev-parse", "HEAD") == head

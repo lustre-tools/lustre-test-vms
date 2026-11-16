@@ -45,7 +45,14 @@ podman machine and is not checked.
 Finished builds go in a ledger in the work directory
 (`<artifacts>/.release-build`, with the Lustre clones).  Rerunning the
 same command with the same ltvm and Lustre commit skips them, so after
-a failure, fix the cause and run it again.
+a failure, fix the cause and run it again.  The ledger knows only those
+two commits: an ltvm checkout with uncommitted changes skips nothing,
+and after anything else changes (a newer distro kernel, say) `--fresh`
+runs every build.  The preflight runs for every target either way, so
+each still has its build container for publishing.
+
+One run at a time uses an artifacts directory, and one a work
+directory; a second is refused.
 
 ### Where to run it
 
@@ -83,8 +90,11 @@ export LTVM_ARTIFACTS_DIR=/mnt/data/$USER-ltvm/artifacts
 ### Publishing
 
 Publish once the change has merged, from the artifacts the build left:
-`ltvm target publish <target> --kernel <kernel> --arch <arch>` for each
-build in the summary, with the same `LTVM_ARTIFACTS_DIR`.
+`ltvm target publish <target> --kernel <kernel_dir> --arch <arch>` for
+each build in `summary.json`, with the same `LTVM_ARTIFACTS_DIR`.  Use
+its `kernel_dir`, the full directory name, rather than the short kernel
+name: the short name picks the newest kernel cached, which need not be
+the one built.
 
 ## Rebuilding Pre-built QEMU Binaries
 

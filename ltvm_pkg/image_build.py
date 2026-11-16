@@ -25,6 +25,7 @@ from . import priv
 from .image_store import current_image, install_image, prune_superseded
 from .paths import load_meta_safe
 from .podman_gc import Superseded, final_image_tag, remove_tag
+from .podman_run import run_podman_with_cleanup
 from .target_config import TARGETS_DIR
 
 if TYPE_CHECKING:
@@ -292,7 +293,7 @@ def _prebuild_tools_native(
         "-c",
         script,
     ]
-    subprocess.run(cmd, check=True)
+    run_podman_with_cleanup(cmd, check=True)
     _drop_internal_blkid(output_dir)
     log.info("Pre-built tools at %s", output_dir)
 

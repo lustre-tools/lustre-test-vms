@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -28,13 +30,9 @@ def _cli_attr(name: str) -> Any:
 def _declared(arch: str) -> dict[str, list[str]]:
     from ltvm_pkg.target_config import TargetConfig, list_targets
 
-    out: dict[str, list[str]] = {}
-    for t in list_targets():
-        try:
-            out[t] = TargetConfig(t, arch=arch).declared_kernels()
-        except Exception:  # noqa: BLE001 -- a target this arch lacks
-            continue
-    return out
+    return {
+        t: TargetConfig(t, arch=arch).declared_kernels() for t in list_targets()
+    }
 
 
 def _ltvm_version() -> str | None:
@@ -42,13 +40,50 @@ def _ltvm_version() -> str | None:
     give (a copy without git or a baked version), which would let the
     ledger mistake one ltvm for another."""
     import ltvm_pkg
+    from ltvm_pkg.target_config import REPO_ROOT
 
     v = ltvm_pkg.__version__
-    return v if "+" in v else None
+    if "+" not in v:
+        return None
+    # uncommitted changes make the commit a poor name for what built it
+    r = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPO_ROOT),
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return v if r.returncode == 0 and not r.stdout.strip() else None
+
+
+def _new_targets(targets: list[str], arch: str) -> int:
+    """Targets podman has no build container for yet."""
+    from ltvm_pkg.target_config import TargetConfig
+
+    n = 0
+    for t in targets:
+        try:
+            tag = TargetConfig(t, arch=arch).container_tag
+            r = subprocess.run(
+                ["podman", "image", "exists", tag], capture_output=True
+            )
+            n += r.returncode != 0
+        except (OSError, ValueError, KeyError):
+            n += 1
+    return n
+
+
+def _raise_interrupt(signum: int, frame: Any) -> None:
+    raise KeyboardInterrupt
 
 
 def cmd_build_release(args: argparse.Namespace) -> int:
-    from ltvm_pkg.target_config import ARTIFACTS_DIR, REPO_ROOT
+    from ltvm_pkg.target_config import ARTIFACTS_DIR
 
     use_json = args.json
     out = sys.stderr if use_json else sys.stdout
@@ -78,10 +113,14 @@ def cmd_build_release(args: argparse.Namespace) -> int:
             _cli_attr("_is_base_stem")(stem, _declared_variant_names(target, a))
         )
 
+    try:
+        declared = _declared(arch)
+    except Exception as e:  # noqa: BLE001 -- any targets.yaml error
+        return _error(f"targets.yaml: {e}", use_json)
     builds, unmatched = rb.published_builds(
         releases,
         arch,
-        _declared(arch),
+        declared,
         _cli_attr("_fetched_kernel_name"),
         is_base,
     )
@@ -101,14 +140,15 @@ def cmd_build_release(args: argparse.Namespace) -> int:
     )
     ltvm_version = _ltvm_version()
     ledger = rb.Ledger(work / f"done-{arch}.json")
-    done = []
+    done: dict[rb.Build, str] = {}
     for b in order:
-        kdir = (
-            ledger.done(arch, b, ltvm_version, head) if ltvm_version else None
-        )
+        if args.fresh or not ltvm_version:
+            break
+        kdir = ledger.done(arch, b, ltvm_version, head)
         if kdir is not None and not rb.verify(b, arch, head, kdir):
-            done.append(b)
+            done[b] = kdir
     todo = [b for b in order if b not in done]
+    targets = list(dict.fromkeys(b.target for b in order))
 
     avail = rb.available_cpus()
     if args.cpus and avail is None:
@@ -127,7 +167,14 @@ def cmd_build_release(args: argparse.Namespace) -> int:
     jobs = max(1, min(jobs, len(todo)))
     cpus = cpus[:jobs]
     store = rb.podman_store()
-    disk = rb.disk_problems(ARTIFACTS_DIR, store, work, jobs, len(todo))
+    disk = rb.disk_problems(
+        ARTIFACTS_DIR,
+        store,
+        work,
+        jobs,
+        len(todo),
+        new_targets=_new_targets(targets, arch) if store else 0,
+    )
 
     plan: dict[str, Any] = {
         "arch": arch,
@@ -146,7 +193,7 @@ def cmd_build_release(args: argparse.Namespace) -> int:
     }
     say(
         f"Release build for {arch}: Lustre {head[:12]} from {tree}, "
-        f"ltvm {ltvm_version or '(commit unknown, so nothing is skipped)'}"
+        f"ltvm {ltvm_version or '(no clean commit, so nothing is skipped)'}"
     )
     say(
         f"  artifacts {ARTIFACTS_DIR}, podman storage "
@@ -178,23 +225,62 @@ def cmd_build_release(args: argparse.Namespace) -> int:
             hint="use fewer --jobs or --only, `ltvm clean`, or move podman's "
             "storage with CONTAINERS_STORAGE_CONF (docs/RELEASING.md)",
         )
-    if not todo:
-        say("Nothing to build.")
-        if use_json:
-            print(json.dumps({**plan, "results": []}, indent=2))
-        return EXIT_OK
-
     log_dir = (
         Path(args.log_dir).resolve()
         if args.log_dir
         else work / "logs" / time.strftime("%Y%m%d-%H%M%S")
     )
+    locks: list[Any] = []
+    old_term = signal.signal(signal.SIGTERM, _raise_interrupt)
     try:
-        work_lock = rb.lock_work_dir(work)
-        trees = rb.prepare_trees(tree, head, work, jobs)
-    except rb.ReleaseBuildError as e:
-        return _error(str(e), use_json)
-    say(f"  logs in {log_dir}")
+        try:
+            locks.append(rb.lock_dir(ARTIFACTS_DIR, "its artifacts"))
+            locks.append(rb.lock_dir(work, "its Lustre trees"))
+            trees = rb.prepare_trees(tree, head, work, jobs) if todo else []
+        except rb.ReleaseBuildError as e:
+            return _error(str(e), use_json)
+        say(f"  logs in {log_dir}")
+        return _run(
+            args,
+            arch,
+            head,
+            ltvm_version,
+            ledger,
+            order,
+            done,
+            todo,
+            targets,
+            jobs,
+            cpus,
+            trees,
+            log_dir,
+            plan,
+            say,
+        )
+    finally:
+        signal.signal(signal.SIGTERM, old_term)
+        for f in locks:
+            f.close()
+
+
+def _run(
+    args: argparse.Namespace,
+    arch: str,
+    head: str,
+    ltvm_version: str | None,
+    ledger: rb.Ledger,
+    order: list[rb.Build],
+    done: dict[rb.Build, str],
+    todo: list[rb.Build],
+    targets: list[str],
+    jobs: int,
+    cpus: list[list[int] | None],
+    trees: list[Path],
+    log_dir: Path,
+    plan: dict[str, Any],
+    say: Any,
+) -> int:
+    from ltvm_pkg.target_config import REPO_ROOT
 
     runner = rb.Runner(
         ltvm=[sys.executable, str(REPO_ROOT / "ltvm")],
@@ -208,7 +294,8 @@ def cmd_build_release(args: argparse.Namespace) -> int:
         say(
             f"{time.strftime('%H:%M:%S')} preflight: containers and image packages"
         )
-        pre = rb.preflight(todo, jobs, runner, log_dir)
+        firsts = [next(b for b in order if b.target == t) for t in targets]
+        pre = rb.preflight(firsts, jobs, runner, log_dir)
     bad = {t: r for t, r in pre.items() if r.status != "ok"}
     runnable = [b for b in todo if b.target not in bad]
     res: dict[rb.Build, rb.Result] = {}
@@ -229,9 +316,7 @@ def cmd_build_release(args: argparse.Namespace) -> int:
 
     results: list[rb.Result] = []
     for b in order:
-        if b in done:
-            results.append(rb.Result(b, "done"))
-        elif b.target in bad:
+        if b.target in bad:
             r = bad[b.target]
             results.append(
                 rb.Result(
@@ -240,6 +325,8 @@ def cmd_build_release(args: argparse.Namespace) -> int:
                     problems=[f"preflight failed at {r.step}: {r.log}"],
                 )
             )
+        elif b in done:
+            results.append(rb.Result(b, "done", kernel_dir=done[b]))
         elif b in res:
             results.append(res[b])
         else:
@@ -261,9 +348,8 @@ def cmd_build_release(args: argparse.Namespace) -> int:
         f"\n{ok} of {len(results)} good in {summary['minutes']} minutes; "
         f"{log_dir / 'summary.json'}"
     )
-    if use_json:
+    if args.json:
         print(json.dumps(summary, indent=2))
-    work_lock.close()
     if runner.stopping.is_set():
         return EXIT_INTERRUPTED
     return EXIT_OK if ok == len(results) else EXIT_ERROR

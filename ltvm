@@ -993,6 +993,13 @@ def build_parser() -> argparse.ArgumentParser:
         "(default: whole NUMA nodes shared out)",
     )
     brp.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Run every build, not only those this commit has not finished "
+        "(after a newer distro kernel, or anything else outside the ltvm "
+        "and Lustre commits, changed)",
+    )
+    brp.add_argument(
         "--no-preflight",
         action="store_true",
         help="Skip building every container and image package layer first",

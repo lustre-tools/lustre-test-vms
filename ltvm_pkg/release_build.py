@@ -47,6 +47,12 @@ ARTIFACT_BYTES_PER_BUILD = 6 * GIB
 WORK_BYTES_PER_SLOT = 25 * GIB
 # image export writes the rootfs tarball and the extracted tree to TMPDIR
 TMP_BYTES_PER_SLOT = 12 * GIB
+# a target's build container and image package layers, kept in podman
+TARGET_STORE_BYTES = 6 * GIB
+# a build's Lustre staging, kept in its slot's tree, plus the slot's
+# own build
+STAGING_BYTES_PER_BUILD = 1 * GIB
+TREE_BYTES_PER_SLOT = 2 * GIB
 STOP_GRACE_SECONDS = 120
 MARGIN_BYTES = 10 * GIB
 
@@ -81,6 +87,7 @@ class Result:
     seconds: float = 0.0
     log: str | None = None
     problems: list[str] = field(default_factory=list)
+    kernel_dir: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -91,6 +98,7 @@ class Result:
             "seconds": round(self.seconds),
             "log": self.log,
             "problems": self.problems,
+            "kernel_dir": self.kernel_dir,
         }
 
 
@@ -308,11 +316,14 @@ def disk_problems(
     builds: int,
     usage: Callable[[Path], Any] = shutil.disk_usage,
     tmp: Path | None = None,
+    new_targets: int = 0,
 ) -> list[str]:
     """What will not fit, per filesystem.  Artifacts grow by one set per
     build; each running slot needs room for a kernel and an image in
     podman's store, for an image export in TMPDIR, and for its Lustre
-    tree's build.  ``store`` None leaves podman's storage unchecked."""
+    tree's build.  Podman also keeps each target's container and image
+    layers (``new_targets`` have none yet), and the trees keep each
+    build's staging.  ``store`` None leaves podman's storage unchecked."""
     if builds == 0:
         return []
     jobs = min(jobs, builds)
@@ -330,9 +341,17 @@ def disk_problems(
         artifacts, builds * ARTIFACT_BYTES_PER_BUILD, f"artifacts ({artifacts})"
     )
     if store is not None:
-        add(store, jobs * WORK_BYTES_PER_SLOT, f"podman storage ({store})")
+        add(
+            store,
+            jobs * WORK_BYTES_PER_SLOT + new_targets * TARGET_STORE_BYTES,
+            f"podman storage ({store})",
+        )
     add(tmp, jobs * TMP_BYTES_PER_SLOT, f"temporary files ({tmp})")
-    add(work, jobs * 2 * GIB, f"Lustre trees ({work})")
+    add(
+        work,
+        jobs * TREE_BYTES_PER_SLOT + builds * STAGING_BYTES_PER_BUILD,
+        f"Lustre trees ({work})",
+    )
     out = []
     for p, need, what in needs.values():
         need += MARGIN_BYTES
@@ -372,21 +391,20 @@ def lustre_head(src: Path) -> str:
     return _git(src, "rev-parse", "HEAD")
 
 
-def lock_work_dir(work: Path) -> Any:
-    """Hold ``work`` for this run: a second run would check its own
-    commit out in the Lustre trees this one is building in.  Returns the
-    open lock file, which holds the lock until it is closed."""
+def lock_dir(path: Path, why: str) -> Any:
+    """Hold ``path`` for this run, or raise naming ``why`` another run
+    there would collide.  Returns the open lock file, which holds the
+    lock until it is closed."""
     import fcntl
 
-    work.mkdir(parents=True, exist_ok=True)
-    f = open(work / ".lock", "w")  # noqa: SIM115 -- held for the run
+    path.mkdir(parents=True, exist_ok=True)
+    f = open(path / ".release-build.lock", "w")  # noqa: SIM115 -- held for the run
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         f.close()
         raise ReleaseBuildError(
-            f"another `ltvm build release` is using {work}; wait for it, "
-            f"or give this one its own --work-dir"
+            f"another `ltvm build release` is using {path} ({why}); wait for it"
         ) from None
     return f
 
@@ -394,10 +412,14 @@ def lock_work_dir(work: Path) -> Any:
 def prepare_trees(src: Path, head: str, work: Path, jobs: int) -> list[Path]:
     """One clone of ``src`` per slot, at ``head``, reused across runs.
     Lustre builds in its own tree and a tree is rebuilt whenever the
-    target changes, so slots cannot share one."""
+    target changes, so slots cannot share one.  The clones own their
+    objects, so a later run from another source still works."""
     trees = []
     for i in range(jobs):
         t = work / f"lustre-{i}"
+        # A clone borrowing another's objects breaks when that one goes.
+        if (t / ".git" / "objects" / "info" / "alternates").exists():
+            shutil.rmtree(t)
         if not (t / ".git").exists():
             work.mkdir(parents=True, exist_ok=True)
             r = subprocess.run(
@@ -405,7 +427,6 @@ def prepare_trees(src: Path, head: str, work: Path, jobs: int) -> list[Path]:
                     "git",
                     "clone",
                     "-q",
-                    "--shared",
                     "--no-checkout",
                     str(src),
                     str(t),
@@ -691,7 +712,8 @@ def run_parallel(
 def preflight(
     builds: list[Build], jobs: int, runner: Runner, log_dir: Path
 ) -> dict[str, Result]:
-    """Build each target's container and image package layers."""
+    """Build each target's container and image package layers: cheap when
+    podman has them, and a release needs the container to publish."""
     firsts = list({b.target: b for b in reversed(builds)}.values())[::-1]
 
     def work(slot: int, b: Build) -> Result:
@@ -776,7 +798,7 @@ def build_all(
         assert kdir is not None
         on_ok(b, kdir)
         runner.say(f"{_clock()} ok {b.name} in {_mins(secs)}")
-        return Result(b, "ok", None, secs, str(log))
+        return Result(b, "ok", None, secs, str(log), kernel_dir=kdir)
 
     return run_parallel(builds, jobs, work, runner, one_per_target=True)
 
