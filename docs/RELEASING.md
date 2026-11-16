@@ -38,7 +38,9 @@ It runs in three passes, so what breaks shows early:
 Each build logs to its own file, and the run ends with a table and a
 `summary.json` beside the logs.  The exit status is 0 only when every
 build is good.  Before starting it checks that the artifacts and
-podman storage have room for the run, and refuses when they do not.
+podman storage, TMPDIR and the work directory have room for the run,
+and refuses when they do not.  On macOS podman's storage is inside the
+podman machine and is not checked.
 
 Finished builds go in a ledger in the work directory
 (`<artifacts>/.release-build`, with the Lustre clones).  Rerunning the
@@ -81,8 +83,8 @@ export LTVM_ARTIFACTS_DIR=/mnt/data/$USER-ltvm/artifacts
 ### Publishing
 
 Publish once the change has merged, from the artifacts the build left:
-`ltvm target publish <target> --kernel <kernel>` for each build in the
-summary, with the same `LTVM_ARTIFACTS_DIR`.
+`ltvm target publish <target> --kernel <kernel> --arch <arch>` for each
+build in the summary, with the same `LTVM_ARTIFACTS_DIR`.
 
 ## Rebuilding Pre-built QEMU Binaries
 

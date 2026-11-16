@@ -694,7 +694,9 @@ def build_lustre(
             )
 
     if jobs is None:
-        jobs = os.cpu_count() or 4
+        from .paths import usable_cpus
+
+        jobs = usable_cpus()
 
     kver = _kernel_release(build_tree)
 

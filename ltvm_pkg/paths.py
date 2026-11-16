@@ -22,6 +22,15 @@ from typing import Any
 log = logging.getLogger("ltvm")
 
 
+def usable_cpus() -> int:
+    """CPUs this process may run on: taskset or a cpuset narrows them,
+    and os.cpu_count() does not see that."""
+    try:
+        return len(os.sched_getaffinity(0)) or 1
+    except AttributeError:
+        return os.cpu_count() or 4
+
+
 def load_meta_safe(meta_file: Path) -> dict[str, Any] | None:
     """Read and parse a meta.json file, tolerating corruption.
 

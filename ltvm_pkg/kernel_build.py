@@ -119,7 +119,9 @@ def _kernel_build_jobs() -> int:
                 return n
         except ValueError:
             pass
-    cores = os.cpu_count() or 4
+    from .paths import usable_cpus
+
+    cores = usable_cpus()
     import sys as _sys
 
     if _sys.platform == "darwin":

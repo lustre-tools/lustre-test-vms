@@ -27,8 +27,10 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -43,8 +45,14 @@ GIB = 1024**3
 # in podman's storage while a slot runs.
 ARTIFACT_BYTES_PER_BUILD = 6 * GIB
 WORK_BYTES_PER_SLOT = 25 * GIB
+# image export writes the rootfs tarball and the extracted tree to TMPDIR
+TMP_BYTES_PER_SLOT = 12 * GIB
+STOP_GRACE_SECONDS = 120
 MARGIN_BYTES = 10 * GIB
 
+_IMAGE_KERNEL_RE = re.compile(
+    r"^==> Building image for \S+ \(kernel=(\S+)\)\.\.\.$", re.MULTILINE
+)
 _STEP_RE = re.compile(
     r"^error: (Container|Kernel|Lustre|Image) (?:build|snapshot) failed",
     re.MULTILINE,
@@ -266,11 +274,12 @@ def available_cpus() -> list[int] | None:
 # ------------------------------------------------------------------
 
 
-def podman_store() -> Path:
+def podman_store() -> Path | None:
     """Where podman keeps images and build layers for this user.
-    CONTAINERS_STORAGE_CONF can move it off the home filesystem."""
+    CONTAINERS_STORAGE_CONF can move it off the home filesystem.  None
+    on macOS, where it is inside the podman machine's own disk."""
     if sys.platform == "darwin":
-        return Path.home() / ".local/share/containers"
+        return None
     try:
         r = subprocess.run(
             ["podman", "info", "--format", "{{.Store.GraphRoot}}"],
@@ -293,15 +302,21 @@ def _existing(p: Path) -> Path:
 
 def disk_problems(
     artifacts: Path,
-    store: Path,
+    store: Path | None,
     work: Path,
     jobs: int,
     builds: int,
     usage: Callable[[Path], Any] = shutil.disk_usage,
+    tmp: Path | None = None,
 ) -> list[str]:
     """What will not fit, per filesystem.  Artifacts grow by one set per
     build; each running slot needs room for a kernel and an image in
-    podman's store, and for its Lustre tree's build."""
+    podman's store, for an image export in TMPDIR, and for its Lustre
+    tree's build.  ``store`` None leaves podman's storage unchecked."""
+    if builds == 0:
+        return []
+    jobs = min(jobs, builds)
+    tmp = Path(tempfile.gettempdir()) if tmp is None else tmp
     needs: dict[int, list[Any]] = {}
 
     def add(path: Path, n: int, what: str) -> None:
@@ -314,7 +329,9 @@ def disk_problems(
     add(
         artifacts, builds * ARTIFACT_BYTES_PER_BUILD, f"artifacts ({artifacts})"
     )
-    add(store, jobs * WORK_BYTES_PER_SLOT, f"podman storage ({store})")
+    if store is not None:
+        add(store, jobs * WORK_BYTES_PER_SLOT, f"podman storage ({store})")
+    add(tmp, jobs * TMP_BYTES_PER_SLOT, f"temporary files ({tmp})")
     add(work, jobs * 2 * GIB, f"Lustre trees ({work})")
     out = []
     for p, need, what in needs.values():
@@ -355,6 +372,25 @@ def lustre_head(src: Path) -> str:
     return _git(src, "rev-parse", "HEAD")
 
 
+def lock_work_dir(work: Path) -> Any:
+    """Hold ``work`` for this run: a second run would check its own
+    commit out in the Lustre trees this one is building in.  Returns the
+    open lock file, which holds the lock until it is closed."""
+    import fcntl
+
+    work.mkdir(parents=True, exist_ok=True)
+    f = open(work / ".lock", "w")  # noqa: SIM115 -- held for the run
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        raise ReleaseBuildError(
+            f"another `ltvm build release` is using {work}; wait for it, "
+            f"or give this one its own --work-dir"
+        ) from None
+    return f
+
+
 def prepare_trees(src: Path, head: str, work: Path, jobs: int) -> list[Path]:
     """One clone of ``src`` per slot, at ``head``, reused across runs.
     Lustre builds in its own tree and a tree is rebuilt whenever the
@@ -392,20 +428,32 @@ def prepare_trees(src: Path, head: str, work: Path, jobs: int) -> list[Path]:
 # ------------------------------------------------------------------
 
 
-def verify(build: Build, arch: str, head: str) -> list[str]:
-    """Read a build's artifacts back: its kernel, the Lustre snapshot
-    beside it (from ``head``), and a current image on that kernel."""
-    from .image_build import image_status
+def built_kernel_dir(log_text: str) -> str | None:
+    """The kernel directory a ``build all`` baked its image on, from its
+    log: it can be an older build than the newest one cached."""
+    m = None
+    for m in _IMAGE_KERNEL_RE.finditer(log_text):
+        pass
+    return m.group(1) if m else None
+
+
+def verify(build: Build, arch: str, head: str, kdir_name: str) -> list[str]:
+    """Read a build's artifacts back from kernel directory ``kdir_name``:
+    a complete kernel, the Lustre snapshot beside it (from ``head``,
+    with modules), and an image current against both."""
+    from .image_build import _lustre_staging_hash_input
     from .paths import load_meta_safe
     from .target_config import TargetConfig
 
     tc = TargetConfig(build.target, arch=arch)
-    kdir_name = tc.resolve_kernel(build.kernel)
     kdir = tc.kernel_output_dir(kernel=kdir_name)
     problems = []
-    if load_meta_safe(kdir / "meta.json") is None:
-        problems.append(f"no kernel meta.json in {kdir}")
-    snap = load_meta_safe(kdir / "lustre-artifacts" / ".ltvm-snapshot.json")
+    if load_meta_safe(kdir / "meta.json") is None or not tc.outputs_complete(
+        "kernel", kernel=kdir_name
+    ):
+        problems.append(f"kernel in {kdir} is missing or incomplete")
+    snap_dir = kdir / "lustre-artifacts"
+    snap = load_meta_safe(snap_dir / ".ltvm-snapshot.json")
     got = snap.get("lustre_commit") if isinstance(snap, dict) else None
     if got != head:
         problems.append(
@@ -413,11 +461,18 @@ def verify(build: Build, arch: str, head: str) -> list[str]:
             if got
             else f"no Lustre snapshot in {kdir}"
         )
-    st = image_status(tc, kernel=kdir_name)
-    if not st.get("built"):
+    elif not any(snap_dir.rglob("*.ko")):
+        problems.append(f"Lustre snapshot in {kdir} has no modules")
+    try:
+        extra = _lustre_staging_hash_input(snap_dir)
+    except FileNotFoundError:
+        extra = None
+    if not tc.outputs_complete("image", kernel=kdir_name):
         problems.append("no image")
-    elif st.get("stale"):
-        problems.append("image is stale against its inputs")
+    elif extra is None or tc.is_stale(
+        "image", kernel=kdir_name, extra_hash=extra
+    ):
+        problems.append("image does not match its inputs and this Lustre")
     return problems
 
 
@@ -437,19 +492,26 @@ class Ledger:
     def _key(arch: str, b: Build) -> str:
         return f"{arch} {b.target} {b.kernel}"
 
-    def done(self, arch: str, b: Build, ltvm: str, lustre: str) -> bool:
+    def done(self, arch: str, b: Build, ltvm: str, lustre: str) -> str | None:
+        """The kernel directory a matching finished build used, or None."""
         e = self.data.get(self._key(arch, b))
-        return (
+        if (
             isinstance(e, dict)
             and e.get("ltvm") == ltvm
             and e.get("lustre") == lustre
-        )
+            and isinstance(e.get("kernel_dir"), str)
+        ):
+            return str(e["kernel_dir"])
+        return None
 
-    def record(self, arch: str, b: Build, ltvm: str, lustre: str) -> None:
+    def record(
+        self, arch: str, b: Build, ltvm: str, lustre: str, kernel_dir: str
+    ) -> None:
         with self._lock:
             self.data[self._key(arch, b)] = {
                 "ltvm": ltvm,
                 "lustre": lustre,
+                "kernel_dir": kernel_dir,
                 "at": datetime.now().isoformat(timespec="seconds"),
             }
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -495,16 +557,21 @@ class Runner:
         with open(log, "ab") as f:
             f.write(f"$ {' '.join(cmd)}\n".encode())
             f.flush()
-            if self.stopping.is_set():
-                return 130
-            proc = subprocess.Popen(
-                cmd,
-                stdout=f,
-                stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL,
-                env=env,
-            )
+            # Checked, started and registered under the lock stop()
+            # takes, so no command starts after stop() has looked.  Its
+            # own session, so stop() reaches the podman and make
+            # processes under it too.
             with self._plock:
+                if self.stopping.is_set():
+                    return 130
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=f,
+                    stderr=subprocess.STDOUT,
+                    stdin=subprocess.DEVNULL,
+                    env=env,
+                    start_new_session=True,
+                )
                 self._procs.add(proc)
             try:
                 return proc.wait()
@@ -512,17 +579,30 @@ class Runner:
                 with self._plock:
                     self._procs.discard(proc)
 
-    def stop(self) -> None:
-        self.stopping.set()
+    def stop(self, grace: float = STOP_GRACE_SECONDS) -> None:
+        """Interrupt every running command's process group, as Ctrl-C in
+        its terminal would, so ltvm's own cleanup runs; kill what is
+        left after ``grace`` seconds."""
         with self._plock:
+            self.stopping.set()
             procs = list(self._procs)
         for p in procs:
-            p.terminate()
+            _signal_group(p, signal.SIGINT)
+        deadline = time.monotonic() + grace
         for p in procs:
             try:
-                p.wait(timeout=60)
+                p.wait(timeout=max(0.0, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
-                p.kill()
+                pass
+        for p in procs:
+            _signal_group(p, signal.SIGKILL)
+
+
+def _signal_group(p: subprocess.Popen[bytes], sig: int) -> None:
+    try:
+        os.killpg(p.pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _clock() -> str:
@@ -591,8 +671,15 @@ def run_parallel(
             while t.is_alive():
                 t.join(timeout=1)
     except KeyboardInterrupt:
-        runner.say(f"{_clock()} interrupted: stopping the running builds")
-        runner.stop()
+        runner.say(
+            f"{_clock()} interrupted: stopping the running builds "
+            f"(up to {STOP_GRACE_SECONDS} s)"
+        )
+        old = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            runner.stop()
+        finally:
+            signal.signal(signal.SIGINT, old)
         with cond:
             cond.notify_all()
         for t in threads:
@@ -636,7 +723,7 @@ def build_all(
     trees: list[Path],
     log_dir: Path,
     head: str,
-    on_ok: Callable[[Build], None],
+    on_ok: Callable[[Build, str], None],
 ) -> dict[Build, Result]:
     def work(slot: int, b: Build) -> Result:
         log = log_dir / f"{b.target}-{b.kernel}.log"
@@ -673,13 +760,21 @@ def build_all(
             return Result(
                 b, "failed", step, secs, str(log), [f"exit status {rc}"]
             )
-        problems = verify(b, runner.arch, head)
+        try:
+            kdir = built_kernel_dir(log.read_text(errors="replace"))
+        except OSError:
+            kdir = None
+        if kdir is None:
+            problems = ["the log does not say which kernel the image is on"]
+        else:
+            problems = verify(b, runner.arch, head, kdir)
         if problems:
             runner.say(
                 f"{_clock()} FAILED {b.name} verify: {'; '.join(problems)}"
             )
             return Result(b, "failed", "verify", secs, str(log), problems)
-        on_ok(b)
+        assert kdir is not None
+        on_ok(b, kdir)
         runner.say(f"{_clock()} ok {b.name} in {_mins(secs)}")
         return Result(b, "ok", None, secs, str(log))
 

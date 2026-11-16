@@ -207,11 +207,55 @@ class TestDisk:
             2,
             10,
             usage=lambda p: free,
+            tmp=tmp_path / "t",
         )
-        # 10 builds * 6 + 2 slots * 25 + 2 * 2 + 10 margin = 124
+        # 10 builds * 6 + 2 slots * (25 + 12 + 2) + 10 margin = 148
         assert len(problems) == 1
-        assert "100 GiB free, about 124 GiB needed" in problems[0]
-        assert "artifacts" in problems[0] and "podman storage" in problems[0]
+        assert "100 GiB free, about 148 GiB needed" in problems[0]
+        for what in ("artifacts", "podman storage", "temporary files"):
+            assert what in problems[0]
+
+    def test_nothing_to_build_needs_nothing(self, tmp_path: Path) -> None:
+        free = SimpleNamespace(free=0)
+        assert (
+            rb.disk_problems(
+                tmp_path, tmp_path, tmp_path, 4, 0, usage=lambda p: free
+            )
+            == []
+        )
+
+    def test_slots_beyond_the_builds_reserve_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        free = SimpleNamespace(free=50 * rb.GIB)
+        # 1 build: 6 + one slot of 39 + 10 margin = 55, not four slots
+        (problem,) = rb.disk_problems(
+            tmp_path,
+            tmp_path,
+            tmp_path,
+            4,
+            1,
+            usage=lambda p: free,
+            tmp=tmp_path,
+        )
+        assert "about 55 GiB needed" in problem
+
+    def test_podman_machine_store_is_not_checked(self, tmp_path: Path) -> None:
+        free = SimpleNamespace(free=1000 * rb.GIB)
+        seen: list[Path] = []
+
+        def usage(p: Path) -> Any:
+            seen.append(p)
+            return free
+
+        assert (
+            rb.disk_problems(
+                tmp_path, None, tmp_path, 1, 1, usage=usage, tmp=tmp_path
+            )
+            == []
+        )
+        with patch.object(rb.sys, "platform", "darwin"):
+            assert rb.podman_store() is None
 
     def test_enough(self, tmp_path: Path) -> None:
         free = SimpleNamespace(free=1000 * rb.GIB)
@@ -333,21 +377,24 @@ class TestScheduler:
 class TestBuildAll:
     def _run(
         self, tmp_path: Path, rc: int, problems: list[str]
-    ) -> tuple[dict[rb.Build, rb.Result], list[rb.Build]]:
+    ) -> tuple[dict[rb.Build, rb.Result], list[Any]]:
         runner = _runner(1)
-        recorded: list[rb.Build] = []
+        recorded: list[Any] = []
 
         def fake_run(slot: int, argv: list[str], log: Path) -> int:
             log.parent.mkdir(parents=True, exist_ok=True)
             log.write_text(
-                "error: Kernel build failed: make\n" if rc else "ok\n"
+                "error: Kernel build failed: make\n"
+                if rc
+                else "==> Building image for rocky9 "
+                "(kernel=5.14-rhel9.8-5.14.0-687.39.1.el9_8)...\n"
             )
             return rc
 
         b = rb.Build("rocky9", "5.14-rhel9.8")
         with (
             patch.object(runner, "run", side_effect=fake_run) as run,
-            patch.object(rb, "verify", return_value=problems),
+            patch.object(rb, "verify", return_value=problems) as ver,
         ):
             res = rb.build_all(
                 [b],
@@ -356,8 +403,10 @@ class TestBuildAll:
                 [tmp_path / "t0"],
                 tmp_path,
                 "abc",
-                recorded.append,
+                lambda b, kdir: recorded.append((b, kdir)),
             )
+        if not rc:
+            assert ver.call_args.args[3] == "5.14-rhel9.8-5.14.0-687.39.1.el9_8"
         argv = run.call_args.args[1]
         assert argv == [
             "build",
@@ -374,7 +423,9 @@ class TestBuildAll:
     def test_ok_is_recorded(self, tmp_path: Path) -> None:
         res, recorded = self._run(tmp_path, 0, [])
         assert [r.status for r in res.values()] == ["ok"]
-        assert len(recorded) == 1
+        assert [k for _, k in recorded] == [
+            "5.14-rhel9.8-5.14.0-687.39.1.el9_8"
+        ]
 
     def test_failure_names_the_step(self, tmp_path: Path) -> None:
         res, recorded = self._run(tmp_path, 1, [])
@@ -494,49 +545,187 @@ class TestLedger:
     def test_round_trip(self, tmp_path: Path) -> None:
         b = rb.Build("rocky9", "5.14-rhel9.8")
         led = rb.Ledger(tmp_path / "done.json")
-        assert not led.done("x86_64", b, "v1", "abc")
-        led.record("x86_64", b, "v1", "abc")
+        assert led.done("x86_64", b, "v1", "abc") is None
+        led.record("x86_64", b, "v1", "abc", "5.14-rhel9.8-x")
         again = rb.Ledger(tmp_path / "done.json")
-        assert again.done("x86_64", b, "v1", "abc")
-        assert not again.done("x86_64", b, "v2", "abc")
-        assert not again.done("x86_64", b, "v1", "def")
-        assert not again.done("aarch64", b, "v1", "abc")
+        assert again.done("x86_64", b, "v1", "abc") == "5.14-rhel9.8-x"
+        assert again.done("x86_64", b, "v2", "abc") is None
+        assert again.done("x86_64", b, "v1", "def") is None
+        assert again.done("aarch64", b, "v1", "abc") is None
 
     def test_corrupt_ledger_is_empty(self, tmp_path: Path) -> None:
         (tmp_path / "done.json").write_text("{not json")
         led = rb.Ledger(tmp_path / "done.json")
-        assert not led.done("x86_64", rb.Build("a", "b"), "v", "c")
+        assert led.done("x86_64", rb.Build("a", "b"), "v", "c") is None
+
+
+class TestKernelDirFromLog:
+    def test_last_image_line(self) -> None:
+        log = (
+            "==> Building image for rocky9 (kernel=5.14-rhel9.7-old)...\n"
+            "noise\n"
+            "==> Building image for rocky9 (kernel=5.14-rhel9.7-5.14.0-611.13.1.el9_7)...\n"
+            "    image took 3m\n"
+        )
+        assert rb.built_kernel_dir(log) == "5.14-rhel9.7-5.14.0-611.13.1.el9_7"
+        assert rb.built_kernel_dir("no image step\n") is None
+
+    def test_matches_what_build_all_prints(self) -> None:
+        import inspect
+
+        from ltvm_pkg.cli import build
+
+        src = inspect.getsource(build._cmd_build_all_body)
+        assert (
+            'print(f"==> Building image for {args.target} '
+            '(kernel={full_kernel})...")' in src
+        )
+
+
+class _FakeTC:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.complete = {"kernel": True, "image": True}
+        self.stale = False
+        self.extra: bytes | None = None
+
+    def kernel_output_dir(self, kernel: str) -> Path:
+        return self.root / "kernels" / kernel
+
+    def outputs_complete(self, artifact: str, kernel: str) -> bool:
+        return self.complete[artifact]
+
+    def is_stale(self, artifact: str, kernel: str, extra_hash: bytes) -> bool:
+        self.extra = extra_hash
+        return self.stale
 
 
 class TestVerify:
-    def test_reads_kernel_snapshot_and_image(self, tmp_path: Path) -> None:
+    def _setup(self, tmp_path: Path) -> tuple[_FakeTC, Path]:
         kdir = tmp_path / "kernels" / "5.14-rhel9.8-x"
-        (kdir / "lustre-artifacts").mkdir(parents=True)
+        snap = kdir / "lustre-artifacts"
+        (snap / "lib").mkdir(parents=True)
         (kdir / "meta.json").write_text("{}")
-        snap = kdir / "lustre-artifacts" / ".ltvm-snapshot.json"
-        snap.write_text(json.dumps({"lustre_commit": "abc123"}))
-        tc = SimpleNamespace(
-            resolve_kernel=lambda k: "5.14-rhel9.8-x",
-            kernel_output_dir=lambda kernel: tmp_path / "kernels" / kernel,
+        (snap / "lib" / "lustre.ko").write_text("x")
+        (snap / ".ltvm-snapshot.json").write_text(
+            json.dumps({"lustre_commit": "abc123"})
         )
-        status = {"built": True, "stale": False}
-        b = rb.Build("rocky9", "5.14-rhel9.8")
-        with (
-            patch("ltvm_pkg.target_config.TargetConfig", return_value=tc),
-            patch("ltvm_pkg.image_build.image_status", return_value=status),
-        ):
-            assert rb.verify(b, "x86_64", "abc123") == []
-            assert rb.verify(b, "x86_64", "def456") == [
-                "Lustre snapshot is from abc123, not def456"
-            ]
-            status["stale"] = True
-            assert rb.verify(b, "x86_64", "abc123") == [
-                "image is stale against its inputs"
-            ]
-            snap.unlink()
-            (kdir / "meta.json").unlink()
-            status["built"] = False
-            assert len(rb.verify(b, "x86_64", "abc123")) == 3
+        (snap / ".ltvm-staging-meta.json").write_text(
+            json.dumps(
+                {"module_symvers_sha256": "s1", "lustre_modules_sha256": "l1"}
+            )
+        )
+        return _FakeTC(tmp_path), snap
+
+    def _verify(self, tc: _FakeTC, head: str = "abc123") -> list[str]:
+        with patch("ltvm_pkg.target_config.TargetConfig", return_value=tc):
+            return rb.verify(
+                rb.Build("rocky9", "5.14-rhel9.8"),
+                "x86_64",
+                head,
+                "5.14-rhel9.8-x",
+            )
+
+    def test_good(self, tmp_path: Path) -> None:
+        tc, _ = self._setup(tmp_path)
+        assert self._verify(tc) == []
+        # the image is checked against the snapshot's Lustre digests
+        assert tc.extra is not None and b"lustre:|l1" in tc.extra
+
+    def test_other_commit(self, tmp_path: Path) -> None:
+        tc, _ = self._setup(tmp_path)
+        assert self._verify(tc, "def456") == [
+            "Lustre snapshot is from abc123, not def456"
+        ]
+
+    def test_incomplete_kernel(self, tmp_path: Path) -> None:
+        tc, _ = self._setup(tmp_path)
+        tc.complete["kernel"] = False
+        assert self._verify(tc)[0].endswith("is missing or incomplete")
+
+    def test_snapshot_without_modules(self, tmp_path: Path) -> None:
+        tc, snap = self._setup(tmp_path)
+        (snap / "lib" / "lustre.ko").unlink()
+        assert self._verify(tc)[0].endswith("has no modules")
+
+    def test_image_without_this_lustre(self, tmp_path: Path) -> None:
+        tc, snap = self._setup(tmp_path)
+        tc.stale = True
+        assert self._verify(tc) == [
+            "image does not match its inputs and this Lustre"
+        ]
+        tc.stale = False
+        (snap / ".ltvm-staging-meta.json").unlink()
+        assert self._verify(tc) == [
+            "image does not match its inputs and this Lustre"
+        ]
+
+    def test_no_image(self, tmp_path: Path) -> None:
+        tc, _ = self._setup(tmp_path)
+        tc.complete["image"] = False
+        assert self._verify(tc) == ["no image"]
+
+
+class TestWorkLock:
+    def test_second_run_refused(self, tmp_path: Path) -> None:
+        first = rb.lock_work_dir(tmp_path / "w")
+        with pytest.raises(rb.ReleaseBuildError, match="another"):
+            rb.lock_work_dir(tmp_path / "w")
+        first.close()
+        rb.lock_work_dir(tmp_path / "w").close()
+
+
+def _alive(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text().split()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    return stat[2] != "Z"
+
+
+class TestStop:
+    def test_stop_reaches_the_whole_group(self, tmp_path: Path) -> None:
+        pidfile = tmp_path / "child.pid"
+        script = tmp_path / "parent.sh"
+        # a grandchild that outlives a plain kill of its parent
+        script.write_text(f"sleep 60 & echo $! > {pidfile}\nwait\n")
+        runner = rb.Runner(
+            ltvm=["bash", str(script)],
+            arch="x86_64",
+            cpus=[None],
+            say=lambda m: None,
+        )
+        rcs: list[int] = []
+        t = threading.Thread(
+            target=lambda: rcs.append(runner.run(0, [], tmp_path / "log"))
+        )
+        t.start()
+        deadline = time.monotonic() + 10
+        while not pidfile.exists() or not pidfile.read_text().strip():
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        child = int(pidfile.read_text())
+        runner.stop(grace=5)
+        t.join(10)
+        assert rcs and rcs[0] != 0
+        deadline = time.monotonic() + 5
+        while _alive(child):
+            assert time.monotonic() < deadline, "grandchild survived stop()"
+            time.sleep(0.05)
+
+    def test_nothing_starts_after_stop(self, tmp_path: Path) -> None:
+        runner = _runner(1)
+        runner.stop()
+        with patch.object(rb.subprocess, "Popen") as popen:
+            assert runner.run(0, ["build"], tmp_path / "log") == 130
+        popen.assert_not_called()
+
+
+def test_usable_cpus_follows_affinity() -> None:
+    from ltvm_pkg.paths import usable_cpus
+
+    with patch("os.sched_getaffinity", return_value={0, 1, 2}):
+        assert usable_cpus() == 3
 
 
 class TestCommand:
@@ -647,6 +836,7 @@ class TestCommand:
             rb.Build("debian13", "6.12-debian13"),
             _ltvm_version(),
             head,
+            "6.12-debian13-6.12.107",
         )
 
         def fake_pre(todo: list[rb.Build], *a: Any) -> dict[str, rb.Result]:

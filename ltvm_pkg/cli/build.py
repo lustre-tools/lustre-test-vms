@@ -72,7 +72,8 @@ def _warn_low_disk() -> None:
     from ltvm_pkg.release_build import podman_store
     from ltvm_pkg.target_config import ARTIFACTS_DIR
 
-    roots = [ARTIFACTS_DIR, podman_store()]
+    store = podman_store()
+    roots = [ARTIFACTS_DIR] + ([store] if store else [])
     seen: set[int] = set()
     for root in roots:
         p = root

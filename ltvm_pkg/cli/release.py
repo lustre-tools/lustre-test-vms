@@ -94,15 +94,6 @@ def cmd_build_release(args: argparse.Namespace) -> int:
         )
     order = rb.breadth_first(builds)
 
-    avail = rb.available_cpus()
-    jobs = max(1, min(args.jobs or rb.default_jobs(avail), len(order)))
-    try:
-        cpus = rb.cpu_sets(jobs, args.cpus, avail, rb.numa_nodes())
-    except (rb.ReleaseBuildError, ValueError) as e:
-        return _error(str(e), use_json)
-    if args.cpus and avail is None:
-        return _error("--cpus needs Linux and taskset", use_json)
-
     work = (
         Path(args.work_dir).resolve()
         if args.work_dir
@@ -110,14 +101,31 @@ def cmd_build_release(args: argparse.Namespace) -> int:
     )
     ltvm_version = _ltvm_version()
     ledger = rb.Ledger(work / f"done-{arch}.json")
-    done = [
-        b
-        for b in order
-        if ltvm_version
-        and ledger.done(arch, b, ltvm_version, head)
-        and not rb.verify(b, arch, head)
-    ]
+    done = []
+    for b in order:
+        kdir = (
+            ledger.done(arch, b, ltvm_version, head) if ltvm_version else None
+        )
+        if kdir is not None and not rb.verify(b, arch, head, kdir):
+            done.append(b)
     todo = [b for b in order if b not in done]
+
+    avail = rb.available_cpus()
+    if args.cpus and avail is None:
+        return _error("--cpus needs Linux and taskset", use_json)
+    n_sets = len(args.cpus.split(":")) if args.cpus else None
+    if args.jobs and n_sets and args.jobs != n_sets:
+        return _error(
+            f"--cpus gives {n_sets} CPU sets for --jobs {args.jobs}", use_json
+        )
+    jobs = args.jobs or n_sets or rb.default_jobs(avail)
+    try:
+        cpus = rb.cpu_sets(jobs, args.cpus, avail, rb.numa_nodes())
+    except (rb.ReleaseBuildError, ValueError) as e:
+        return _error(str(e), use_json)
+    # no more slots than builds left to run
+    jobs = max(1, min(jobs, len(todo)))
+    cpus = cpus[:jobs]
     store = rb.podman_store()
     disk = rb.disk_problems(ARTIFACTS_DIR, store, work, jobs, len(todo))
 
@@ -132,7 +140,7 @@ def cmd_build_release(args: argparse.Namespace) -> int:
         "already_done": [b.name for b in done],
         "unmatched_releases": unmatched,
         "artifacts": str(ARTIFACTS_DIR),
-        "podman_store": str(store),
+        "podman_store": str(store) if store else None,
         "work_dir": str(work),
         "disk_problems": disk,
     }
@@ -140,7 +148,10 @@ def cmd_build_release(args: argparse.Namespace) -> int:
         f"Release build for {arch}: Lustre {head[:12]} from {tree}, "
         f"ltvm {ltvm_version or '(commit unknown, so nothing is skipped)'}"
     )
-    say(f"  artifacts {ARTIFACTS_DIR}, podman storage {store}, work {work}")
+    say(
+        f"  artifacts {ARTIFACTS_DIR}, podman storage "
+        f"{store or '(in the podman machine; not checked)'}, work {work}"
+    )
     for i, c in enumerate(cpus):
         say(
             f"  slot {i}: "
@@ -179,6 +190,7 @@ def cmd_build_release(args: argparse.Namespace) -> int:
         else work / "logs" / time.strftime("%Y%m%d-%H%M%S")
     )
     try:
+        work_lock = rb.lock_work_dir(work)
         trees = rb.prepare_trees(tree, head, work, jobs)
     except rb.ReleaseBuildError as e:
         return _error(str(e), use_json)
@@ -208,8 +220,8 @@ def cmd_build_release(args: argparse.Namespace) -> int:
             trees,
             log_dir,
             head,
-            on_ok=lambda b: (
-                ledger.record(arch, b, ltvm_version, head)
+            on_ok=lambda b, kdir: (
+                ledger.record(arch, b, ltvm_version, head, kdir)
                 if ltvm_version
                 else None
             ),
@@ -251,6 +263,7 @@ def cmd_build_release(args: argparse.Namespace) -> int:
     )
     if use_json:
         print(json.dumps(summary, indent=2))
+    work_lock.close()
     if runner.stopping.is_set():
         return EXIT_INTERRUPTED
     return EXIT_OK if ok == len(results) else EXIT_ERROR
