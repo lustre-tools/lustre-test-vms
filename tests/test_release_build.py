@@ -1843,18 +1843,26 @@ def test_damage_since_an_older_build_is_forced(
     b = rb.Build("rocky9", "5.14-rhel9.8")
     led = rb.Ledger(tmp_path / "work" / "done-x86_64.json")
     led.record("x86_64", b, "0.5.0+old", "oldcommit", "kd", "payload-then")
-    common = (
-        t._patches([]),
-        patch.object(rb, "disk_problems", return_value=[]),
-        patch.object(rb, "preflight", return_value={}),
-        patch("ltvm_pkg.cli.release._ltvm_version", return_value="0.5.1+abc"),
-        patch("ltvm_pkg.cli.release._new_targets", return_value=0),
-    )
+
+    def common() -> tuple[Any, ...]:
+        # Fresh each time: _patches() hands back an entered ExitStack,
+        # and one reused after its first exit no longer patches the
+        # GitHub API, so the second pass reached the live one.
+        return (
+            t._patches([]),
+            patch.object(rb, "disk_problems", return_value=[]),
+            patch.object(rb, "preflight", return_value={}),
+            patch(
+                "ltvm_pkg.cli.release._ltvm_version", return_value="0.5.1+abc"
+            ),
+            patch("ltvm_pkg.cli.release._new_targets", return_value=0),
+        )
+
     for payload_now, forced in (("payload-then", set()), ("payload-now", {b})):
         import contextlib
 
         with contextlib.ExitStack() as st:
-            for c in common:
+            for c in common():
                 st.enter_context(c)
             st.enter_context(
                 patch.object(rb, "build_payload", return_value=payload_now)
