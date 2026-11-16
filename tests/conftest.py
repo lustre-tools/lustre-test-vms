@@ -230,8 +230,12 @@ def _neutralize_podman_preflight() -> object:
     would fail tests that don't mock podman. The tests already stub the
     actual build functions, so the preflight is orthogonal.
     """
-    with patch(
-        "ltvm_pkg.cli.build.check_podman_machine_macos", return_value=None
+    with (
+        patch(
+            "ltvm_pkg.cli.build.check_podman_machine_macos",
+            return_value=None,
+        ),
+        patch("ltvm_pkg.release_package._ensure_podman", return_value=None),
     ):
         yield
 
