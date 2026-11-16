@@ -659,8 +659,17 @@ def run_parallel(
     busy: set[str] = set()
     results: dict[Build, Result] = {}
     cond = threading.Condition()
+    # An interrupted join can leave a thread looking finished while its
+    # worker still runs, so the workers say when they are done.
+    finished = [threading.Event() for _ in range(jobs)]
 
     def worker(slot: int) -> None:
+        try:
+            _worker(slot)
+        finally:
+            finished[slot].set()
+
+    def _worker(slot: int) -> None:
         while True:
             with cond:
                 while True:
@@ -712,9 +721,9 @@ def run_parallel(
             signal.signal(signal.SIGINT, old)
         with cond:
             cond.notify_all()
-        for t in threads:
+        for t, done in zip(threads, finished):
             if t.ident is not None:
-                t.join(timeout=120)
+                done.wait(timeout=STOP_GRACE_SECONDS)
     with cond:
         return dict(results)
 

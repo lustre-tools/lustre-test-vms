@@ -1120,3 +1120,46 @@ def test_borrowing_clone_is_recloned(lustre_repo: Path, tmp_path: Path) -> None:
     (trees,) = [rb.prepare_trees(lustre_repo, head, work, 1)]
     assert not (trees[0] / ".git/objects/info/alternates").exists()
     assert _git(trees[0], "rev-parse", "HEAD") == head
+
+
+def test_interrupt_waits_for_the_worker_not_the_join() -> None:
+    runner = _runner(1)
+    item = rb.Build("rocky9", "k")
+
+    def work(slot: int, b: rb.Build) -> rb.Result:
+        time.sleep(0.3)
+        return rb.Result(b, "ok")
+
+    real_join = threading.Thread.join
+    calls = {"n": 0}
+
+    def join(self: threading.Thread, timeout: float | None = None) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise KeyboardInterrupt
+        real_join(self, timeout)
+
+    with patch.object(threading.Thread, "join", join):
+        res = rb.run_parallel([item], 1, work, runner, one_per_target=True)
+    assert runner.stopping.is_set()
+    assert res[item].status == "ok"
+
+
+def test_one_build_left_is_not_pinned_to_a_slice(
+    lustre_repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ltvm_pkg.cli.release import cmd_build_release
+
+    t = TestCommand()
+    with (
+        t._patches([]),
+        patch.object(rb, "available_cpus", return_value=list(range(128))),
+        patch.object(rb, "numa_nodes", return_value=[]),
+        patch.object(rb, "disk_problems", return_value=[]),
+        patch("ltvm_pkg.cli.release._new_targets", return_value=0),
+    ):
+        cmd_build_release(
+            t._args(lustre_repo, tmp_path, jobs=None, only=["debian13"])
+        )
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["jobs"] == 1 and plan["cpus"] == [None]

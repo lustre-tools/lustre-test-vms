@@ -3218,7 +3218,7 @@ def parse_cli(
 # not become group-writable.
 _ARTIFACT_WRITERS: dict[str, frozenset[str] | None] = {
     "build": frozenset(
-        {"all", "container", "kernel", "image", "zfs", "mofed-kmods"}
+        {"all", "container", "kernel", "image", "zfs", "mofed-kmods", "release"}
     ),
     "target": frozenset(
         {"build", "fetch", "clean", "delete", "archive", "restore"}

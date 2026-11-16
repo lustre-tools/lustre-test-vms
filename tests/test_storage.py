@@ -788,6 +788,7 @@ class TestWhichCommandsShare:
             return argparse.Namespace(command=command, **kw)
 
         assert ltvm._writes_artifacts(ns("build", build_action="kernel"))
+        assert ltvm._writes_artifacts(ns("build", build_action="release"))
         assert ltvm._writes_artifacts(ns("target", target_action="fetch"))
         assert ltvm._writes_artifacts(ns("target", target_action="archive"))
         assert ltvm._writes_artifacts(ns("clean"))

@@ -286,7 +286,8 @@ def _prebuild_tools_native(
         "run",
         "--rm",
         "-v",
-        f"{common_dir}:/input:ro,Z",
+        # z, not Z: parallel prebuilds share this directory
+        f"{common_dir}:/input:ro,z",
         "-v",
         f"{output_dir}:/output:Z",
         build_tag,

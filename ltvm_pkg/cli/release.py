@@ -63,17 +63,24 @@ def _ltvm_version() -> str | None:
 
 
 def _new_targets(targets: list[str], arch: str) -> int:
-    """Targets podman has no build container for yet."""
+    """Targets podman lacks the build container or the image package
+    layers for, which the preflight will build."""
+    from ltvm_pkg.image_build import _container_image_tag
     from ltvm_pkg.target_config import TargetConfig
 
     n = 0
     for t in targets:
         try:
-            tag = TargetConfig(t, arch=arch).container_tag
-            r = subprocess.run(
-                ["podman", "image", "exists", tag], capture_output=True
+            tc = TargetConfig(t, arch=arch)
+            tags = [tc.container_tag, _container_image_tag(tc)]
+            missing = any(
+                subprocess.run(
+                    ["podman", "image", "exists", tag], capture_output=True
+                ).returncode
+                != 0
+                for tag in tags
             )
-            n += r.returncode != 0
+            n += missing
         except (OSError, ValueError, KeyError):
             n += 1
     return n
@@ -198,13 +205,17 @@ def _plan_and_run(
             f"--cpus gives {n_sets} CPU sets for --jobs {args.jobs}", use_json
         )
     jobs = args.jobs or n_sets or rb.default_jobs(avail)
+    # No more slots than builds left to run.  Sets given by hand keep
+    # their meaning; automatic ones are shared out over the slots used.
+    used = max(1, min(jobs, len(todo)))
     try:
-        cpus = rb.cpu_sets(jobs, args.cpus, avail, rb.numa_nodes())
+        if args.cpus:
+            cpus = rb.cpu_sets(jobs, args.cpus, avail, [])[:used]
+        else:
+            cpus = rb.cpu_sets(used, None, avail, rb.numa_nodes())
     except (rb.ReleaseBuildError, ValueError) as e:
         return _error(str(e), use_json)
-    # no more slots than builds left to run
-    jobs = max(1, min(jobs, len(todo)))
-    cpus = cpus[:jobs]
+    jobs = used
     store = rb.podman_store()
     disk = rb.disk_problems(
         [ARTIFACTS_DIR / b.target / arch for b in todo],

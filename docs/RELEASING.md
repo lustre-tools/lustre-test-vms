@@ -51,11 +51,11 @@ same command with the same ltvm and Lustre commit skips them, so after
 a failure, fix the cause and run it again.  The ledger knows only those
 two commits: an ltvm checkout with uncommitted changes skips nothing.
 After anything else changes, `--fresh` runs every build with
-`--force`, rebuilding each kernel, Lustre and image.  A newer RHEL or
-SUSE kernel release is picked up without it, since the kernel build
-looks for the newest one each time it runs.  Podman's cached package
-layers are not rebuilt by either; `podman image rm` the target's
-`ltvm-image-*` image for that.  The preflight runs for every target either way, so
+`--force`, rebuilding each kernel, Lustre and image.  It rebuilds; it
+does not choose newer kernels.  Which kernel release a build uses comes
+from targets.yaml and the Lustre tree, so moving to a newer one means
+changing those.  Podman's cached package layers are not rebuilt either
+way; `podman image rm` the target's `ltvm-image-*` image for that.  The preflight runs for every target either way, so
 each still has its build container for publishing.
 
 One run at a time uses an artifacts directory, and one a work
