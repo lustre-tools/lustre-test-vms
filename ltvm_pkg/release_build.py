@@ -751,6 +751,18 @@ class Ledger:
             }
             self._write()
 
+    def last(self, arch: str, b: Build) -> tuple[str, str] | None:
+        """The kernel directory and payload digest of the last build of
+        ``b`` that verified, whatever commits it was built from."""
+        e = self.data.get(self._key(arch, b))
+        if (
+            isinstance(e, dict)
+            and isinstance(e.get("kernel_dir"), str)
+            and isinstance(e.get("payload"), str)
+        ):
+            return str(e["kernel_dir"]), str(e["payload"])
+        return None
+
     def unfinished(self, arch: str, b: Build) -> bool:
         e = self.data.get(self._key(arch, b))
         return isinstance(e, dict) and "attempt" in e

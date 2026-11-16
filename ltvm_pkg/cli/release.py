@@ -312,6 +312,18 @@ def _plan_and_run(
             break
         entry = ledger.done(arch, b, ltvm_version, head)
         if entry is None:
+            # Built from other commits: it reruns anyway, but if its
+            # files changed since they verified, its caches may hold the
+            # damage, so it is forced.
+            prev = ledger.last(arch, b)
+            try:
+                if (
+                    prev is not None
+                    and rb.build_payload(b, arch, prev[0]) != prev[1]
+                ):
+                    rejected.add(b)
+            except OSError:
+                rejected.add(b)
             continue
         try:
             problems = rb.verify(b, arch, head, *entry)
