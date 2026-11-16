@@ -1412,21 +1412,23 @@ def _export_to_ext4(
                 "cat /tmp/out.ext4"
             )
             with open(str(tarball), "rb") as fin, open(tmpfile, "wb") as fout:
-                subprocess.run(
-                    [
-                        "podman",
-                        "run",
-                        "--rm",
-                        "-i",
-                        container_tag,
-                        "bash",
-                        "-c",
-                        in_container_script,
-                    ],
-                    stdin=fin,
-                    stdout=fout,
-                    check=True,
-                )
+                # The worker runs in the podman machine, beyond a signal
+                # to this process group: the wrapper removes it.  Any
+                # nonzero exit fails, a cleanup EOF included, since the
+                # image it streamed may be short.
+                worker = [
+                    "podman",
+                    "run",
+                    "--rm",
+                    "-i",
+                    container_tag,
+                    "bash",
+                    "-c",
+                    in_container_script,
+                ]
+                r = run_podman_with_cleanup(worker, stdin=fin, stdout=fout)
+                if r.returncode != 0:
+                    raise subprocess.CalledProcessError(r.returncode, worker)
         else:
             # Linux host: run with fakeroot directly.
             host_extract_script = (

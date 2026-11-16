@@ -544,11 +544,13 @@ def prepare_trees(src: Path, head: str, work: Path, jobs: int) -> list[Path]:
             was = _git(t, "rev-parse", "-q", "--verify", "HEAD")
         except ReleaseBuildError:
             was = ""
-        _git(t, "checkout", "-q", "--force", "--detach", head)
         if was != head:
             # The build would keep the old configure state, and with it
-            # the old version, when only the commit changed.
+            # the old version, when only the commit changed.  Cleaned
+            # before HEAD moves, so an interruption leaves HEAD old and
+            # the next run cleans again.
             _git(t, "clean", "-q", "-x", "-d", "-f")
+        _git(t, "checkout", "-q", "--force", "--detach", head)
         trees.append(t)
     return trees
 

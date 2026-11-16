@@ -1760,3 +1760,38 @@ def test_impossible_ext4_geometry_is_not_whole(tmp_path: Path) -> None:
     struct.pack_into("<I", data, 1024 + 24, 0xFFFFFFFF)
     (tmp_path / "img").write_bytes(bytes(data))
     assert not ext4_whole(tmp_path / "img")
+
+
+def test_an_interrupted_preparation_is_cleaned_on_retry(
+    lustre_repo: Path, tmp_path: Path
+) -> None:
+    head = rb.lustre_head(lustre_repo)
+    (tree,) = rb.prepare_trees(lustre_repo, head, tmp_path / "w", 1)
+    (tree / "config.status").write_text("old configure\n")
+    (lustre_repo / "README").write_text("next\n")
+    _git(
+        lustre_repo,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-qam",
+        "next",
+    )
+    new = rb.lustre_head(lustre_repo)
+    real = rb._git
+
+    def interrupted(t: Path, *args: str) -> str:
+        if args[:1] == ("clean",):
+            raise KeyboardInterrupt
+        return real(t, *args)
+
+    with patch.object(rb, "_git", side_effect=interrupted):
+        with pytest.raises(KeyboardInterrupt):
+            rb.prepare_trees(lustre_repo, new, tmp_path / "w", 1)
+    # HEAD did not move before the clean, so the retry cleans
+    assert _git(tree, "rev-parse", "HEAD") == head
+    rb.prepare_trees(lustre_repo, new, tmp_path / "w", 1)
+    assert _git(tree, "rev-parse", "HEAD") == new
+    assert not (tree / "config.status").exists()
