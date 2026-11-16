@@ -19,6 +19,7 @@ from ltvm_pkg import release_build as rb
 from ltvm_pkg.cli.util import EXIT_ERROR, EXIT_OK, _error, host_arch
 
 EXIT_INTERRUPTED = 130
+PODMAN_PROBE_SECONDS = 60
 
 
 def _cli_attr(name: str) -> Any:
@@ -75,12 +76,19 @@ def _new_targets(targets: list[str], arch: str) -> int:
             tags = [tc.container_tag, _container_image_tag(tc)]
             missing = any(
                 subprocess.run(
-                    ["podman", "image", "exists", tag], capture_output=True
+                    ["podman", "image", "exists", tag],
+                    capture_output=True,
+                    timeout=PODMAN_PROBE_SECONDS,
                 ).returncode
                 != 0
                 for tag in tags
             )
             n += missing
+        except subprocess.TimeoutExpired:
+            raise rb.ReleaseBuildError(
+                f"podman did not answer in {PODMAN_PROBE_SECONDS} s; is a "
+                f"build holding its storage?  `podman ps -a --external` shows them"
+            ) from None
         except (OSError, ValueError, KeyError):
             n += 1
     return n
@@ -258,9 +266,10 @@ def _plan_and_run(
             f"--cpus gives {n_sets} CPU sets for --jobs {args.jobs}", use_json
         )
     jobs = args.jobs or n_sets or rb.default_jobs(avail)
-    # No more slots than builds left to run.  Sets given by hand keep
-    # their meaning; automatic ones are shared out over the slots used.
-    used = max(1, min(jobs, len(todo)))
+    # No more slots than targets left to build: one target's kernels
+    # run one at a time.  Sets given by hand keep their meaning;
+    # automatic ones are shared out over the slots used.
+    used = max(1, min(jobs, len({b.target for b in todo})))
     try:
         if args.cpus:
             cpus = rb.cpu_sets(jobs, args.cpus, avail, [])[:used]
@@ -270,14 +279,9 @@ def _plan_and_run(
         return _error(str(e), use_json)
     jobs = used
     store = rb.podman_store()
-    disk = rb.disk_problems(
-        [ARTIFACTS_DIR / b.target / arch for b in todo],
-        store,
-        work,
-        jobs,
-        len(todo),
+    try:
         # without a preflight, only the builds make containers
-        new_targets=(
+        new_targets = (
             _new_targets(
                 list(dict.fromkeys(b.target for b in todo))
                 if args.no_preflight
@@ -286,7 +290,16 @@ def _plan_and_run(
             )
             if store
             else 0
-        ),
+        )
+    except rb.ReleaseBuildError as e:
+        return _error(str(e), use_json)
+    disk = rb.disk_problems(
+        [ARTIFACTS_DIR / b.target / arch for b in todo],
+        store,
+        work,
+        jobs,
+        len(todo),
+        new_targets=new_targets,
         preflight_slots=0 if args.no_preflight else min(jobs, len(targets)),
         new_caches=_new_caches(todo, arch, work),
         cross_preflight=(

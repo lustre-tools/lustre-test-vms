@@ -667,9 +667,11 @@ class _FakeTC:
 
 class TestVerify:
     def _setup(self, tmp_path: Path) -> tuple[_FakeTC, Path]:
-        from ltvm_pkg.lustre_build import _hash_staged_modules
+        from ltvm_pkg.lustre_build import _hash_file, _hash_staged_modules
 
         kdir = tmp_path / "kernels" / "5.14-rhel9.8-x"
+        (kdir / "build-tree").mkdir(parents=True)
+        (kdir / "build-tree" / "Module.symvers").write_text("0x1 sym vmlinux\n")
         snap = kdir / "lustre-artifacts"
         (snap / "lib").mkdir(parents=True)
         (kdir / "meta.json").write_text("{}")
@@ -681,7 +683,9 @@ class TestVerify:
         (snap / ".ltvm-staging-meta.json").write_text(
             json.dumps(
                 {
-                    "module_symvers_sha256": "s1",
+                    "module_symvers_sha256": _hash_file(
+                        kdir / "build-tree" / "Module.symvers"
+                    ),
                     "lustre_modules_sha256": _hash_staged_modules(snap),
                 }
             )
@@ -713,6 +717,22 @@ class TestVerify:
         tc, _ = self._setup(tmp_path)
         tc.complete["kernel"] = False
         assert self._verify(tc)[0].endswith("is missing or incomplete")
+
+    def test_kernel_abi_changed_under_the_snapshot(
+        self, tmp_path: Path
+    ) -> None:
+        tc, _ = self._setup(tmp_path)
+        symvers = (
+            tmp_path
+            / "kernels"
+            / "5.14-rhel9.8-x"
+            / "build-tree"
+            / "Module.symvers"
+        )
+        symvers.write_text("0x2 sym vmlinux\n")
+        assert self._verify(tc)[0].endswith(
+            "was built against another kernel ABI"
+        )
 
     def test_snapshot_missing_a_module(self, tmp_path: Path) -> None:
         tc, snap = self._setup(tmp_path)
@@ -1375,3 +1395,71 @@ def test_a_build_that_keeps_writing_is_not_stalled(tmp_path: Path) -> None:
         poll_seconds=0.1,
     )
     assert runner.run(0, [], tmp_path / "log") == 0
+
+
+def test_a_custom_tag_is_found_by_its_manifest() -> None:
+    rel = _rel("rocky9", "rocky9-x86_64-5.14.0-687.39.1.el9_8_lustre")
+    builds, unmatched, _ = rb.published_builds(
+        [rel], "x86_64", DECLARED, _kernel_of, _is_base
+    )
+    assert [b.name for b in builds] == ["rocky9:5.14-rhel9.8"]
+    assert unmatched == []
+
+
+def test_a_new_commit_cleans_the_reused_clone(
+    lustre_repo: Path, tmp_path: Path
+) -> None:
+    head = rb.lustre_head(lustre_repo)
+    (tree,) = rb.prepare_trees(lustre_repo, head, tmp_path / "w", 1)
+    (tree / "config.status").write_text("old configure\n")
+    rb.prepare_trees(lustre_repo, head, tmp_path / "w", 1)
+    assert (tree / "config.status").exists()  # same commit: kept
+    (lustre_repo / "README").write_text("next\n")
+    _git(
+        lustre_repo,
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-qam",
+        "next",
+    )
+    rb.prepare_trees(
+        lustre_repo, rb.lustre_head(lustre_repo), tmp_path / "w", 1
+    )
+    assert not (tree / "config.status").exists()
+
+
+def test_one_target_gets_one_slot(
+    lustre_repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from ltvm_pkg.cli.release import cmd_build_release
+
+    t = TestCommand()
+    with (
+        t._patches([]),
+        patch.object(rb, "available_cpus", return_value=list(range(128))),
+        patch.object(rb, "numa_nodes", return_value=[]),
+        patch.object(rb, "disk_problems", return_value=[]),
+        patch("ltvm_pkg.cli.release._new_targets", return_value=0),
+    ):
+        cmd_build_release(
+            t._args(lustre_repo, tmp_path, jobs=4, only=["rocky10"])
+        )
+    plan = json.loads(capsys.readouterr().out)
+    assert len(plan["builds"]) == 2 and plan["jobs"] == 1
+
+
+def test_a_wedged_podman_fails_the_plan() -> None:
+    from ltvm_pkg.cli import release
+
+    with (
+        patch.object(
+            subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(["podman"], 60),
+        ),
+        pytest.raises(rb.ReleaseBuildError, match="podman did not answer"),
+    ):
+        release._new_targets(["rocky9"], "x86_64")

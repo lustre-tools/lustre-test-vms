@@ -122,8 +122,9 @@ def published_builds(
 ) -> tuple[list[Build], list[str], list[str]]:
     """The (target, kernel) pairs published for ``arch``, in the order
     targets.yaml declares them (``declared`` maps each target to its
-    kernels), and the release tags that matched no declared kernel.
-    ``kernel_of(target, tag, arch)`` maps a tag to a kernel, and
+    kernels), and the tags of releases whose manifest matched no declared
+    kernel.  ``kernel_of(target, manifest_stem, arch)`` maps a base
+    manifest's name to a kernel, and
     ``is_base(target, arch, manifest_stem)`` tells a base release from
     a variant's.  Also returns the tags of releases carrying ZFS, which
     a plain ``build all`` would rebuild without it.
@@ -134,28 +135,34 @@ def published_builds(
     unmatched: list[str] = []
     with_zfs: list[str] = []
     for rel in releases:
+        # The manifest names the target, arch and kernel; the tag is
+        # whatever publish was given (`target publish --tag`).
         tag = rel.get("tag_name", "")
-        target = next(
-            (t for t in by_length if tag.startswith(f"{t}-{arch}-")), None
-        )
-        if target is None or not any(
-            is_base(target, arch, n[: -len(".json")])
-            for n in (a.get("name", "") for a in rel.get("assets", []))
-            if n.startswith(f"manifest-{target}-{arch}-")
-            and n.endswith(".json")
-        ):
-            continue
-        if any(
-            a.get("name", "").startswith(f"zfs-{target}-{arch}-")
-            for a in rel.get("assets", [])
-        ):
-            with_zfs.append(tag)
-            continue
-        kernel = kernel_of(target, tag, arch)
-        if kernel is None:
-            unmatched.append(tag)
-            continue
-        found.add(Build(target, kernel))
+        names = [a.get("name", "") for a in rel.get("assets", [])]
+        for n in names:
+            if not (n.startswith("manifest-") and n.endswith(".json")):
+                continue
+            stem = n[: -len(".json")]
+            target = next(
+                (
+                    t
+                    for t in by_length
+                    if stem.startswith(f"manifest-{t}-{arch}-")
+                ),
+                None,
+            )
+            if target is None or not is_base(target, arch, stem):
+                continue
+            if any(m.startswith(f"zfs-{target}-{arch}-") for m in names):
+                if tag not in with_zfs:
+                    with_zfs.append(tag)
+                continue
+            kernel = kernel_of(target, stem, arch)
+            if kernel is None:
+                if tag not in unmatched:
+                    unmatched.append(tag)
+                continue
+            found.add(Build(target, kernel))
     rank = {t: i for i, t in enumerate(targets)}
 
     def key(b: Build) -> tuple[int, int, str]:
@@ -514,7 +521,15 @@ def prepare_trees(src: Path, head: str, work: Path, jobs: int) -> list[Path]:
                     f"cannot clone {src} to {t}: {r.stderr.strip()}"
                 )
         _git(t, "fetch", "-q", "--tags", str(src), head)
+        try:
+            was = _git(t, "rev-parse", "-q", "--verify", "HEAD")
+        except ReleaseBuildError:
+            was = ""
         _git(t, "checkout", "-q", "--force", "--detach", head)
+        if was != head:
+            # The build would keep the old configure state, and with it
+            # the old version, when only the commit changed.
+            _git(t, "clean", "-q", "-x", "-d", "-f")
         trees.append(t)
     return trees
 
@@ -569,6 +584,14 @@ def verify(build: Build, arch: str, head: str, kdir_name: str) -> list[str]:
             problems.append(
                 f"Lustre snapshot in {kdir} does not hold the modules it records"
             )
+    from .lustre_build import _hash_file
+
+    staged_meta = load_meta_safe(snap_dir / ".ltvm-staging-meta.json") or {}
+    symvers = _hash_file(kdir / "build-tree" / "Module.symvers")
+    if got == head and symvers != staged_meta.get("module_symvers_sha256"):
+        problems.append(
+            f"Lustre snapshot in {kdir} was built against another kernel ABI"
+        )
     try:
         extra = _lustre_staging_hash_input(snap_dir)
     except FileNotFoundError:
