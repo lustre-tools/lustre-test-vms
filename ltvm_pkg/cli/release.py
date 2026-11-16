@@ -261,11 +261,16 @@ def _plan_and_run(
     ltvm_version = _ltvm_version()
     ledger = rb.Ledger(work / f"done-{arch}.json")
     done: dict[rb.Build, str] = {}
+    rejected: set[rb.Build] = set()
     for b in order:
         if args.fresh or not ltvm_version:
             break
         entry = ledger.done(arch, b, ltvm_version, head)
-        if entry is not None and not rb.verify(b, arch, head, *entry):
+        if entry is None:
+            continue
+        if rb.verify(b, arch, head, *entry):
+            rejected.add(b)
+        else:
             done[b] = entry[0]
     todo = [b for b in order if b not in done]
     targets = list(dict.fromkeys(b.target for b in order))
@@ -401,6 +406,7 @@ def _plan_and_run(
         log_dir,
         plan,
         say,
+        rejected,
     )
 
 
@@ -420,6 +426,7 @@ def _run(
     log_dir: Path,
     plan: dict[str, Any],
     say: Any,
+    rejected: set[rb.Build],
 ) -> int:
     from ltvm_pkg.target_config import REPO_ROOT
 
@@ -449,7 +456,9 @@ def _run(
             trees,
             log_dir,
             head,
-            force=args.fresh,
+            # A build whose verified files changed is rebuilt outright:
+            # its caches may hold what changed.
+            force=True if args.fresh else rejected,
             on_start=lambda b: ledger.forget(arch, b),
             on_ok=lambda b, kdir: (
                 ledger.record(
@@ -458,7 +467,7 @@ def _run(
                     ltvm_version,
                     head,
                     kdir,
-                    rb.payload_digest(rb.kernel_dir(b, arch, kdir)),
+                    rb.build_payload(b, arch, kdir),
                 )
                 if ltvm_version
                 else None

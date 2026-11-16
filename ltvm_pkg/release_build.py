@@ -563,16 +563,23 @@ def built_kernel_dir(log_text: str) -> str | None:
     return m.group(1) if m else None
 
 
-def payload_digest(kdir: Path) -> str:
+def payload_digest(
+    kdir: Path, image: Path | None = None, variants: Iterable[str] = ()
+) -> str:
     """What a build left in kernel directory ``kdir`` for publishing:
-    every file of its Lustre snapshot by contents, and its installed
-    kernel modules by path and size.  Not file times, which a copy need
-    not keep to the nanosecond."""
+    every file of its Lustre snapshot by contents (less the snapshots of
+    ``variants`` nested in it, which are not this release's), its
+    installed kernel modules by path and size, and which image is
+    current (each install gets a new versioned name) and its size.  Not
+    file times, which a copy need not keep to the nanosecond."""
     import hashlib
 
     h = hashlib.sha256()
     snap = kdir / "lustre-artifacts"
+    skip = {snap / v for v in variants}
     for p in sorted(snap.rglob("*")):
+        if any(p == d or d in p.parents for d in skip):
+            continue
         rel = p.relative_to(kdir)
         if p.is_symlink():
             h.update(f"L {rel}\0{os.readlink(p)}\0".encode())
@@ -588,14 +595,28 @@ def payload_digest(kdir: Path) -> str:
     for p in sorted((kdir / "modules").rglob("*")):
         if p.is_file() and not p.is_symlink():
             h.update(f"M {p.relative_to(kdir)}\0{p.stat().st_size}\0".encode())
+    if image is not None:
+        try:
+            h.update(
+                f"I {image.resolve().name}\0{image.stat().st_size}\0".encode()
+            )
+        except OSError:
+            h.update(b"I missing\0")
     return h.hexdigest()
 
 
-def kernel_dir(build: Build, arch: str, kdir_name: str) -> Path:
+def build_payload(build: Build, arch: str, kdir_name: str) -> str:
+    """payload_digest for a build, with its current image and the
+    target's variants found the way publishing finds them."""
+    from .image_store import current_image
+    from .release_package import _declared_variant_names
     from .target_config import TargetConfig
 
-    return TargetConfig(build.target, arch=arch).kernel_output_dir(
-        kernel=kdir_name
+    tc = TargetConfig(build.target, arch=arch)
+    return payload_digest(
+        tc.kernel_output_dir(kernel=kdir_name),
+        current_image(tc.image_output_dir(kdir_name)),
+        _declared_variant_names(build.target, arch),
     )
 
 
@@ -650,7 +671,7 @@ def verify(
         "image", kernel=kdir_name, extra_hash=extra
     ):
         problems.append("image does not match its inputs and this Lustre")
-    if payload is not None and payload_digest(kdir) != payload:
+    if payload is not None and build_payload(build, arch, kdir_name) != payload:
         problems.append(f"files in {kdir} changed since the build was verified")
     return problems
 
@@ -991,7 +1012,7 @@ def build_all(
     log_dir: Path,
     head: str,
     on_ok: Callable[[Build, str], None],
-    force: bool = False,
+    force: bool | set[Build] = False,
     on_start: Callable[[Build], None] = lambda b: None,
 ) -> dict[Build, Result]:
     def work(slot: int, b: Build) -> Result:
@@ -1017,7 +1038,7 @@ def build_all(
                 str(trees[slot]),
                 "-y",
             ]
-            + (["--force"] if force else []),
+            + (["--force"] if force is True or (force and b in force) else []),
             log,
         )
         secs = time.monotonic() - t0

@@ -660,6 +660,12 @@ class _FakeTC:
     def kernel_output_dir(self, kernel: str) -> Path:
         return self.root / "kernels" / kernel
 
+    def image_output_dir(self, kernel: str) -> Path:
+        return self.root / "images" / kernel
+
+    def declared_variants(self) -> list[str]:
+        return []
+
     def outputs_complete(self, artifact: str, kernel: str) -> bool:
         return self.complete[artifact]
 
@@ -746,7 +752,7 @@ class TestVerify:
         (snap / "sbin" / "mount.lustre").write_text("m")
         b = rb.Build("rocky9", "5.14-rhel9.8")
         with patch("ltvm_pkg.target_config.TargetConfig", return_value=tc):
-            built = rb.payload_digest(kdir)
+            built = rb.build_payload(b, "x86_64", "5.14-rhel9.8-x")
             assert (
                 rb.verify(b, "x86_64", "abc123", "5.14-rhel9.8-x", built) == []
             )
@@ -1635,3 +1641,49 @@ def test_a_zfs_kernel_is_not_brought_back_by_another_manifest() -> None:
     )
     assert builds == []
     assert with_zfs == ["rocky9-x86_64-5.14.0-611.55.1.el9_7_lustre"]
+
+
+def test_payload_names_the_current_image_and_skips_variants(
+    tmp_path: Path,
+) -> None:
+    kdir = tmp_path / "k"
+    (kdir / "lustre-artifacts" / "selinux").mkdir(parents=True)
+    (kdir / "lustre-artifacts" / "lustre.ko").write_text("x")
+    images = tmp_path / "images"
+    images.mkdir()
+    (images / "base-1.ext4").write_bytes(b"a" * 10)
+    (images / "base-2.ext4").write_bytes(b"b" * 10)
+    cur = images / "current.ext4"
+    cur.symlink_to("base-1.ext4")
+    before = rb.payload_digest(kdir, cur, ["selinux"])
+    # a variant's snapshot appearing is not a change to the base build
+    (kdir / "lustre-artifacts" / "selinux" / "lustre.ko").write_text("v")
+    assert rb.payload_digest(kdir, cur, ["selinux"]) == before
+    # another image installed in its place is
+    cur.unlink()
+    cur.symlink_to("base-2.ext4")
+    assert rb.payload_digest(kdir, cur, ["selinux"]) != before
+
+
+def test_a_build_that_failed_its_check_is_forced(tmp_path: Path) -> None:
+    runner = _runner(1)
+    a, b = rb.Build("rocky9", "k"), rb.Build("rocky10", "k")
+    argvs: dict[str, list[str]] = {}
+
+    def fake_run(slot: int, argv: list[str], log: Path) -> int:
+        argvs[argv[2]] = argv
+        return 1
+
+    with patch.object(runner, "run", side_effect=fake_run):
+        rb.build_all(
+            [a, b],
+            1,
+            runner,
+            [tmp_path],
+            tmp_path,
+            "h",
+            lambda x, k: None,
+            force={b},
+        )
+    assert "--force" not in argvs["rocky9"]
+    assert argvs["rocky10"][-1] == "--force"
