@@ -43,6 +43,7 @@ class ContainerMeta(_BaseMeta, total=False):
     """meta.json schema for build containers."""
 
     image_tag: str  # required in practice; set by cmd_build_all
+    image_id: str  # the podman image built; publish checks the tag names it
 
 
 class KernelMeta(_BaseMeta, total=False):

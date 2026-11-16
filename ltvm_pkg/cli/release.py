@@ -224,12 +224,21 @@ def cmd_build_release(args: argparse.Namespace) -> int:
         declared = _declared(arch)
     except Exception as e:  # noqa: BLE001 -- any targets.yaml error
         return _error(f"targets.yaml: {e}", use_json)
+
+    def checkout_key(target: str, kernel: str, a: str) -> str | None:
+        key: str | None = _cli_attr("_checkout_key")(
+            target, a, kernel, "base", key_memo
+        )
+        return key
+
+    key_memo: dict = {}
     builds, unmatched, with_zfs = rb.published_builds(
         releases,
         arch,
         declared,
         _cli_attr("_fetched_kernel_name"),
         is_base,
+        checkout_key,
     )
     builds = rb.filter_builds(builds, args.only)
     if not builds:

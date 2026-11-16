@@ -244,6 +244,130 @@ def _release_matches_kernel(rel: dict, signature: str, arch: str) -> bool:
     return signature in tag
 
 
+def _checkout_key(
+    target: str,
+    arch: str,
+    kernel: str | None,
+    variant: str,
+    memo: dict[tuple[str, str, str, str], str | None] | None = None,
+) -> str | None:
+    """This checkout's release key for one kernel, or None when it
+    cannot be computed (no kernel, or a target this checkout does not
+    declare).  ``memo`` spares rehashing across one listing."""
+    if not kernel:
+        return None
+    k = (target, arch, kernel, variant)
+    if memo is not None and k in memo:
+        return memo[k]
+    from ltvm_pkg.release_tags import release_key
+
+    try:
+        key: str | None = release_key(target, arch, kernel, variant)
+    except Exception as e:  # noqa: BLE001
+        log.debug("no release key for %s: %s", k, e)
+        key = None
+    if memo is not None:
+        memo[k] = key
+    return key
+
+
+def _manifest_identity(
+    rel: dict, target: str, arch: str
+) -> tuple[str, str] | None:
+    """(manifest stem, variant) of ``rel``'s manifest for target/arch."""
+    from ltvm_pkg.release_package import _declared_variant_names
+
+    known = _declared_variant_names(target, arch)
+    prefix = f"manifest-{target}-{arch}-"
+    for a in rel.get("assets", []):
+        name = a.get("name", "")
+        if not (name.startswith(prefix) and name.endswith(".json")):
+            continue
+        stem = name[: -len(".json")]
+        if _is_base_stem(stem, known):
+            return stem, "base"
+        for v in known:
+            if stem.endswith(f"-{v}"):
+                return stem, v
+    return None
+
+
+def _declared_kernel(
+    target: str,
+    arch: str,
+    kernel: str,
+    memo: dict[tuple[str, str, str], str] | None = None,
+) -> str:
+    """``kernel`` as targets.yaml declares it: a full kernel dir name
+    (``5.14-rhel9.7-5.14.0-611.13.1.el9_7``) becomes ``5.14-rhel9.7``."""
+    k = (target, arch, kernel)
+    if memo is not None and k in memo:
+        return memo[k]
+    try:
+        tc = _cli_attr("TargetConfig")(target, arch=arch)
+        name = str(tc._short_kernel_name(kernel))
+    except Exception:  # noqa: BLE001
+        name = kernel
+    if memo is not None:
+        memo[k] = name
+    return name
+
+
+def _named_fits(
+    notes: Any,
+    target: str,
+    arch: str,
+    variant: str,
+    kernel: str | None,
+    memo: dict[tuple[str, str, str], str] | None = None,
+) -> bool | None:
+    """Whether a release whose notes name what it holds is this target,
+    arch, variant and (when given) declared kernel; None when its notes
+    do not say, and only its asset names can."""
+    named = notes.identity()
+    if named is None:
+        return None
+    if named[0] != target or named[1] != arch or named[3] != variant:
+        return False
+    if kernel is None:
+        return True
+    return _declared_kernel(target, arch, named[2], memo) == _declared_kernel(
+        target, arch, kernel, memo
+    )
+
+
+def _release_checkout_match(
+    rel: dict,
+    target: str,
+    arch: str,
+    memo: dict[tuple[str, str, str, str], str | None] | None = None,
+) -> bool | None:
+    """Whether ``rel`` was built from this checkout's inputs: None when
+    it carries no key or its kernel cannot be named."""
+    from ltvm_pkg.release_tags import Publisher, tag_key
+
+    key = tag_key(rel.get("tag_name", ""))
+    if key is None:
+        return None
+    notes = Publisher.of(rel)
+    named = notes.identity()
+    kernel: str | None
+    if named is not None:
+        if named[:2] != (target, arch):
+            return None
+        kernel, variant = named[2], named[3]
+    else:
+        ident = _manifest_identity(rel, target, arch)
+        if ident is None:
+            return None
+        stem, variant = ident
+        kernel = _fetched_kernel_name(target, stem, arch)
+    want = _checkout_key(target, arch, kernel, variant, memo)
+    if want is None:
+        return None
+    return key == want
+
+
 def _find_release_url(
     target: str,
     filter_str: str | None = None,
@@ -251,6 +375,7 @@ def _find_release_url(
     kernel_signature: str | None = None,
     variant: str = "base",
     mode: str = "ecosystem",
+    kernel: str | None = None,
 ) -> str:
     """Find an asset download URL from GitHub releases.
 
@@ -265,6 +390,11 @@ def _find_release_url(
     variant fetch we require the exact ``-<variant>`` suffix so a
     ``--variant mofed`` request doesn't silently grab the base
     asset and vice versa.
+
+    In ecosystem mode the releases of both tag schemes are candidates,
+    and the one keyed with this checkout's inputs wins (see
+    release_tags.pick_release).  ``kernel`` names the kernel the key is
+    computed for; without it each release's own kernel is used.
     """
     releases = _cli_attr("_gh_api")("releases")
     if not isinstance(releases, list):
@@ -312,14 +442,55 @@ def _find_release_url(
                 stem = stem[:dot]
         return stem
 
-    for rel in releases:
+    from ltvm_pkg.release_tags import (
+        UPDATE_HINT,
+        Publisher,
+        manifest_names,
+        pick_release,
+        selectable,
+        tag_is_for,
+        this_ltvm_version,
+        visible,
+    )
+
+    def _tag_fits(tag: str) -> bool:
+        if mode == "bootable":
+            return tag == tag_prefix or tag.startswith(tag_prefix + "-")
+        return tag_is_for(tag, target)
+
+    # (tag, manifest stem, url, publishing ltvm) of each fitting
+    # release, newest first.
+    candidates: list[tuple[str, str, str, Publisher]] = []
+    names: dict[tuple[str, str, str], str] = {}
+    # Newest published first, whole releases only; the bootable
+    # namespace keeps the API's order.
+    usable = visible(releases) if mode == "bootable" else selectable(releases)
+    for rel in usable:
         tag = rel.get("tag_name", "")
-        if tag != tag_prefix and not tag.startswith(tag_prefix + "-"):
+        if not _tag_fits(tag):
             continue
         if filter_str and filter_str not in tag:
             continue
-        if kernel_signature and not _release_matches_kernel(
-            rel, kernel_signature, arch
+        # A release whose notes name its kernel and variant is chosen by
+        # them; the name's signature is for those published before.
+        fits = (
+            None
+            if mode == "bootable"
+            else _named_fits(
+                Publisher.of(rel), target, arch, variant, kernel, names
+            )
+        )
+        if fits is False:
+            continue
+        # One manifest per release: notes name one kernel and variant,
+        # so a release holding two cannot say which is which.
+        if fits and len(manifest_names(rel)) != 1:
+            continue
+        by_name = fits is None or (kernel is None and kernel_signature)
+        if (
+            by_name
+            and kernel_signature
+            and not _release_matches_kernel(rel, kernel_signature, arch)
         ):
             continue
         for asset in rel.get("assets", []):
@@ -329,14 +500,63 @@ def _find_release_url(
             if not name.endswith(suffix):
                 continue
             stem = _asset_stem(name)
-            if variant == "base":
-                if not _is_base_stem(stem, known_variants):
+            if fits is None:
+                if variant == "base":
+                    if not _is_base_stem(stem, known_variants):
+                        continue
+                elif not stem.endswith(f"-{variant}"):
                     continue
-            elif not stem.endswith(f"-{variant}"):
+            if by_name and kernel_signature and kernel_signature not in name:
                 continue
-            if kernel_signature and kernel_signature not in name:
-                continue
-            return str(asset["browser_download_url"])
+            candidates.append(
+                (
+                    tag,
+                    stem,
+                    str(asset["browser_download_url"]),
+                    Publisher.of(rel),
+                )
+            )
+            break
+        if mode == "bootable" and candidates:
+            return candidates[0][2]
+
+    memo: dict[tuple[str, str, str, str], str | None] = {}
+
+    def _expected(i: int) -> str | None:
+        # The declared kernel the notes name: a moving one (mainline's
+        # stable) cannot be read back from the version in the name.
+        notes = candidates[i][3]
+        k = (
+            notes.kernel
+            or kernel
+            or _fetched_kernel_name(target, candidates[i][1], arch)
+        )
+        return _checkout_key(target, arch, k, variant, memo)
+
+    mine = this_ltvm_version() if candidates else None
+    pick = pick_release(
+        [c[0] for c in candidates],
+        [c[3] for c in candidates],
+        _expected,
+        mine,
+    )
+    if pick.index is not None:
+        chosen = candidates[pick.index]
+        if not pick.matched:
+            print(
+                f"note: no published release of {target} ({variant}) is "
+                f"keyed with this checkout's inputs; fetching {chosen[0]}, "
+                f"built from other inputs, so `ltvm build status` may show "
+                f"it stale.",
+                file=sys.stderr,
+            )
+        if pick.newer:
+            print(
+                f"warning: {chosen[0]} was published by ltvm {pick.newer}, "
+                f"newer than this one ({mine}); {UPDATE_HINT}.",
+                file=sys.stderr,
+            )
+        return chosen[2]
 
     avail = [r.get("tag_name", "?") for r in releases]
     hint = f" matching '{filter_str}'" if filter_str else ""
@@ -360,17 +580,42 @@ def _list_releases(
     target: str | None = None,
     kernel_signature: str | None = None,
     arch: str = "x86_64",
+    kernel: str | None = None,
 ) -> list[dict]:
-    """List available releases, optionally filtered by target prefix."""
+    """List available releases, optionally filtered by target prefix.
+
+    With a target and ``kernel`` (a declared kernel), only that
+    kernel's: a release whose notes name its kernel by them, as fetch
+    chooses, any other by ``kernel_signature``.  Each entry says
+    whether it was built from this checkout's inputs
+    (``matches_checkout``: true, false, or null for a release without a
+    key, whose inputs cannot be told).
+    """
+    from ltvm_pkg.release_tags import (
+        Publisher,
+        notes_commit,
+        notes_version,
+        selectable,
+        tag_is_for,
+    )
+
     releases = _cli_attr("_gh_api")("releases")
     if not isinstance(releases, list):
         releases = [releases]
     result = []
-    for rel in releases:
+    memo: dict[tuple[str, str, str, str], str | None] = {}
+    names: dict[tuple[str, str, str], str] = {}
+    for rel in selectable(releases):
         tag = rel.get("tag_name", "")
-        if target and tag != target and not tag.startswith(target + "-"):
+        if target and not tag_is_for(tag, target):
             continue
-        if kernel_signature and not _release_matches_kernel(
+        named = Publisher.of(rel).identity()
+        if target and kernel and named is not None:
+            if named[:2] != (target, arch) or _declared_kernel(
+                target, arch, named[2], names
+            ) != _declared_kernel(target, arch, kernel, names):
+                continue
+        elif kernel_signature and not _release_matches_kernel(
             rel, kernel_signature, arch
         ):
             continue
@@ -387,14 +632,19 @@ def _list_releases(
         size_mb = sum(a.get("size", 0) for a in rel.get("assets", [])) / (
             1024 * 1024
         )
-        result.append(
-            {
-                "tag": tag,
-                "date": rel.get("published_at", "")[:10],
-                "assets": assets,
-                "size_mb": round(size_mb),
-            }
-        )
+        entry: dict[str, Any] = {
+            "tag": tag,
+            "date": (rel.get("published_at") or "")[:10],
+            "ltvm_version": notes_version(rel.get("body")),
+            "ltvm_commit": notes_commit(rel.get("body")),
+            "assets": assets,
+            "size_mb": round(size_mb),
+        }
+        if target:
+            entry["matches_checkout"] = _release_checkout_match(
+                rel, target, arch, memo
+            )
+        result.append(entry)
     return result
 
 
@@ -660,7 +910,10 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     if getattr(args, "list", False):
         try:
             releases = _list_releases(
-                target, kernel_signature=kernel_signature, arch=arch
+                target,
+                kernel_signature=kernel_signature,
+                arch=arch,
+                kernel=kernel,
             )
         except RuntimeError as e:
             return _error(str(e), use_json)
@@ -670,7 +923,18 @@ def cmd_fetch(args: argparse.Namespace) -> int:
             if not releases:
                 print("  (no releases found)")
             for r in releases:
-                print(f"  {r['tag']:<60s}  {r['size_mb']:>5d} MB  {r['date']}")
+                match = r.get("matches_checkout")
+                note = (
+                    ""
+                    if match is None
+                    else "  built from this checkout's inputs"
+                    if match
+                    else "  built from other inputs"
+                )
+                print(
+                    f"  {r['tag']:<60s}  {r['size_mb']:>5d} MB  "
+                    f"{r['date']}{note}"
+                )
         return EXIT_OK
 
     if not target:
@@ -775,6 +1039,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                 kernel_signature=kernel_signature or default_signature,
                 variant=variant,
                 mode="ecosystem",
+                kernel=kernel or tc.default_kernel,
             )
         except RuntimeError as e:
             if kernel_signature or not default_signature:
@@ -1033,49 +1298,121 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------
 
 
-def _gh_release_upload(
-    tag: str, assets: list[Path], notes: str, use_json: bool
-) -> tuple[int | None, str | None]:
-    """Create (if needed) a GitHub release at ``tag`` and upload every
-    path in ``assets`` to it.  Returns (exit_code, err_msg): on success,
-    (None, None).  ``--clobber`` is set so re-runs overwrite prior
-    uploads with the same asset name, which matches the rest of the
-    publish flow.
-    """
+def _gh_release_info(tag: str) -> dict[str, Any] | None:
+    """The release ``tag`` as the logged-in gh user sees it, drafts
+    included: {"state": "absent" | "draft" | "published", "body": its
+    notes, "assets": asset names}.  None when gh cannot say."""
     import ltvm_pkg.cli as _cli
 
     try:
-        create = subprocess.run(
+        r = subprocess.run(
             [
                 "gh",
                 "release",
-                "create",
+                "view",
                 tag,
                 "--repo",
                 _cli.GITHUB_REPO,
-                "--title",
-                tag,
-                "--notes",
-                notes,
+                "--json",
+                "isDraft,body,assets",
             ],
             capture_output=True,
             text=True,
         )
     except FileNotFoundError:
-        return EXIT_ERROR, "gh CLI not found (https://cli.github.com/)"
-    if create.returncode != 0:
-        gh_msg = (create.stderr or "") + (create.stdout or "")
-        if "already exists" not in gh_msg:
+        return None
+    if r.returncode != 0:
+        msg = ((r.stderr or "") + (r.stdout or "")).lower()
+        if "not found" in msg:
+            return {"state": "absent", "body": "", "assets": []}
+        return None
+    try:
+        data = json.loads(r.stdout)
+        return {
+            "state": "draft" if data.get("isDraft") else "published",
+            "body": str(data.get("body") or ""),
+            "assets": [
+                str(a.get("name", "")) for a in data.get("assets") or []
+            ],
+        }
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return None
+
+
+def _gh_release_upload(
+    tag: str,
+    assets: list[Path],
+    notes: str,
+    use_json: bool,
+    public: bool = True,
+) -> tuple[int | None, str | None]:
+    """Create or replace the GitHub release ``tag`` with ``assets`` and
+    ``notes``.  Returns (exit_code, err_msg): on success, (None, None).
+
+    The release is a draft, and its notes lack the completion mark
+    (release_tags.COMPLETE_NOTE), while its assets change: a new one is
+    created so, an existing one, draft or public, made so before any
+    asset changes.  Nothing selects or promotes it then, so nobody takes
+    a mix of old and new assets, or new assets under old notes.  The
+    last step writes ``notes``, mark included, and with ``public``
+    publishes it; without, it stays a draft.  On a failure it is left
+    an incomplete draft.  ``--clobber`` replaces assets of the same
+    name.
+    One maintainer publishes a given target and arch at a time: two
+    publishes of one tag at once can still mix their assets.
+    """
+    import ltvm_pkg.cli as _cli
+
+    def gh(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["gh", "release", *args, "--repo", _cli.GITHUB_REPO],
+            capture_output=True,
+            text=True,
+        )
+
+    def said(r: subprocess.CompletedProcess[str]) -> str:
+        return ((r.stderr or "") + (r.stdout or "")).strip()
+
+    from ltvm_pkg.release_tags import incomplete_notes
+
+    left = (
+        f"; release {tag} is left a draft marked incomplete, so neither "
+        f"fetch nor promote takes it"
+    )
+    # The first change to any release: notes without the completion
+    # mark (and, for a public one, back to a draft), before any asset.
+    unfinished = incomplete_notes(notes)
+    try:
+        info = _cli_attr("_gh_release_info")(tag)
+        if info is None:
             return EXIT_ERROR, (
-                f"gh release create failed (rc={create.returncode}): "
-                f"{gh_msg.strip()}"
+                f"cannot tell whether release {tag} exists (gh release view "
+                f"failed)"
             )
+        if info["state"] == "absent":
+            r = gh(
+                "create", tag, "--title", tag, "--notes", unfinished, "--draft"
+            )
+            if r.returncode != 0:
+                return EXIT_ERROR, (
+                    f"gh release create failed (rc={r.returncode}): {said(r)}"
+                )
+        else:
+            r = gh("edit", tag, "--notes", unfinished, "--draft=true")
+            if r.returncode != 0:
+                return EXIT_ERROR, (
+                    f"could not mark release {tag} incomplete before "
+                    f"replacing its assets (rc={r.returncode}): {said(r)}; "
+                    f"nothing was changed"
+                )
+    except FileNotFoundError:
+        return EXIT_ERROR, "gh CLI not found (https://cli.github.com/)"
 
     for a in assets:
         if not use_json:
             size_mb = a.stat().st_size / (1024 * 1024)
             print(f"  Uploading {a.name} ({size_mb:.0f} MB)...")
-        r = subprocess.run(
+        up = subprocess.run(
             [
                 "gh",
                 "release",
@@ -1087,11 +1424,652 @@ def _gh_release_upload(
                 "--clobber",
             ],
         )
-        if r.returncode != 0:
+        if up.returncode != 0:
             return EXIT_ERROR, (
-                f"gh release upload failed (rc={r.returncode}) for {a.name}"
+                f"gh release upload failed (rc={up.returncode}) for "
+                f"{a.name}{left}"
             )
+    # The notes say what the release holds and who published it, which
+    # fetch decides by: replaced with the assets, published with them.
+    from datetime import datetime, timezone
+
+    from ltvm_pkg.release_tags import finished_notes
+
+    r = gh(
+        "edit",
+        tag,
+        "--notes",
+        finished_notes(notes, datetime.now(timezone.utc)),
+        "--draft=false" if public else "--draft=true",
+    )
+    if r.returncode != 0:
+        return EXIT_ERROR, (
+            f"gh release edit failed (rc={r.returncode}) finishing {tag} "
+            f"with its notes: {said(r)}{left}"
+        )
     return None, None
+
+
+def _gh_release_delete(tag: str) -> str | None:
+    """Delete the release ``tag`` and its git tag; the error, or None."""
+    import ltvm_pkg.cli as _cli
+
+    try:
+        r = subprocess.run(
+            [
+                "gh",
+                "release",
+                "delete",
+                tag,
+                "--repo",
+                _cli.GITHUB_REPO,
+                "--yes",
+                "--cleanup-tag",
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return "gh CLI not found (https://cli.github.com/)"
+    if r.returncode != 0:
+        return f"rc={r.returncode}: {(r.stderr or r.stdout).strip()}"
+    return None
+
+
+def _gh_release_publish(tag: str, notes: str) -> str | None:
+    """Make the draft ``tag`` public with ``notes``; the error, or None."""
+    import ltvm_pkg.cli as _cli
+
+    try:
+        r = subprocess.run(
+            [
+                "gh",
+                "release",
+                "edit",
+                tag,
+                "--repo",
+                _cli.GITHUB_REPO,
+                "--notes",
+                notes,
+                "--draft=false",
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return "gh CLI not found (https://cli.github.com/)"
+    if r.returncode != 0:
+        return f"rc={r.returncode}: {(r.stderr or r.stdout).strip()}"
+    return None
+
+
+def _gh_draft_releases() -> list[dict[str, Any]]:
+    """Every draft release, as the logged-in gh user sees them, in the
+    shape the releases API gives: tag_name, draft, created_at, body and
+    assets.  One whose details could not be read carries
+    ``lookup_failed``.  Raises RuntimeError when gh cannot list them."""
+    import ltvm_pkg.cli as _cli
+
+    try:
+        r = subprocess.run(
+            [
+                "gh",
+                "release",
+                "list",
+                "--repo",
+                _cli.GITHUB_REPO,
+                "--limit",
+                "1000",
+                "--json",
+                "tagName,isDraft,createdAt",
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("gh CLI not found (https://cli.github.com/)")
+    if r.returncode != 0:
+        raise RuntimeError(f"gh release list failed: {r.stderr.strip()}")
+    try:
+        rows = json.loads(r.stdout)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"gh release list returned non-JSON: {e}")
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not row.get("isDraft"):
+            continue
+        tag = str(row.get("tagName", ""))
+        created = row.get("createdAt")
+        info = _cli_attr("_gh_release_info")(tag)
+        if info is None:
+            # Kept, so promote reports it rather than silently missing
+            # a draft it was asked to promote.
+            out.append(
+                {
+                    "tag_name": tag,
+                    "draft": True,
+                    "created_at": created,
+                    "lookup_failed": True,
+                }
+            )
+            continue
+        if info["state"] != "draft":
+            continue
+        out.append(
+            {
+                "tag_name": tag,
+                "draft": True,
+                "created_at": created,
+                "body": info["body"],
+                "assets": [{"name": n} for n in info["assets"]],
+            }
+        )
+    return out
+
+
+def _publish_input_mismatches(
+    tc: Any,
+    kernel: str,
+    variant: str,
+    lustre_src: Path | None = None,
+    include_lustre: bool = True,
+) -> list[str]:
+    """Why the artifacts about to be published must not be, one line
+    each; empty when they may.
+
+    Whether each component is current is what the builds themselves
+    decide, by the same functions: the container's and the image's
+    is_stale, the image's against the Lustre being packaged and its
+    MOFED kmods exactly as image_build hashes them, the kernel's
+    status, release_build's check that the Lustre was built against
+    this kernel, and the MOFED kmods' and ZFS's own is_stale.  On top
+    of those, what only a release needs: a kernel and image that record
+    this build generation (not merely none), built in the container
+    they belong to, and a ZFS that is the one the key covers.
+
+    ``lustre_src`` is the Lustre that will be packaged when it is not
+    yet the snapshot (publish --lustre-tree): its staging.  Without
+    ``include_lustre`` (--no-lustre) no Lustre ships, so an image with
+    Lustre baked in is refused.
+    """
+    from ltvm_pkg.cli.util import has_recorded_components, staleness_reasons
+    from ltvm_pkg.image_build import (
+        _lustre_staging_hash_input,
+        mofed_kmods_hash,
+    )
+    from ltvm_pkg.kernel_build import kernel_status
+    from ltvm_pkg.paths import load_meta_safe
+    from ltvm_pkg.release_build import lustre_fits_kernel
+    from ltvm_pkg.release_package import BUILD_GENERATION, _snapshot_zfs_version
+    from ltvm_pkg.target_config import DEFAULT_VARIANT
+
+    v_flag = "" if variant == DEFAULT_VARIANT else f" --variant {variant}"
+    rebuild = (
+        f"rebuild with `ltvm build all {tc.name} --kernel {kernel}{v_flag}`"
+    )
+    problems: list[str] = []
+    metas: dict[str, dict[str, Any]] = {}
+    for artifact in ("container", "kernel", "image"):
+        path = tc.meta_path(artifact, kernel, variant=variant)
+        meta = load_meta_safe(path)
+        if meta is None:
+            problems.append(f"{artifact}: no meta.json at {path}")
+        else:
+            metas[artifact] = meta
+
+    def stale(artifact: str, meta: dict[str, Any]) -> None:
+        why = staleness_reasons(
+            tc, artifact, meta, kernel=kernel, variant=variant
+        )
+        problems.extend(f"{artifact}: {r}" for r in why)
+        if not why:
+            problems.append(
+                f"{artifact}: not current against its inputs; {rebuild}"
+            )
+
+    def generation(artifact: str, meta: dict[str, Any]) -> bool:
+        got = meta.get("build_generation")
+        if got == BUILD_GENERATION:
+            return True
+        problems.append(
+            f"{artifact}: built by build generation "
+            f"{got if got is not None else '(unrecorded)'}, this "
+            f"checkout's is {BUILD_GENERATION}"
+        )
+        return False
+
+    def built_in(artifact: str, meta: dict[str, Any]) -> bool:
+        # A kernel is built in the base variant's container whatever
+        # variant asked for it (kernel_build._ensure_kernel_builder), an
+        # image in its own.
+        if artifact == "kernel":
+            which = "the base variant's build container"
+            want_hash = tc.input_hash("container", variant=DEFAULT_VARIANT)
+            base = (
+                load_meta_safe(
+                    tc.meta_path("container", variant=DEFAULT_VARIANT)
+                )
+                or {}
+            )
+            want_id = (
+                base.get("image_id")
+                if base.get("input_hash") == want_hash
+                else None
+            )
+        else:
+            which = "the build container being published"
+            cmeta = metas.get("container") or {}
+            want_hash = cmeta.get("input_hash")
+            want_id = cmeta.get("image_id")
+        got = meta.get("container_input_hash")
+        if got is None:
+            problems.append(
+                f"{artifact}: does not record the build container it was "
+                f"built in (built before ltvm recorded it)"
+            )
+            return False
+        if want_hash is not None and got != want_hash:
+            problems.append(
+                f"{artifact}: built in another build container than {which} "
+                f"(its inputs differ)"
+            )
+            return False
+        got_id = meta.get("container_image_id")
+        if got_id and want_id and got_id != want_id:
+            problems.append(
+                f"{artifact}: built in another build container than {which} "
+                f"(podman image {str(got_id)[:12]}, not {str(want_id)[:12]})"
+            )
+            return False
+        return True
+
+    cmeta = metas.get("container")
+    if cmeta is not None and tc.is_stale("container", variant=variant):
+        stale("container", cmeta)
+
+    kmeta = metas.get("kernel")
+    if kmeta is not None:
+        if not tc.outputs_complete("kernel", kernel=kernel):
+            problems.append(f"kernel: its files are incomplete; {rebuild}")
+        elif generation("kernel", kmeta) and built_in("kernel", kmeta):
+            # Without the Lustre tree its patches come from, the kernel's
+            # status answers by generation alone; the per-input digests
+            # answer for the rest, as `build status --why` reads them.
+            if not has_recorded_components(kmeta):
+                problems.append(
+                    "kernel: built before per-input digests were recorded, "
+                    "so it cannot be checked"
+                )
+            elif kernel_status(tc, kernel).get("stale") or staleness_reasons(
+                tc, "kernel", kmeta, kernel=kernel, variant=variant
+            ):
+                stale("kernel", kmeta)
+
+    kdir = tc.kernel_output_dir(kernel)
+    snap = kdir / "lustre-artifacts"
+    if variant != DEFAULT_VARIANT:
+        snap = snap / variant
+    lustre = lustre_src or snap
+    imeta = metas.get("image")
+
+    lustre_input = b""
+    zfs_version: str | None = None
+    # Whether Lustre is baked into the image: image_build folds the
+    # Lustre's staging hash into the image's only then.  Without it the
+    # release is split, a kernel-only image and the Lustre beside it,
+    # and the Lustre is checked against the kernel alone.
+    baked = bool(imeta and imeta.get("with_lustre"))
+    # What the image is checked against could not be read, or is itself
+    # refused: its own staleness would only repeat that.
+    image_inputs_known = True
+    if not include_lustre:
+        if imeta is not None and (
+            imeta.get("with_lustre") or imeta.get("lustre_version")
+        ):
+            image_inputs_known = False
+            problems.append(
+                "image: has Lustre baked in, but --no-lustre ships none; "
+                f"rebuild it without Lustre (`ltvm build image {tc.name} "
+                f"--kernel {kernel}{v_flag} --no-lustre`), or publish with "
+                f"Lustre"
+            )
+    elif (lustre / ".ltvm-staging-meta.json").exists() or (
+        lustre / ".ltvm-snapshot.json"
+    ).exists():
+        try:
+            lustre_input = _lustre_staging_hash_input(lustre)
+        except FileNotFoundError as e:
+            if baked:
+                image_inputs_known = False
+            problems.append(f"Lustre: {e}")
+        if kmeta is not None and not lustre_fits_kernel(kdir, lustre):
+            problems.append(
+                f"Lustre: built against another build of this kernel (its "
+                f"Module.symvers differs); rebuild with `ltvm build all "
+                f"{tc.name} --kernel {kernel}{v_flag} --lustre-tree <tree>`"
+            )
+        zfs_version = _snapshot_zfs_version(lustre)
+
+    mofed_input = b""
+    if imeta is not None and imeta.get("mofed_kmods"):
+        from ltvm_pkg.mofed_kmod_build import is_stale as mofed_is_stale
+        from ltvm_pkg.mofed_kmod_build import mofed_kmod_dir
+
+        try:
+            mdir: Path | None = mofed_kmod_dir(tc, kernel)
+        except Exception:  # noqa: BLE001
+            mdir = None
+        if mdir is None or mofed_is_stale(tc, kernel):
+            image_inputs_known = False
+            problems.append(
+                f"MOFED kmods: not current against this kernel; rebuild with "
+                f"`ltvm build mofed-kmods {tc.name} --kernel {kernel}{v_flag}`"
+            )
+        else:
+            mofed_input = mofed_kmods_hash(mdir)
+
+    if imeta is not None:
+        fits = generation("image", imeta)
+        fits = built_in("image", imeta) and fits
+        if (
+            fits
+            and image_inputs_known
+            and tc.is_stale(
+                "image",
+                kernel=kernel,
+                extra_hash=(lustre_input if baked else b"") + mofed_input,
+                variant=variant,
+            )
+        ):
+            stale("image", imeta)
+
+    if zfs_version:
+        from ltvm_pkg.zfs_build import is_stale as zfs_is_stale
+        from ltvm_pkg.zfs_build import resolve_zfs_version
+
+        declared = resolve_zfs_version(tc)
+        what = f"ZFS {zfs_version}"
+        # The key covers the ZFS targets.yaml declares, not one a build
+        # was told to use instead (--zfs-version).
+        if zfs_version != declared:
+            problems.append(
+                f"{what}: the Lustre was built against ZFS {zfs_version}, "
+                f"but this checkout declares {declared}, which the release "
+                f"key covers"
+            )
+        elif zfs_is_stale(tc, kernel, zfs_version):
+            problems.append(
+                f"{what}: not current against this kernel, or incomplete; "
+                f"rebuild with `ltvm build zfs {tc.name} --kernel {kernel}`"
+            )
+    return problems
+
+
+def _prune_after_publish(
+    identity: tuple[str, str, str, str],
+    tag: str,
+    *,
+    dry_run: bool,
+    use_json: bool,
+) -> list[dict[str, Any]]:
+    """Delete the published releases of ``identity`` (target, arch,
+    declared kernel, variant) that ``tag`` supersedes (see
+    release_tags.prune_plan).  A failure here never fails the publish
+    or promote: the release is already up."""
+    from datetime import datetime, timezone
+
+    from ltvm_pkg.release_tags import prune_plan
+
+    def say(msg: str) -> None:
+        if not use_json:
+            print(msg)
+
+    try:
+        releases = _cli_attr("_gh_api")("releases")
+    except RuntimeError as e:
+        print(
+            f"warning: prune skipped, cannot list releases: {e}",
+            file=sys.stderr,
+        )
+        # Said in the result, so promote can count it a failure: once
+        # the release is public, a rerun finds no draft to retry from.
+        return [
+            {
+                "tag": None,
+                "delete": False,
+                "action": "list failed",
+                "reason": "prune skipped",
+                "error": str(e),
+            }
+        ]
+    if not isinstance(releases, list):
+        releases = [releases]
+    plan = prune_plan(releases, tag, datetime.now(timezone.utc), identity)
+    out: list[dict[str, Any]] = []
+    if plan:
+        say("  Older releases of this kernel and variant:")
+    for d in plan:
+        entry = d.as_dict()
+        if not d.delete:
+            entry["action"] = "kept"
+            say(f"    kept     {d.tag} ({d.reason})")
+        elif dry_run:
+            entry["action"] = "would delete"
+            say(f"    would delete {d.tag} ({d.reason})")
+        else:
+            err = _cli_attr("_gh_release_delete")(d.tag)
+            if err is None:
+                entry["action"] = "deleted"
+                say(f"    deleted  {d.tag} ({d.reason})")
+            else:
+                entry["action"] = "delete failed"
+                entry["error"] = err
+                print(
+                    f"warning: could not delete release {d.tag}: {err}",
+                    file=sys.stderr,
+                )
+        out.append(entry)
+    return out
+
+
+def _publish_refusal(
+    tag: str,
+    public: bool,
+    manifest_name: str,
+    identity: tuple[str, str, str, str],
+    replace_unmerged: bool,
+) -> tuple[str, str] | None:
+    """Why publishing to ``tag`` must not go ahead, as (error, hint);
+    None when it may.
+
+    - A release holds one manifest: another one already in it refuses.
+    - A published release is replaced only from the default branch: a
+      branch publishes drafts, and must not hide or change what
+      everyone fetches.
+    - A draft is resumed when this commit published it.  One another
+      commit published is someone else's publish in progress (one
+      maintainer publishes a target and arch at a time), or an older
+      one of this branch: taken over only with --replace-unmerged.
+    """
+    from ltvm_pkg.release_tags import Publisher, this_ltvm_commit
+
+    info = _cli_attr("_gh_release_info")(tag)
+    if info is None:
+        return (
+            f"cannot tell whether release {tag} already exists "
+            f"(gh release view failed)",
+            "check `gh auth status`",
+        )
+    if info["state"] == "absent":
+        return None
+    others = [
+        n
+        for n in info["assets"]
+        if n.startswith("manifest-")
+        and n.endswith(".json")
+        and n != manifest_name
+    ]
+    if others:
+        return (
+            f"release {tag} already holds {', '.join(others)}: publishing "
+            f"{manifest_name} there would leave two manifests in one release",
+            "delete the stray manifest from that release, then publish again",
+        )
+    notes = Publisher.of({"body": info["body"]})
+    if info["state"] == "published":
+        if public:
+            return None
+        return (
+            f"release {tag} is published, and this checkout's commit is not "
+            f"known to be on the release repository's default branch: a "
+            f"branch publishes drafts, and must not replace a release "
+            f"everyone fetches",
+            "merge first and publish from the default branch",
+        )
+    if notes.identity() not in (None, identity):
+        return (
+            f"draft {tag} names {'/'.join(notes.identity() or ())}, not "
+            f"{'/'.join(identity)}",
+            "check that draft's notes; delete it if it is stale",
+        )
+    commit = this_ltvm_commit()
+    if notes.commit == commit or replace_unmerged:
+        return None
+    return (
+        f"draft {tag} was published from commit "
+        f"{(notes.commit or 'unknown')[:12]}, not this checkout's "
+        f"{(commit or 'unknown')[:12]}: another maintainer may be "
+        f"publishing it, and one publishes a target and arch at a time",
+        "pass --replace-unmerged to take the draft over",
+    )
+
+
+def _bootable_tag_refusal(tag: str) -> str | None:
+    """Why ``--image --tag tag`` must not publish there: the ecosystem
+    tag namespaces are the ecosystem's, and a bootable publish would
+    rewrite such a release's notes without its completion mark."""
+    if not tag.startswith("bootable-"):
+        return (
+            f"--tag {tag}: a bootable image's release tag must start with "
+            f"bootable-; other tags are ecosystem releases"
+        )
+    info = _cli_attr("_gh_release_info")(tag)
+    if info is None:
+        return (
+            f"cannot tell whether release {tag} exists (gh release view failed)"
+        )
+    held = [
+        n
+        for n in info["assets"]
+        if n.startswith("manifest-") and n.endswith(".json")
+    ]
+    if held:
+        return (
+            f"release {tag} holds an ecosystem manifest ({', '.join(held)}): "
+            f"a bootable image does not go there"
+        )
+    return None
+
+
+def _uncommitted_problem(
+    identities: list[tuple[str, str, str, str]],
+) -> str | None:
+    """Why this checkout's release inputs for ``identities`` are not all
+    its commit's: untracked or ignored files the hashes read, which the
+    tracked-files check cannot see (release_tags.uncommitted_inputs)."""
+    from ltvm_pkg import release_tags as rt
+
+    found = rt.uncommitted_inputs(identities)
+    if found is None:
+        return (
+            "cannot compare this checkout's release inputs with its commit "
+            "(exporting HEAD failed)"
+        )
+    lines = sorted({d for diffs in found.values() for d in diffs})
+    if not lines:
+        return None
+    return (
+        "this checkout's release inputs are not all in its commit, so the "
+        "release key would describe files the commit does not hold:\n"
+        + "\n".join(f"    {d}" for d in lines)
+    )
+
+
+def _snapshot_missing(snap_dir: Path) -> str:
+    return (
+        "Lustre snapshot missing under "
+        f"{snap_dir}.\n"
+        "  publish needs Lustre staged into the artifacts "
+        "dir.  Either:\n"
+        "    --lustre-tree <path>   "
+        "(snapshot from a Lustre source tree on the fly)\n"
+        "    ltvm build all <target> --lustre-tree <path>   "
+        "(then re-run publish)\n"
+        "    --no-lustre            "
+        "(ship a kernel-only release on purpose)"
+    )
+
+
+def _may_prune(position: str | None, no_prune: bool, use_json: bool) -> bool:
+    """Whether to prune after a public publish or a promote: only from
+    the tip of the release repository's default branch.  An older
+    checkout may publish, but its releases are not what that branch
+    builds now, and pruning by them could delete the one it fetches."""
+    if no_prune or position not in ("tip", "ancestor"):
+        return False
+    if position != "tip":
+        if not use_json:
+            print(
+                "  Prune skipped: this checkout is not at the tip of the "
+                "default branch."
+            )
+        return False
+    return True
+
+
+def _publish_bootable_dry_run(
+    tc: Any, kernel: str | None, variant: str, tag: str | None, use_json: bool
+) -> int:
+    """What `publish --image` would upload, without packaging it."""
+    from ltvm_pkg.paths import load_meta_safe
+    from ltvm_pkg.release_package import (
+        _bootable_asset_name,
+        _declared_default_kernel,
+        _resolve_kernel,
+    )
+
+    if not tag:
+        try:
+            _, kdir = _resolve_kernel(
+                tc.output_dir,
+                kernel,
+                _declared_default_kernel(tc.name, tc.arch, variant),
+            )
+        except ValueError as e:
+            return _error(f"Package bootable failed: {e}", use_json)
+        kver = (load_meta_safe(kdir / "meta.json") or {}).get("kernel_version")
+        if not kver:
+            return _error(
+                f"kernel meta.json missing at {kdir / 'meta.json'}", use_json
+            )
+        tag = _bootable_asset_name(tc.name, tc.arch, kver, variant)[
+            : -len(".qcow2.zst")
+        ]
+    if use_json:
+        _output(
+            {
+                "dry_run": True,
+                "target": tc.name,
+                "variant": variant,
+                "tag": tag,
+                "mode": "bootable",
+            },
+            use_json,
+        )
+    else:
+        print("Dry run: nothing will be packaged or uploaded.")
+        print(f"  Tag: {tag}")
+    return EXIT_OK
 
 
 def cmd_publish(args: argparse.Namespace) -> int:
@@ -1101,8 +2079,16 @@ def cmd_publish(args: argparse.Namespace) -> int:
 
     * default: publishes the ecosystem -- every asset listed by the
       manifest produced by ``package_target`` (container, kernel, image,
-      optional lustre) to a single release tagged ``<target>-<arch>-<kver>[-<variant>]``.
-      The manifest is uploaded alongside so ``fetch`` can verify.
+      optional lustre) to a single release tagged
+      ``rel-<target>-<arch>-<kver>[-<variant>]-<key>``, the key being
+      this checkout's inputs (release_tags.release_key).  From a
+      checkout whose HEAD is not on the release repository's default
+      branch (release_tags.default_branch_position) the release
+      stays a draft until ``ltvm target promote``; from the default
+      branch it is public, and this kernel and variant's superseded
+      releases are pruned.  _publish_refusal and
+      _publish_input_mismatches say what is refused.  The manifest is
+      uploaded alongside so ``fetch`` can verify.
 
     * ``--image``: publishes only a bootable qcow2 (produced by
       ``ltvm target export`` earlier) to a dedicated release tagged
@@ -1123,6 +2109,9 @@ def cmd_publish(args: argparse.Namespace) -> int:
     image_mode = bool(getattr(args, "image", False))
     no_upload = bool(getattr(args, "no_upload", False))
     tag = getattr(args, "tag", None)
+    # Read before either mode can package or upload anything.
+    dry_run = bool(getattr(args, "dry_run", False))
+    no_prune = bool(getattr(args, "no_prune", False))
 
     if not use_json:
         from ltvm_pkg.cli.util import _print_target_header
@@ -1134,6 +2123,13 @@ def cmd_publish(args: argparse.Namespace) -> int:
         else:
             action = "Publishing"
         _print_target_header(tc, kernel=kernel, variant=variant, action=action)
+
+    if image_mode and tag:
+        bad_tag = _bootable_tag_refusal(tag)
+        if bad_tag is not None:
+            return _error(bad_tag, use_json)
+    if image_mode and dry_run:
+        return _publish_bootable_dry_run(tc, kernel, variant, tag, use_json)
 
     if image_mode:
         from ltvm_pkg.release_package import package_bootable
@@ -1194,6 +2190,181 @@ def cmd_publish(args: argparse.Namespace) -> int:
 
     # --- Ecosystem publish: package, then upload every asset (unless
     # --no-upload, which short-circuits after packaging). ---
+    from ltvm_pkg import release_tags as rt
+    from ltvm_pkg.paths import load_meta_safe
+    from ltvm_pkg.release_package import (
+        _declared_default_kernel,
+        _manifest_name,
+        _resolve_kernel,
+    )
+
+    replace_unmerged = bool(getattr(args, "replace_unmerged", False))
+    if dry_run and no_upload:
+        return _error(
+            "--dry-run and --no-upload together: --dry-run previews a "
+            "publish, --no-upload packages without one",
+            use_json,
+            hint="drop one of them",
+        )
+    if tag:
+        # Always derived: a name given by hand could carry a key the
+        # artifacts were not built with, or be one of the unprefixed
+        # tags older ltvm fetches, whose loader cannot use a container
+        # archive saved by id.
+        return _error(
+            f"--tag {tag}: an ecosystem release is always tagged from its "
+            f"kernel and key; --tag names --image releases only",
+            use_json,
+        )
+
+    # The kernel being published, as package_target will resolve it.
+    try:
+        pub_kernel, pub_kernel_dir = _resolve_kernel(
+            tc.output_dir,
+            kernel,
+            _declared_default_kernel(tc.name, tc.arch, variant),
+        )
+    except ValueError as e:
+        if not no_upload:
+            return _error(f"Package failed: {e}", use_json)
+        pub_kernel, pub_kernel_dir = kernel or "", Path()
+    try:
+        decl_kernel = str(tc._short_kernel_name(pub_kernel))
+    except Exception:  # noqa: BLE001
+        decl_kernel = pub_kernel
+
+    key: str | None = None
+    public = False
+    position: str | None = None
+    manifest_name = ""
+    if not no_upload:
+        # The release records this commit and keys this checkout's
+        # inputs: neither describes uncommitted changes.
+        problem = rt.checkout_problem() or _uncommitted_problem(
+            [(tc.name, tc.arch, decl_kernel, variant)]
+        )
+        if problem is not None:
+            return _error(
+                f"cannot publish: {problem}",
+                use_json,
+                hint="commit the changes, or move them aside, then publish",
+            )
+        # With --lustre-tree, the Lustre packaged is the one snapshotted
+        # from that tree below: check its staging, not the snapshot it
+        # will replace.
+        lustre_src: Path | None = None
+        if getattr(args, "lustre_tree", None) and not getattr(
+            args, "no_lustre", False
+        ):
+            from ltvm_pkg.lustre_build import staging_path
+
+            lustre_src = staging_path(
+                Path(args.lustre_tree).resolve(),
+                tc.name,
+                arch=tc.arch,
+                kernel=pub_kernel,
+                variant=variant,
+            )
+        problems = _cli_attr("_publish_input_mismatches")(
+            tc,
+            pub_kernel,
+            variant,
+            lustre_src=lustre_src,
+            include_lustre=not getattr(args, "no_lustre", False),
+        )
+        if problems:
+            return _error(
+                "the artifacts were not built from this checkout's "
+                "inputs and build code, so the release would not describe "
+                "them:\n" + "\n".join(f"    {p}" for p in problems),
+                use_json,
+                hint=f"rebuild them (ltvm build all {tc.name})",
+            )
+        kver = (load_meta_safe(pub_kernel_dir / "meta.json") or {}).get(
+            "kernel_version"
+        )
+        if not kver:
+            return _error(
+                f"kernel meta.json missing at {pub_kernel_dir / 'meta.json'}",
+                use_json,
+            )
+        manifest_name = _manifest_name(tc.name, tc.arch, kver, variant)
+        try:
+            key = rt.release_key(tc.name, tc.arch, pub_kernel, variant)
+        except Exception as e:  # noqa: BLE001
+            return _error(f"cannot compute the release key: {e}", use_json)
+        tag = rt.keyed_tag(manifest_name[len("manifest-") : -len(".json")], key)
+        # A branch publishes a draft, which nothing fetches until
+        # `ltvm target promote` after its merge; the default branch of
+        # the repository releases go to publishes for everyone.
+        position = rt.default_branch_position()
+        public = position in ("tip", "ancestor")
+        refused = _publish_refusal(
+            tag,
+            public,
+            manifest_name,
+            (tc.name, tc.arch, decl_kernel, variant),
+            replace_unmerged,
+        )
+        if refused is not None:
+            return _error(refused[0], use_json, hint=refused[1])
+
+    if dry_run:
+        assert tag is not None
+        # What packaging would refuse, read-only: the Lustre it would
+        # snapshot or take, and the build container it would export.
+        if not getattr(args, "no_lustre", False):
+            if lustre_src is not None:
+                if not lustre_src.is_dir():
+                    return _error(
+                        f"Lustre snapshot failed: no staging directory at "
+                        f"{lustre_src}; run `ltvm build lustre {tc.name} "
+                        f"--kernel {pub_kernel}` in that tree first",
+                        use_json,
+                    )
+            else:
+                snap_dir = pub_kernel_dir / "lustre-artifacts"
+                if variant != "base":
+                    snap_dir = snap_dir / variant
+                if not (snap_dir / ".ltvm-snapshot.json").exists():
+                    return _error(_snapshot_missing(snap_dir), use_json)
+        from ltvm_pkg.release_package import check_build_container
+
+        try:
+            check_build_container(tc.name, tc.output_dir, tc.arch, variant)
+        except RuntimeError as e:
+            return _error(f"Package failed: {e}", use_json)
+        if not use_json:
+            print("Dry run: nothing will be packaged, uploaded or deleted.")
+            print(f"  Tag: {tag}")
+            if key:
+                print(f"  Key: {key} (artifacts match this checkout)")
+            print(f"  As: {'a public release' if public else 'a draft'}")
+        pruned = (
+            _prune_after_publish(
+                (tc.name, tc.arch, decl_kernel, variant),
+                tag,
+                dry_run=True,
+                use_json=use_json,
+            )
+            if _may_prune(position, no_prune, use_json)
+            else []
+        )
+        if use_json:
+            _output(
+                {
+                    "dry_run": True,
+                    "target": args.target,
+                    "variant": variant,
+                    "tag": tag,
+                    "key": key,
+                    "draft": not public,
+                    "pruned": pruned,
+                },
+                use_json,
+            )
+        return EXIT_OK
+
     # Lustre staging lands in two places: the per-tree
     # ``<lustre_tree>/.ltvm-staging/`` written by ``ltvm build lustre``,
     # and a snapshot under ``kernels/<kver>/lustre-artifacts/`` that
@@ -1246,19 +2417,21 @@ def cmd_publish(args: argparse.Namespace) -> int:
                 except Exception as e:
                     return _error(f"Lustre snapshot failed: {e}", use_json)
             else:
-                return _error(
-                    "Lustre snapshot missing under "
-                    f"{snap_dir}.\n"
-                    "  publish needs Lustre staged into the artifacts "
-                    "dir.  Either:\n"
-                    "    --lustre-tree <path>   "
-                    "(snapshot from a Lustre source tree on the fly)\n"
-                    "    ltvm build all <target> --lustre-tree <path>   "
-                    "(then re-run publish)\n"
-                    "    --no-lustre            "
-                    "(ship a kernel-only release on purpose)",
-                    use_json,
+                return _error(_snapshot_missing(snap_dir), use_json)
+            if not no_upload:
+                # Checked once more on the snapshot just taken: it is
+                # what is packaged.
+                problems = _cli_attr("_publish_input_mismatches")(
+                    tc, pub_kernel, variant
                 )
+                if problems:
+                    return _error(
+                        "the Lustre snapshot just taken does not fit the "
+                        "artifacts:\n"
+                        + "\n".join(f"    {p}" for p in problems),
+                        use_json,
+                        hint=f"rebuild them (ltvm build all {tc.name})",
+                    )
 
     if not use_json:
         v_hint = "" if variant == "base" else f" variant={variant}"
@@ -1287,14 +2460,14 @@ def cmd_publish(args: argparse.Namespace) -> int:
         )
         return EXIT_OK
 
-    # Tag: derive from the manifest filename (strips .json, natural
-    # read).  Variant is embedded in the manifest name for free.
-    if not tag:
-        manifest_name = assets["manifest"].name
-        tag = manifest_name[len("manifest-") : -len(".json")]
-
+    assert tag is not None
+    if assets["manifest"].name != manifest_name:
+        return _error(
+            f"packaged {assets['manifest'].name}, expected {manifest_name}",
+            use_json,
+        )
     if not use_json:
-        print(f"  Tag: {tag}")
+        print(f"  Tag: {tag}{'' if public else ' (draft)'}")
         print(f"  Assets: {len(assets)}")
 
     # Upload EVERYTHING including the manifest so fetch can find it.
@@ -1302,22 +2475,38 @@ def cmd_publish(args: argparse.Namespace) -> int:
     exit_code, err_msg = _cli_attr("_gh_release_upload")(
         tag,
         to_upload,
-        notes=f"Pre-built artifacts for {args.target} (variant={variant})",
+        notes=rt.release_notes(
+            f"Pre-built artifacts for {args.target} (variant={variant})",
+            target=tc.name,
+            arch=tc.arch,
+            kernel=decl_kernel,
+            variant=variant,
+        ),
         use_json=use_json,
+        public=public,
     )
     if exit_code is not None:
         return _error(err_msg or "upload failed", use_json)
 
     url = f"https://github.com/{_cli.GITHUB_REPO}/releases/tag/{tag}"
     if not use_json:
-        print(f"  Published: {url}")
+        if public:
+            print(f"  Published: {url}")
+        else:
+            why = (
+                f"this commit is not on {_cli.GITHUB_REPO}'s default branch"
+                if position == "off"
+                else f"whether this commit is on {_cli.GITHUB_REPO}'s "
+                f"default branch could not be checked"
+            )
+            print(
+                f"  Published as a draft ({why}): nothing fetches it until "
+                f"`ltvm target promote {tc.name}` runs on the default "
+                f"branch after the merge."
+            )
 
     # Record the release tag locally so subsequent `ltvm fetch` knows
-    # the artifacts already on disk match this release.  Use
-    # ``tc.output_dir`` rather than the module-level ARTIFACTS_DIR so a
-    # test that patches TargetConfig automatically gets the redirected
-    # path -- otherwise the write lands on the real filesystem while
-    # the rest of the publish flow is mocked.
+    # the artifacts already on disk match this release.
     from ltvm_pkg.cli.util import write_release_tag
 
     # tc.output_dir, not the global ARTIFACTS_DIR: they differ under
@@ -1325,14 +2514,267 @@ def cmd_publish(args: argparse.Namespace) -> int:
     # global wrote release tags into the real artifacts tree.
     write_release_tag(tc.output_dir, tc.name, tc.arch, tag, variant)
 
-    result = {
+    result: dict[str, Any] = {
         "target": args.target,
         "variant": variant,
         "tag": tag,
+        "key": key,
+        "draft": not public,
         "assets": {k: str(p) for k, p in assets.items()},
         "url": url,
     }
-    _output(result, use_json)
+    # Asked again after the upload: the default branch may have moved on
+    # while it ran, and pruning is for its tip only.
+    if (
+        public
+        and not no_prune
+        and _may_prune(rt.default_branch_position(), no_prune, use_json)
+    ):
+        result["pruned"] = _prune_after_publish(
+            (tc.name, tc.arch, decl_kernel, variant),
+            tag,
+            dry_run=False,
+            use_json=use_json,
+        )
+    # The prune printed its own lines; text mode lists the rest.
+    _output(
+        result
+        if use_json
+        else {k: v for k, v in result.items() if k != "pruned"},
+        use_json,
+    )
+    return EXIT_OK
+
+
+# ------------------------------------------------------------------
+# Subcommand: promote
+# ------------------------------------------------------------------
+
+
+def cmd_promote(args: argparse.Namespace) -> int:
+    """Make public the draft releases a branch published, once merged.
+
+    Runs from a clean checkout whose HEAD is in the history of the
+    release repository's default branch.  A draft ``rel-`` release is promoted when its notes
+    name a target this run covers and its key is the one this checkout
+    computes for that target, arch, kernel and variant: the release is
+    built from what the default branch now builds, and its upload
+    finished (its notes carry the completion mark).  The promoting
+    ltvm's version is added to its notes.  Each promoted release then
+    prunes the releases it supersedes.  Every other draft of those
+    targets is left, with the reason.  Fails, after doing the rest, if
+    GitHub refused any promotion or deletion.
+    """
+    from ltvm_pkg import release_tags as rt
+
+    use_json = args.json
+    dry_run = bool(getattr(args, "dry_run", False))
+    names: list[str] = list(getattr(args, "targets", None) or [])
+    if getattr(args, "all", False):
+        if names:
+            return _error("pass target names or --all, not both", use_json)
+        names = list(_cli_attr("list_targets")())
+    if not names:
+        return _error(
+            "name the targets to promote, or pass --all",
+            use_json,
+            hint="ltvm target promote rocky9  |  ltvm target promote --all",
+        )
+    arch = getattr(args, "arch", None)
+
+    problem = rt.checkout_problem()
+    if problem is not None:
+        return _error(f"cannot promote: {problem}", use_json)
+    import ltvm_pkg.cli as _cli
+
+    position = rt.default_branch_position()
+    if position not in ("tip", "ancestor"):
+        return _error(
+            "cannot promote: this checkout's HEAD is "
+            + (
+                f"not in the history of {_cli.GITHUB_REPO}'s default branch"
+                if position == "off"
+                else f"not known to be on {_cli.GITHUB_REPO}'s default "
+                f"branch (git could not fetch it)"
+            ),
+            use_json,
+            hint="check out the default branch after the merge, pull, and "
+            "promote from there",
+        )
+    try:
+        drafts = _cli_attr("_gh_draft_releases")()
+    except RuntimeError as e:
+        return _error(str(e), use_json)
+
+    promoted: list[dict[str, Any]] = []
+    left: list[dict[str, Any]] = []
+    memo: dict[tuple[str, str, str, str], str | None] = {}
+    mine = rt.this_ltvm_version()
+    # A promotion or a prune that GitHub refused: the run fails, after
+    # the rest are done.  A draft that does not match is not a failure.
+    failed = False
+
+    def leave(tag: str, why: str) -> None:
+        left.append({"tag": tag, "reason": why})
+        if not use_json:
+            print(f"  left     {tag} ({why})")
+
+    # Drafts this checkout would promote, grouped by what they are and
+    # what built them: (target, arch, kernel, variant) and key.
+    matching: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for rel in drafts:
+        tag = str(rel.get("tag_name", ""))
+        if rt.tag_key(tag) is None or not any(
+            rt.tag_is_for(tag, t) for t in names
+        ):
+            continue
+        if rel.get("lookup_failed"):
+            failed = True
+            leave(tag, "reading it failed (gh release view): run promote again")
+            continue
+        notes = rt.Publisher.of(rel)
+        ident = notes.identity()
+        if ident is None:
+            leave(tag, "its notes do not name its target, kernel and variant")
+            continue
+        t, a, k, v = ident
+        if t not in names or (arch and a != arch):
+            continue
+        if not notes.complete:
+            leave(
+                tag,
+                "its upload did not finish (no completion mark): publish "
+                "it again",
+            )
+            continue
+        if len(rt.manifest_names(rel)) != 1:
+            leave(tag, "it does not hold exactly one manifest")
+            continue
+        want = _checkout_key(t, a, k, v, memo)
+        if want is None:
+            leave(tag, f"this checkout does not declare {t}/{a}/{k}/{v}")
+            continue
+        if rt.tag_key(tag) != want:
+            leave(
+                tag,
+                f"built from other inputs than this checkout's (key {want} "
+                f"here): not what the default branch builds",
+            )
+            continue
+        matching.setdefault((*ident, want), []).append(rel)
+
+    if matching:
+        problem = _uncommitted_problem(
+            sorted({(g[0], g[1], g[2], g[3]) for g in matching})
+        )
+        if problem is not None:
+            return _error(
+                f"cannot promote: {problem}",
+                use_json,
+                hint="commit the changes, or move them aside, then promote",
+            )
+
+    # Only the newest build of each group goes public, newest by when
+    # its publish finished (rt.build_order), among the group's drafts
+    # and its published releases: an older one published later would
+    # be newer to fetch, and on a retry after a partial failure it
+    # could be.  Not created_at, the tag commit's date, which builds
+    # made between two commits share.
+    chosen: list[tuple[dict[str, Any], tuple[str, str, str, str]]] = []
+    if matching:
+        try:
+            published = rt.selectable(_cli_attr("_gh_api")("releases"))
+        except RuntimeError as e:
+            published = None
+            for rels in matching.values():
+                for rel in rels:
+                    failed = True
+                    leave(
+                        str(rel["tag_name"]),
+                        f"cannot list published releases to order it: {e}",
+                    )
+        for group, rels in matching.items() if published is not None else ():
+            ident4 = (group[0], group[1], group[2], group[3])
+            builds = list(rels) + [
+                r
+                for r in published or []
+                if rt.tag_key(str(r.get("tag_name", ""))) == group[4]
+                and rt.Publisher.of(r).identity() == ident4
+            ]
+            newest = max(builds, key=rt.build_order)
+            for rel in rels:
+                if rel is not newest:
+                    leave(
+                        str(rel["tag_name"]),
+                        f"superseded by the newer build {newest['tag_name']}",
+                    )
+            if newest in rels:
+                chosen.append((newest, ident4))
+
+    # Oldest first, so of builds of one kernel under different keys the
+    # newer is published last, and is the newest published.
+    for rel, ident in sorted(chosen, key=lambda c: rt.build_order(c[0])):
+        tag = str(rel["tag_name"])
+        if dry_run:
+            entry: dict[str, Any] = {"tag": tag, "action": "would promote"}
+            if not use_json:
+                print(f"  would promote {tag}")
+            entry["pruned"] = (
+                _prune_after_publish(
+                    ident, tag, dry_run=True, use_json=use_json
+                )
+                if _may_prune(position, False, use_json)
+                else []
+            )
+            # As the real run would: a prune it could not plan fails it.
+            if any(p.get("action") == "list failed" for p in entry["pruned"]):
+                failed = True
+            promoted.append(entry)
+            continue
+        # The default-branch ltvm promoting it: what fetch's update
+        # prompt compares, as a branch's version count does not order
+        # against the default branch's.
+        err = _cli_attr("_gh_release_publish")(
+            tag, rt.promoted_notes(str(rel.get("body") or ""), mine)
+        )
+        if err is not None:
+            failed = True
+            leave(tag, f"promoting it failed: {err}")
+            continue
+        if not use_json:
+            print(f"  promoted {tag}")
+        # Asked again now, not at the start: the default branch may
+        # have moved on while this ran.
+        pruned = (
+            _prune_after_publish(ident, tag, dry_run=False, use_json=use_json)
+            if _may_prune(rt.default_branch_position(), False, use_json)
+            else []
+        )
+        if any(
+            p.get("action") in ("delete failed", "list failed") for p in pruned
+        ):
+            failed = True
+        promoted.append({"tag": tag, "action": "promoted", "pruned": pruned})
+
+    if not use_json and not promoted and not left:
+        print("  no draft releases of those targets")
+    if use_json:
+        _output(
+            {
+                "dry_run": dry_run,
+                "promoted": promoted,
+                "left": left,
+                "failed": failed,
+            },
+            use_json,
+        )
+    if failed:
+        if not use_json:
+            print(
+                "error: some promotions or deletions failed (see above)",
+                file=sys.stderr,
+            )
+        return EXIT_ERROR
     return EXIT_OK
 
 
@@ -1460,6 +2902,7 @@ def cmd_delete(args: argparse.Namespace) -> int:
                 kernel_signature=kernel_signature,
                 variant=variant,
                 mode=mode,
+                kernel=kernel,
             )
         except RuntimeError as e:
             return _error(str(e), use_json)

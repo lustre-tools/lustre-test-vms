@@ -123,65 +123,122 @@ def published_builds(
     declared: dict[str, list[str]],
     kernel_of: Callable[[str, str, str], str | None],
     is_base: Callable[[str, str, str], bool],
+    checkout_key: Callable[[str, str, str], str | None] | None = None,
 ) -> tuple[list[Build], list[str], list[str]]:
     """The (target, kernel) pairs published for ``arch``, in the order
     targets.yaml declares them (``declared`` maps each target to its
     kernels), and the tags of releases whose manifest matched no declared
-    kernel.  ``kernel_of(target, manifest_stem, arch)`` maps a base
-    manifest's name to a kernel, and
+    kernel.  Also returns the tags of releases carrying ZFS, which a
+    plain ``build all`` would rebuild without it.
+
+    A release's notes name its target, arch, declared kernel and
+    variant (see release_tags).  For one without, ``kernel_of(target,
+    manifest_stem, arch)`` maps a base manifest's name to a kernel and
     ``is_base(target, arch, manifest_stem)`` tells a base release from
-    a variant's.  Also returns the tags of releases carrying ZFS, which
-    a plain ``build all`` would rebuild without it.
+    a variant's.
+
+    Each declared kernel is read from one release only, the one fetch
+    would take (release_tags.pick_release), whatever other releases of
+    it exist, under either tag scheme or an older kernel version:
+    ``checkout_key(target, kernel, arch)`` is this checkout's key for
+    it.  Whether it carries ZFS is read
+    from that release alone.
     """
+    from ltvm_pkg.release_tags import (
+        Publisher,
+        manifest_names,
+        pick_release,
+        selectable,
+    )
+
     targets = list(declared)
     by_length = sorted(targets, key=len, reverse=True)
-    found: set[Build] = set()
+
+    def _target_of(stem: str) -> str | None:
+        return next(
+            (t for t in by_length if stem.startswith(f"manifest-{t}-{arch}-")),
+            None,
+        )
+
+    def _note(tag: str, into: list[str]) -> None:
+        if tag not in into:
+            into.append(tag)
+
     unmatched: list[str] = []
-    with_zfs: list[str] = []
-    zfs_builds: set[Build] = set()
-    for rel in releases:
-        # The manifest names the target, arch and kernel; the tag is
-        # whatever publish was given (`target publish --tag`).
+    # (target, kernel) -> [(release, kver)], newest first.
+    groups: dict[tuple[str, str], list[tuple[dict[str, Any], str]]] = {}
+    for rel in selectable(releases):
+        # The notes, or else the manifest, name the target, arch and
+        # kernel; the tag is whatever publish was given (`--tag`).
         tag = rel.get("tag_name", "")
-        names = [a.get("name", "") for a in rel.get("assets", [])]
-        for n in names:
+        named = Publisher.of(rel).identity()
+        # One manifest per release, as fetch requires: notes name one
+        # kernel, and cannot say which of two manifests is it.
+        if named is not None and len(manifest_names(rel)) != 1:
+            _note(tag, unmatched)
+            continue
+        for a in rel.get("assets", []):
+            n = a.get("name", "")
             if not (n.startswith("manifest-") and n.endswith(".json")):
                 continue
             stem = n[: -len(".json")]
-            target = next(
-                (
-                    t
-                    for t in by_length
-                    if stem.startswith(f"manifest-{t}-{arch}-")
-                ),
-                None,
-            )
-            if target is None or not is_base(target, arch, stem):
-                continue
+            kernel: str | None
+            if named is not None:
+                target, n_arch, kernel, variant = named
+                if n_arch != arch or target not in declared:
+                    continue
+                if variant != "base":
+                    continue
+                if not stem.startswith(f"manifest-{target}-{arch}-"):
+                    continue
+            else:
+                found_target = _target_of(stem)
+                if found_target is None or not is_base(
+                    found_target, arch, stem
+                ):
+                    continue
+                target = found_target
+                kernel = None
             if MOVING_KERNELS & set(declared[target]):
-                if tag not in unmatched:
-                    unmatched.append(tag)
+                _note(tag, unmatched)
                 continue
             kver = stem[len(f"manifest-{target}-{arch}-") :]
             # A release candidate is mainline's moving `latest`, which a
             # series name's numbers would otherwise claim.
             if re.search(r"-rc\d", kver):
-                if tag not in unmatched:
-                    unmatched.append(tag)
+                _note(tag, unmatched)
                 continue
-            if any(m.startswith(f"zfs-{target}-{arch}-{kver}-") for m in names):
-                if tag not in with_zfs:
-                    with_zfs.append(tag)
-                zfs_kernel = kernel_of(target, stem, arch)
-                if zfs_kernel is not None:
-                    zfs_builds.add(Build(target, zfs_kernel))
-                continue
-            kernel = kernel_of(target, stem, arch)
             if kernel is None:
-                if tag not in unmatched:
-                    unmatched.append(tag)
+                kernel = kernel_of(target, stem, arch)
+            # A kernel the notes name must be one targets.yaml declares,
+            # as one mapped from a manifest name is: it goes on to name
+            # build logs and directories.
+            if kernel is None or kernel not in declared[target]:
+                _note(tag, unmatched)
                 continue
-            found.add(Build(target, kernel))
+            groups.setdefault((target, kernel), []).append((rel, kver))
+
+    found: list[Build] = []
+    with_zfs: list[str] = []
+    for (g_target, g_kernel), rels in groups.items():
+
+        def _want(_i: int, t: str = g_target, k: str = g_kernel) -> str | None:
+            return checkout_key(t, k, arch) if checkout_key else None
+
+        pick = pick_release(
+            [r.get("tag_name", "") for r, _ in rels],
+            [Publisher.of(r) for r, _ in rels],
+            _want,
+            None,
+        )
+        if pick.index is None:
+            continue
+        rel, kver = rels[pick.index]
+        names = [a.get("name", "") for a in rel.get("assets", [])]
+        if any(m.startswith(f"zfs-{g_target}-{arch}-{kver}-") for m in names):
+            _note(rel.get("tag_name", ""), with_zfs)
+            continue
+        found.append(Build(g_target, g_kernel))
     rank = {t: i for i, t in enumerate(targets)}
 
     def key(b: Build) -> tuple[int, int, str]:
@@ -189,9 +246,7 @@ def published_builds(
         pos = names.index(b.kernel) if b.kernel in names else len(names)
         return (rank[b.target], pos, b.kernel)
 
-    # Another manifest of a kernel published with ZFS must not bring it
-    # back: its build would replace the ZFS one without ZFS.
-    return sorted(found - zfs_builds, key=key), unmatched, with_zfs
+    return sorted(found, key=key), unmatched, with_zfs
 
 
 def breadth_first(builds: list[Build]) -> list[Build]:
@@ -672,6 +727,20 @@ def build_payload(build: Build, arch: str, kdir_name: str) -> str:
     )
 
 
+def lustre_fits_kernel(kdir: Path, staged: Path) -> bool:
+    """Whether the Lustre staged (or snapshotted) in ``staged`` was built
+    against the kernel in ``kdir``: its recorded Module.symvers digest
+    is that kernel's."""
+    from .lustre_build import _hash_file
+    from .paths import load_meta_safe
+
+    staged_meta = load_meta_safe(staged / ".ltvm-staging-meta.json") or {}
+    symvers = _hash_file(kdir / "build-tree" / "Module.symvers")
+    return symvers is not None and symvers == staged_meta.get(
+        "module_symvers_sha256"
+    )
+
+
 def verify(
     build: Build,
     arch: str,
@@ -705,11 +774,7 @@ def verify(
         )
     elif not any(snap_dir.rglob("*.ko")):
         problems.append(f"Lustre snapshot in {kdir} has no modules")
-    from .lustre_build import _hash_file
-
-    staged_meta = load_meta_safe(snap_dir / ".ltvm-staging-meta.json") or {}
-    symvers = _hash_file(kdir / "build-tree" / "Module.symvers")
-    if got == head and symvers != staged_meta.get("module_symvers_sha256"):
+    if got == head and not lustre_fits_kernel(kdir, snap_dir):
         problems.append(
             f"Lustre snapshot in {kdir} was built against another kernel ABI"
         )

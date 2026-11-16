@@ -373,6 +373,13 @@ def _input_hash(kver: str, version: str, kernel_hash: str) -> str:
     return h.hexdigest()
 
 
+def _kernel_marks(tc: TargetConfig, kernel: str | None) -> dict[str, object]:
+    """What these modules record of the kernel they are built against."""
+    from .target_config import kernel_abi_marks
+
+    return kernel_abi_marks(load_meta_safe(tc.meta_path("kernel", kernel)))
+
+
 def is_stale(
     tc: TargetConfig,
     kernel: str | None = None,
@@ -393,6 +400,14 @@ def is_stale(
         return True
     expected = _input_hash(kver, ver, _kernel_input_hash(tc, kernel))
     if meta.get("input_hash") != expected:
+        return True
+    from .target_config import kernel_abi_mismatch
+
+    # A BUILD_GENERATION change rebuilds the kernel with its input_hash
+    # unchanged; the modules must follow it.
+    if kernel_abi_mismatch(
+        meta, load_meta_safe(tc.meta_path("kernel", kernel))
+    ):
         return True
     # A failed or half-deleted build can leave the matching meta.json
     # over an empty tree, which the hash alone would call fresh.  Probe
@@ -950,6 +965,7 @@ def _run_build(
         "build_date": datetime.now(timezone.utc).isoformat(),
         "build_seconds": elapsed,
         "modules": kmods,
+        **_kernel_marks(tc, kernel),
     }
     _atomic_write_json(out_dir / "meta.json", meta)
     log.info(

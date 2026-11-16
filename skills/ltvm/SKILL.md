@@ -45,8 +45,8 @@ moves an input often comes with republished artifacts, and `ltvm target
 fetch <target>` takes them in a minute or two where a kernel build takes
 from 20 minutes to over an hour. Rebuild locally when no release has
 caught up (`ltvm target fetch <target> --dry-run` says what it would
-take). A release republished under the same tag (same kernel version,
-new config or image) makes fetch stop and ask for `--replace`.
+take). A release rebuilt for the same kernel version (new config or
+image) makes fetch stop and ask for `--replace`.
 
 Images are per-kernel. A target with two kernels has an image for each,
 so `--kernel <name>` on `build image` and on `create` picks which one,
@@ -772,6 +772,7 @@ accepted by the `build` commands, `target build`, `target validate`,
 ```bash
 ltvm target publish rocky9                # bundle + upload a GitHub release
 ltvm target publish rocky9 --no-upload    # build the tarballs only
+ltvm target promote rocky9                # a merged branch's drafts go public
 ```
 
 `ltvm build release --lustre-tree <tree>` rebuilds every published
@@ -779,8 +780,15 @@ target for the host's arch, in parallel, with a preflight and a check
 of each result (`--dry-run` shows the plan); docs/RELEASING.md has the
 procedure.
 
-`ltvm target fetch` finds the latest release for a target and downloads
-it; re-running when the local tree is current finishes in under a second.
+`ltvm target fetch` finds the published release built from this
+checkout's inputs and downloads it.  Without one it takes the newest
+published release, saying it was built from other inputs (`build
+status` may show it stale), and asks for `sudo ltvm update` when that
+release came from a newer ltvm.  Re-running when the local tree is
+current finishes in under a second.
+A publish from a branch makes draft releases, which `ltvm target
+promote` makes public on the default branch after the merge;
+docs/RELEASING.md explains.
 
 ## Hot and cold storage
 

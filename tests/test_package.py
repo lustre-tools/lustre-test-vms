@@ -367,6 +367,11 @@ class TestPackageTarget:
 
         assert manifest["schema"] == f"{SCHEMA_NAME}/{SCHEMA_VERSION}"
         assert "producer" in manifest
+        # Which ltvm published it: a real field, read to order releases.
+        from ltvm_pkg.release_tags import this_ltvm_commit, this_ltvm_version
+
+        assert manifest["ltvm_version"] == this_ltvm_version()
+        assert manifest["ltvm_commit"] == this_ltvm_commit()
         assert manifest["target"] == "rocky9"
         assert manifest["variant"] == DEFAULT_VARIANT
         assert manifest["kernel_version"] == "5.14.0-611.test"
