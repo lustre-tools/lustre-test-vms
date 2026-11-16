@@ -1389,8 +1389,10 @@ class TargetConfig:
         A meta.json is written at the end of a successful build, but
         nothing removes it when a *later* rebuild of the same inputs
         fails partway -- so the hash alone cannot tell "built" from
-        "was built once, then destroyed".  Container images live in
-        podman's store rather than the filesystem, so they are not
+        "was built once, then destroyed".  A copy cut short leaves a
+        file whose size differs from the one meta.json records, or an
+        empty image, so sizes are checked too.  Container images live
+        in podman's store rather than the filesystem, so they are not
         checked here.
         """
         v = self.variant_name if variant is None else variant
@@ -1402,6 +1404,12 @@ class TargetConfig:
                 return False
             if not (out / "build-tree" / ".config").exists():
                 return False
+            meta = load_meta_safe(out / "meta.json") or {}
+            for name in ("vmlinux", "vmlinuz"):
+                size = (out / name).stat().st_size
+                want = meta.get(f"{name}_bytes")
+                if size == 0 or (isinstance(want, int) and size != want):
+                    return False
             mods = out / "modules"
             if not mods.is_dir():
                 return False
@@ -1410,7 +1418,8 @@ class TargetConfig:
             from .image_store import current_image
 
             image_dir = self.image_output_dir(kernel, variant=v)
-            return current_image(image_dir) is not None
+            image = current_image(image_dir)
+            return image is not None and image.stat().st_size > 0
         return True
 
     def write_meta(

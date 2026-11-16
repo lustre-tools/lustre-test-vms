@@ -154,6 +154,12 @@ def published_builds(
             if target is None or not is_base(target, arch, stem):
                 continue
             kver = stem[len(f"manifest-{target}-{arch}-") :]
+            # A release candidate is mainline's moving `latest`, which a
+            # series name's numbers would otherwise claim.
+            if re.search(r"-rc\d", kver):
+                if tag not in unmatched:
+                    unmatched.append(tag)
+                continue
             if any(m.startswith(f"zfs-{target}-{arch}-{kver}-") for m in names):
                 if tag not in with_zfs:
                     with_zfs.append(tag)

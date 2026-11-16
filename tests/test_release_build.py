@@ -1570,3 +1570,15 @@ def test_remote_podman_store_is_not_checked() -> None:
             assert rb.podman_store() is None
         with patch.object(rb.subprocess, "run", return_value=local):
             assert rb.podman_store() == Path("/data/containers")
+
+
+def test_a_release_candidate_is_unmatched() -> None:
+    rel = _rel("rocky10-x86_64-6.12.0-rc5")
+    builds, unmatched, _ = rb.published_builds(
+        [rel],
+        "x86_64",
+        {"rocky10": ["6.12-rhel10.2"]},
+        lambda t, s, a: "6.12-rhel10.2",
+        _is_base,
+    )
+    assert builds == [] and unmatched == ["rocky10-x86_64-6.12.0-rc5"]
