@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import tempfile
 import threading
@@ -322,7 +323,7 @@ class TestDisk:
             st = real_stat(self, **kw)
             dev = (
                 2
-                if str(self.resolve()).startswith(str(tmp_path / "cold"))
+                if os.path.realpath(self).startswith(str(tmp_path / "cold"))
                 else 1
             )
             return SimpleNamespace(st_dev=dev, st_mode=st.st_mode)
@@ -884,7 +885,7 @@ class TestStop:
 def test_usable_cpus_follows_affinity() -> None:
     from ltvm_pkg.paths import usable_cpus
 
-    with patch("os.sched_getaffinity", return_value={0, 1, 2}):
+    with patch("os.sched_getaffinity", return_value={0, 1, 2}, create=True):
         assert usable_cpus() == 3
 
 

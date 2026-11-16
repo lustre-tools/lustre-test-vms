@@ -2130,7 +2130,7 @@ class TestRequirements:
         assert reqs["QEMU vhost-user-fs-pci"].ok
         assert reqs[f"QEMU {shmrdma.SHARED_RAM_BACKEND}"].ok
         assert reqs["QEMU vhost-user netdev"].ok
-        sr._caps_cache().unlink()  # another QEMU
+        sr._caps_cache().unlink(missing_ok=True)  # another QEMU
         with (
             patch("ltvm_pkg.shmrdma_req._qemu_help", return_value=""),
             patch("ltvm_pkg.qemu_run.qemu_binds_numa", return_value=True),
