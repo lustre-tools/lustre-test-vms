@@ -185,6 +185,7 @@ try:
         cmd_build_kernel,
         cmd_build_lustre,
         cmd_build_mofed_kmods,
+        cmd_build_release,
         cmd_build_shell,
         cmd_build_zfs,
         cmd_claim,
@@ -955,7 +956,65 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to Lustre source tree (default: cwd) -- used to "
         "find per-kernel Lustre staging to bake into the image",
     )
+    bip.add_argument(
+        "--base-only",
+        action="store_true",
+        help="Build only the image's package layers (no kernel modules or "
+        "Lustre), which podman caches for the full image build",
+    )
     bip.set_defaults(func=cmd_build_image)
+
+    brp = build_sub.add_parser(
+        "release",
+        parents=[common],
+        help="Rebuild every published target release for this arch "
+        "(see docs/RELEASING.md)",
+    )
+    brp.add_argument(
+        "--lustre-tree",
+        help="Lustre tree whose HEAD commit to build (default: cwd)",
+    )
+    brp.add_argument(
+        "--only",
+        action="append",
+        metavar="TARGET[:KERNEL]",
+        help="Build only this target, or one kernel of it (repeatable)",
+    )
+    brp.add_argument(
+        "--jobs",
+        type=int,
+        default=None,
+        help="Builds at once (default: one per 32 CPUs, at most 4; 1 on macOS)",
+    )
+    brp.add_argument(
+        "--cpus",
+        metavar="SET:SET...",
+        help="CPU set per job, colon separated, e.g. 0-15,64-79:16-31,80-95 "
+        "(default: whole NUMA nodes shared out)",
+    )
+    brp.add_argument(
+        "--no-preflight",
+        action="store_true",
+        help="Skip building every container and image package layer first",
+    )
+    brp.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the plan, CPU sets and disk check, and build nothing",
+    )
+    brp.add_argument(
+        "--work-dir",
+        metavar="DIR",
+        help="Lustre clones and the ledger of finished builds "
+        "(default: <artifacts>/.release-build)",
+    )
+    brp.add_argument(
+        "--log-dir",
+        metavar="DIR",
+        help="Per-build logs and summary.json "
+        "(default: <work-dir>/logs/<time>)",
+    )
+    brp.set_defaults(func=cmd_build_release)
 
     # Note: build lustre's --force has a slightly different meaning
     # ("Clean and reconfigure before building") than the shared help text,
