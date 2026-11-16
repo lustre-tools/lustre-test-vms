@@ -1272,14 +1272,12 @@ def test_preflight_alone_needs_working_room(tmp_path: Path) -> None:
 
 def test_lock_paths_are_each_taken_once(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    paths = rb.lock_paths(tmp_path / "a", tmp_path / "a", None, home=home)
+    paths = rb.lock_paths(tmp_path / "a", tmp_path / "a", home=home)
     # artifacts and work coincide: one lock; podman's is per user
     assert len(paths) == 2
     assert paths[1][0] == home / ".cache" / "ltvm" / "release-build-podman.lock"
-    # another store is still this user's podman
-    other = rb.lock_paths(
-        tmp_path / "b", tmp_path / "c", tmp_path / "store", home=home
-    )
+    # other directories are still this user's podman
+    other = rb.lock_paths(tmp_path / "b", tmp_path / "c", home=home)
     assert other[2][0] == paths[1][0]
     locks = [rb.lock_dir(p, why) for p, why in paths]
     with pytest.raises(rb.ReleaseBuildError, match="this user's podman"):
@@ -1531,3 +1529,44 @@ def test_a_failed_wait_does_not_orphan_the_build(tmp_path: Path) -> None:
         assert time.monotonic() < deadline, "the build outlived its runner"
         time.sleep(0.05)
     assert not runner._procs
+
+
+def test_module_digest_sees_same_size_changes(tmp_path: Path) -> None:
+    (tmp_path / "lustre.ko").write_bytes(b"old code")
+    before = rb.snapshot_modules(tmp_path)
+    (tmp_path / "lustre.ko").write_bytes(b"new code")
+    assert rb.snapshot_modules(tmp_path) != before
+
+
+def test_zfs_is_judged_per_kernel() -> None:
+    rel = {
+        "tag_name": "rocky9",
+        "assets": [
+            {
+                "name": "manifest-rocky9-x86_64-5.14.0-611.55.1.el9_7_lustre.json"
+            },
+            {
+                "name": "manifest-rocky9-x86_64-5.14.0-687.39.1.el9_8_lustre.json"
+            },
+            {
+                "name": "zfs-rocky9-x86_64-5.14.0-611.55.1.el9_7_lustre-2.3.4.tar.zst"
+            },
+        ],
+    }
+    builds, _, with_zfs = rb.published_builds(
+        [rel], "x86_64", DECLARED, _kernel_of, _is_base
+    )
+    assert [b.name for b in builds] == ["rocky9:5.14-rhel9.8"]
+    assert with_zfs == ["rocky9"]
+
+
+def test_remote_podman_store_is_not_checked() -> None:
+    remote = subprocess.CompletedProcess(
+        [], 0, "true /var/lib/containers\n", ""
+    )
+    local = subprocess.CompletedProcess([], 0, "false /data/containers\n", "")
+    with patch.object(rb.sys, "platform", "linux"):
+        with patch.object(rb.subprocess, "run", return_value=remote):
+            assert rb.podman_store() is None
+        with patch.object(rb.subprocess, "run", return_value=local):
+            assert rb.podman_store() == Path("/data/containers")

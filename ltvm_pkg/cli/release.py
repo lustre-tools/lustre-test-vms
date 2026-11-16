@@ -211,9 +211,7 @@ def cmd_build_release(args: argparse.Namespace) -> int:
         if old_int is signal.SIG_IGN:
             signal.signal(signal.SIGINT, signal.default_int_handler)
         try:
-            for path, why in rb.lock_paths(
-                ARTIFACTS_DIR, work, rb.podman_store()
-            ):
+            for path, why in rb.lock_paths(ARTIFACTS_DIR, work):
                 locks.append(rb.lock_dir(path, why))
         except rb.ReleaseBuildError as e:
             signal.signal(signal.SIGTERM, old_term)
@@ -492,6 +490,12 @@ def _run(
     (log_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     say("")
     say(rb.summary_table(results))
+    if any(r.status == "interrupted" or r.step == "stalled" for r in results):
+        say(
+            "\nStopped builds can leave podman build containers behind: "
+            "`podman ps -a --external` lists them, `podman rm --storage ID` "
+            "removes one."
+        )
     ok = sum(r.status in ("ok", "done") for r in results)
     say(
         f"\n{ok} of {len(results)} good in {summary['minutes']} minutes; "

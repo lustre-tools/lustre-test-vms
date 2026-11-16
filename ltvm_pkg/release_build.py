@@ -153,7 +153,8 @@ def published_builds(
             )
             if target is None or not is_base(target, arch, stem):
                 continue
-            if any(m.startswith(f"zfs-{target}-{arch}-") for m in names):
+            kver = stem[len(f"manifest-{target}-{arch}-") :]
+            if any(m.startswith(f"zfs-{target}-{arch}-{kver}-") for m in names):
                 if tag not in with_zfs:
                     with_zfs.append(tag)
                 continue
@@ -312,18 +313,27 @@ def available_cpus() -> list[int] | None:
 def podman_store() -> Path | None:
     """Where podman keeps images and build layers for this user.
     CONTAINERS_STORAGE_CONF can move it off the home filesystem.  None
-    on macOS, where it is inside the podman machine's own disk."""
+    when it is not on this host's filesystems: on macOS, inside the
+    podman machine, and with a remote podman service."""
     if sys.platform == "darwin":
         return None
     try:
         r = subprocess.run(
-            ["podman", "info", "--format", "{{.Store.GraphRoot}}"],
+            [
+                "podman",
+                "info",
+                "--format",
+                "{{.Host.ServiceIsRemote}} {{.Store.GraphRoot}}",
+            ],
             capture_output=True,
             text=True,
             timeout=60,
         )
-        if r.returncode == 0 and r.stdout.strip():
-            return Path(r.stdout.strip())
+        remote, _, root = r.stdout.strip().partition(" ")
+        if r.returncode == 0 and remote == "true":
+            return None
+        if r.returncode == 0 and root:
+            return Path(root)
     except (OSError, subprocess.TimeoutExpired):
         pass
     return Path.home() / ".local/share/containers"
@@ -438,7 +448,7 @@ def lustre_head(src: Path) -> str:
 
 
 def lock_paths(
-    artifacts: Path, work: Path, store: Path | None, home: Path | None = None
+    artifacts: Path, work: Path, home: Path | None = None
 ) -> list[tuple[Path, str]]:
     """The lock files a run holds, each once: for its artifacts, its
     Lustre trees, and the user's podman.  Rootless podman keeps one run
@@ -542,17 +552,20 @@ def built_kernel_dir(log_text: str) -> str | None:
 
 
 def snapshot_modules(snap_dir: Path) -> str:
-    """The Lustre modules a snapshot holds, by path and size.  Not their
-    times, which a snapshot copy need not keep to the nanosecond."""
+    """The Lustre modules a snapshot holds, by path and contents.  Not
+    their times, which a snapshot copy need not keep to the nanosecond."""
     import hashlib
 
     h = hashlib.sha256()
     for ko in sorted(snap_dir.rglob("*.ko")):
+        h.update(f"{ko.relative_to(snap_dir)}\0".encode())
         try:
-            size = ko.stat().st_size
+            with ko.open("rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
         except OSError:
-            continue
-        h.update(f"{ko.relative_to(snap_dir)}\0{size}\0".encode())
+            h.update(b"\0unreadable")
+        h.update(b"\0")
     return h.hexdigest()
 
 
