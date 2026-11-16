@@ -827,7 +827,24 @@ def _ccache_volume(target_config: TargetConfig) -> str:
     return str(cache_dir)
 
 
-def _ensure_container_image(target_config: TargetConfig) -> str:
+def _ensure_kernel_builder(target_config: TargetConfig) -> str:
+    """Build (if needed) and name the container a kernel is built in:
+    always the base variant's.  A kernel is shared by every variant (its
+    directory and input hash ignore the variant), so building it in a
+    variant's container under ``build all --variant`` would make the
+    shared kernel depend on which variant happened to build it last."""
+    from .target_config import DEFAULT_VARIANT, TargetConfig
+
+    if target_config.variant_name == DEFAULT_VARIANT:
+        return _ensure_container_image(target_config)
+    return _ensure_container_image(
+        TargetConfig(target_config.name, arch=target_config.arch)
+    )
+
+
+def _ensure_container_image(
+    target_config: TargetConfig, iidfile: Path | None = None
+) -> str:
     """Build the container image if needed.
 
     For non-base variants, first ensures the base container exists
@@ -835,7 +852,13 @@ def _ensure_container_image(target_config: TargetConfig) -> str:
     container_overlay Dockerfile applied.  Base and variant containers
     have distinct tags (see build_container_tag) so both can coexist
     on the host.  Returns the (possibly variant-suffixed) tag.
+
+    ``iidfile`` receives the id of the image returned, from the build
+    itself (``podman build --iidfile``): the tag is shared by every
+    checkout of a user, so inspecting it afterwards can name another's.
+    Each build writes it, so the last one, the image returned, wins.
     """
+    iid_args = ["--iidfile", str(iidfile)] if iidfile is not None else []
     from .target_config import DEFAULT_VARIANT, build_container_tag
 
     arch = target_config.arch
@@ -862,6 +885,7 @@ def _ensure_container_image(target_config: TargetConfig) -> str:
         platform,
         "-t",
         base_tag,
+        *iid_args,
         "--build-arg",
         f"BASE_IMAGE={target_config.container_image}",
     ]
@@ -909,6 +933,7 @@ def _ensure_container_image(target_config: TargetConfig) -> str:
         platform,
         "-t",
         variant_tag,
+        *iid_args,
         "--build-arg",
         f"BASE_TAG={base_tag}",
     ]
@@ -1222,7 +1247,7 @@ def _build_kernel_upstream(
     cache_dir = target_config.output_dir / "cache"
     tarball = uk.download_tarball(rel, cache_dir)
 
-    image_tag = _ensure_container_image(target_config)
+    image_tag = _ensure_kernel_builder(target_config)
 
     kernel_out = target_config.output_dir / "kernels" / full_name
     kernel_out.mkdir(parents=True, exist_ok=True)
@@ -1313,7 +1338,7 @@ def _build_kernel_deb(
     log.info("Kernel output directory: kernels/%s", full_name)
 
     # Ensure container image
-    image_tag = _ensure_container_image(target_config)
+    image_tag = _ensure_kernel_builder(target_config)
 
     # Prepare output directory
     kernel_out = target_config.output_dir / "kernels" / full_name
@@ -1568,7 +1593,7 @@ def _build_kernel_suse(
         config_url, cache_dir / f"suse-config-{tag}-{target_config.arch}"
     )
 
-    image_tag = _ensure_container_image(target_config)
+    image_tag = _ensure_kernel_builder(target_config)
 
     kernel_out = target_config.output_dir / "kernels" / full_name
     kernel_out.mkdir(parents=True, exist_ok=True)
@@ -1738,7 +1763,7 @@ def _build_kernel_srpm(
         raise
 
     # Ensure container image
-    image_tag = _ensure_container_image(target_config)
+    image_tag = _ensure_kernel_builder(target_config)
 
     # Prepare output directory (use full name)
     kernel_out = target_config.output_dir / "kernels" / full_name
@@ -1872,11 +1897,15 @@ def kernel_status(
     # a tristate (built=True, stale=None) so callers can show "?"
     # instead of either always-stale (round 17 regression) or
     # always-not-stale (round 18 over-correction).
+    from .target_config import generation_mismatch
+
     stale: bool | None
     if extra_hash:
         stale = target_config.is_stale(
             "kernel", kernel=resolved, extra_hash=extra_hash
         )
+    elif generation_mismatch(meta):
+        stale = True
     else:
         stale = None
     return {

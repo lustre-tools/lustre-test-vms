@@ -302,9 +302,16 @@ def staleness_reasons(
     genuinely how the hash reads it, and guessing which labels refer to
     one file would be a worse kind of wrong than a repeated line.
     """
+    from ltvm_pkg.target_config import GENERATION_ARTIFACTS, generation_mismatch
+
+    generation = (
+        generation_mismatch(status)
+        if artifact in GENERATION_ARTIFACTS
+        else None
+    )
     stored = status.get("input_components")
     if not isinstance(stored, dict) or not stored:
-        return []
+        return [generation] if generation else []
     try:
         current = target_config.input_components(
             artifact, kernel=kernel, variant=variant
@@ -327,6 +334,8 @@ def staleness_reasons(
         if name in skip or name in current:
             continue
         reasons.append(f"{name} (no longer an input)")
+    if generation:
+        reasons.append(generation)
     return reasons
 
 
@@ -562,9 +571,13 @@ def kver_from_release_tag(
 ) -> str:
     """Extract the kernel-version core of a release tag.
 
-    Tags are ``<target>-<arch>-<kver>[-<variant>]``.
+    Tags are ``<target>-<arch>-<kver>[-<variant>]``, or the same inside
+    ``rel-...-<key>`` (see release_tags), which records one kernel under
+    the same name whichever scheme fetched it.
     """
-    core = tag.strip()
+    from ltvm_pkg.release_tags import split_tag
+
+    core = split_tag(tag.strip())[0]
     prefix = f"{target}-{arch}-"
     if core.startswith(prefix):
         core = core[len(prefix) :]

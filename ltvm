@@ -219,6 +219,7 @@ try:
         cmd_make_reinstall,
         cmd_make_uninstall,
         cmd_nmi,
+        cmd_promote,
         cmd_prune,
         cmd_publish,
         cmd_release,
@@ -1147,7 +1148,7 @@ def build_parser() -> argparse.ArgumentParser:
         "target",
         parents=[common],
         help="Target OS management "
-        "(list/show/clean/archive/restore/validate/fetch/publish)",
+        "(list/show/clean/archive/restore/validate/fetch/publish/promote)",
     )
     target_sub = target_parser.add_subparsers(
         dest="target_action", metavar="<action>"
@@ -1474,7 +1475,9 @@ def build_parser() -> argparse.ArgumentParser:
     tpbp.add_argument(
         "--tag",
         default=None,
-        help="Release tag (default: derived from tarball name)",
+        help="Release tag for --image (default: derived from the image "
+        "name); an ecosystem release is always tagged from its kernel "
+        "and key",
     )
     tpbp.add_argument(
         "--tarball",
@@ -1525,7 +1528,65 @@ def build_parser() -> argparse.ArgumentParser:
             "transfer or inspecting what would be published."
         ),
     )
+    tpbp.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help=(
+            "Show the release tag, check the artifacts against this "
+            "checkout and list the older releases a publish would "
+            "prune, without packaging, uploading or deleting anything."
+        ),
+    )
+    tpbp.add_argument(
+        "--replace-unmerged",
+        action="store_true",
+        default=False,
+        help=(
+            "Take over a draft release of the same tag that another "
+            "commit published.  Without it publish refuses: one "
+            "maintainer publishes a target and arch at a time."
+        ),
+    )
+    tpbp.add_argument(
+        "--no-prune",
+        action="store_true",
+        default=False,
+        help=(
+            "Keep every older release of this kernel and variant.  By "
+            "default a public publish deletes the published keyed (rel-) "
+            "ones at least 14 days old, except the newest."
+        ),
+    )
     tpbp.set_defaults(func=cmd_publish)
+
+    # promote (maintainer use): a branch's draft releases, after merge
+    tprp = target_sub.add_parser(
+        "promote",
+        parents=[common],
+        help="Make public the draft releases a branch published, from the "
+        "default branch after the merge",
+    )
+    _tprp_targets = tprp.add_argument(
+        "targets",
+        nargs="*",
+        default=[],
+        help="Targets whose drafts to promote (or --all)",
+    )
+    _tprp_targets.completer = complete_targets  # type: ignore[attr-defined]
+    tprp.add_argument(
+        "--all",
+        action="store_true",
+        default=False,
+        help="Every target's drafts",
+    )
+    tprp.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="List what would be promoted and pruned, change nothing",
+    )
+    tprp.set_defaults(func=cmd_promote)
 
     def _target_no_action(args: argparse.Namespace) -> int:
         target_parser.print_help()

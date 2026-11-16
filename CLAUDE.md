@@ -1847,6 +1847,25 @@ release that should stay fetchable.  Old clients get a
 clear "upgrade ltvm" error and (interactive) an update
 prompt via [ltvm_pkg/update_check.py](ltvm_pkg/update_check.py).
 
+The manifest's top-level `ltvm_version` and `ltvm_commit`
+are real fields; `producer` stays debugging only.  A
+release's notes carry `ltvm-<field>:` lines (target, arch,
+declared kernel, variant, schema, version, commit) that
+fetch, promote, pruning and `build release` decide by.
+Release tags carry a key of the publishing checkout's
+inputs, the schema version and `BUILD_GENERATION`
+(`rel-...-<key>`); a schema bump moves every key.  Replace
+`BUILD_GENERATION` (release_package.py) with a new
+`"YYYY-MM-DD-<reason>"` value with any change to ltvm's build
+Python that changes what kernels or images contain without
+moving an input hash: they record it, and another value reads
+as stale.  Never increment it: independent bumps must conflict.  A branch publishes
+drafts; `ltvm target promote` on the default branch makes
+them public.  The tag scheme, the notes, the choice between
+releases and pruning live in
+[ltvm_pkg/release_tags.py](ltvm_pkg/release_tags.py), and
+docs/RELEASING.md describes them.
+
 ## Code Review Guidance
 
 Watch for:

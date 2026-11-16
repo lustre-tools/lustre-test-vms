@@ -559,3 +559,26 @@ def _neutralize_host_clean_state() -> object:
         patch("ltvm_pkg.image_build.prune_superseded", return_value=0),
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _neutralize_default_branch_check() -> object:
+    """Keep publish and promote off origin, GitHub and the state of this
+    checkout: the default branch is not fetched (unknown, so a publish
+    under test makes a draft unless a test says otherwise), gh reports
+    no release of any tag, and the checkout reads as clean, its release
+    inputs all committed.
+    tests/test_keyed_releases.py covers each."""
+    with (
+        patch("ltvm_pkg.release_tags.default_branch_head", return_value=None),
+        patch("ltvm_pkg.release_tags.checkout_problem", return_value=None),
+        patch(
+            "ltvm_pkg.release_tags.uncommitted_inputs",
+            side_effect=lambda ids: {tuple(i): [] for i in ids},
+        ),
+        patch(
+            "ltvm_pkg.cli._gh_release_info",
+            return_value={"state": "absent", "body": "", "assets": []},
+        ),
+    ):
+        yield

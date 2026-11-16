@@ -425,32 +425,109 @@ class TestGhReleaseUpload:
             )
         assert rc is None
         assert err is None
-        # First call: gh release create.  Second: gh release upload.
+        # A new release is created as a draft, the assets uploaded, and
+        # only then is it published, with its notes.
         assert calls[0][:3] == ["gh", "release", "create"]
+        assert "--draft" in calls[0]
         assert calls[1][:3] == ["gh", "release", "upload"]
         # --clobber is required so re-runs overwrite prior uploads.
         assert "--clobber" in calls[1]
+        assert calls[2][:4] == ["gh", "release", "edit", "rocky9-x86_64-5.14"]
+        assert "--draft=false" in calls[2]
 
-    def test_already_exists_is_not_fatal(self, tmp_path: Path) -> None:
-        """A "release already exists" stderr is treated as success and
-        upload still proceeds.  This is what makes `publish` re-runnable."""
+    def test_an_existing_release_is_a_draft_while_replaced(
+        self, tmp_path: Path
+    ) -> None:
+        """Republishing hides the release while its assets and notes
+        change, so nobody fetches a mix; this is what makes `publish`
+        re-runnable."""
         a = tmp_path / "asset.tar.zst"
         a.write_bytes(b"x")
+        calls: list[list[str]] = []
 
-        run_outputs = iter(
-            [
-                self._proc(1, stderr="release already exists"),
-                self._proc(0),
-            ]
-        )
+        def _run(cmd: list[str], **kw: Any) -> Any:
+            calls.append(cmd)
+            return self._proc(0)
 
-        with patch(
-            "ltvm_pkg.cli.subprocess.run",
-            side_effect=lambda *a, **k: next(run_outputs),
+        with (
+            patch.object(
+                cli_mod,
+                "_gh_release_info",
+                return_value={"state": "published", "body": "", "assets": []},
+            ),
+            patch("ltvm_pkg.cli.subprocess.run", side_effect=_run),
         ):
             rc, err = _gh_release_upload("tag", [a], notes="n", use_json=True)
-        assert rc is None
-        assert err is None
+        assert (rc, err) == (None, None)
+        assert calls[0][:4] == ["gh", "release", "edit", "tag"]
+        assert "--draft=true" in calls[0]
+        assert calls[1][:3] == ["gh", "release", "upload"]
+        assert calls[2][:4] == ["gh", "release", "edit", "tag"]
+        assert calls[2][4:7] == ["--notes", "n", "--draft=false"]
+
+    @pytest.mark.parametrize("fail_at", [1, 2])
+    def test_a_failed_replacement_is_left_a_draft(
+        self, tmp_path: Path, fail_at: int
+    ) -> None:
+        """An upload or the final notes edit failing leaves the release
+        a draft, which fetch passes by, instead of a published mix."""
+        a = tmp_path / "asset.tar.zst"
+        a.write_bytes(b"x")
+        calls: list[list[str]] = []
+
+        def _run(cmd: list[str], **kw: Any) -> Any:
+            calls.append(cmd)
+            return self._proc(
+                1 if len(calls) - 1 == fail_at else 0, stderr="no"
+            )
+
+        with (
+            patch.object(
+                cli_mod,
+                "_gh_release_info",
+                return_value={"state": "published", "body": "", "assets": []},
+            ),
+            patch("ltvm_pkg.cli.subprocess.run", side_effect=_run),
+        ):
+            rc, err = _gh_release_upload("tag", [a], notes="n", use_json=True)
+        assert rc == EXIT_ERROR
+        assert err is not None and "left a draft marked incomplete" in err
+        assert not any("--draft=false" in c for c in calls[:fail_at])
+        assert len(calls) == fail_at + 1
+
+    def test_a_release_that_cannot_be_hidden_is_not_touched(
+        self, tmp_path: Path
+    ) -> None:
+        a = tmp_path / "asset.tar.zst"
+        a.write_bytes(b"x")
+        with (
+            patch.object(
+                cli_mod,
+                "_gh_release_info",
+                return_value={"state": "published", "body": "", "assets": []},
+            ),
+            patch(
+                "ltvm_pkg.cli.subprocess.run",
+                return_value=self._proc(1, stderr="denied"),
+            ) as run,
+        ):
+            rc, err = _gh_release_upload("tag", [a], notes="n", use_json=True)
+        assert rc == EXIT_ERROR
+        assert err is not None and "nothing was changed" in err
+        assert run.call_count == 1
+
+    def test_unknown_release_state_uploads_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        a = tmp_path / "asset.tar.zst"
+        a.write_bytes(b"x")
+        with (
+            patch.object(cli_mod, "_gh_release_info", return_value=None),
+            patch("ltvm_pkg.cli.subprocess.run") as run,
+        ):
+            rc, err = _gh_release_upload("tag", [a], notes="n", use_json=True)
+        assert rc == EXIT_ERROR
+        assert not run.called
 
     def test_create_failure_other_message_is_error(
         self, tmp_path: Path
@@ -480,6 +557,7 @@ class TestGhReleaseUpload:
         assert rc == EXIT_ERROR
         assert err is not None
         assert "asset.tar.zst" in err
+        assert "left a draft marked incomplete" in err
 
     def test_missing_gh_cli_returns_helpful_error(self, tmp_path: Path) -> None:
         a = tmp_path / "asset.tar.zst"
@@ -1573,6 +1651,31 @@ def _tc_factory(tmp_targets: Path):
 # ---------------------------------------------------------------------------
 
 
+def _publishable(key: str = "abcdef0123") -> Any:
+    """Patch what an ecosystem publish checks and lists around the
+    upload: artifacts that match the checkout, a fixed release key, and
+    no older releases to prune.  tests/test_keyed_releases.py covers
+    each of those."""
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    stack.enter_context(
+        patch.object(cli_mod, "_publish_input_mismatches", return_value=[])
+    )
+    stack.enter_context(
+        patch("ltvm_pkg.release_tags.release_key", return_value=key)
+    )
+    stack.enter_context(patch.object(cli_mod, "_gh_api", return_value=[]))
+    # The built kernel's version, which names the release.
+    stack.enter_context(
+        patch(
+            "ltvm_pkg.paths.load_meta_safe",
+            return_value={"kernel_version": "5.14.0-611.13.1.el9_7_lustre"},
+        )
+    )
+    return stack
+
+
 class TestCmdPublish:
     def test_no_lustre_ecosystem_publish_succeeds(
         self,
@@ -1592,6 +1695,7 @@ class TestCmdPublish:
         assets = {"kernel": kernel_tar, "manifest": manifest}
 
         with (
+            _publishable(),
             patch.object(cli_mod, "TargetConfig", return_value=tc),
             patch.object(cfg, "ARTIFACTS_DIR", tmp_targets / "artifacts"),
             patch.object(cli_mod, "package_target", return_value=assets) as pt,
@@ -1614,8 +1718,9 @@ class TestCmdPublish:
         assert pt.called
         assert up.called
         out = capsys.readouterr().out
-        # Tag derived from manifest name.
-        assert "Tag: rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre" in out
+        # Tag derived from manifest name and the release key.
+        tag = "rel-rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre-abcdef0123"
+        assert f"Tag: {tag}" in out
         # Recorded the tag locally for fetch idempotency.
         tag_file = _tag_path(
             tmp_targets / "artifacts",
@@ -1624,10 +1729,7 @@ class TestCmdPublish:
             "5.14.0-611.13.1.el9_7_lustre",
         )
         assert tag_file.exists()
-        assert (
-            tag_file.read_text().strip()
-            == "rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre"
-        )
+        assert tag_file.read_text().strip() == tag
 
     def test_package_failure_blocks_upload(
         self,
@@ -1636,6 +1738,7 @@ class TestCmdPublish:
     ) -> None:
         tc = _tc(tmp_targets)
         with (
+            _publishable(),
             patch.object(cli_mod, "TargetConfig", return_value=tc),
             patch.object(
                 cli_mod,
@@ -1664,11 +1767,14 @@ class TestCmdPublish:
         tmp_path: Path,
     ) -> None:
         tc = _tc(tmp_targets)
-        manifest = tmp_path / ("manifest-rocky9-x86_64-5.14.0-611.json")
+        manifest = tmp_path / (
+            "manifest-rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre.json"
+        )
         manifest.write_text("{}")
         assets = {"manifest": manifest}
 
         with (
+            _publishable(),
             patch.object(cli_mod, "TargetConfig", return_value=tc),
             patch.object(cli_mod, "package_target", return_value=assets),
             patch.object(
@@ -1676,6 +1782,7 @@ class TestCmdPublish:
                 "_gh_release_upload",
                 return_value=(EXIT_ERROR, "gh upload boom"),
             ),
+            patch.object(cli_mod, "_gh_release_delete") as delete,
         ):
             args = _ns(
                 target="rocky9",
@@ -1688,41 +1795,120 @@ class TestCmdPublish:
 
         assert rc == EXIT_ERROR
         assert "gh upload boom" in capsys.readouterr().err
+        # A failed publish prunes nothing.
+        assert not delete.called
 
-    def test_explicit_tag_overrides_derived(
+    def test_explicit_tag_is_refused_for_the_ecosystem(
         self,
         capsys: pytest.CaptureFixture[str],
         tmp_targets: Path,
-        tmp_path: Path,
     ) -> None:
+        """An ecosystem release is always tagged from its kernel and
+        key; --tag names --image releases only (tested below)."""
         tc = _tc(tmp_targets)
-        manifest = tmp_path / "manifest-rocky9-x86_64-5.14.0-611.json"
-        manifest.write_text("{}")
-        assets = {"manifest": manifest}
-        captured_tag: list[str] = []
-
-        def _record_upload(tag, paths, notes, use_json):  # type: ignore[no-untyped-def]
-            captured_tag.append(tag)
-            return None, None
-
         with (
+            _publishable(),
             patch.object(cli_mod, "TargetConfig", return_value=tc),
-            patch.object(cli_mod, "package_target", return_value=assets),
-            patch.object(
-                cli_mod, "_gh_release_upload", side_effect=_record_upload
-            ),
+            patch.object(cli_mod, "package_target") as pt,
+            patch.object(cli_mod, "_gh_release_upload") as up,
         ):
             args = _ns(
                 target="rocky9",
                 no_lustre=True,
                 output=None,
-                tag="my-explicit-tag",
+                tag="rel-my-explicit-tag",
                 image=False,
             )
             rc = cmd_publish(args)
 
+        assert rc == EXIT_ERROR
+        assert "--image releases only" in capsys.readouterr().err
+        assert not pt.called and not up.called
+
+    def test_explicit_tag_names_a_bootable_release(
+        self,
+        tmp_targets: Path,
+        tmp_path: Path,
+    ) -> None:
+        tc = _tc(tmp_targets)
+        asset = tmp_path / "bootable-rocky9-x86_64-5.14.0-611.qcow2.zst"
+        asset.write_bytes(b"z")
+        with (
+            patch.object(cli_mod, "TargetConfig", return_value=tc),
+            patch(
+                "ltvm_pkg.release_package.package_bootable",
+                return_value=asset,
+            ),
+            patch.object(
+                cli_mod, "_gh_release_upload", return_value=(None, None)
+            ) as up,
+        ):
+            args = _ns(
+                target="rocky9",
+                no_lustre=True,
+                output=None,
+                tag="bootable-mine",
+                image=True,
+            )
+            rc = cmd_publish(args)
         assert rc == EXIT_OK
-        assert captured_tag == ["my-explicit-tag"]
+        assert up.call_args.args[0] == "bootable-mine"
+
+    @pytest.mark.parametrize(
+        "tag,assets,why",
+        [
+            (
+                "rel-rocky9-x86_64-5.14.0-1-aaaaaaaaaa",
+                [],
+                "must start with bootable-",
+            ),
+            ("rocky9-x86_64-5.14.0-1", [], "must start with bootable-"),
+            (
+                "bootable-odd",
+                ["manifest-rocky9-x86_64-5.14.0-1.json"],
+                "holds an ecosystem manifest",
+            ),
+        ],
+    )
+    def test_a_bootable_tag_never_names_an_ecosystem_release(
+        self,
+        capsys: pytest.CaptureFixture[str],
+        tmp_targets: Path,
+        tag: str,
+        assets: list[str],
+        why: str,
+    ) -> None:
+        """The ecosystem's tags are the ecosystem's: a bootable publish
+        would rewrite such a release's notes without their completion
+        mark."""
+        tc = _tc(tmp_targets)
+        for dry_run in (False, True):
+            with (
+                patch.object(cli_mod, "TargetConfig", return_value=tc),
+                patch.object(
+                    cli_mod,
+                    "_gh_release_info",
+                    return_value={
+                        "state": "published",
+                        "body": "",
+                        "assets": assets,
+                    },
+                ),
+                patch("ltvm_pkg.release_package.package_bootable") as pb,
+                patch.object(cli_mod, "_gh_release_upload") as up,
+            ):
+                args = _ns(
+                    target="rocky9",
+                    no_lustre=True,
+                    output=None,
+                    tag=tag,
+                    image=True,
+                    dry_run=dry_run,
+                )
+                rc = cmd_publish(args)
+            assert rc == EXIT_ERROR
+            assert why in capsys.readouterr().err
+            assert not pb.called and not up.called
 
     def test_image_mode_packages_bootable_and_uploads(
         self,

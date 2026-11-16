@@ -115,17 +115,13 @@ def _load_saved_container(tc: TargetConfig) -> bool:
     image_tar = tc.container_output_dir() / "image.tar"
     if not image_tar.is_file():
         return False
+    from ltvm_pkg.release_package import load_container_archive
+
     print(f"Loading build container from {image_tar}", file=sys.stderr)
-    r = subprocess.run(
-        ["podman", "load", "-i", str(image_tar)],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode != 0:
-        print(
-            f"podman load failed (rc={r.returncode}): {r.stderr.strip()}",
-            file=sys.stderr,
-        )
+    try:
+        load_container_archive(image_tar, tc.container_tag)
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
         return False
     return True
 
@@ -307,12 +303,30 @@ def _do_build_container(target_config: TargetConfig) -> str:
     Delegates to kernel_build._ensure_container_image so the podman
     invocation lives in exactly one place.
     """
+    import tempfile
+
     from ltvm_pkg.kernel_build import _ensure_container_image
 
-    tag = _ensure_container_image(target_config)
+    with tempfile.TemporaryDirectory(prefix="ltvm-iid-") as td:
+        iidfile = Path(td) / "iid"
+        tag = _ensure_container_image(target_config, iidfile=iidfile)
+        try:
+            image_id = iidfile.read_text().strip().removeprefix("sha256:")
+        except OSError:
+            image_id = ""
     # Schema: see ltvm_pkg.meta_schema.ContainerMeta.
-    # target/input_hash are written by TargetConfig.write_meta.
-    target_config.write_meta("container", image_tag=tag)
+    # target/input_hash are written by TargetConfig.write_meta.  The
+    # image id, from the build itself, is what publish checks the tag
+    # still names: every checkout of this user shares the tag.
+    if image_id:
+        target_config.write_meta("container", image_tag=tag, image_id=image_id)
+    else:
+        print(
+            f"warning: podman build wrote no image id for {tag}; "
+            f"publishing this container will be refused",
+            file=sys.stderr,
+        )
+        target_config.write_meta("container", image_tag=tag)
     return tag
 
 

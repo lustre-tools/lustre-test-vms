@@ -51,11 +51,35 @@ def _release_status(
     kernel_signature: str | None = None,
     variant: str = "base",
 ) -> tuple[str, str]:
-    """Return (local_tag, remote_tag) for a target/arch/variant.
+    """Return (local_tag, remote_tag) for a target/arch/variant; see
+    _release_status_full, which also says whether the remote release
+    matches this checkout."""
+    local, remote, _ = _release_status_full(
+        target, arch, all_releases, kernel_signature, variant
+    )
+    return local, remote
 
-    Both strip the shared ``<target>-<arch>-`` prefix so only the bit
-    that actually varies shows up in the table.  ``-`` means "nothing"
-    built/published; ``?`` means GitHub was unreachable.
+
+def _release_status_full(
+    target: str,
+    arch: str,
+    all_releases: list | None,
+    kernel_signature: str | None = None,
+    variant: str = "base",
+    kernel: str | None = None,
+    memo: dict | None = None,
+) -> tuple[str, str, bool | None]:
+    """Return (local_tag, remote_tag, remote_matches_checkout) for a
+    target/arch/variant.
+
+    Both tags strip the ``rel-`` and ``<target>-<arch>-`` prefixes so
+    only the bit that actually varies shows up in the table.  ``-``
+    means "nothing" built/published; ``?`` means GitHub was
+    unreachable.  The remote release is the one fetch would take: the
+    one keyed with this checkout's inputs when there is one (see
+    release_tags.pick_release).  The third value is True for that
+    match, False for a release keyed with other inputs, None when the
+    release has no key or there is none.
 
     For non-base variants, only releases that ship a
     ``manifest-*-<variant>.json`` asset are considered; base lookups
@@ -65,10 +89,21 @@ def _release_status(
     `target show` agree on what's available.)
     """
     from ltvm_pkg.cli.util import read_release_tag, released_kvers
+    from ltvm_pkg.release_tags import (
+        KEYED_PREFIX,
+        Publisher,
+        manifest_names,
+        pick_release,
+        selectable,
+        tag_is_for,
+        tag_key,
+    )
 
     prefix = f"{target}-{arch}-"
 
     def _trim(tag: str) -> str:
+        if tag.startswith(KEYED_PREFIX):
+            tag = tag[len(KEYED_PREFIX) :]
         return tag[len(prefix) :] if tag.startswith(prefix) else tag
 
     # Release tags are recorded per (kernel, variant), so this is an
@@ -88,6 +123,7 @@ def _release_status(
     )
     local = _trim(raw_local) if raw_local else "-"
 
+    matched: bool | None = None
     if all_releases is None:
         remote = "?"
     else:
@@ -96,40 +132,82 @@ def _release_status(
         known_variants = _declared_variant_names(target, arch)
         arch_match = f"-{arch}-"
         remote = "-"
-        for rel in all_releases:
+        candidates: list[tuple[str, str, Publisher]] = []
+        names: dict = {}
+        for rel in selectable(all_releases):
             tag = rel.get("tag_name", "")
-            if tag != target and not tag.startswith(target + "-"):
+            if not tag_is_for(tag, target):
                 continue
-            # Require a manifest asset matching the variant.  This is
-            # the same rule _find_release_url uses, so list/fetch/show
-            # agree on availability.
-            manifest_match = False
+            # The same rules _find_release_url uses, so list/fetch/show
+            # agree on availability: a release whose notes name its
+            # kernel and variant by them, any other by a manifest asset
+            # matching the variant and the kernel's signature.
+            notes = Publisher.of(rel)
+            fits = _cli_attr("_named_fits")(
+                notes, target, arch, variant, kernel, names
+            )
+            if fits is False:
+                continue
+            if fits and len(manifest_names(rel)) != 1:
+                continue
+            manifest_match = ""
             for a in rel.get("assets", []):
                 name = a.get("name", "")
                 if not name.startswith(f"manifest-{target}{arch_match}"):
                     continue
                 if not name.endswith(".json"):
                     continue
-                if variant == "base":
-                    if not _cli_attr("_is_base_stem")(
-                        name[: -len(".json")], known_variants
-                    ):
+                if fits is None:
+                    if variant == "base":
+                        if not _cli_attr("_is_base_stem")(
+                            name[: -len(".json")], known_variants
+                        ):
+                            continue
+                    elif not name.endswith(f"-{variant}.json"):
                         continue
-                else:
-                    if not name.endswith(f"-{variant}.json"):
-                        continue
-                manifest_match = True
+                manifest_match = name[: -len(".json")]
                 break
             if not manifest_match:
                 continue
-            if kernel_signature and not _cli_attr("_release_matches_kernel")(
-                rel, kernel_signature, arch
+            by_name = fits is None or kernel is None
+            if (
+                by_name
+                and kernel_signature
+                and not _cli_attr("_release_matches_kernel")(
+                    rel, kernel_signature, arch
+                )
             ):
                 continue
-            remote = _trim(tag)
-            break
+            candidates.append((tag, manifest_match, notes))
 
-    return (local, remote)
+        def _expected(i: int) -> str | None:
+            k = (
+                candidates[i][2].kernel
+                or kernel
+                or _cli_attr("_fetched_kernel_name")(
+                    target, candidates[i][1], arch
+                )
+            )
+            key: str | None = _cli_attr("_checkout_key")(
+                target, arch, k, variant, memo
+            )
+            return key
+
+        pick = pick_release(
+            [c[0] for c in candidates],
+            [c[2] for c in candidates],
+            _expected,
+            None,
+        )
+        if pick.index is not None:
+            remote = _trim(candidates[pick.index][0])
+            matched = (
+                True
+                if pick.matched
+                else (False if tag_key(candidates[pick.index][0]) else None)
+            )
+
+    return (local, remote, matched)
 
 
 def _variant_suffix_in_tag(tag: str) -> str | None:
@@ -213,6 +291,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
     # built or published anywhere falls back to the host arch so it still
     # shows one row inviting a local build.
     from ltvm_pkg.cli.util import host_arch
+    from ltvm_pkg.release_tags import selectable, split_tag
     from ltvm_pkg.storage import storage_fields
     from ltvm_pkg.target_config import ARTIFACTS_DIR
 
@@ -237,9 +316,10 @@ def cmd_targets(args: argparse.Namespace) -> int:
             for entry in target_root.iterdir():
                 if entry.is_dir() and (entry / "kernels").is_dir():
                     archs.add(entry.name)
-        # arches with a published release (tag "<target>-<arch>-...")
-        for rel in all_releases or []:
-            tag = rel.get("tag_name", "")
+        # arches with a published release (tag "<target>-<arch>-...",
+        # or the same inside "rel-...-<key>")
+        for rel in selectable(all_releases or []):
+            tag = split_tag(rel.get("tag_name", ""))[0]
             for a in _KNOWN_ARCHES:
                 if tag.startswith(f"{target_name}-{a}-"):
                     archs.add(a)
@@ -254,6 +334,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
 
     TargetConfig = _cli_attr("TargetConfig")
     rows: list[dict[str, Any]] = []
+    key_memo: dict = {}
     for name in names:
         for arch in _archs_for(name):
             try:
@@ -289,6 +370,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
                         "built": False,
                         "local_release": "-",
                         "remote_release": "-",
+                        "remote_matches_checkout": None,
                         **where,
                     }
                 )
@@ -300,12 +382,14 @@ def cmd_targets(args: argparse.Namespace) -> int:
                         variant
                     ):
                         continue
-                    local, remote = _release_status(
+                    local, remote, remote_match = _release_status_full(
                         name,
                         tc.arch,
                         all_releases,
                         kernel_signature=signature,
                         variant=variant,
+                        kernel=kname,
+                        memo=key_memo,
                     )
                     # "Built" here = a variant-specific image meta exists on
                     # disk.  The kernel meta is variant-independent, so
@@ -379,6 +463,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
                             "built": built,
                             "local_release": local,
                             "remote_release": remote,
+                            "remote_matches_checkout": remote_match,
                             "lustre_missing": lustre_missing,
                             **where,
                         }
@@ -429,6 +514,7 @@ def cmd_targets(args: argparse.Namespace) -> int:
     has_unreachable = False
     has_no_lustre = False
     has_cold = False
+    has_keyed: set[bool] = set()
 
     def _cells(r: dict[str, Any]) -> tuple[str, str, str]:
         """Local / Remote / State cells for a variant row."""
@@ -442,6 +528,11 @@ def cmd_targets(args: argparse.Namespace) -> int:
             remote_col = "-"
         else:
             remote_col = CHECK
+            # '✓=' keyed with this checkout's inputs, '✓~' with others.
+            match = r.get("remote_matches_checkout")
+            if match is not None:
+                remote_col += "=" if match else "~"
+                has_keyed.add(bool(match))
         if (
             r["built"]
             and r["local_release"] not in ("-", "?")
@@ -631,6 +722,13 @@ def cmd_targets(args: argparse.Namespace) -> int:
         print("* experimental -- may not build or boot cleanly")
     if has_unreachable:
         print("? github unreachable -- remote status unknown")
+    if True in has_keyed:
+        print(f"{CHECK}= release built from this checkout's inputs")
+    if False in has_keyed:
+        print(
+            f"{CHECK}~ release built from other inputs than this "
+            f"checkout's (`ltvm build status` shows it stale)"
+        )
     if has_behind:
         print(
             "✓! = local copy differs from latest release -- "
@@ -705,8 +803,12 @@ def cmd_target_show(args: argparse.Namespace) -> int:
     kernels: list[dict[str, Any]] = []
     for kname in tc.declared_kernels():
         signature = _cli_attr("_kernel_release_signature")(kname)
-        local, remote = _release_status(
-            tc.name, tc.arch, all_releases, kernel_signature=signature
+        local, remote, remote_match = _release_status_full(
+            tc.name,
+            tc.arch,
+            all_releases,
+            kernel_signature=signature,
+            kernel=kname,
         )
         built = tc.meta_path("kernel", kname).exists()
         if built:
@@ -723,6 +825,7 @@ def cmd_target_show(args: argparse.Namespace) -> int:
                 "built": built,
                 "local_release": local,
                 "remote_release": remote,
+                "remote_matches_checkout": remote_match,
                 "zfs_built": _built_zfs_versions(tc, kname),
             }
         )
@@ -770,7 +873,11 @@ def cmd_target_show(args: argparse.Namespace) -> int:
         if k["local_release"] != "-":
             print(f"            local:  {k['local_release']}")
         if k["remote_release"] not in ("-", "?"):
-            print(f"            remote: {k['remote_release']}")
+            note = {
+                True: " (built from this checkout's inputs)",
+                False: " (built from other inputs)",
+            }.get(k["remote_matches_checkout"], "")
+            print(f"            remote: {k['remote_release']}{note}")
         if k["zfs_built"]:
             print(f"            zfs:    {', '.join(k['zfs_built'])}")
     return EXIT_OK

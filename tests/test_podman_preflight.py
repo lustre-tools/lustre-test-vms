@@ -288,7 +288,8 @@ class TestPreflightContainerHelper:
         run = MagicMock(
             side_effect=[
                 MagicMock(returncode=1),
-                MagicMock(returncode=0, stdout="Loaded image: x\n"),
+                MagicMock(returncode=0, stdout="Loaded image: sha256:abc\n"),
+                MagicMock(returncode=0),
                 MagicMock(returncode=0),
                 MagicMock(returncode=0, stdout="x86_64\n"),
             ]
@@ -301,6 +302,13 @@ class TestPreflightContainerHelper:
             "load",
             "-i",
             str(self.container_dir / "image.tar"),
+        ]
+        # An archive saved by id carries no tag: the loader names it.
+        assert run.call_args_list[2].args[0] == [
+            "podman",
+            "tag",
+            "abc",
+            "ltvm-build-rocky9",
         ]
 
     def test_failed_load_still_reports_missing(
@@ -323,7 +331,8 @@ class TestPreflightContainerHelper:
         )
         assert _real_preflight_container(self._tc(), False) == EXIT_ERROR
         err = capsys.readouterr().err
-        assert "podman load failed (rc=125): bad tarball" in err
+        assert "podman load failed (rc=125)" in err
+        assert "bad tarball" in err
         assert "ltvm-build-rocky9 not found" in err
 
     def test_pass_when_image_present(

@@ -1677,17 +1677,25 @@ def test_kernel_ccache_room_is_charged_beside_the_artifacts() -> None:
     assert entry[0].name == "ccache-aarch64"
 
 
-def test_a_zfs_kernel_is_not_brought_back_by_another_manifest() -> None:
+def test_a_kernel_is_planned_from_the_release_fetch_takes() -> None:
+    """Two releases of one declared kernel: only the one fetch takes,
+    the newest, says whether it carries ZFS.  Another release of it
+    with ZFS neither brings the kernel back nor keeps it out."""
     plain = _rel("rocky9-x86_64-5.14.0-611.13.1.el9_7_lustre")
     zfs = _rel("rocky9-x86_64-5.14.0-611.55.1.el9_7_lustre")
     zfs["assets"].append(
         {"name": "zfs-rocky9-x86_64-5.14.0-611.55.1.el9_7_lustre-2.3.4.tar.zst"}
     )
     builds, _, with_zfs = rb.published_builds(
-        [plain, zfs], "x86_64", DECLARED, _kernel_of, _is_base
+        [zfs, plain], "x86_64", DECLARED, _kernel_of, _is_base
     )
     assert builds == []
     assert with_zfs == ["rocky9-x86_64-5.14.0-611.55.1.el9_7_lustre"]
+    builds, _, with_zfs = rb.published_builds(
+        [plain, zfs], "x86_64", DECLARED, _kernel_of, _is_base
+    )
+    assert builds == [rb.Build("rocky9", "5.14-rhel9.7")]
+    assert with_zfs == []
 
 
 def test_payload_names_the_current_image_and_skips_variants(

@@ -110,6 +110,13 @@ def _kernel_input_hash(tc: TargetConfig, kernel: str | None) -> str:
     return h if isinstance(h, str) else ""
 
 
+def _kernel_marks(tc: TargetConfig, kernel: str | None) -> dict[str, object]:
+    """What these modules record of the kernel they are built against."""
+    from .target_config import kernel_abi_marks
+
+    return kernel_abi_marks(load_meta_safe(tc.meta_path("kernel", kernel)))
+
+
 def is_stale(tc: TargetConfig, kernel: str | None = None) -> bool:
     out_dir = mofed_kmod_dir(tc, kernel)
     meta = load_meta_safe(out_dir / "meta.json")
@@ -124,6 +131,14 @@ def is_stale(tc: TargetConfig, kernel: str | None = None) -> bool:
         kver, _mofed_version(tc), _kernel_input_hash(tc, kernel)
     )
     if meta.get("input_hash") != expected:
+        return True
+    from .target_config import kernel_abi_mismatch
+
+    # A BUILD_GENERATION change rebuilds the kernel with its input_hash
+    # unchanged; the kmods must follow it.
+    if kernel_abi_mismatch(
+        meta, load_meta_safe(tc.meta_path("kernel", kernel))
+    ):
         return True
     # A failed build wipes the RPMs but leaves the matching meta.json,
     # so the hash alone would report "up to date" over an empty
@@ -267,6 +282,7 @@ def build_mofed_kmods(
         "build_date": datetime.now(timezone.utc).isoformat(),
         "build_seconds": elapsed,
         "rpms": rpms,
+        **_kernel_marks(tc, kernel),
     }
     _atomic_write_json(out_dir / "meta.json", meta)
     log.info(

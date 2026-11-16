@@ -36,6 +36,7 @@ import hashlib
 import importlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -85,6 +86,22 @@ from .target_config import (  # noqa: E402
 SCHEMA_VERSION = 1
 SCHEMA_NAME = "ltvm-release"
 
+# Generation of ltvm's build code, folded into every release key
+# (release_tags.release_key) and recorded on built kernels and images.
+# Replace it whenever a change to ltvm's build code changes what the
+# artifacts contain without changing any input hash: Python that
+# assembles a kernel config, lays out an image or packages a release,
+# say.  Without that such a rebuild gets the same key, and so the same
+# release tag, as the artifacts it differs from.  Input hashes are
+# untouched by it; a kernel or image that recorded another value reads
+# as stale and is rebuilt.
+#
+# Always a new value, never a counter: "YYYY-MM-DD-<short-reason>".
+# Two pull requests replacing it then conflict on this line instead of
+# merging to the same value, and the value a resolution writes matches
+# neither branch's artifacts, so promote leaves them for a rebuild.
+BUILD_GENERATION = "2026-11-16-keyed-releases"
+
 
 def _schema_id() -> str:
     return f"{SCHEMA_NAME}/{SCHEMA_VERSION}"
@@ -109,7 +126,9 @@ def _producer_metadata() -> dict[str, str]:
 
     Not part of the compat check -- purely for debugging ("which build
     published this?") when a release looks wrong.  Consumers MUST NOT
-    key behavior off these fields; use SCHEMA_VERSION for that.
+    key behavior off these fields; use SCHEMA_VERSION for that, and the
+    manifest's top-level ``ltvm_version`` and ``ltvm_commit`` for which
+    ltvm published it, which are real fields consumers may read.
     """
     from datetime import datetime, timezone
 
@@ -523,6 +542,129 @@ def _variant_paths(
 # ---------------------------------------------------------------------------
 
 
+_LOADED_RE = re.compile(r"^Loaded image(?:\(s\))?:\s*(.+)$", re.M)
+
+
+def loaded_image_ref(output: str) -> str | None:
+    """The image `podman load` reports loading: a name, for an archive
+    that carries one, or the bare id, for one saved by id."""
+    m = _LOADED_RE.search(output or "")
+    if m is None:
+        return None
+    ref = m.group(1).split(",")[0].strip()
+    return ref.removeprefix("sha256:") or None
+
+
+def load_container_archive(archive: Path, tag: str) -> str:
+    """``podman load`` a build container archive and tag what it loads
+    as ``tag``, the name every caller looks the container up by.
+
+    Archives published since the container has been exported by its id
+    carry no tag; older ones carry ``tag`` itself, and tagging them
+    again changes nothing.  Raises RuntimeError on failure.
+    """
+    try:
+        load = subprocess.run(
+            ["podman", "load", "-i", str(archive)],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "podman not found -- install podman to load the build container"
+        )
+    if load.returncode != 0:
+        raise RuntimeError(
+            f"podman load failed (rc={load.returncode}) for {archive}: "
+            f"{load.stderr.strip()}"
+        )
+    ref = loaded_image_ref(load.stdout)
+    if ref is None:
+        raise RuntimeError(
+            f"podman load of {archive} did not say which image it loaded"
+        )
+    tagged = subprocess.run(
+        ["podman", "tag", ref, tag], capture_output=True, text=True
+    )
+    if tagged.returncode != 0:
+        raise RuntimeError(
+            f"podman tag {ref} {tag} failed (rc={tagged.returncode}): "
+            f"{tagged.stderr.strip()}"
+        )
+    return ref
+
+
+def container_image_id(tag: str) -> str | None:
+    """The id of the podman image ``tag`` names, or None."""
+    try:
+        r = subprocess.run(
+            ["podman", "image", "inspect", "--format", "{{.Id}}", tag],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return None
+    out = r.stdout.strip()
+    return out if r.returncode == 0 and out else None
+
+
+def check_build_container(
+    target_name: str,
+    output_dir: str | Path,
+    arch: str = "x86_64",
+    variant: str = DEFAULT_VARIANT,
+) -> str:
+    """The id of the build container this artifacts dir built, after
+    checking podman's shared tag still names it; read-only.  Raises
+    RuntimeError when it does not, or when the container's meta.json
+    records no id (built before ltvm recorded one).
+
+    The tag is shared by every checkout and artifacts dir of this user,
+    so it can name a container another checkout built since.
+    """
+    from ltvm_pkg.target_config import build_container_tag
+
+    output_dir = Path(output_dir)
+    container_tag = build_container_tag(target_name, arch, variant)
+    container_dir = _variant_paths(output_dir, "__unused__", variant)[
+        "container_dir"
+    ]
+    _ensure_podman()
+    try:
+        check = subprocess.run(
+            ["podman", "image", "exists", container_tag],
+            capture_output=True,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "podman not found -- install podman to package targets"
+        )
+    v_hint = "" if variant == DEFAULT_VARIANT else f" --variant {variant}"
+    if check.returncode != 0:
+        raise RuntimeError(
+            f"Build container '{container_tag}' not found in podman storage.\n"
+            f"  Run: ltvm build container {target_name}{v_hint}"
+        )
+    meta = load_meta_safe(container_dir / "meta.json") or {}
+    want = meta.get("image_id")
+    if not want:
+        raise RuntimeError(
+            f"{container_dir / 'meta.json'} does not record which podman "
+            f"image the build container is (built before ltvm recorded "
+            f"it), so the one tagged '{container_tag}' cannot be checked.\n"
+            f"  Run: ltvm build container {target_name}{v_hint}"
+        )
+    got = container_image_id(container_tag)
+    if got != want:
+        raise RuntimeError(
+            f"the podman image tagged '{container_tag}' ({got or 'unknown'}) "
+            f"is not the build container {container_dir / 'meta.json'} "
+            f"describes ({want}): another checkout may have built it "
+            f"since.\n  Run: ltvm build container {target_name}{v_hint}"
+        )
+    return str(want)
+
+
 def export_build_container(
     target_name: str,
     output_dir: str | Path,
@@ -534,7 +676,8 @@ def export_build_container(
     The base-variant tag is ``ltvm-build-<target>[-<arch>]``; variant
     tags gain a ``-<variant>`` suffix (see target_config.build_container_tag).
     The written path follows the same base/variant split TargetConfig
-    uses for all other artifacts.
+    uses for all other artifacts.  Only the container
+    check_build_container verifies is exported.
     """
     from ltvm_pkg.target_config import build_container_tag
 
@@ -545,36 +688,26 @@ def export_build_container(
     ]
     container_dir.mkdir(parents=True, exist_ok=True)
     image_tar = container_dir / "image.tar"
-
-    _ensure_podman()
-    try:
-        check = subprocess.run(
-            ["podman", "image", "exists", container_tag],
-            capture_output=True,
-        )
-    except FileNotFoundError:
-        raise RuntimeError(
-            "podman not found -- install podman to package targets"
-        )
-    if check.returncode != 0:
-        v_hint = "" if variant == DEFAULT_VARIANT else f" --variant {variant}"
-        raise RuntimeError(
-            f"Build container '{container_tag}' not found in podman storage.\n"
-            f"  Run: ltvm build container {target_name}{v_hint}"
-        )
+    want = check_build_container(target_name, output_dir, arch, variant)
 
     print(f"  Exporting build container '{container_tag}' -> {image_tar}")
     if image_tar.exists():
         image_tar.unlink()
+    # By the id just checked, not the tag, which another checkout could
+    # move meanwhile.  The archive then carries no tag, so every loader
+    # tags what it loads (load_container_archive).  `podman save -o`
+    # rather than a push to a docker-archive: a remote podman (a Mac's
+    # podman machine) streams a save to the client and cannot push to
+    # a local archive.
     r = subprocess.run(
-        ["podman", "save", "-o", str(image_tar), container_tag],
+        ["podman", "save", "-o", str(image_tar), want],
         capture_output=True,
         text=True,
     )
     if r.returncode != 0:
         raise RuntimeError(
-            f"podman save failed (rc={r.returncode}) for {container_tag}: "
-            f"{r.stderr.strip()}"
+            f"podman save failed (rc={r.returncode}) for {container_tag} "
+            f"({want}): {r.stderr.strip()}"
         )
 
     size_mb = image_tar.stat().st_size / (1024 * 1024)
@@ -1038,8 +1171,14 @@ def package_target(
             zfs_version = None
 
     # ---- manifest ----
+    from .release_tags import this_ltvm_commit, this_ltvm_version
+
     manifest = {
         "schema": _schema_id(),
+        # The publishing ltvm's version and commit (release_tags), for
+        # consumers to order releases by; also in the release notes.
+        "ltvm_version": this_ltvm_version(),
+        "ltvm_commit": this_ltvm_commit(),
         "producer": _producer_metadata(),
         "target": target_name,
         "arch": arch,
@@ -1512,13 +1651,16 @@ def fetch_target(
 
         m_schema = manifest.get("schema")
         if m_schema != _schema_id():
+            from .release_tags import UPDATE_HINT
+
+            made_by = manifest.get("ltvm_version")
+            by = f" (published by ltvm {made_by})" if made_by else ""
             raise RuntimeError(
                 f"unrecognized manifest schema in {manifest_url}: "
                 f"got {m_schema!r}, this ltvm understands {_schema_id()!r}.\n"
-                f"  Either the published release was produced by a newer "
-                f"ltvm and this one can't read it (upgrade ltvm), or by an "
-                f"older ltvm whose format is no longer supported (publish "
-                f"a fresh release with a current ltvm)."
+                f"  The release{by} needs a newer ltvm: {UPDATE_HINT}.\n"
+                f"  (If this ltvm is current, the release is in a format "
+                f"no longer supported: publish a fresh one.)"
             )
         if manifest.get("target") != target_name:
             raise RuntimeError(
@@ -1589,32 +1731,11 @@ def fetch_target(
         )
     print(f"    Loading build container from {container_image}")
     _ensure_podman()
-    try:
-        load = subprocess.run(
-            ["podman", "load", "-i", str(container_image)],
-            capture_output=True,
-            text=True,
-        )
-    except FileNotFoundError:
-        raise RuntimeError(
-            "podman not found -- install podman to load the fetched "
-            "build container"
-        )
-    if load.returncode != 0:
-        raise RuntimeError(
-            f"podman load failed (rc={load.returncode}) for "
-            f"{container_image}: {load.stderr.strip()}"
-        )
-    loaded_line = next(
-        (
-            ln
-            for ln in load.stdout.splitlines()
-            if ln.startswith("Loaded image")
-        ),
-        "",
-    )
-    if loaded_line:
-        print(f"    {loaded_line}")
+    from .target_config import build_container_tag
+
+    container_tag = build_container_tag(target_name, arch, variant)
+    ref = load_container_archive(container_image, container_tag)
+    print(f"    Loaded image {ref} as {container_tag}")
 
     return target_dir
 

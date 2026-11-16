@@ -322,6 +322,80 @@ def resolve_kernel_dir(
     return name
 
 
+# Artifacts whose contents ltvm's own build code shapes beyond what the
+# input hash covers; see release_package.BUILD_GENERATION.
+GENERATION_ARTIFACTS = ("kernel", "image")
+
+
+def build_generation() -> str:
+    from .release_package import BUILD_GENERATION
+
+    return BUILD_GENERATION
+
+
+def generation_mismatch(meta: dict[str, Any] | None) -> str | None:
+    """Why ``meta``'s artifact is stale by build generation: built by
+    another generation of ltvm's build code than this one.  None when it
+    was built by this one, or recorded none (built before generations
+    were recorded: kept, not rebuilt, though publish refuses it).
+
+    Separate from input_hash, which a generation bump must not move.
+    """
+    if not isinstance(meta, dict):
+        return None
+    got = meta.get("build_generation")
+    if got is None or got == build_generation():
+        return None
+    return f"build generation {got} (now {build_generation()})"
+
+
+# What a kernel's meta.json says about the build that made it, beyond
+# its input_hash, which modules built against it (MOFED kmods, ZFS)
+# record as theirs: a BUILD_GENERATION change rebuilds the kernel with
+# its input_hash unchanged, and the modules must follow it.
+_KERNEL_ABI_FIELDS = {
+    "build_generation": "kernel_build_generation",
+    "module_symvers_sha256": "kernel_module_symvers_sha256",
+}
+
+
+def kernel_abi_marks(kernel_meta: dict[str, Any] | None) -> dict[str, Any]:
+    """The marks a module built against ``kernel_meta``'s kernel records:
+    its build generation and, when the kernel records one, its
+    Module.symvers digest."""
+    if not isinstance(kernel_meta, dict):
+        return {}
+    return {
+        mark: kernel_meta[field]
+        for field, mark in _KERNEL_ABI_FIELDS.items()
+        if kernel_meta.get(field) is not None
+    }
+
+
+def kernel_abi_mismatch(
+    module_meta: dict[str, Any] | None, kernel_meta: dict[str, Any] | None
+) -> str | None:
+    """Why a module built against a kernel no longer fits it: a mark the
+    kernel records that the module does not record alike, missing
+    included, since a kernel rebuilt for a new build generation keeps
+    its input_hash.  A kernel recording no marks (built before they
+    were) is fitted by any module, so an existing kernel and its
+    modules stay current together."""
+    if not isinstance(module_meta, dict):
+        return None
+    now = kernel_abi_marks(kernel_meta)
+    for mark, value in now.items():
+        got = module_meta.get(mark)
+        if got is None:
+            return (
+                f"records no {mark} (built before it was recorded); the "
+                f"kernel's is {value}"
+            )
+        if got != value:
+            return f"built against a kernel with {mark} {got}, now {value}"
+    return None
+
+
 def build_container_tag(
     name: str, arch: str = "x86_64", variant: str = DEFAULT_VARIANT
 ) -> str:
@@ -1132,12 +1206,41 @@ class TargetConfig:
         """
         return self._hash_parts(artifact, kernel, extra, variant).components()
 
+    def checkout_input_hash(
+        self,
+        artifact: str,
+        kernel: str | None = None,
+        variant: str | None = None,
+    ) -> str:
+        """:meth:`input_hash` from this checkout alone.
+
+        No extra bytes, and an image's hash does not fold in a built
+        kernel's meta.json, so any checkout computes the same value
+        whatever it has on disk.  It equals ``input_hash`` on a host
+        with no kernel built, the case the stability goldens pin.
+        """
+        return self._hash_parts(
+            artifact, kernel, b"", variant, built_kernel=False
+        ).digest()
+
+    def checkout_input_components(
+        self,
+        artifact: str,
+        kernel: str | None = None,
+        variant: str | None = None,
+    ) -> dict[str, str]:
+        """The per-input digests behind :meth:`checkout_input_hash`."""
+        return self._hash_parts(
+            artifact, kernel, b"", variant, built_kernel=False
+        ).components()
+
     def _hash_parts(
         self,
         artifact: str,
         kernel: str | None = None,
         extra: bytes = b"",
         variant: str | None = None,
+        built_kernel: bool = True,
     ) -> _HashParts:
         """Hash inputs for an artifact to detect staleness.
 
@@ -1294,8 +1397,11 @@ class TargetConfig:
             # staging moved per-tree under <lustre_tree>/.ltvm-staging,
             # and the maintainer is expected to bundle Lustre via
             # `ltvm package`'s lustre-artifacts/ instead.
-            kernel_meta = self.meta_path("kernel", kernel)
-            km = load_meta_safe(kernel_meta)
+            km = (
+                load_meta_safe(self.meta_path("kernel", kernel))
+                if built_kernel
+                else None
+            )
             if km is not None:
                 kh = km.get("input_hash")
                 if isinstance(kh, str) and kh:
@@ -1344,6 +1450,27 @@ class TargetConfig:
 
         return h
 
+    def _built_in_container(self, variant: str) -> dict[str, Any]:
+        """The build container a kernel or image is being built in, for
+        its meta.json: the container's input hash, and its podman image
+        id when the container's own meta.json records one for those
+        inputs.  Publish checks they are the container it publishes;
+        nothing else reads them, so builds never go stale over them.
+        """
+        out: dict[str, Any] = {
+            "container_input_hash": self.input_hash(
+                "container", variant=variant
+            )
+        }
+        cmeta = load_meta_safe(self.meta_path("container", variant=variant))
+        if (
+            isinstance(cmeta, dict)
+            and cmeta.get("input_hash") == out["container_input_hash"]
+            and cmeta.get("image_id")
+        ):
+            out["container_image_id"] = cmeta["image_id"]
+        return out
+
     def _kernel_meta_file(self, kernel: str | None) -> Path:
         return self.meta_path("kernel", kernel)
 
@@ -1384,6 +1511,8 @@ class TargetConfig:
                 self.name,
                 artifact,
             )
+            return True
+        if artifact in GENERATION_ARTIFACTS and generation_mismatch(meta):
             return True
         return bool(
             meta.get("input_hash")
@@ -1503,6 +1632,15 @@ class TargetConfig:
         }
         if v != DEFAULT_VARIANT:
             meta["variant"] = v
+        if artifact in GENERATION_ARTIFACTS:
+            meta["build_generation"] = build_generation()
+            # A kernel is built in the base variant's container whatever
+            # variant asked for it (kernel_build._ensure_kernel_builder).
+            meta.update(
+                self._built_in_container(
+                    DEFAULT_VARIANT if artifact == "kernel" else v
+                )
+            )
         # Atomic write via tempfile + rename so a concurrent reader
         # (load_meta_safe) can't see a half-written JSON blob -- which
         # would fail to parse, return None, and trigger a spurious

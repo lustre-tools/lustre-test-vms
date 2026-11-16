@@ -412,6 +412,19 @@ def cross_patch_dockerfile(
     return "".join(out)
 
 
+def mofed_kmods_hash(kmods_dir: Path) -> bytes:
+    """Bytes the MOFED kmods in ``kmods_dir`` add to an image's input
+    hash: the RPMs' names and sizes, so the image rebuilds when the kmod
+    set changes (a mofed_version bump, say)."""
+    h = hashlib.sha256()
+    for rpm in sorted(kmods_dir.glob("*.rpm")):
+        h.update(rpm.name.encode())
+        h.update(b"\0")
+        h.update(str(rpm.stat().st_size).encode())
+        h.update(b"\0")
+    return h.digest()
+
+
 def _lustre_staging_hash_input(staging: Path) -> bytes:
     """Return bytes to fold into the image input hash when --with-lustre
     is active.
@@ -955,15 +968,7 @@ def build_image(
                 kernel=kernel,
                 force=force,
             )
-        # Hash the produced RPM names + sizes so image rebuilds when
-        # the kmod set changes (e.g. mofed_version bump).
-        h = hashlib.sha256()
-        for rpm in sorted(mofed_kmods_dir.glob("*.rpm")):
-            h.update(rpm.name.encode())
-            h.update(b"\0")
-            h.update(str(rpm.stat().st_size).encode())
-            h.update(b"\0")
-        mofed_kmods_hash_input = h.digest()
+        mofed_kmods_hash_input = mofed_kmods_hash(mofed_kmods_dir)
 
     lustre_staging: Path | None = None
     lustre_hash_input: bytes = b""
@@ -1657,6 +1662,10 @@ def _stale_by_components(
     handed to every new VM, with `build status` saying only "built (?)"
     and nothing pointing at the package the VMs were missing.
     """
+    from .target_config import generation_mismatch
+
+    if generation_mismatch(meta):
+        return True
     stored = meta.get("input_components")
     if not isinstance(stored, dict) or not stored:
         return None
@@ -1751,4 +1760,5 @@ def image_status(
         # Without this `build status --why` could never explain an image,
         # reporting every one as built before digests were recorded.
         "input_components": meta.get("input_components"),
+        "build_generation": meta.get("build_generation"),
     }
