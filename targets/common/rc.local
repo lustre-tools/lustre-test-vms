@@ -274,6 +274,15 @@ if [ -n "${FC_NICS}" ]; then
     done
 fi
 
+# --- shmrdma -------------------------------------------------------
+# ltvm create --shmrdma: SMC sockets over the device.  The hook comes
+# with the shmrdma guest module, so older images have neither.
+if grep -qw fc_shmrdma=1 /proc/cmdline && \
+   [ -x /usr/local/sbin/shmrdma-boot.sh ]; then
+    /usr/local/sbin/shmrdma-boot.sh || \
+        echo "rc.local: warning: shmrdma-boot.sh exited non-zero" >&2
+fi
+
 # --- LNet config ---------------------------------------------------
 # Compose /etc/modprobe.d/lnet.conf from fc_nics (plus the implicit
 # mgmt tcp NIC prepended by setup-lnet-config.sh) so `modprobe lnet`

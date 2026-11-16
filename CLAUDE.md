@@ -432,6 +432,21 @@ autologin, kdump pre-configured (vmlinuz + initramfs
 baked in at build time).  No kernel inside the image --
 QEMU passes it via `-kernel`.
 
+The shmrdma guest driver (`shmrdma/kmod/`) is built per kernel in the
+build container (`ltvm_pkg/shmrdma.py`, cached under
+`kernels/<k>/shmrdma/`, or `~/.cache/ltvm/shmrdma/` for a user who does
+not own the kernel, by ZFS's ownership rules) and copied into `/lib/modules/<kver>/extra/`
+in the final stage; its sources are an image hash input (not for a
+MOFED variant, which never carries it).  A kernel it
+does not build for gets an image without it (`shmrdma_kmod: false` in
+meta.json), which `create --shmrdma` refuses; so does an image that
+installs MOFED's kmods, which replace the ib_core the module is built
+against.  meta.json's `shmrdma_kmod_images` says which versioned image
+files have it, and a fetch carries the old entries over; a VM records
+its own file's answer as `SHMRDMA_KMOD` in its `.info` at create, which
+start and `vm set --shmrdma` check (an older VM adopts a yes from the
+meta).  docs/SHMRDMA.md covers the daemon and the device.
+
 ### Image files are never replaced
 
 A VM's root disk is a qcow2 overlay backed by an image file
@@ -1036,7 +1051,10 @@ otherwise; 0 or `none` emits nothing, so the guest reports Unknown.
 socklnd sizes `conns_per_peer` from the ethtool speed and uses 1 for a
 NIC with none.  None in `NicSpec.speed` and `VMInfo.eth0_speed` means
 the default, so an older `.info` gets it at its next start.
-Passthrough takes no key: a real device reports its own.
+Passthrough takes no key: a real device reports its own.  Nor does
+shmnet: the daemon does not offer `VIRTIO_NET_F_SPEED_DUPLEX`, so its
+NICs report Unknown and socklnd uses one connection per peer unless
+`conns_per_peer` is set by hand.
 
 **NIC NUMA node:** `--nic tcp:node=N` (also softroce; not passthrough,
 whose device need not be ethN) gives the NIC's PCI device guest NUMA

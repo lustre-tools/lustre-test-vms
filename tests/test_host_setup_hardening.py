@@ -157,3 +157,19 @@ class TestPrerequisitesReportFailure:
         ):
             inst.side_effect = lambda *a, **k: state.update(done=True)
             host_setup.check_prerequisites(self._host())
+
+    def test_optional_tool_missing_only_warns(self) -> None:
+        """--host-node works without numactl; install must not fail."""
+
+        def which(name: str) -> str | None:
+            return None if name == "numactl" else "/usr/bin/" + name
+
+        with (
+            patch.object(host_setup.shutil, "which", side_effect=which),
+            patch.object(host_setup, "_pkg_install") as inst,
+            patch.object(host_setup, "log") as log,
+        ):
+            host_setup.check_prerequisites(self._host())
+        assert "numactl" in inst.call_args.args
+        warned = [c.args[0] % c.args[1:] for c in log.warning.call_args_list]
+        assert any("numactl did not install" in w for w in warned)

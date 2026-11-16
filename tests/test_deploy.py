@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from ltvm_pkg import deploy
+from ltvm_pkg.nic_spec import NicSpec
 from ltvm_pkg.vm_state import VMInfo
 from tests.host_marks import needs_gnu_sed
 
@@ -2777,6 +2778,13 @@ class TestCmdDeployOstCount:
         assert rc == 0
         assert deploy_mock.call_args.kwargs["ost_count"] is None
 
+    def test_lnet_required_only_with_mount(
+        self, tmp_sockets: Path, tmp_path: Path
+    ) -> None:
+        rc, deploy_mock = self._run(tmp_path)
+        assert rc == 0
+        assert deploy_mock.call_args.kwargs["lnet_required"] is False
+
     def test_negative_refused(self, tmp_sockets: Path, tmp_path: Path) -> None:
         rc, deploy_mock = self._run(tmp_path, ost_count=-1)
         assert rc == 1
@@ -3094,3 +3102,94 @@ class TestTarCreateArgv:
         assert "./lib/modules/5.14/libcfs.ko" in names.split()
         assert "._" not in names
         assert b"LIBARCHIVE.xattr" not in out
+
+
+class TestSingleLnet:
+    """A single VM whose LNet is not tcp on eth0 gets NETTYPE and MGSNID
+    from its lnet.conf, as a cluster's MGS does."""
+
+    ADDRS = (
+        "1: lo    inet 127.0.0.1/8 scope host lo\n"
+        "2: eth0    inet 192.168.100.50/24 brd 192.168.100.255 scope global\n"
+    )
+
+    def _run(self, networks: str) -> list[str]:
+        sent: list[str] = []
+
+        def fake(ip, script, timeout=30):
+            sent.append(script)
+            if len(sent) == 1:
+                return _ok(stdout=f"{networks}\n--\n{self.ADDRS}")
+            return _ok()
+
+        with patch("ltvm_pkg.deploy.run_ssh", side_effect=fake):
+            deploy.configure_single_lnet("192.168.100.50")
+        return sent
+
+    def test_shmrdma_vm_mounts_over_o2ib(self) -> None:
+        probe, script = self._run("o2ib0(eth0)")
+        assert "lnet.conf" in probe
+        assert "NETTYPE=o2ib\\nMGSNID=192.168.100.50@o2ib\\n" in script
+        # rewritten, not stacked, on every deploy
+        assert f"/^{deploy.LNET_BEGIN}/,/^{deploy.LNET_END}/d" in script
+
+    def test_cluster_member_left_alone(self) -> None:
+        from ltvm_pkg.vm_cluster import CLUSTER_BLOCK_BEGIN
+
+        # A member's lnet.conf is not even parsed: one the probe cannot
+        # read must not fail its deploy.
+        with patch(
+            "ltvm_pkg.deploy.run_ssh",
+            return_value=_ok(stdout=f"{deploy._CLUSTER_MEMBER}\n"),
+        ) as ssh:
+            deploy.configure_single_lnet("192.168.100.50")
+        assert ssh.call_count == 1
+        probe = ssh.call_args.args[1]
+        guard = f"grep -q '^{CLUSTER_BLOCK_BEGIN}'"
+        assert probe.index(guard) < probe.index("lnet.conf")
+
+    def test_passthrough_hca_takes_its_netdev_address(self) -> None:
+        # The passthrough resolver names the HCA; its address is on the
+        # netdev sysfs lists under the HCA's PCI device.
+        out = (
+            "o2ib0(mlx5_0)\n--\n"
+            f"{self.ADDRS}"
+            "3: eth1    inet 10.0.0.7/24 scope global eth1\n"
+            "-- ibdev\n/sys/class/infiniband/mlx5_0/device/net/eth1\n"
+        )
+        with patch(
+            "ltvm_pkg.deploy.run_ssh", return_value=_ok(stdout=out)
+        ) as s:
+            deploy.configure_single_lnet("192.168.100.50")
+        assert "MGSNID=10.0.0.7@o2ib" in s.call_args.args[1]
+
+    def test_no_address_is_an_error(self) -> None:
+        with (
+            patch(
+                "ltvm_pkg.deploy.run_ssh",
+                return_value=_ok(stdout="o2ib0(eth1)\n--\n"),
+            ),
+            pytest.raises(RuntimeError, match="no IPv4 address on eth1"),
+        ):
+            deploy.configure_single_lnet("192.168.100.50")
+
+    def test_not_required_warns_and_keeps_the_stock_file(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        for r in (
+            _ok(stdout="o2ib0(eth1)\n--\n"),
+            MagicMock(returncode=255, stdout="", stderr="no route"),
+        ):
+            with patch("ltvm_pkg.deploy.run_ssh", return_value=r) as ssh:
+                deploy.configure_single_lnet("192.168.100.50", required=False)
+            assert ssh.call_count == 1
+            assert "as shipped" in capsys.readouterr().err
+
+    def test_only_vms_with_their_own_lnet(self) -> None:
+        plain = VMInfo(name="co1-a", ip="192.168.100.50")
+        assert not deploy.uses_own_lnet(plain)
+        plain.shmrdma = "auto"
+        assert deploy.uses_own_lnet(plain)
+        assert deploy.uses_own_lnet(
+            VMInfo(name="co1-b", ip="192.168.100.51", nics=[NicSpec("tcp")])
+        )

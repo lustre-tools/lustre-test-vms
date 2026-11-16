@@ -15,6 +15,8 @@ record was installed before this existed and counts as 0.
 History:
   1: /dev/vhost-net for the ltvm group (PR #63), and the first record.
   2: the performance cpufreq governor, now and at boot (PR #66).
+  3: numactl for --host-node, and ltvm's own QEMU on macOS, which
+     shmrdma and shmnet need (PR #60).
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-HOST_SETUP_VERSION = 2
+HOST_SETUP_VERSION = 3
 
 NOTICE_INTERVAL = timedelta(hours=24)
 

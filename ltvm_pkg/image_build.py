@@ -104,7 +104,13 @@ def _is_cross_build(target_config: TargetConfig) -> bool:
 
 
 def _podman_platform(target_config: TargetConfig) -> list[str]:
-    """Return --platform flag for podman if cross-arch build needed.
+    """Return the --platform flag for the image build: the target's.
+
+    Native builds pass it too.  A cross build of another target from
+    the same base image re-tags that image as the other arch, and
+    without the flag the next native build ran on it under emulation
+    with only a warning, producing an image of the wrong arch; with
+    it, podman pulls the right one back.
 
     Unlike kernel_build (which flips to host arch so its cross
     toolchain runs natively), the image build needs a target-arch
@@ -120,8 +126,6 @@ def _podman_platform(target_config: TargetConfig) -> list[str]:
     `_prebuild_tools_native`, which cross-builds IOR/iozone/e2fsprogs
     natively and COPYs them into the emulated image build).
     """
-    if not _is_cross_build(target_config):
-        return []
     from .cross_compile import podman_platform_for
 
     return ["--platform", podman_platform_for(target_config.arch)]
@@ -1004,6 +1008,8 @@ def build_image(
     superseded = Superseded()
     tag = _build_base_layers(target_config, out_dir, superseded)
 
+    shmrdma_kmod = False
+
     # ── Step 1b: Add kernel modules + Lustre via a second Dockerfile stage ──
     # resolve_kernel never raises -- it returns the short name if no
     # built directory exists yet.  The actual "no kernel built yet"
@@ -1139,9 +1145,10 @@ def build_image(
             # These provide MOFED's mlx5_core / ib_core / rdma_cm symbol
             # versions, which Lustre's ko2iblnd was linked against in
             # the build container.
-            if mofed_kmods_dir is not None and any(
+            mofed_rpms = mofed_kmods_dir is not None and any(
                 mofed_kmods_dir.glob("*.rpm")
-            ):
+            )
+            if mofed_kmods_dir is not None and mofed_rpms:
                 kmod_dest = inject_dir / "mofed-kmods"
                 kmod_dest.mkdir(exist_ok=True)
                 for rpm in mofed_kmods_dir.glob("*.rpm"):
@@ -1160,6 +1167,16 @@ def build_image(
                     "&& rm -rf /tmp/mofed-kmods"
                 )
             if kver:
+                shm_lines = _shmrdma_lines(
+                    target_config,
+                    kernel,
+                    kver,
+                    inject_dir,
+                    cross=_is_cross_build(target_config),
+                    mofed=mofed_rpms,
+                )
+                lines.extend(shm_lines)
+                shmrdma_kmod = bool(shm_lines)
                 lines.append(f"RUN ldconfig && depmod -a {kver}")
             else:
                 # No kernel.release file available; fall back to whatever
@@ -1202,6 +1219,8 @@ def build_image(
     # would otherwise leak as a podman layer on every retry.  Wrap
     # so we can rmi it on failure.  On success it goes once the
     # package manifest below has been read from it.
+    prev_image = current_image(out_dir)
+    prev_meta = load_meta_safe(out_dir / "meta.json") or {}
     log.info("Exporting container to ext4 ...")
     try:
         image_path = _export_to_ext4(final_tag, out_dir)
@@ -1265,6 +1284,10 @@ def build_image(
             if mofed_kmods_dir is not None
             else None
         ),
+        shmrdma_kmod=shmrdma_kmod,
+        shmrdma_kmod_images=_kmod_images(
+            prev_meta, prev_image, image_path, shmrdma_kmod
+        ),
         build_seconds=round(elapsed, 1),
         image_size_mb=round(size_mb, 1),
         packages=pkg_manifest,
@@ -1285,6 +1308,54 @@ def build_image(
     return image_path
 
 
+def _shmrdma_lines(
+    target_config: TargetConfig,
+    kernel: str | None,
+    kver: str,
+    inject_dir: Path,
+    cross: bool,
+    mofed: bool,
+) -> list[str]:
+    """Dockerfile lines baking the shmrdma guest driver into the image,
+    staged in *inject_dir*; none when it is left out.
+
+    Not for a cross build: the build container runs the target's arch.
+    Not over MOFED's kmods either: they replace the ib_core it is built
+    against.
+    """
+    if cross:
+        return []
+    if mofed:
+        log.warning(
+            "shmrdma.ko is left out of this image: MOFED's kmods replace "
+            "the in-tree ib_core it is built against, so create --shmrdma "
+            "will refuse it"
+        )
+        return []
+    from .shmrdma import GUEST_FILES, MODPROBE_CONF, SRC_DIR, build_kmod
+
+    shm_ko = build_kmod(target_config, kernel, kver)
+    if shm_ko is None:
+        return []
+    shm_dest = inject_dir / "shmrdma"
+    shm_dest.mkdir(exist_ok=True)
+    shutil.copy2(shm_ko, shm_dest / "shmrdma.ko")
+    (shm_dest / "shmrdma.conf").write_text(MODPROBE_CONF)
+    lines = [
+        f"COPY shmrdma/shmrdma.ko /lib/modules/{kver}/extra/",
+        "COPY shmrdma/shmrdma.conf /etc/modprobe.d/shmrdma.conf",
+    ]
+    # rc.local runs the boot hook for fc_shmrdma=1.
+    names = []
+    for rel in GUEST_FILES:
+        name = Path(rel).name
+        shutil.copy2(SRC_DIR / rel, shm_dest / name)
+        names.append(f"/usr/local/sbin/{name}")
+        lines.append(f"COPY shmrdma/{name} /usr/local/sbin/{name}")
+    lines.append(f"RUN chmod 0755 {' '.join(names)}")
+    return lines
+
+
 def _compute_image_size_mb_from_tar(tarball: Path) -> int:
     """Return the ext4 image size (MiB) needed to hold *tarball*.
 
@@ -1300,6 +1371,30 @@ def _compute_image_size_mb_from_tar(tarball: Path) -> int:
         + _IMAGE_SIZE_HEADROOM_MB
     )
     return max(mb, _IMAGE_SIZE_FLOOR_MB)
+
+
+def _kmod_images(
+    prev_meta: dict[str, Any],
+    prev_image: Path | None,
+    image_path: Path,
+    has_kmod: bool,
+) -> dict[str, bool]:
+    """Which image files in the directory have shmrdma.ko, by file name.
+
+    VMs keep the versioned image they were created on, so the newest
+    build's ``shmrdma_kmod`` does not describe theirs.
+    """
+    out_dir = image_path.parent
+    known = prev_meta.get("shmrdma_kmod_images")
+    names = {
+        k: bool(v)
+        for k, v in (known.items() if isinstance(known, dict) else ())
+        if (out_dir / k).is_file()
+    }
+    if prev_image is not None and "shmrdma_kmod" in prev_meta:
+        names.setdefault(prev_image.name, bool(prev_meta["shmrdma_kmod"]))
+    names[image_path.name] = has_kmod
+    return names
 
 
 def _export_to_ext4(

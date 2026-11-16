@@ -22,6 +22,12 @@ targets:
       - 4.18-rhel8.4
       config:
         CONFIG_XEN_PVH: y
+        # EL8's SMC sources do not build outside s390x (553.177.1 prints
+        # an s64 with %ld under -Werror), so rocky8 kernels go without
+        # SMC; shmrdma works without it.
+        CONFIG_SMC: null
+        CONFIG_SMC_DIAG: null
+        CONFIG_SMC_LO: null
       arch_config:
         aarch64:
           # EPEL8's aarch64 cross gcc is GCC 12, which fails a FIELD_FIT
@@ -367,6 +373,12 @@ targets:
         CONFIG_XFS_FS: m
         CONFIG_XFS_QUOTA: y
         CONFIG_XFS_POSIX_ACL: y
+      arch_config:
+        aarch64:
+          # linux-source-6.8.0 6.8.0-149 does not build coresight-catu.c
+          # on arm64 (csdev->refcnt became atomic_t, catu still does
+          # arithmetic on it); x86 does not build CoreSight.
+          CONFIG_CORESIGHT_CATU: n
       default: 6.8-ubuntu2404
     lustre:
       mode: client

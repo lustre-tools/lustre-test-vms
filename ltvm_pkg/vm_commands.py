@@ -17,8 +17,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from . import numa_dist, rootless, vm_claim
-from .deploy import configure_test_disks, premount_cleanup_script
+from . import numa_dist, rootless, shmrdma, shmrdma_req, vm_claim
+from .deploy import (
+    configure_single_lnet,
+    configure_test_disks,
+    premount_cleanup_script,
+    uses_own_lnet,
+)
 from .host_setup import is_macos
 from .nic_guest import wait_for_layout as guest_nic_layout
 from .nic_spec import DEFAULT_SPEED, NicSpec, NicSpecError, parse_speed
@@ -27,6 +32,7 @@ from .paths import load_meta_safe
 from .priv import SudoUnavailable, chmod_regular, sudo_prime, sudo_run
 from .qemu_run import (
     die,
+    host_node_problem,
     is_running,
     kill_qemu,
     launch_qemu,
@@ -707,6 +713,8 @@ _RESOURCE_FLAGS = {
     "disk_dir": "--disk-dir",
     "disk_cache": "--disk-cache",
     "disk_prealloc": "--disk-prealloc",
+    "shmrdma": "--shmrdma",
+    "host_node": "--host-node",
 }
 
 # Flags whose typed spelling differs from the stored one only cosmetically.
@@ -938,6 +946,7 @@ def _allocate_and_persist_vm(
             created=int(time.time()),
             base_image=base_name,
             image_id=_image_id(image),
+            shmrdma_kmod=shmrdma.image_has_kmod(image),
             os_id=os_id,
             kver=kver,
             arch=os_arts.arch,
@@ -957,6 +966,8 @@ def _allocate_and_persist_vm(
             kernel_args=getattr(args, "kernel_args", ""),
             numa_nodes=getattr(args, "numa_nodes", 0) or 0,
             numa_dist=getattr(args, "numa_dist", "") or "",
+            shmrdma=getattr(args, "shmrdma", "") or "",
+            host_node=getattr(args, "host_node", -1),
             share_disks=bool(getattr(args, "share_disks", False)),
             disks_from=getattr(args, "disks_from", None) or "",
             disk_dir=getattr(args, "disk_dir", "") or "",
@@ -964,7 +975,9 @@ def _allocate_and_persist_vm(
             disk_prealloc=getattr(args, "disk_prealloc", "") or "",
             eth0_speed=getattr(args, "eth0_speed", None),
         )
-        problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes)
+        problem = numa_problem(
+            vm.vcpus, vm.mem, vm.numa_nodes, vm.shared_ram, vm.arch
+        )
         if problem:
             die(problem)
 
@@ -1203,7 +1216,60 @@ def _resolve_os_and_kernel(
         )
     kver = meta["kernel_version"]
 
+    feats = shmrdma_req.features_of(
+        getattr(args, "shmrdma", "") or "",
+        extra_nic_types or [],
+        getattr(args, "host_node", -1),
+    )
+    if feats:
+        target = shmrdma_req.Target(
+            os_target,
+            explicit_kernel or None,
+            image=Path(image),
+            kernel_dir=Path(kernel).parent,
+            arch=arch,
+        )
+        why = shmrdma_req.refusal(feats, target)
+        if why:
+            die(why)
+
     return os_arts, image, kernel, kver, os_target, variant
+
+
+def shmrdma_socket_message(value: str, problem: str) -> str:
+    """Why a --shmrdma value is refused.  It takes an optional value, so a
+    positional written after it is taken as its socket."""
+    return (
+        f"--shmrdma took {value!r} as its socket: put --shmrdma after the "
+        f"VM name, target and node specs, or give --shmrdma=SOCKET (the "
+        f"{problem})"
+    )
+
+
+def _check_shmrdma_socket(value: str) -> None:
+    """--shmrdma takes 'auto' or an absolute socket path."""
+    from .nic_spec import socket_path_problem
+
+    if value == "auto":
+        return
+    problem = socket_path_problem(value)
+    if problem:
+        die(shmrdma_socket_message(value, problem))
+
+
+def _check_shmrdma_image(vm: VMInfo, shm: str) -> None:
+    """Refuse --shmrdma *shm* on what *vm* lacks: the guest module in its
+    image, or what the host needs."""
+    t = shmrdma_req.Target(
+        vm.os_id,
+        image=Path(vm.image),
+        kernel_dir=Path(vm.kernel).parent,
+        arch=vm.arch or None,
+        has_kmod=shmrdma.vm_has_kmod(vm),
+    )
+    why = shmrdma_req.refusal(shmrdma_req.features_of(shm, [], -1), t)
+    if why:
+        die(why)
 
 
 def _validate_create_bounds(
@@ -1220,6 +1286,11 @@ def _validate_create_bounds(
         die(f"--vcpus must be > 0 (got {args.vcpus})")
     if args.mem is not None and args.mem <= 0:
         die(f"--mem must be > 0 (got {args.mem})")
+    if getattr(args, "shmrdma", ""):
+        _check_shmrdma_socket(args.shmrdma)
+    problem = host_node_problem(getattr(args, "host_node", -1))
+    if problem:
+        die(problem)
 
     # Disk count bounds: vda is the rootfs, leaving vdb..vdz for
     # MDT+OST.  Past 25 letters we'd write /dev/vd{ etc. into the
@@ -2147,6 +2218,8 @@ def cmd_llmount(args: argparse.Namespace) -> None:
                 disk_size_bytes=vm.disk_size,
                 os_family=os_family,
             )
+            if uses_own_lnet(vm):
+                configure_single_lnet(vm.ip, os_family=os_family)
         except (RuntimeError, subprocess.TimeoutExpired) as e:
             print(f"error: {e}", file=sys.stderr)
             sys.exit(EXIT_ERROR)
@@ -2245,6 +2318,12 @@ def _cluster_rows() -> list[dict[str, Any]]:
 
 
 def cmd_list(args: argparse.Namespace) -> None:
+    # What create and start admit against, which in a container is its
+    # cgroup's memory.max rather than the host's RAM.
+    from .qemu_run import charged_mb, guest_memory_budget
+
+    budget = guest_memory_budget()
+    overcommit = budget.overcommit if budget else 1.0
     total_vcpus = 0
     total_mem = 0
     total_rss = 0
@@ -2282,7 +2361,7 @@ def cmd_list(args: argparse.Namespace) -> None:
         if status == "running":
             running_count += 1
             total_vcpus += vm.vcpus
-            total_mem += vm.mem
+            total_mem += charged_mb(vm.mem, vm.shared_ram, overcommit)
             total_rss += rss or 0
         else:
             stopped_count += 1
@@ -2325,11 +2404,6 @@ def cmd_list(args: argparse.Namespace) -> None:
 
     host_cpus = os.cpu_count() or 1
     host_mem_mb = _host_total_mem_mb()
-    # What create and start admit against, which in a container is its
-    # cgroup's memory.max rather than the host's RAM.
-    from .qemu_run import guest_memory_budget
-
-    budget = guest_memory_budget()
     mem_limit_mb = budget.limit_mb if budget else host_mem_mb
 
     if args.json:
@@ -3347,6 +3421,13 @@ def cmd_set(args: argparse.Namespace) -> None:
     dist_inline = getattr(args, "numa_dist", None)
     dist_file = getattr(args, "numa_dist_file", None)
     cache = getattr(args, "disk_cache", None)
+    shm = getattr(args, "shmrdma", None)
+    host_node = getattr(args, "host_node", None)
+    if host_node is not None:
+        problem = host_node_problem(host_node)
+        if problem:
+            die(problem)
+        host_node = max(host_node, -1)
     speed_arg = getattr(args, "eth0_speed", None)
     if (
         args.vcpus is None
@@ -3355,12 +3436,19 @@ def cmd_set(args: argparse.Namespace) -> None:
         and dist_inline is None
         and dist_file is None
         and cache is None
+        and shm is None
+        and host_node is None
         and speed_arg is None
     ):
         die(
             "nothing to set: give --vcpus, --mem, --numa-nodes, "
-            "--numa-dist[-file], --disk-cache and/or --eth0-speed"
+            "--numa-dist[-file], --disk-cache, --host-node, --shmrdma "
+            "and/or --eth0-speed"
         )
+    if shm == "none":
+        shm = ""
+    if shm:
+        _check_shmrdma_socket(shm)
     speed: int | None = None
     if speed_arg is not None and speed_arg != "default":
         try:
@@ -3394,6 +3482,14 @@ def cmd_set(args: argparse.Namespace) -> None:
     if numa is not None and numa != vm.numa_nodes:
         changes.append(f"numa nodes {vm.numa_nodes} -> {numa}")
         vm.numa_nodes = numa
+    if shm is not None and shm != vm.shmrdma:
+        if shm:
+            _check_shmrdma_image(vm, shm)
+        changes.append(f"shmrdma {vm.shmrdma or 'none'} -> {shm or 'none'}")
+        vm.shmrdma = shm
+    if host_node is not None and host_node != vm.host_node:
+        changes.append(f"host node {vm.host_node} -> {host_node}")
+        vm.host_node = host_node
     if dist_inline == "default":
         dist = ""
     else:
@@ -3433,9 +3529,9 @@ def cmd_set(args: argparse.Namespace) -> None:
             f"eth0 speed {_speed_label(vm.eth0_speed)} -> {_speed_label(speed)}"
         )
         vm.eth0_speed = speed
-    problem = numa_problem(vm.vcpus, vm.mem, vm.numa_nodes) or (
-        nic_numa_problem(vm.nics, vm.numa_nodes)
-    )
+    problem = numa_problem(
+        vm.vcpus, vm.mem, vm.numa_nodes, vm.shared_ram, vm.arch
+    ) or (nic_numa_problem(vm.nics, vm.numa_nodes))
     if problem:
         die(problem)
     if not changes:
@@ -4057,6 +4153,21 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     print(f"  FAILED to remove: {err}")
                     fix_failures += 1
 
+    # Running VMs whose shmrdmad is gone, or was replaced: their shmrdma
+    # device and shmnet NICs are dead until each VM restarts.
+    try:
+        shm: shmrdma.Daemon | None = shmrdma.daemon(create=False)
+    except (KeyError, OSError, RuntimeError):
+        # a uid with no passwd entry (a container) has no daemon dir
+        shm = None
+    orphans = shmrdma.orphaned_vms(shm) if shm is not None else []
+    if orphans:
+        print(
+            f"the shmrdmad {', '.join(orphans)} started against is gone: "
+            f"restart them (`ltvm stop`, `ltvm start`) to bring it back"
+        )
+        issues += 1
+
     # Cluster files referencing dead nodes.  A user can `ltvm destroy
     # node` individually after a `cluster create`, leaving the .cluster
     # file pointing at VMs that no longer exist.
@@ -4273,6 +4384,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                         unregister_ssh_name(sname)
                         print("  fixed: removed ssh config")
 
+    # --shmrdma [TARGET]: what the shmrdma family needs (shmrdma_req).
+    shm_target = getattr(args, "shmrdma", None)
+    if shm_target:
+        target = shmrdma_req.resolve_target(
+            shm_target,
+            getattr(args, "kernel", None),
+            getattr(args, "lustre_tree", None),
+            getattr(args, "arch", None),
+        )
+        found, failed = shmrdma_req.doctor(target, args.fix)
+        issues += found
+        fix_failures += failed
     # vhost-net: the in-kernel datapath ltvm's virtio-net NICs use when
     # QEMU can open /dev/vhost-net.
     if not is_macos():

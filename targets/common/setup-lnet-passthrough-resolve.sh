@@ -12,7 +12,8 @@
 #   1. Enumerate /sys/class/infiniband/ to list all ibdevs.
 #   2. Subtract rxe* entries -- those are SoftRoCE links created
 #      by setup-nic-softroce.sh and already named correctly in
-#      lnet.conf.
+#      lnet.conf -- and shmrdma* entries, the emulated device of
+#      --shmrdma, whose net lnet.conf names by its netdev.
 #   3. Match the remainder positionally to the passthrough
 #      entries in FC_NICS (Nth passthrough -> Nth non-rxe ibdev).
 #   4. Rewrite lnet.conf in place, replacing each
@@ -101,8 +102,8 @@ if ! grep -q '@ib-of-eth' "$LNET_CONF"; then
 	exit 0
 fi
 
-# Enumerate ibdevs (sorted) and subtract rxe* (softroce entries
-# already named correctly by the emitter).
+# Enumerate ibdevs (sorted) and subtract rxe* and shmrdma* (named
+# correctly by the emitter).
 if [ ! -d "$SYSFS_IB_ROOT" ]; then
 	log "WARNING: $SYSFS_IB_ROOT does not exist; leaving $pt_count" \
 		"placeholder(s) in $LNET_CONF"
@@ -116,7 +117,7 @@ non_rxe_list=""
 # shellcheck disable=SC2012
 for dev in $(ls "$SYSFS_IB_ROOT" 2>/dev/null | sort); do
 	case "$dev" in
-	rxe*)
+	rxe* | shmrdma*)
 		continue
 		;;
 	*)

@@ -494,6 +494,44 @@ LTVM.TEST; rerunning keeps the keys, recreating the cluster loses them):
 ltvm cluster krb5 co2
 ```
 
+### Fast networking between VMs: shmrdma and shmnet
+
+When a test needs network speed between VMs (bulk I/O, many clients,
+LNet performance work), give them a fast path through host memory.
+Ordinary functional testing does not need it.  Two options, both
+served by a host daemon that copies straight between the guests'
+memory:
+
+- `--shmrdma` (on `create` and `cluster create`) gives each node an
+  RDMA device, and LNet comes up on o2ib over it: about 10 to 25 GB/s
+  of LNet between two VMs, against about 1 GB/s on the default NIC.
+  LNet then runs o2iblnd, not socklnd, so it is not the TCP path CI
+  mostly tests.
+- `--nic shmnet` adds a TCP NIC on the daemon's switch, so LNet stays
+  on socklnd.  It gains less: about 1.5 times the default NIC on slow
+  cores, where the guests' own TCP is the limit, and close to o2ib on
+  fast ones (9 GB/s on an Apple M5).
+
+On a `--shmrdma` VM an extra NIC joins LNet only when its spec names
+a net (`--nic shmnet:net=tcp1`); otherwise LNet would send its traffic
+over o2ib anyway.  ltvm builds and starts the daemon (`ltvm vm shmrdmad
+status`); never stop it while VMs use it, since their devices die until
+they restart.  On a multi-NUMA host, placing the VMs that talk to each
+other on one node (`--host-node N`, and the daemon with `[shmrdma]
+nodes = N` in /etc/ltvm.conf) made TCP paths 2 to 3 times faster on
+Sookie; o2ib bulk is faster spread over nodes, since one node's memory
+channels cap the copies.  Shared-memory VMs cannot be merged by KSM,
+so they cost their full RAM on the host.  It works on macOS too, on
+ltvm's own QEMU.  When something it needs is missing (a fetched image
+has no guest module, say), create refuses and says to run `ltvm doctor
+--fix --shmrdma <target>`, which installs and builds it.
+docs/SHMRDMA.md has the detail.
+
+```bash
+ltvm cluster create co2 mgs+mds+oss:co2-srv:3 client:co2-c1 --shmrdma
+ltvm cluster deploy co2 --build <tree> --mount
+```
+
 ### Failover pairs
 
 To move a target between 2 servers (`fail mds1`, replay and recovery

@@ -9,15 +9,23 @@ tmp_path, and a bare ``subprocess.run`` from the module fails the test.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
 
-from ltvm_pkg import host_firewall, host_setup, host_uninstall, rootless
+from ltvm_pkg import (
+    host_firewall,
+    host_setup,
+    host_uninstall,
+    rootless,
+    shmrdma,
+)
 from ltvm_pkg.host_uninstall import Choices, Survey
 
 # conftest stubs this for every test; the survey reads the real one.
@@ -93,6 +101,7 @@ def host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeSudo:
     vm_dir = root / "opt/qemu-vms"
     qemu = root / "opt/qemu"
     m = monkeypatch.setattr
+    m(shmrdma, "_state_home", lambda uid: home / ".local/state")
     m(host_uninstall, "VM_DIR", vm_dir)
     m(host_uninstall, "_DEFAULT_VM_DIR", vm_dir)
     m(host_uninstall, "QEMU_PREFIX", qemu)
@@ -574,6 +583,74 @@ def test_a_failed_step_does_not_stop_the_rest(
     assert st["launchd jobs"] == host_uninstall.FAILED
     assert st["vm dir"] == host_uninstall.DONE
     assert not host_uninstall.VM_DIR.exists()
+
+
+def test_shmrdma_daemons_stopped(
+    host: FakeSudo, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each user's daemon goes; another user's through sudo."""
+    from ltvm_pkg import shmrdma
+
+    me = os.geteuid()
+    mine = host_uninstall.VM_DIR / f"shmrdma-{me}"
+    theirs = host_uninstall.VM_DIR / f"shmrdma-{me + 1}"
+    mine.mkdir(parents=True)
+    theirs.mkdir()
+    (host_uninstall.VM_DIR / "shmrdma-x").mkdir()
+    direct: list[tuple[Path, int]] = []
+
+    def stop_dir(d: Path, uid: int) -> str | None:
+        direct.append((d, uid))
+        return "pid 5" if d == mine else None
+
+    monkeypatch.setattr(shmrdma, "stop_dir", stop_dir)
+    host.answer((sys.executable, "-I", "-c"), out="pid 6\n")
+    got = host_uninstall._shmrdma_daemons()
+    assert got == f"{mine} (pid 5) {theirs} (pid 6)"
+    assert (mine, me) in direct
+    assert all(d != theirs for d, _ in direct)
+    assert host.ran(sys.executable, "-I", "-c")
+    assert [c[-2:] for c in host.calls] == [[str(theirs), str(me + 1)]]
+
+
+def test_shmrdma_home_dir_removed(
+    host: FakeSudo, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The daemon's directory in the home goes even when the state
+    directory is elsewhere."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    stopped: list[Path] = []
+    monkeypatch.setattr(
+        shmrdma, "stop_dir", lambda d, uid: stopped.append(d) or None
+    )
+    home_dir = shmrdma._candidate_dirs(os.geteuid())[1]
+    _touch(home_dir / "shmrdmad.log")
+    assert host_uninstall._shmrdma_daemons() == f"{home_dir} (removed)"
+    assert stopped == [home_dir]
+    assert not home_dir.exists()
+
+
+def test_root_shmrdmad_stop_ignores_the_working_directory(
+    host: FakeSudo, tmp_path: Path
+) -> None:
+    """The helper root runs imports nothing from the caller's cwd."""
+    me = os.geteuid()
+    (host_uninstall.VM_DIR / f"shmrdma-{me + 1}").mkdir(parents=True)
+    host.answer((sys.executable, "-I", "-c"), out="")
+    host_uninstall._shmrdma_daemons()
+    [cmd] = host.calls
+    plant = tmp_path / "plant"
+    plant.mkdir()
+    marker = tmp_path / "planted"
+    (plant / "getpass.py").write_text(f"open({str(marker)!r}, 'w').close()\n")
+    env = dict(os.environ, PYTHONPATH=str(plant))
+    cmd = [*cmd[:-2], str(tmp_path / "none"), str(me + 1)]
+    with subprocess.Popen(
+        cmd, cwd=plant, env=env, stderr=subprocess.PIPE, text=True
+    ) as p:
+        _, err = p.communicate(timeout=60)
+    assert p.returncode == 0, err
+    assert not marker.exists()
 
 
 def test_claimed_vms_refuse_before_anything(host: FakeSudo) -> None:

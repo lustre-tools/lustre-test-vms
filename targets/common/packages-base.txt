@@ -29,6 +29,8 @@ iproute
 iputils
 openssh-server
 openssh-clients
+# SMC sockets over RDMA (smc_run, smcss, smcd ueid): shmrdma
+smc-tools
 
 # Editors
 vim-minimal

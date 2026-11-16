@@ -17,9 +17,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import numa_dist, vm_claim
+from . import numa_dist, shmrdma_req, vm_claim
 from .nic_spec import numa_problem as nic_numa_problem
-from .qemu_run import die, is_running, run
+from .qemu_run import (
+    die,
+    host_node_problem,
+    is_running,
+    run,
+    shared_numa_problem,
+)
 from .vm_net import (
     SSH_KEEPALIVE_OPTS,
     SSH_OPTS,
@@ -179,13 +185,18 @@ def failover_partners(
 
 
 # What a node's LNet will run on: the networks= value of its lnet.conf,
-# a separator, then every address the node holds.  rc.local composes
-# lnet.conf at boot from the node's NICs (setup-lnet-config.sh), so
-# asking the node keeps that rule in one place.
+# a separator, every address the node holds, then each RDMA device's
+# netdevs as <ibdev>/device/net/<netdev>.  rc.local composes lnet.conf
+# at boot from the node's NICs (setup-lnet-config.sh), so asking the
+# node keeps that rule in one place.  A passthrough net is named by its
+# HCA (o2ib0(mlx5_0)), whose address is on one of those netdevs.
+_IBDEV_MARK = "-- ibdev"
 LNET_PROBE = (
     'sed -n \'s/.*networks="\\([^"]*\\)".*/\\1/p\' '
     "/etc/modprobe.d/lnet.conf 2>/dev/null | head -n 1; "
-    "echo --; ip -o addr show"
+    "echo --; ip -o addr show; "
+    f"echo '{_IBDEV_MARK}'; "
+    "ls -d /sys/class/infiniband/*/device/net/* 2>/dev/null; true"
 )
 
 # The first net of a networks= value: its type ("o2ib" holds a digit,
@@ -221,6 +232,7 @@ def lnet_from_probe(output: str, ip_family: str = "ipv4") -> ClusterLnet:
     Raises ValueError when the MGS has no usable address for that net.
     """
     networks, _, addrs = output.partition("--\n")
+    addrs, _, ibdevs = addrs.partition(f"{_IBDEV_MARK}\n")
     m = _NET_RE.match(networks.strip() or "tcp0(eth0)")
     if not m:
         raise ValueError(f"cannot parse lnet.conf networks={networks!r}")
@@ -237,9 +249,14 @@ def lnet_from_probe(output: str, ip_family: str = "ipv4") -> ClusterLnet:
             f'supported by tcp"'
         )
 
+    netdevs = {iface}
+    for path in ibdevs.split():
+        parts = path.split("/")
+        if parts[-4:-1] == [iface, "device", "net"]:
+            netdevs.add(parts[-1])
     for line in addrs.splitlines():
         fields = line.split()
-        if len(fields) < 4 or fields[1] != iface:
+        if len(fields) < 4 or fields[1] not in netdevs:
             continue
         # A link-local IPv6 address is not a NID LNet will use.
         if fields[2] == ("inet6" if ipv6 else "inet") and (
@@ -250,7 +267,9 @@ def lnet_from_probe(output: str, ip_family: str = "ipv4") -> ClusterLnet:
                 nettype=nettype, mgsnid=f"{ip}@{net}", force_large_nid=ipv6
             )
     family = "global IPv6" if ipv6 else "IPv4"
-    raise ValueError(f"no {family} address on {iface}, which carries {net}")
+    others = sorted(netdevs - {iface})
+    where = f"{iface} ({', '.join(others)})" if others else iface
+    raise ValueError(f"no {family} address on {where}, which carries {net}")
 
 
 def _probe_node_lnet(node: ClusterNode, ip_family: str) -> ClusterLnet:
@@ -578,6 +597,8 @@ def _create_one_node(
     wait_seconds: int = 0,
     numa_nodes: int = 0,
     numa_dist: str = "",
+    shmrdma: str = "",
+    host_node: int = -1,
     kernel: str | None = None,
     variant: str = "base",
     share_disks: bool = False,
@@ -662,6 +683,10 @@ def _create_one_node(
         cmd += ["--numa-nodes", str(numa_nodes)]
     if numa_dist:
         cmd += [f"--numa-dist={numa_dist}"]
+    if shmrdma:
+        cmd += [f"--shmrdma={shmrdma}"]
+    if host_node >= 0:
+        cmd += ["--host-node", str(host_node)]
     if eth0_speed is not None:
         cmd += ["--eth0-speed", str(eth0_speed)]
     if wait_seconds:
@@ -915,6 +940,7 @@ def _require_cluster_memory(
     node_targets: dict[str, str | None],
     os_target: str | None,
     wait_seconds: int,
+    shared_ram: bool = False,
 ) -> None:
     """Refuse a cluster whose nodes cannot all start, before any does.
 
@@ -923,7 +949,7 @@ def _require_cluster_memory(
     them all back.  With --wait the running VMs may yet stop, so only
     a cluster too big for an idle host is refused.
     """
-    from .qemu_run import guest_memory_budget, running_vm_memory
+    from .qemu_run import charged_mb, guest_memory_budget, running_vm_memory
     from .target_config import TargetConfig
 
     budget = guest_memory_budget()
@@ -939,8 +965,12 @@ def _require_cluster_memory(
             sizes[node.name] = TargetConfig(target).default_mem
         except (ValueError, FileNotFoundError):
             return
-    need = sum(sizes.values())
-    running = [] if wait_seconds else running_vm_memory()
+    need = sum(
+        charged_mb(m, shared_ram, budget.overcommit) for m in sizes.values()
+    )
+    running = (
+        [] if wait_seconds else running_vm_memory(overcommit=budget.overcommit)
+    )
     used = sum(m for _, m in running)
     biggest = max(sizes.values(), default=0)
     if biggest <= budget.budget_mb and used + need <= budget.limit_mb:
@@ -976,6 +1006,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     cluster_name = args.name
     # Cluster name flows into filesystem paths (SOCKETS/<name>.cluster)
     # so it needs the same character whitelist as VM names.
+    from .cli.util import host_arch
     from .vm_commands import (
         _validate_disk_options,
         _validate_kernel_args,
@@ -1114,6 +1145,27 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
     problem = nic_numa_problem(nic_specs, numa_nodes)
     if problem:
         die(problem)
+    shmrdma_flag = getattr(args, "shmrdma", "") or ""
+    host_node = getattr(args, "host_node", -1)
+    shared_ram = bool(shmrdma_flag) or any(
+        n.type == "shmnet" for n in nic_specs
+    )
+    # What every node's create would refuse alike; the image checks stay
+    # with the nodes, whose targets differ.
+    problem = (
+        host_node_problem(host_node)
+        or (
+            shared_numa_problem(numa_nodes, arch or host_arch())
+            if shared_ram
+            else None
+        )
+        or shmrdma_req.refusal(
+            shmrdma_req.features_of(shmrdma_flag, nic_specs, host_node),
+            arch=arch or host_arch(),
+        )
+    )
+    if problem:
+        die(problem)
     try:
         owner_id = resolve_owner_id(getattr(args, "owner_id", None))
     except ValueError as e:
@@ -1155,7 +1207,12 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
         return
 
     _require_cluster_memory(
-        node_specs, mem, node_targets, os_target, wait_seconds
+        node_specs,
+        mem,
+        node_targets,
+        os_target,
+        wait_seconds,
+        shared_ram=shared_ram,
     )
 
     print(f"=== Creating cluster '{cluster_name}' ===", flush=True)
@@ -1192,6 +1249,8 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                     wait_seconds=wait_seconds,
                     numa_nodes=numa_nodes,
                     numa_dist=dist,
+                    shmrdma=shmrdma_flag,
+                    host_node=host_node,
                     kernel=node_kernels[node.name]
                     or (None if node_targets[node.name] else kernel),
                     variant="base" if node_targets[node.name] else variant,

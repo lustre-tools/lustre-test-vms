@@ -301,7 +301,7 @@ class TestDoctorStaleSshConfig:
 def _write_foreign_vm(sockets: Path, name: str) -> None:
     """A .info from another ltvm, with a NIC type this one lacks."""
     (sockets / f"{name}.info").write_text(
-        f"NAME={name}\nIP=10.0.0.9\nPID=0\nNICS=shmnet:tso=off|shmnet:tso=off\n"
+        f"NAME={name}\nIP=10.0.0.9\nPID=0\nNICS=warpnet:x=1|warpnet:x=1\n"
     )
 
 
@@ -845,3 +845,60 @@ class TestDoctorSshClientConfig:
         ) as probe:
             assert vm_commands.cmd_doctor(_make_args(fix=False)) == 0
         probe.assert_called_once_with(f"{SUBNET}.2")
+
+
+# -- shmrdmad ---------------------------------------------------------
+
+
+class TestDoctorShmrdmad:
+    def test_no_passwd_entry_skips_the_check(
+        self,
+        tmp_vmdir: Path,
+        doctor_env: dict,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        with patch(
+            "ltvm_pkg.shmrdma.daemon",
+            side_effect=KeyError("getpwuid(): uid not found: 4242"),
+        ):
+            rc = vm_commands.cmd_doctor(_make_args(fix=False))
+        assert rc == 0
+        assert "no issues found" in capsys.readouterr().out
+
+    def test_orphans_reported(
+        self,
+        tmp_vmdir: Path,
+        doctor_env: dict,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from ltvm_pkg.vm_state import VMInfo
+
+        vm = VMInfo(name="co1-a", ip="192.168.100.50", shm_daemon="10:99")
+        with patch("ltvm_pkg.shmrdma._attached", return_value=[vm]):
+            rc = vm_commands.cmd_doctor(_make_args(fix=False))
+        assert rc != 0
+        assert "the shmrdmad co1-a started against is gone" in (
+            capsys.readouterr().out
+        )
+
+    def test_replaced_daemon_reported(
+        self,
+        tmp_vmdir: Path,
+        doctor_env: dict,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from ltvm_pkg.vm_state import VMInfo
+
+        old = VMInfo(name="co1-a", ip="192.168.100.50", shm_daemon="10:99")
+        new = VMInfo(name="co1-b", ip="192.168.100.51", shm_daemon="20:500")
+        legacy = VMInfo(name="co1-c", ip="192.168.100.52")
+        with (
+            patch(
+                "ltvm_pkg.shmrdma._attached", return_value=[old, new, legacy]
+            ),
+            patch("ltvm_pkg.shmrdma.Daemon.identity", return_value="20:500"),
+        ):
+            rc = vm_commands.cmd_doctor(_make_args(fix=False))
+        assert rc != 0
+        out = capsys.readouterr().out
+        assert "the shmrdmad co1-a started against is gone" in out

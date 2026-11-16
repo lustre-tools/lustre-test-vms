@@ -6,6 +6,7 @@
 #   - 0 passthrough: no-op, file untouched
 #   - 1 passthrough + 0 softroce
 #   - 1 passthrough + 1 softroce (mixed, rxe ignored)
+#   - 1 passthrough + shmrdma (shmrdma ignored)
 #   - 2 passthrough
 #   - mismatched counts: warn + leave placeholder
 #   - operator-authored file (no marker): untouched
@@ -128,6 +129,14 @@ run_case "1pt-1sr" "softroce,passthrough" "mlx5_0 rxe0" \
 	'options lnet networks="tcp0(eth0),o2ib0(eth1),o2ib1(@ib-of-eth2))"'
 check "1pt+1sr: only passthrough resolved" \
 	'options lnet networks="tcp0(eth0),o2ib0(eth1),o2ib1(mlx5_0)"' \
+	"$RESULT"
+
+# --- Case: 1 passthrough + shmrdma ---------------------------------
+# shmrdma0 is not a passthrough HCA: its net is o2ib0(eth0).
+run_case "1pt-shmrdma" "passthrough" "mlx5_0 shmrdma0" \
+	'options lnet networks="o2ib0(eth0),o2ib1(@ib-of-eth1))"'
+check "1pt+shmrdma: shmrdma0 skipped" \
+	'options lnet networks="o2ib0(eth0),o2ib1(mlx5_0)"' \
 	"$RESULT"
 
 # --- Case: 2 passthrough -------------------------------------------

@@ -13,6 +13,15 @@ CONFIG_INFINIBAND_USER_ACCESS=m
 CONFIG_INFINIBAND_ADDR_TRANS=y
 CONFIG_RDMA_RXE=m
 
+# SMC sockets: SMC-R runs over any RoCE device, shmrdma's included, so
+# TCP programs (smc_run) and socklnd (with socket_smc=1) can use it.
+# Its capability handshake is a TCP SYN option in the core TCP stack,
+# so it cannot be added as a module later.  SMC_LO is the in-guest
+# loopback ISM (6.11 and later).
+CONFIG_SMC=m
+CONFIG_SMC_DIAG=m
+CONFIG_SMC_LO=y
+
 # libcfs finds kallsyms_lookup_name through a kprobe: without them
 # every Lustre module fails to load with -EOPNOTSUPP.  arm64's
 # defconfig leaves them off.

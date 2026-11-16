@@ -347,18 +347,40 @@ def _install_fetched_images(staging: Path, output_base: Path) -> None:
     Each image goes in under a versioned name (image_store), never over
     a file an existing VM overlay may be backed by.
     """
-    from .image_store import LEGACY, install_image
+    from .image_build import _kmod_images
+    from .image_store import LEGACY, current_image, install_image
 
+    # Per image dir: the meta.json and current image it had before.
+    before: dict[Path, tuple[dict, Path | None]] = {}
+    installed: dict[Path, Path] = {}
     for src in sorted(staging.rglob("*")):
         if not src.is_file() or src.is_symlink():
             continue
         rel = src.relative_to(staging)
         dest_dir = output_base / rel.parent
         dest_dir.mkdir(parents=True, exist_ok=True)
+        if dest_dir not in before:
+            before[dest_dir] = (
+                load_meta_safe(dest_dir / "meta.json") or {},
+                current_image(dest_dir),
+            )
         if src.name == LEGACY:
-            install_image(src, dest_dir)
+            installed[dest_dir] = install_image(src, dest_dir)
         else:
             os.replace(src, dest_dir / src.name)
+    # A fetched meta.json describes only the fetched image: carry over
+    # which older image files have shmrdma.ko, for the VMs on them.
+    for dest_dir, image in installed.items():
+        meta_path = dest_dir / "meta.json"
+        meta = load_meta_safe(meta_path)
+        if meta is None:
+            continue
+        prev_meta, prev_image = before[dest_dir]
+        has = bool(meta.get("shmrdma_kmod"))
+        names = _kmod_images(prev_meta, prev_image, image, has)
+        if len(names) > 1 or "shmrdma_kmod_images" in meta:
+            meta["shmrdma_kmod_images"] = names
+            meta_path.write_text(json.dumps(meta, indent=2) + "\n")
 
 
 def _zstd_file(src: Path, dst: Path) -> None:
