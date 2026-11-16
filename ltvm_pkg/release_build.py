@@ -345,7 +345,7 @@ def disk_problems(
     tmp: Path | None = None,
     new_targets: int = 0,
     preflight_slots: int = 0,
-    new_caches: int = 0,
+    ccache_bytes: int = 0,
     cross_preflight: list[Path] | None = None,
 ) -> list[str]:
     """What will not fit, per filesystem.  Artifacts grow by one set per
@@ -356,8 +356,8 @@ def disk_problems(
     layers (``new_targets`` have none yet), and the trees keep each
     build's staging.  The preflight needs working room in podman's
     storage for each of its ``preflight_slots`` even with no builds, and
-    each target without a Lustre ccache yet (``new_caches``) grows one
-    in the work directory.  A cross build's preflight writes tools into
+    the targets' Lustre ccaches in the work directory grow by up to
+    ``ccache_bytes``.  A cross build's preflight writes tools into
     its target's artifacts (``cross_preflight``).  ``store`` None leaves
     podman's storage unchecked."""
     if builds == 0 and new_targets == 0 and preflight_slots == 0:
@@ -395,7 +395,7 @@ def disk_problems(
         work,
         jobs * TREE_BYTES_PER_SLOT
         + builds * STAGING_BYTES_PER_BUILD
-        + new_caches * CCACHE_BYTES_PER_TARGET,
+        + ccache_bytes,
         f"Lustre trees ({work})",
     )
     out = []
@@ -541,10 +541,39 @@ def built_kernel_dir(log_text: str) -> str | None:
     return m.group(1) if m else None
 
 
-def verify(build: Build, arch: str, head: str, kdir_name: str) -> list[str]:
+def snapshot_modules(snap_dir: Path) -> str:
+    """The Lustre modules a snapshot holds, by path and size.  Not their
+    times, which a snapshot copy need not keep to the nanosecond."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for ko in sorted(snap_dir.rglob("*.ko")):
+        try:
+            size = ko.stat().st_size
+        except OSError:
+            continue
+        h.update(f"{ko.relative_to(snap_dir)}\0{size}\0".encode())
+    return h.hexdigest()
+
+
+def snapshot_dir(build: Build, arch: str, kdir_name: str) -> Path:
+    from .target_config import TargetConfig
+
+    tc = TargetConfig(build.target, arch=arch)
+    return tc.kernel_output_dir(kernel=kdir_name) / "lustre-artifacts"
+
+
+def verify(
+    build: Build,
+    arch: str,
+    head: str,
+    kdir_name: str,
+    modules: str | None = None,
+) -> list[str]:
     """Read a build's artifacts back from kernel directory ``kdir_name``:
     a complete kernel, the Lustre snapshot beside it (from ``head``,
-    with modules), and an image current against both."""
+    with modules, and when ``modules`` is given the same ones as when it
+    was built), and an image current against both."""
     from .image_build import _lustre_staging_hash_input
     from .paths import load_meta_safe
     from .target_config import TargetConfig
@@ -567,16 +596,10 @@ def verify(build: Build, arch: str, head: str, kdir_name: str) -> list[str]:
         )
     elif not any(snap_dir.rglob("*.ko")):
         problems.append(f"Lustre snapshot in {kdir} has no modules")
-    else:
-        from .lustre_build import _hash_staged_modules, read_staging_meta
-
-        staged = read_staging_meta(snap_dir) or {}
-        if _hash_staged_modules(snap_dir) != staged.get(
-            "lustre_modules_sha256"
-        ):
-            problems.append(
-                f"Lustre snapshot in {kdir} does not hold the modules it records"
-            )
+    elif modules is not None and snapshot_modules(snap_dir) != modules:
+        problems.append(
+            f"Lustre snapshot in {kdir} no longer holds the modules it was built with"
+        )
     from .lustre_build import _hash_file
 
     staged_meta = load_meta_safe(snap_dir / ".ltvm-staging-meta.json") or {}
@@ -614,8 +637,11 @@ class Ledger:
     def _key(arch: str, b: Build) -> str:
         return f"{arch} {b.target} {b.kernel}"
 
-    def done(self, arch: str, b: Build, ltvm: str, lustre: str) -> str | None:
-        """The kernel directory a matching finished build used, or None."""
+    def done(
+        self, arch: str, b: Build, ltvm: str, lustre: str
+    ) -> tuple[str, str | None] | None:
+        """The kernel directory and snapshot modules of a matching
+        finished build, or None."""
         e = self.data.get(self._key(arch, b))
         if (
             isinstance(e, dict)
@@ -623,7 +649,8 @@ class Ledger:
             and e.get("lustre") == lustre
             and isinstance(e.get("kernel_dir"), str)
         ):
-            return str(e["kernel_dir"])
+            m = e.get("modules")
+            return str(e["kernel_dir"]), m if isinstance(m, str) else None
         return None
 
     def forget(self, arch: str, b: Build) -> None:
@@ -638,13 +665,20 @@ class Ledger:
         tmp.replace(self.path)
 
     def record(
-        self, arch: str, b: Build, ltvm: str, lustre: str, kernel_dir: str
+        self,
+        arch: str,
+        b: Build,
+        ltvm: str,
+        lustre: str,
+        kernel_dir: str,
+        modules: str | None = None,
     ) -> None:
         with self._lock:
             self.data[self._key(arch, b)] = {
                 "ltvm": ltvm,
                 "lustre": lustre,
                 "kernel_dir": kernel_dir,
+                "modules": modules,
                 "at": datetime.now().isoformat(timespec="seconds"),
             }
             self._write()
@@ -709,6 +743,10 @@ class Runner:
             try:
                 return self._wait(proc, log, f)
             finally:
+                # Whatever ended the wait, the build must not outlive it
+                # untracked.
+                if proc.poll() is None:
+                    _stop_group(proc)
                 with self._plock:
                     self._procs.discard(proc)
 
@@ -736,17 +774,15 @@ class Runner:
             self.say(
                 f"{_clock()} {log.name}: no output for {mins} min, stopping it"
             )
-            f.write(
-                f"\nltvm build release: no output for {mins} min; stopped\n".encode()
-            )
-            f.flush()
-            _signal_group(proc, signal.SIGINT)
             try:
-                proc.wait(timeout=STOP_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                _signal_group(proc, signal.SIGKILL)
-                proc.wait()
-            _signal_group(proc, signal.SIGKILL)
+                f.write(
+                    f"\nltvm build release: no output for {mins} min; "
+                    f"stopped\n".encode()
+                )
+                f.flush()
+            except OSError:
+                pass
+            _stop_group(proc)
             return STALLED
 
     def stop(self, grace: float = STOP_GRACE_SECONDS) -> None:
@@ -766,6 +802,18 @@ class Runner:
                 pass
         for p in procs:
             _signal_group(p, signal.SIGKILL)
+
+
+def _stop_group(proc: subprocess.Popen[bytes]) -> None:
+    """Interrupt a build's process group, kill what is left after the
+    grace period, and reap it."""
+    _signal_group(proc, signal.SIGINT)
+    try:
+        proc.wait(timeout=STOP_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    _signal_group(proc, signal.SIGKILL)
+    proc.wait()
 
 
 def _signal_group(p: subprocess.Popen[bytes], sig: int) -> None:

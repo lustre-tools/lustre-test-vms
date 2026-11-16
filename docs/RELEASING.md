@@ -31,7 +31,9 @@ It runs in three passes, so what breaks shows early:
    target's first kernel before any target's second, so a kernel
    problem common to a target shows on its first build.  Builds run
    in parallel slots (`--jobs`; one per 32 CPUs, at most four), each
-   pinned to whole NUMA nodes (`--cpus` sets them by hand) and given
+   pinned to whole NUMA nodes (`--cpus` sets them by hand; the pinning
+reaches local podman's containers, not those of a podman service reached
+through `CONTAINER_HOST`) and given
    its own clone of the Lustre tree.  Two kernels of one target never
    build at once.
 3. **Verify**: a build counts only when its kernel, its Lustre
@@ -48,7 +50,7 @@ and refuses when they do not.  On macOS podman's storage is inside the
 podman machine and is not checked.
 
 Finished builds go in a ledger in the work directory
-(`<artifacts>/.release-build`, with the Lustre clones).  Rerunning the
+(`<artifacts>/.release-build/<user>`, with the Lustre clones).  Rerunning the
 same command with the same ltvm and Lustre commit skips them, so after
 a failure, fix the cause and run it again.  The ledger knows only those
 two commits: an ltvm checkout with uncommitted changes skips nothing.

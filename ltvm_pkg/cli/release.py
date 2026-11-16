@@ -7,7 +7,9 @@ report and the exit status.
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -94,22 +96,30 @@ def _new_targets(targets: list[str], arch: str) -> int:
     return n
 
 
-def _new_caches(todo: list[rb.Build], arch: str, work: Path) -> int:
-    """Targets with builds to run but no Lustre ccache in ``work`` yet
-    (lustre_build keeps it beside the trees, named for the container)."""
+def _ccache_room(todo: list[rb.Build], arch: str, work: Path) -> int:
+    """Bytes the Lustre ccaches of targets with builds to run may still
+    grow by in ``work``, up to ccache's default cap, given what each
+    already holds (lustre_build keeps them beside the trees, named for
+    the container)."""
     from ltvm_pkg.target_config import TargetConfig
 
-    n = 0
+    room = 0
     for t in dict.fromkeys(b.target for b in todo):
         try:
             tag = TargetConfig(t, arch=arch).container_tag
         except (ValueError, KeyError):
-            n += 1
+            room += rb.CCACHE_BYTES_PER_TARGET
             continue
-        n += not (
-            work / ".ltvm-ccache" / tag.removeprefix("ltvm-build-")
-        ).is_dir()
-    return n
+        d = work / ".ltvm-ccache" / tag.removeprefix("ltvm-build-")
+        used = 0
+        for dirpath, _dirs, files in os.walk(d):
+            for name in files:
+                try:
+                    used += os.lstat(os.path.join(dirpath, name)).st_size
+                except OSError:
+                    pass
+        room += max(0, rb.CCACHE_BYTES_PER_TARGET - used)
+    return room
 
 
 def _cross_preflight_dirs(targets: list[str], arch: str) -> list[Path]:
@@ -186,7 +196,8 @@ def cmd_build_release(args: argparse.Namespace) -> int:
     work = (
         Path(args.work_dir).resolve()
         if args.work_dir
-        else ARTIFACTS_DIR / ".release-build"
+        # per user: git refuses a clone another user owns
+        else ARTIFACTS_DIR / ".release-build" / getpass.getuser()
     )
     locks: list[Any] = []
     old_term = None
@@ -251,9 +262,9 @@ def _plan_and_run(
     for b in order:
         if args.fresh or not ltvm_version:
             break
-        kdir = ledger.done(arch, b, ltvm_version, head)
-        if kdir is not None and not rb.verify(b, arch, head, kdir):
-            done[b] = kdir
+        entry = ledger.done(arch, b, ltvm_version, head)
+        if entry is not None and not rb.verify(b, arch, head, *entry):
+            done[b] = entry[0]
     todo = [b for b in order if b not in done]
     targets = list(dict.fromkeys(b.target for b in order))
 
@@ -301,7 +312,7 @@ def _plan_and_run(
         len(todo),
         new_targets=new_targets,
         preflight_slots=0 if args.no_preflight else min(jobs, len(targets)),
-        new_caches=_new_caches(todo, arch, work),
+        ccache_bytes=_ccache_room(todo, arch, work),
         cross_preflight=(
             [] if args.no_preflight else _cross_preflight_dirs(targets, arch)
         ),
@@ -439,7 +450,14 @@ def _run(
             force=args.fresh,
             on_start=lambda b: ledger.forget(arch, b),
             on_ok=lambda b, kdir: (
-                ledger.record(arch, b, ltvm_version, head, kdir)
+                ledger.record(
+                    arch,
+                    b,
+                    ltvm_version,
+                    head,
+                    kdir,
+                    rb.snapshot_modules(rb.snapshot_dir(b, arch, kdir)),
+                )
                 if ltvm_version
                 else None
             ),

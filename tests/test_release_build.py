@@ -419,6 +419,9 @@ class TestScheduler:
             def wait(self, timeout: float | None = None) -> int:
                 return 3
 
+            def poll(self) -> int:
+                return 3
+
         log = tmp_path / "x" / "b.log"
         with patch.object(rb.subprocess, "Popen", FakeProc):
             assert runner.run(0, ["build", "all", "rocky9"], log) == 3
@@ -613,7 +616,7 @@ class TestLedger:
         assert led.done("x86_64", b, "v1", "abc") is None
         led.record("x86_64", b, "v1", "abc", "5.14-rhel9.8-x")
         again = rb.Ledger(tmp_path / "done.json")
-        assert again.done("x86_64", b, "v1", "abc") == "5.14-rhel9.8-x"
+        assert again.done("x86_64", b, "v1", "abc") == ("5.14-rhel9.8-x", None)
         assert again.done("x86_64", b, "v2", "abc") is None
         assert again.done("x86_64", b, "v1", "def") is None
         assert again.done("aarch64", b, "v1", "abc") is None
@@ -736,10 +739,25 @@ class TestVerify:
 
     def test_snapshot_missing_a_module(self, tmp_path: Path) -> None:
         tc, snap = self._setup(tmp_path)
-        (snap / "lib" / "lustre.ko").unlink()
-        assert self._verify(tc)[0].endswith(
-            "does not hold the modules it records"
-        )
+        built = rb.snapshot_modules(snap)
+        with patch("ltvm_pkg.target_config.TargetConfig", return_value=tc):
+            b = rb.Build("rocky9", "5.14-rhel9.8")
+            assert (
+                rb.verify(b, "x86_64", "abc123", "5.14-rhel9.8-x", built) == []
+            )
+            (snap / "lib" / "lustre.ko").unlink()
+            (problem,) = rb.verify(
+                b, "x86_64", "abc123", "5.14-rhel9.8-x", built
+            )
+        assert problem.endswith("no longer holds the modules it was built with")
+
+    def test_module_digest_ignores_file_times(self, tmp_path: Path) -> None:
+        import os
+
+        _, snap = self._setup(tmp_path)
+        before = rb.snapshot_modules(snap)
+        os.utime(snap / "lib" / "lustre.ko", (1, 1))
+        assert rb.snapshot_modules(snap) == before
 
     def test_snapshot_without_modules(self, tmp_path: Path) -> None:
         tc, snap = self._setup(tmp_path)
@@ -1310,7 +1328,7 @@ def test_new_ccache_space_is_counted(tmp_path: Path) -> None:
     args = ([tmp_path], tmp_path, tmp_path, 1, 1)
     kw: dict[str, Any] = {"usage": lambda p: free, "tmp": tmp_path}
     assert rb.disk_problems(*args, **kw) == []
-    (problem,) = rb.disk_problems(*args, **kw, new_caches=2)
+    (problem,) = rb.disk_problems(*args, **kw, ccache_bytes=10 * rb.GIB)
     # 56 + 2 * 5
     assert "about 66 GiB needed" in problem
 
@@ -1484,3 +1502,32 @@ def test_a_build_stopped_by_the_run_is_interrupted_not_failed(
             lambda b, k: None,
         )
     assert [r.status for r in res.values()] == ["interrupted"]
+
+
+def test_a_failed_wait_does_not_orphan_the_build(tmp_path: Path) -> None:
+    pidfile = tmp_path / "child.pid"
+    script = tmp_path / "slow.sh"
+    script.write_text(f"sleep 60 & echo $! > {pidfile}\nwait\n")
+    runner = rb.Runner(
+        ltvm=["bash", str(script)],
+        arch="x86_64",
+        cpus=[None],
+        say=lambda m: None,
+    )
+
+    def boom(*a: Any) -> int:
+        deadline = time.monotonic() + 10
+        while not pidfile.exists() or not pidfile.read_text().strip():
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        raise OSError("log disk full")
+
+    with patch.object(runner, "_wait", side_effect=boom):
+        with pytest.raises(OSError):
+            runner.run(0, [], tmp_path / "log")
+    child = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    while _alive(child):
+        assert time.monotonic() < deadline, "the build outlived its runner"
+        time.sleep(0.05)
+    assert not runner._procs
