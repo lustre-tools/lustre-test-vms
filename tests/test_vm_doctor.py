@@ -295,6 +295,53 @@ class TestDoctorStaleSshConfig:
         assert rc != 0
 
 
+# ── unreadable VM state ───────────────────────────────────
+
+
+def _write_foreign_vm(sockets: Path, name: str) -> None:
+    """A .info from another ltvm, with a NIC type this one lacks."""
+    (sockets / f"{name}.info").write_text(
+        f"NAME={name}\nIP=10.0.0.9\nPID=0\nNICS=shmnet:tso=off|shmnet:tso=off\n"
+    )
+
+
+class TestDoctorUnreadableVM:
+    """A VM this ltvm cannot load is reported, and the rest still checked."""
+
+    def test_reports_it_and_checks_the_others(
+        self,
+        tmp_vmdir: Path,
+        doctor_env: dict,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _write_foreign_vm(tmp_vmdir / "sockets", "foreign")
+        VMInfo(name="ghost", ip="10.0.0.1", pid=99999).save()
+        rc = vm_commands.cmd_doctor(_make_args(fix=False))
+        out = capsys.readouterr().out
+        assert "unreadable VM state: foreign (unknown --nic type" in out
+        assert "stale PID: ghost" in out
+        assert rc != 0
+
+    def test_fix_leaves_it_alone(
+        self, tmp_vmdir: Path, doctor_env: dict
+    ) -> None:
+        _write_foreign_vm(tmp_vmdir / "sockets", "foreign")
+        info = tmp_vmdir / "sockets" / "foreign.info"
+        before = info.read_text()
+        vm_commands.cmd_doctor(_make_args(fix=True))
+        assert info.read_text() == before
+
+    def test_its_taps_are_counted_from_the_raw_nics_line(
+        self, tmp_vmdir: Path
+    ) -> None:
+        _write_foreign_vm(tmp_vmdir / "sockets", "foreign")
+        assert vm_commands._unreadable_vm_taps("foreign") == {
+            "tap-foreign",
+            "tap-foreign-1",
+            "tap-foreign-2",
+        }
+
+
 # ── orphan TAPs ───────────────────────────────────────────
 
 
