@@ -1621,13 +1621,28 @@ def test_podman_volume_caches_are_not_charged_to_the_host(
     from ltvm_pkg.cli import release
 
     builds = [rb.Build("rocky9", "k")]
+    full = rb.CCACHE_BYTES_PER_TARGET
+    exists = subprocess.CompletedProcess([], 0, b"", b"")
+    missing = subprocess.CompletedProcess([], 1, b"", b"")
     with patch("ltvm_pkg.build_volumes.enabled", return_value=True):
-        assert release._ccache_room(builds, "x86_64", tmp_path) == 0
+        with patch.object(subprocess, "run", return_value=exists):
+            assert release._ccache_room(builds, "x86_64", tmp_path) == 0
+        # no volume yet: the build may fall back to the host directory
+        with patch.object(subprocess, "run", return_value=missing):
+            assert release._ccache_room(builds, "x86_64", tmp_path) == full
     with patch("ltvm_pkg.build_volumes.enabled", return_value=False):
-        assert (
-            release._ccache_room(builds, "x86_64", tmp_path)
-            == rb.CCACHE_BYTES_PER_TARGET
-        )
+        assert release._ccache_room(builds, "x86_64", tmp_path) == full
+
+
+def test_kernel_ccache_room_is_charged_beside_the_artifacts() -> None:
+    from ltvm_pkg.cli import release
+
+    (entry,) = release._kernel_ccache_room([rb.Build("rocky9", "k")], "x86_64")
+    path, room, what = entry
+    assert path.name == "ccache" and room <= rb.CCACHE_BYTES_PER_TARGET
+    assert "kernel ccache" in what
+    (entry,) = release._kernel_ccache_room([rb.Build("rocky9", "k")], "aarch64")
+    assert entry[0].name == "ccache-aarch64"
 
 
 def test_a_zfs_kernel_is_not_brought_back_by_another_manifest() -> None:

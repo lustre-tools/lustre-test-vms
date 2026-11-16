@@ -1406,7 +1406,10 @@ class TargetConfig:
                 return False
             meta = load_meta_safe(out / "meta.json") or {}
             for name in ("vmlinux", "vmlinuz"):
-                size = (out / name).stat().st_size
+                try:
+                    size = (out / name).stat().st_size
+                except OSError:  # renamed away by a rebuild meanwhile
+                    return False
                 want = meta.get(f"{name}_bytes")
                 if size == 0 or (isinstance(want, int) and size != want):
                     return False

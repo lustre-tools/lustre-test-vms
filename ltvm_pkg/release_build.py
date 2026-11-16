@@ -369,6 +369,7 @@ def disk_problems(
     preflight_slots: int = 0,
     ccache_bytes: int = 0,
     cross_preflight: list[Path] | None = None,
+    extra: list[tuple[Path, int, str]] | None = None,
 ) -> list[str]:
     """What will not fit, per filesystem.  Artifacts grow by one set per
     build, in that build's ``artifacts`` directory (an archived target's
@@ -380,7 +381,8 @@ def disk_problems(
     storage for each of its ``preflight_slots`` even with no builds, and
     the targets' Lustre ccaches in the work directory grow by up to
     ``ccache_bytes``.  A cross build's preflight writes tools into
-    its target's artifacts (``cross_preflight``).  ``store`` None leaves
+    its target's artifacts (``cross_preflight``).  ``extra`` adds (path,
+    bytes, what) needs, such as kernel ccaches.  ``store`` None leaves
     podman's storage unchecked."""
     if builds == 0 and new_targets == 0 and preflight_slots == 0:
         return []
@@ -405,6 +407,8 @@ def disk_problems(
         )
     for a in cross_preflight:
         add(a, CROSS_PREFLIGHT_BYTES, f"artifacts ({_existing(a).resolve()})")
+    for path, n, what in extra or []:
+        add(path, n, what)
     if store is not None:
         add(
             store,

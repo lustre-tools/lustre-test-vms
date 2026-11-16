@@ -96,17 +96,27 @@ def _new_targets(targets: list[str], arch: str) -> int:
     return n
 
 
+def _dir_bytes(d: Path) -> int:
+    used = 0
+    for dirpath, _dirs, files in os.walk(d):
+        for name in files:
+            try:
+                used += os.lstat(os.path.join(dirpath, name)).st_size
+            except OSError:
+                pass
+    return used
+
+
 def _ccache_room(todo: list[rb.Build], arch: str, work: Path) -> int:
     """Bytes the Lustre ccaches of targets with builds to run may still
     grow by in ``work``, up to ccache's default cap, given what each
     already holds (lustre_build keeps them beside the trees, named for
-    the container)."""
+    the container).  On macOS a target whose podman cache volume exists
+    keeps its cache in the podman machine; one without may fall back to
+    the host directory."""
     from ltvm_pkg import build_volumes
     from ltvm_pkg.target_config import TargetConfig
 
-    # On macOS the caches are podman volumes, in the podman machine
-    if build_volumes.enabled():
-        return 0
     room = 0
     for t in dict.fromkeys(b.target for b in todo):
         try:
@@ -114,16 +124,46 @@ def _ccache_room(todo: list[rb.Build], arch: str, work: Path) -> int:
         except (ValueError, KeyError):
             room += rb.CCACHE_BYTES_PER_TARGET
             continue
+        if build_volumes.enabled():
+            try:
+                r = subprocess.run(
+                    [
+                        "podman",
+                        "volume",
+                        "exists",
+                        build_volumes.ccache_volume_name(tag),
+                    ],
+                    capture_output=True,
+                    timeout=PODMAN_PROBE_SECONDS,
+                )
+                if r.returncode == 0:
+                    continue
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         d = work / ".ltvm-ccache" / tag.removeprefix("ltvm-build-")
-        used = 0
-        for dirpath, _dirs, files in os.walk(d):
-            for name in files:
-                try:
-                    used += os.lstat(os.path.join(dirpath, name)).st_size
-                except OSError:
-                    pass
-        room += max(0, rb.CCACHE_BYTES_PER_TARGET - used)
+        room += max(0, rb.CCACHE_BYTES_PER_TARGET - _dir_bytes(d))
     return room
+
+
+def _kernel_ccache_room(
+    todo: list[rb.Build], arch: str
+) -> list[tuple[Path, int, str]]:
+    """Room each target's kernel ccache may still take: it is beside the
+    target's artifacts (kernel_build's bind mount), up to ccache's cap."""
+    from ltvm_pkg.target_config import TargetConfig
+
+    out = []
+    for t in dict.fromkeys(b.target for b in todo):
+        try:
+            tc = TargetConfig(t, arch=arch)
+        except (ValueError, KeyError):
+            continue
+        # where kernel_build._ccache_volume puts it, without creating it
+        suffix = "" if not tc.arch or tc.arch == "x86_64" else f"-{tc.arch}"
+        d = tc.output_dir / f"ccache{suffix}"
+        room = max(0, rb.CCACHE_BYTES_PER_TARGET - _dir_bytes(d))
+        out.append((d, room, f"kernel ccache ({d})"))
+    return out
 
 
 def _cross_preflight_dirs(targets: list[str], arch: str) -> list[Path]:
@@ -320,6 +360,7 @@ def _plan_and_run(
         new_targets=new_targets,
         preflight_slots=0 if args.no_preflight else min(jobs, len(targets)),
         ccache_bytes=_ccache_room(todo, arch, work),
+        extra=_kernel_ccache_room(todo, arch),
         cross_preflight=(
             [] if args.no_preflight else _cross_preflight_dirs(targets, arch)
         ),
