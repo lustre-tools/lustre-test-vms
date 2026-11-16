@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
 from . import build_timeout
-from .paths import load_meta_safe
+from .paths import load_meta_safe, usable_cpus
 from .podman_run import run_podman_with_cleanup
 
 if TYPE_CHECKING:
@@ -903,7 +903,7 @@ def _run_build(
         "-e",
         f"KVER={kver}",
         "-e",
-        f"JOBS={jobs or os.cpu_count() or 4}",
+        f"JOBS={jobs or usable_cpus()}",
         "-v",
         f"{INNER_SCRIPT}:/zfs-build-inner.sh:ro",
         "-v",

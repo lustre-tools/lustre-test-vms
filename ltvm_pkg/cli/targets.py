@@ -91,6 +91,9 @@ def _release_status(
     if all_releases is None:
         remote = "?"
     else:
+        from ltvm_pkg.release_package import _declared_variant_names
+
+        known_variants = _declared_variant_names(target, arch)
         arch_match = f"-{arch}-"
         remote = "-"
         for rel in all_releases:
@@ -108,10 +111,9 @@ def _release_status(
                 if not name.endswith(".json"):
                     continue
                 if variant == "base":
-                    stem = name[: -len(".json")]
-                    last_seg = stem.rsplit("-", 1)[-1]
-                    # Variant suffixes are alphabetic; kvers end in digits.
-                    if last_seg and not any(ch.isdigit() for ch in last_seg):
+                    if not _cli_attr("_is_base_stem")(
+                        name[: -len(".json")], known_variants
+                    ):
                         continue
                 else:
                     if not name.endswith(f"-{variant}.json"):

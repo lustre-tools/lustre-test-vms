@@ -25,6 +25,7 @@ from . import priv
 from .image_store import current_image, install_image, prune_superseded
 from .paths import load_meta_safe
 from .podman_gc import Superseded, final_image_tag, remove_tag
+from .podman_run import run_podman_with_cleanup
 from .target_config import TARGETS_DIR
 
 if TYPE_CHECKING:
@@ -285,14 +286,19 @@ def _prebuild_tools_native(
         "run",
         "--rm",
         "-v",
-        f"{common_dir}:/input:ro,Z",
+        # z, not Z: parallel prebuilds share this directory
+        f"{common_dir}:/input:ro,z",
         "-v",
         f"{output_dir}:/output:Z",
         build_tag,
         "-c",
         script,
     ]
-    subprocess.run(cmd, check=True)
+    # Not check=True: the wrapper lets a cleanup EOF through, and
+    # nothing here checks the tools came out whole.
+    r = run_podman_with_cleanup(cmd)
+    if r.returncode != 0:
+        raise subprocess.CalledProcessError(r.returncode, cmd)
     _drop_internal_blkid(output_dir)
     log.info("Pre-built tools at %s", output_dir)
 
@@ -732,6 +738,160 @@ def _kdump_inject_lines(
     return []
 
 
+def _build_base_layers(
+    target_config: TargetConfig, out_dir: Path, superseded: Superseded
+) -> str:
+    """Build the image's package layers: the target's image.Dockerfile,
+    then its variant overlay if any.  Returns the tag to layer the
+    kernel modules and Lustre on.  Needs no kernel or Lustre.
+    """
+    tag = _container_image_tag(target_config)
+    dockerfile = target_config.target_dir / "image.Dockerfile"
+    if not dockerfile.exists():
+        raise FileNotFoundError(
+            f"No image.Dockerfile for target {target_config.name}"
+        )
+
+    # ── Step 1: Build container image ──
+    cross = _is_cross_build(target_config)
+    platform_args = _podman_platform(target_config)
+    effective_dockerfile = dockerfile
+    prebuilt_dir: Path | None = None
+
+    if cross:
+        # Cross-build: compile tools natively, then inject into the
+        # emulated image build (avoids slow compilation under QEMU).
+        prebuilt_dir = out_dir / "_prebuilt"
+        _prebuild_tools_native(target_config, prebuilt_dir)
+
+        patched = cross_patch_dockerfile(
+            dockerfile.read_text(),
+            prebuilt_dir,
+            libdir="/usr/lib64/"
+            if target_config.os_family in ("rhel", "suse")
+            else "/usr/lib/",
+        )
+
+        # Write patched Dockerfile next to the original
+        effective_dockerfile = out_dir / "image.Dockerfile.cross"
+        effective_dockerfile.write_text(patched)
+        log.info(
+            "Using patched Dockerfile for cross-build: %s", effective_dockerfile
+        )
+
+        # Build context needs the prebuilt dir AND the targets/ content.
+        # Podman doesn't follow symlinks outside the context, so we
+        # hard-copy the target dirs into the build context.
+        build_context = out_dir
+        # Copy this target's dir, common/, and any *sibling* target dir
+        # its Dockerfile COPYs from.  rocky9-64k's image.Dockerfile
+        # reads rocky9/packages-os.txt and mainline's reads rocky10/'s
+        # -- and since both targets are cross-built on an ordinary
+        # host, every build of them died at
+        # "COPY rocky9/packages-os.txt: no such file or directory".
+        needed = {"common", target_config.name}
+        needed |= _dockerfile_referenced_target_dirs(effective_dockerfile)
+        for name in sorted(needed):
+            src = TARGETS_DIR / name
+            if not src.is_dir():
+                continue
+            dest = build_context / name
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(src, dest)
+        # out_dir also holds the previous base.ext4 (often 1-3 GB) and
+        # _prebuilt/, all of which podman would otherwise tar up and
+        # ship to the daemon before running the first instruction.
+        (build_context / ".containerignore").write_text(
+            "base.ext4\n"
+            "*.ext4\n"
+            "meta.json\n"
+            "bootable-*\n"
+            "disk.raw\n"
+            "*.tar.gz\n"
+            "*.tar.zst\n"
+            "_inject/\n"
+        )
+    else:
+        build_context = TARGETS_DIR
+
+    log.info("Building container image %s ...", tag)
+    superseded.note(tag)
+    _run(
+        [
+            "podman",
+            "build",
+            *platform_args,
+            "--build-arg",
+            f"BASE_IMAGE={target_config.container_image}",
+            "-t",
+            tag,
+            "-f",
+            str(effective_dockerfile),
+            str(build_context),
+        ],
+        capture_output=False,
+    )
+
+    # ── Step 1a: Apply variant image overlay (e.g. MOFED) ──
+    # Sits between the base image build and the kernel-module inject
+    # step so MOFED lands in the rootfs before `depmod -a` runs (which
+    # might pick up MOFED kmods too, depending on what the overlay
+    # installs).  Kernel build-tree is exposed at /kernel-build-tree
+    # in the context for overlays that need --kernel-sources.
+    from .target_config import DEFAULT_VARIANT
+
+    variant_name = target_config.variant_name
+    if variant_name != DEFAULT_VARIANT:
+        v = target_config.variant(variant_name)
+        if v.image_overlay is None or not v.image_overlay.exists():
+            raise RuntimeError(
+                f"variant {variant_name!r}: image_overlay is required "
+                f"but missing (checked {v.image_overlay})"
+            )
+        overlay_tag = f"{tag}-{variant_name}"
+        log.info(
+            "Applying variant image overlay %s -> %s",
+            v.image_overlay,
+            overlay_tag,
+        )
+        v_cmd = [
+            "podman",
+            "build",
+            *platform_args,
+            "--build-arg",
+            f"BASE_IMAGE_TAG={tag}",
+            "-t",
+            overlay_tag,
+        ]
+        for key, val in sorted(v.params.items()):
+            v_cmd += ["--build-arg", f"VARIANT_{key.upper()}={val}"]
+        # The MOFED overlay Dockerfiles build their bundle URL from
+        # MOFED_ARCH, which nothing ever set -- so an aarch64 variant
+        # build passed --platform linux/arm64 and then downloaded the
+        # x86_64 MLNX_OFED tarball.  mofed_distro is surfaced as a
+        # variant param; the arch is ltvm's own, so pass it explicitly.
+        v_cmd += ["--build-arg", f"MOFED_ARCH={target_config.arch}"]
+        v_cmd += ["-f", str(v.image_overlay), str(TARGETS_DIR)]
+        superseded.note(overlay_tag)
+        _run(v_cmd, capture_output=False)
+        tag = overlay_tag  # downstream stages layer on top of the overlay
+    return tag
+
+
+def build_image_base(target_config: TargetConfig) -> str:
+    """Build only an image's package layers, which podman caches for the
+    full image build.  A package that no longer installs fails here, in
+    minutes, rather than after a kernel build.
+    """
+    out_dir = target_config.image_output_dir(None)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    superseded = Superseded()
+    tag = _build_base_layers(target_config, out_dir, superseded)
+    superseded.drop()
+    return tag
+
+
 def build_image(
     target_config: TargetConfig,
     force: bool = False,
@@ -838,140 +998,11 @@ def build_image(
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    tag = _container_image_tag(target_config)
-    dockerfile = target_config.target_dir / "image.Dockerfile"
-    if not dockerfile.exists():
-        raise FileNotFoundError(
-            f"No image.Dockerfile for target {target_config.name}"
-        )
-
     t0 = time.monotonic()
 
-    # ── Step 1: Build container image ──
-    cross = _is_cross_build(target_config)
-    platform_args = _podman_platform(target_config)
-    effective_dockerfile = dockerfile
-    prebuilt_dir: Path | None = None
-
-    if cross:
-        # Cross-build: compile tools natively, then inject into the
-        # emulated image build (avoids slow compilation under QEMU).
-        prebuilt_dir = out_dir / "_prebuilt"
-        _prebuild_tools_native(target_config, prebuilt_dir)
-
-        patched = cross_patch_dockerfile(
-            dockerfile.read_text(),
-            prebuilt_dir,
-            libdir="/usr/lib64/"
-            if target_config.os_family in ("rhel", "suse")
-            else "/usr/lib/",
-        )
-
-        # Write patched Dockerfile next to the original
-        effective_dockerfile = out_dir / "image.Dockerfile.cross"
-        effective_dockerfile.write_text(patched)
-        log.info(
-            "Using patched Dockerfile for cross-build: %s", effective_dockerfile
-        )
-
-        # Build context needs the prebuilt dir AND the targets/ content.
-        # Podman doesn't follow symlinks outside the context, so we
-        # hard-copy the target dirs into the build context.
-        build_context = out_dir
-        # Copy this target's dir, common/, and any *sibling* target dir
-        # its Dockerfile COPYs from.  rocky9-64k's image.Dockerfile
-        # reads rocky9/packages-os.txt and mainline's reads rocky10/'s
-        # -- and since both targets are cross-built on an ordinary
-        # host, every build of them died at
-        # "COPY rocky9/packages-os.txt: no such file or directory".
-        needed = {"common", target_config.name}
-        needed |= _dockerfile_referenced_target_dirs(effective_dockerfile)
-        for name in sorted(needed):
-            src = TARGETS_DIR / name
-            if not src.is_dir():
-                continue
-            dest = build_context / name
-            if dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(src, dest)
-        # out_dir also holds the previous base.ext4 (often 1-3 GB) and
-        # _prebuilt/, all of which podman would otherwise tar up and
-        # ship to the daemon before running the first instruction.
-        (build_context / ".containerignore").write_text(
-            "base.ext4\n"
-            "*.ext4\n"
-            "meta.json\n"
-            "bootable-*\n"
-            "disk.raw\n"
-            "*.tar.gz\n"
-            "*.tar.zst\n"
-            "_inject/\n"
-        )
-    else:
-        build_context = TARGETS_DIR
-
+    # ── Step 1: Build container image (+ variant overlay) ──
     superseded = Superseded()
-    log.info("Building container image %s ...", tag)
-    superseded.note(tag)
-    _run(
-        [
-            "podman",
-            "build",
-            *platform_args,
-            "--build-arg",
-            f"BASE_IMAGE={target_config.container_image}",
-            "-t",
-            tag,
-            "-f",
-            str(effective_dockerfile),
-            str(build_context),
-        ],
-        capture_output=False,
-    )
-
-    # ── Step 1a: Apply variant image overlay (e.g. MOFED) ──
-    # Sits between the base image build and the kernel-module inject
-    # step so MOFED lands in the rootfs before `depmod -a` runs (which
-    # might pick up MOFED kmods too, depending on what the overlay
-    # installs).  Kernel build-tree is exposed at /kernel-build-tree
-    # in the context for overlays that need --kernel-sources.
-    from .target_config import DEFAULT_VARIANT
-
-    variant_name = target_config.variant_name
-    if variant_name != DEFAULT_VARIANT:
-        v = target_config.variant(variant_name)
-        if v.image_overlay is None or not v.image_overlay.exists():
-            raise RuntimeError(
-                f"variant {variant_name!r}: image_overlay is required "
-                f"but missing (checked {v.image_overlay})"
-            )
-        overlay_tag = f"{tag}-{variant_name}"
-        log.info(
-            "Applying variant image overlay %s -> %s",
-            v.image_overlay,
-            overlay_tag,
-        )
-        v_cmd = [
-            "podman",
-            "build",
-            *platform_args,
-            "--build-arg",
-            f"BASE_IMAGE_TAG={tag}",
-            "-t",
-            overlay_tag,
-        ]
-        for key, val in sorted(v.params.items()):
-            v_cmd += ["--build-arg", f"VARIANT_{key.upper()}={val}"]
-        # The MOFED overlay Dockerfiles build their bundle URL from
-        # MOFED_ARCH, which nothing ever set -- so an aarch64 variant
-        # build passed --platform linux/arm64 and then downloaded the
-        # x86_64 MLNX_OFED tarball.  mofed_distro is surfaced as a
-        # variant param; the arch is ltvm's own, so pass it explicitly.
-        v_cmd += ["--build-arg", f"MOFED_ARCH={target_config.arch}"]
-        v_cmd += ["-f", str(v.image_overlay), str(TARGETS_DIR)]
-        superseded.note(overlay_tag)
-        _run(v_cmd, capture_output=False)
-        tag = overlay_tag  # downstream stages layer on top of the overlay
+    tag = _build_base_layers(target_config, out_dir, superseded)
 
     # ── Step 1b: Add kernel modules + Lustre via a second Dockerfile stage ──
     # resolve_kernel never raises -- it returns the short name if no
@@ -1381,21 +1412,23 @@ def _export_to_ext4(
                 "cat /tmp/out.ext4"
             )
             with open(str(tarball), "rb") as fin, open(tmpfile, "wb") as fout:
-                subprocess.run(
-                    [
-                        "podman",
-                        "run",
-                        "--rm",
-                        "-i",
-                        container_tag,
-                        "bash",
-                        "-c",
-                        in_container_script,
-                    ],
-                    stdin=fin,
-                    stdout=fout,
-                    check=True,
-                )
+                # The worker runs in the podman machine, beyond a signal
+                # to this process group: the wrapper removes it.  Any
+                # nonzero exit fails, a cleanup EOF included, since the
+                # image it streamed may be short.
+                worker = [
+                    "podman",
+                    "run",
+                    "--rm",
+                    "-i",
+                    container_tag,
+                    "bash",
+                    "-c",
+                    in_container_script,
+                ]
+                r = run_podman_with_cleanup(worker, stdin=fin, stdout=fout)
+                if r.returncode != 0:
+                    raise subprocess.CalledProcessError(r.returncode, worker)
         else:
             # Linux host: run with fakeroot directly.
             host_extract_script = (
