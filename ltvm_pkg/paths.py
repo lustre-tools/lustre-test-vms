@@ -48,7 +48,10 @@ def ext4_whole(path: Path) -> bool:
     blocks = int(struct.unpack_from("<I", sb, 4)[0])
     if struct.unpack_from("<I", sb, 96)[0] & 0x80:  # INCOMPAT_64BIT
         blocks |= int(struct.unpack_from("<I", sb, 0x150)[0]) << 32
-    block_size = 1024 << int(struct.unpack_from("<I", sb, 24)[0])
+    log_block = int(struct.unpack_from("<I", sb, 24)[0])
+    if log_block > 6:  # ext4 blocks are 1 KiB to 64 KiB
+        return False
+    block_size = 1024 << log_block
     return size >= blocks * block_size
 
 

@@ -1732,3 +1732,31 @@ def test_an_unfinished_attempt_is_forced_on_resume(
     assert ball.call_args.kwargs["force"] == {
         rb.Build("rocky9", "5.14-rhel9.8")
     }
+
+
+def test_payload_covers_the_kernel(tmp_path: Path) -> None:
+    (tmp_path / "build-tree" / "include").mkdir(parents=True)
+    (tmp_path / "build-tree" / "include" / "autoconf.h").write_text(
+        "#define X 1\n"
+    )
+    (tmp_path / "vmlinuz").write_bytes(b"kernel-1")
+    (tmp_path / "vmlinux").write_bytes(b"elf")
+    before = rb.payload_digest(tmp_path)
+    (tmp_path / "vmlinuz").write_bytes(b"kernel-2")  # same length
+    assert rb.payload_digest(tmp_path) != before
+    (tmp_path / "vmlinuz").write_bytes(b"kernel-1")
+    assert rb.payload_digest(tmp_path) == before
+    (tmp_path / "build-tree" / "include" / "autoconf.h").unlink()
+    assert rb.payload_digest(tmp_path) != before
+
+
+def test_impossible_ext4_geometry_is_not_whole(tmp_path: Path) -> None:
+    import struct
+
+    from ltvm_pkg.paths import ext4_whole
+    from tests.conftest import fake_ext4
+
+    data = bytearray(fake_ext4(8))
+    struct.pack_into("<I", data, 1024 + 24, 0xFFFFFFFF)
+    (tmp_path / "img").write_bytes(bytes(data))
+    assert not ext4_whole(tmp_path / "img")

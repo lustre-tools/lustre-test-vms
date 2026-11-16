@@ -313,7 +313,11 @@ def _plan_and_run(
         entry = ledger.done(arch, b, ltvm_version, head)
         if entry is None:
             continue
-        if rb.verify(b, arch, head, *entry):
+        try:
+            problems = rb.verify(b, arch, head, *entry)
+        except OSError as e:  # a file went away under the check
+            problems = [str(e)]
+        if problems:
             rejected.add(b)
         else:
             done[b] = entry[0]

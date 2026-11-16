@@ -571,34 +571,54 @@ def payload_digest(
     kdir: Path, image: Path | None = None, variants: Iterable[str] = ()
 ) -> str:
     """What a build left in kernel directory ``kdir`` for publishing:
-    every file of its Lustre snapshot by contents (less the snapshots of
-    ``variants`` nested in it, which are not this release's), its
-    installed kernel modules by path and size, and which image is
-    current (each install gets a new versioned name) and its size.  Not
-    file times, which a copy need not keep to the nanosecond."""
+    every file of its Lustre snapshot (less the snapshots of ``variants``
+    nested in it, which are not this release's) and its kernel binaries
+    by contents, its kernel build tree and installed modules by path and
+    size, and which image is current (each install gets a new versioned
+    name) and its size.  Not file times, which a copy need not keep to
+    the nanosecond.  A file that vanishes or cannot be read mid-scan
+    counts as a change."""
     import hashlib
 
     h = hashlib.sha256()
+
+    def by_contents(p: Path, rel: Path) -> None:
+        h.update(f"F {rel}\0".encode())
+        try:
+            with p.open("rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+        except OSError:
+            h.update(b"\0unreadable")
+        h.update(b"\0")
+
+    def by_size(top: Path, tag: str) -> None:
+        for p in sorted(top.rglob("*")):
+            try:
+                if p.is_symlink() or not p.is_file():
+                    continue
+                size = p.stat().st_size
+            except OSError:
+                size = -1
+            h.update(f"{tag} {p.relative_to(kdir)}\0{size}\0".encode())
+
     snap = kdir / "lustre-artifacts"
     skip = {snap / v for v in variants}
     for p in sorted(snap.rglob("*")):
         if any(p == d or d in p.parents for d in skip):
             continue
         rel = p.relative_to(kdir)
-        if p.is_symlink():
-            h.update(f"L {rel}\0{os.readlink(p)}\0".encode())
-        elif p.is_file():
-            h.update(f"F {rel}\0".encode())
-            try:
-                with p.open("rb") as f:
-                    for chunk in iter(lambda: f.read(1 << 20), b""):
-                        h.update(chunk)
-            except OSError:
-                h.update(b"\0unreadable")
-            h.update(b"\0")
-    for p in sorted((kdir / "modules").rglob("*")):
-        if p.is_file() and not p.is_symlink():
-            h.update(f"M {p.relative_to(kdir)}\0{p.stat().st_size}\0".encode())
+        try:
+            if p.is_symlink():
+                h.update(f"L {rel}\0{os.readlink(p)}\0".encode())
+            elif p.is_file():
+                by_contents(p, rel)
+        except OSError:
+            h.update(f"? {rel}\0".encode())
+    for name in ("vmlinux", "vmlinuz"):
+        by_contents(kdir / name, Path(name))
+    by_size(kdir / "build-tree", "B")
+    by_size(kdir / "modules", "M")
     if image is not None:
         try:
             h.update(
