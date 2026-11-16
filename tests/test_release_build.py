@@ -1795,3 +1795,15 @@ def test_an_interrupted_preparation_is_cleaned_on_retry(
     rb.prepare_trees(lustre_repo, new, tmp_path / "w", 1)
     assert _git(tree, "rev-parse", "HEAD") == new
     assert not (tree / "config.status").exists()
+
+
+def test_a_target_with_moving_kernels_is_unmatched() -> None:
+    rel = _rel("mainline-x86_64-7.0.8")
+    builds, unmatched, _ = rb.published_builds(
+        [rel],
+        "x86_64",
+        {"mainline": ["latest", "stable", "longterm", "7.0", "6.18"]},
+        lambda t, s, a: "7.0",
+        _is_base,
+    )
+    assert builds == [] and unmatched == ["mainline-x86_64-7.0.8"]

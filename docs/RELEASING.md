@@ -15,9 +15,10 @@ ltvm build release --lustre-tree <lustre tree>
 The set to build comes from the GitHub releases: every base release
 for the arch, mapped back to its kernel in targets.yaml.  `--only
 rocky9` or `--only rocky9:5.14-rhel9.7` narrows it.  Releases whose
-kernel cannot be mapped back are listed as unmatched and not built;
-mainline's moving kernels (`stable`, `latest`) are among them, so build
-those with `ltvm build all`.  The Lustre tree
+kernel cannot be mapped back are listed as unmatched and not built.
+That includes every release of a target with moving kernels (mainline's
+`stable`, `latest`, `longterm`), since a version cannot say which name
+or series built it; build those with `ltvm build all`.  The Lustre tree
 must have no uncommitted changes to tracked files, since the release
 records its commit.
 

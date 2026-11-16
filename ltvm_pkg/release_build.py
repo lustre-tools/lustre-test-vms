@@ -62,6 +62,10 @@ STOP_GRACE_SECONDS = 120
 STALLED = 124
 MARGIN_BYTES = 10 * GIB
 
+# Kernel names that follow upstream rather than name a release: a
+# manifest's version cannot say which of them, or which series, built it.
+MOVING_KERNELS = frozenset({"latest", "stable", "longterm"})
+
 _IMAGE_KERNEL_RE = re.compile(
     r"^==> Building image for \S+ \(kernel=(\S+)\)\.\.\.$", re.MULTILINE
 )
@@ -153,6 +157,10 @@ def published_builds(
                 None,
             )
             if target is None or not is_base(target, arch, stem):
+                continue
+            if MOVING_KERNELS & set(declared[target]):
+                if tag not in unmatched:
+                    unmatched.append(tag)
                 continue
             kver = stem[len(f"manifest-{target}-{arch}-") :]
             # A release candidate is mainline's moving `latest`, which a
