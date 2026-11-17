@@ -988,6 +988,51 @@ class TestLaunchQemuMacos:
         ):
             qemu_run.launch_qemu(vm)
 
+    @pytest.mark.parametrize(
+        ("macos", "el2", "qemu", "disabled", "want_el2", "want_userspace_gic"),
+        [
+            ("26.6", True, True, False, True, False),
+            ("26.6", True, True, True, False, False),
+            ("26.6", True, False, False, False, False),
+            ("15.7", False, True, False, False, False),
+            ("14.8", False, True, False, False, True),
+            ("14.8", False, False, False, False, False),
+        ],
+    )
+    def test_arm_hvf_nesting(
+        self,
+        tmp_vmdir: Path,
+        macos: str,
+        el2: bool,
+        qemu: bool,
+        disabled: bool,
+        want_el2: bool,
+        want_userspace_gic: bool,
+    ) -> None:
+        vm = _make_vm(tmp_vmdir, arch="aarch64")
+        vm.disable_nesting = disabled
+        h = _LaunchHarness()
+        with (
+            patch("platform.system", return_value="Darwin"),
+            patch("platform.machine", return_value="arm64"),
+            patch("platform.mac_ver", return_value=(macos, (), "arm64")),
+            patch("ltvm_pkg.qemu_run.hvf_el2_supported", return_value=el2),
+            patch(
+                "ltvm_pkg.qemu_run.qemu_supports_hvf_vgic", return_value=qemu
+            ),
+        ):
+            self._launch_macos(vm, h)
+        args = h.qemu_args or []
+        machine = args[args.index("-machine") + 1]
+        assert ("virtualization=on" in machine) is want_el2
+        if want_userspace_gic:
+            assert args[args.index("-accel") + 1] == "hvf,kernel-irqchip=off"
+            assert machine == "virt,gic-version=max"
+        else:
+            assert "-accel" not in args
+            assert "accel=hvf" in machine
+        assert args[args.index("-cpu") + 1] == "host"
+
     def test_mgmt_nic_uses_stream_unix(self, tmp_vmdir: Path) -> None:
         """-netdev stream,addr.type=unix,addr.path=<socket>,server=off."""
         vm = _make_vm(tmp_vmdir)

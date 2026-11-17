@@ -234,6 +234,13 @@ class TestCreateDiskAllocation:
             )
         assert VMInfo.load("co1-kargs").kernel_args == "slub_debug=FZPU"
 
+    def test_disable_nesting_persists(self, tmp_vmdir: Path) -> None:
+        with _create_env(tmp_vmdir):
+            vm_commands.cmd_create(
+                _create_args(name="co1-noel2", disable_nesting=True)
+            )
+        assert VMInfo.load("co1-noel2").disable_nesting
+
     def test_refused_kernel_args_write_nothing(self, tmp_vmdir: Path) -> None:
         with _create_env(tmp_vmdir) as env, pytest.raises(SystemExit):
             vm_commands.cmd_create(

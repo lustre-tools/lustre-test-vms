@@ -81,6 +81,7 @@ def doctor_env(tmp_vmdir: Path, tmp_path: Path) -> Iterator[dict]:
             "ltvm_pkg.vm_commands._check_completion",
             return_value=([], [], 0),
         ),
+        patch("ltvm_pkg.vm_commands.hvf_el2_supported", return_value=False),
         patch("ltvm_pkg.vm_commands.is_running", return_value=False),
         patch("shutil.disk_usage", return_value=plenty),
     ):
@@ -96,6 +97,43 @@ def doctor_env(tmp_vmdir: Path, tmp_path: Path) -> Iterator[dict]:
 
 def _make_args(fix: bool = False) -> argparse.Namespace:
     return argparse.Namespace(fix=fix, json=False)
+
+
+@pytest.mark.parametrize(
+    ("fix", "supported_after_fix"),
+    [
+        (False, False),
+        (True, True),
+        (True, False),
+    ],
+)
+def test_doctor_checks_and_repairs_selected_qemu_for_nesting(
+    doctor_env: dict,
+    capsys: pytest.CaptureFixture[str],
+    fix: bool,
+    supported_after_fix: bool,
+) -> None:
+    binary = "/custom/qemu/bin/qemu-system-aarch64"
+    with (
+        patch("ltvm_pkg.vm_commands.is_macos", return_value=True),
+        patch("ltvm_pkg.vm_commands.hvf_el2_supported", return_value=True),
+        patch("ltvm_pkg.vm_commands.qemu_binary_for_arch", return_value=binary),
+        patch(
+            "ltvm_pkg.vm_commands.qemu_supports_hvf_vgic",
+            side_effect=[False, supported_after_fix],
+        ) as check,
+        patch("ltvm_pkg.host_setup.install_qemu_macos_vhost") as install,
+    ):
+        rc = vm_commands.cmd_doctor(_make_args(fix=fix))
+    output = capsys.readouterr().out
+    assert (
+        f"nested virtualization needs QEMU 11.1 or newer at {binary}" in output
+    )
+    assert install.call_count == int(fix)
+    assert check.call_count == 1 + int(fix)
+    assert all(call.args == (binary,) for call in check.call_args_list)
+    assert ("fixed: installed QEMU" in output) is supported_after_fix
+    assert (rc == 0) is supported_after_fix
 
 
 # ── clean ─────────────────────────────────────────────────

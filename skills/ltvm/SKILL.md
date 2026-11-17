@@ -27,6 +27,15 @@ On macOS it is `./ltvm install` with no `sudo`: it refuses to run as
 root there and prompts for sudo itself where it must (README.md,
 "Running on macOS").
 
+Native aarch64 VMs on macOS expose Arm EL2 by default on capable
+Apple Silicon (M3 or later), macOS 15+, and QEMU 11.1+. A Linux guest
+with KVM enabled gets `/dev/kvm` and can run its own accelerated VMs.
+Older setups boot with ordinary HVF. Pass `--disable-nesting` to
+`ltvm create` or `ltvm cluster create` to save a per-VM opt-out.
+On a capable Mac, `ltvm doctor` flags an older QEMU. Run
+`ltvm doctor --fix` to install the current bundle from GitHub.
+Use `ltvm vm exec <vm> -- ls -l /dev/kvm` to check the guest.
+
 `install` also sets up tab completion for the human's shell (bash, zsh,
 fish), which needs a new shell before it works -- worth saying when you
 walk someone through setup, since nothing else announces it. `ltvm

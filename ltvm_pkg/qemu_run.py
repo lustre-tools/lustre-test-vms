@@ -7,6 +7,7 @@ import fcntl
 import functools
 import math
 import os
+import platform
 import pwd
 import re
 import secrets
@@ -49,6 +50,40 @@ def run(
 def die(msg: str, code: int = EXIT_ERROR) -> NoReturn:
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(code)
+
+
+def hvf_el2_supported() -> bool:
+    """Return whether this Apple Silicon host can expose Arm EL2."""
+    if not is_macos() or platform.machine() != "arm64":
+        return False
+
+    import ctypes
+
+    try:
+        hvf = ctypes.CDLL(
+            "/System/Library/Frameworks/Hypervisor.framework/Hypervisor"
+        )
+        query = hvf.hv_vm_config_get_el2_supported
+    except (OSError, AttributeError):
+        return False
+    query.argtypes = [ctypes.POINTER(ctypes.c_bool)]
+    query.restype = ctypes.c_int
+    supported = ctypes.c_bool()
+    return query(ctypes.byref(supported)) == 0 and supported.value
+
+
+def qemu_supports_hvf_vgic(binary: str) -> bool:
+    """QEMU 11.1 introduced both the HVF platform GIC and EL2 support."""
+    try:
+        result = run([binary, "--version"], check=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    version = re.search(r"\bversion (\d+)\.(\d+)\.(\d+)\b", result.stdout)
+    return version is not None and tuple(map(int, version.groups())) >= (
+        11,
+        1,
+        0,
+    )
 
 
 def _read_meminfo_mb(key: str) -> int:
@@ -1294,11 +1329,23 @@ def _start_qemu(vm: VMInfo) -> None:
                 f"{str(_nic)!r} on VM {vm.name!r}"
             )
 
-    import platform as _platform
-
     arch = vm.arch
     qemu_bin = qemu_binary_for_arch(arch)
     machine = qemu_machine_for_arch(arch)
+    accel_args = []
+    if arch == "aarch64" and "accel=hvf" in machine:
+        macos_major = int(platform.mac_ver()[0].partition(".")[0] or 0)
+        if macos_major < 15:
+            if qemu_supports_hvf_vgic(qemu_bin):
+                # Newer QEMU defaults to a GIC that needs macOS 15.
+                machine = machine.replace(",accel=hvf", "")
+                accel_args = ["-accel", "hvf,kernel-irqchip=off"]
+        elif (
+            not vm.disable_nesting
+            and hvf_el2_supported()
+            and qemu_supports_hvf_vgic(qemu_bin)
+        ):
+            machine += ",virtualization=on"
 
     # q35 (x86) and virt (aarch64) both have a PCI bus, so virtio
     # devices attach as virtio-*-pci.  Previously x86 used microvm and
@@ -1317,7 +1364,7 @@ def _start_qemu(vm: VMInfo) -> None:
     # those, so /sbin/init aborts with "Fatal glibc error: CPU does not
     # support x86-64-v2" and the kernel panics.  Nehalem (Intel 2008) is
     # the baseline CPU model that satisfies v2 in full.
-    host_arch = _platform.machine()
+    host_arch = platform.machine()
     import os as _os
 
     _force_tcg = _os.environ.get("LTVM_FORCE_TCG") == "1"
@@ -1345,6 +1392,7 @@ def _start_qemu(vm: VMInfo) -> None:
         qemu_bin,
         "-name",
         vm.name,
+        *accel_args,
         "-machine",
         machine,
         "-cpu",

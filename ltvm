@@ -1595,7 +1595,16 @@ def build_parser() -> argparse.ArgumentParser:
     target_parser.set_defaults(func=_target_no_action)
 
     # -- VM lifecycle: create --
-    _vm_create_args = argparse.ArgumentParser(add_help=False)
+    _nesting_args = argparse.ArgumentParser(add_help=False)
+    _nesting_args.add_argument(
+        "--disable-nesting",
+        action="store_true",
+        help="Keep Arm EL2 unavailable to guests on macOS HVF. "
+        "Fixed at create time.",
+    )
+    _vm_create_args = argparse.ArgumentParser(
+        add_help=False, parents=[_nesting_args]
+    )
     _vm_create_args.add_argument(
         "--vcpus", type=int, default=2, help="vCPU count (default: 2)"
     )
@@ -2568,7 +2577,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ccp = cluster_sub.add_parser(
         "create",
-        parents=[common],
+        parents=[common, _nesting_args],
         help="Create a cluster from node specs (needs root)",
     )
     ccp.add_argument("name", help="Cluster name (e.g. co2)")

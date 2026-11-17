@@ -153,9 +153,36 @@ gcloud compute instances update <name> \
 
 ### Apple Silicon -- aarch64
 
-ltvm runs on macOS itself, with HVF.  To run it inside a Linux VM on
-the Mac instead -- so an agent driving ltvm is confined to that VM --
-the Linux VM needs nested virtualization, and that needs all of:
+#### Expose KVM in a VM created by ltvm
+
+ltvm exposes Arm EL2 to native aarch64 guests by default on compatible
+Apple Silicon (M3 or later) with macOS 15+ and QEMU 11.1+. A Linux guest
+kernel with KVM enabled then provides `/dev/kvm`. On a capable Mac,
+`ltvm doctor` flags an older QEMU. `ltvm doctor --fix` or
+`ltvm install --qemu` installs the signed Apple Silicon QEMU bundle
+from [ltvm's GitHub releases](https://github.com/lustre-tools/lustre-test-vms/releases).
+
+```bash
+ltvm create nested-host --target rocky10 --arch aarch64 \
+    --mem 6144 --vcpus 4 --root-size 16G --mdt-disks 0 --ost-disks 0
+ltvm vm exec nested-host -- ls -l /dev/kvm
+ltvm vm exec nested-host -- dmesg | grep -E 'started at EL2|kvm \['
+```
+
+ltvm checks support at each cold boot, including for existing VMs.
+On an older host or QEMU, the VM boots with ordinary HVF. To opt out,
+pass `--disable-nesting` to `ltvm create` or `ltvm cluster create`.
+ltvm saves the opt-out for each VM. QEMU suppresses Arm SME when it
+exposes EL2 through HVF, so opt out for workloads that need SME.
+
+The example allocates space for inner VMs and their images.
+For an inner QEMU, use
+`-accel kvm -cpu host -machine virt,gic-version=max,its=off`.
+
+#### Run ltvm inside a Linux VM on the Mac
+
+Use the Linux guest above, or use UTM to create the outer VM. For the
+UTM path, use:
 
 - an **M3 or later** chip (M1 and M2 have no nested virtualization);
 - **macOS 15** or later;
@@ -176,13 +203,13 @@ sudo usermod -aG kvm $USER                          # if you are not in the kvm 
 it: `accel=kvm` and `-cpu host`.  `ps -o args -C qemu-system-aarch64`
 shows what a running VM got.
 
-**ltvm turns off the GIC ITS here.**  On an Apple CPU (`CPU
+**ltvm turns off the GIC ITS for the inner VM.** On an Apple CPU (`CPU
 implementer : 0x61` in `/proc/cpuinfo`), ltvm launches KVM guests with
-`virt,...,its=off`.  With the ITS, virtio-pci MSIs lose wakeups under
-this nesting: the guest boots past init, then sits in `cpu_do_idle`
-for good while its vCPU thread shows 100% CPU.  Without the ITS,
-virtio falls back to wired INTx interrupts, which work.  Trapping WFI
-in the L1 KVM does not help, so it is the MSI delivery itself.
+`virt,...,its=off`. This avoids a hang observed under UTM's Apple
+Virtualization backend. With the ITS, virtio-pci MSIs lose wakeups and
+the guest sits in `cpu_do_idle` while its vCPU thread shows 100% CPU.
+Without the ITS, virtio falls back to wired INTx interrupts.
+Trapping WFI in the L1 KVM does not help.
 `LTVM_FORCE_TCG=1` still forces emulation, if you ever need it.
 
 Parallels Desktop and VMware Fusion have not been tested with ltvm.

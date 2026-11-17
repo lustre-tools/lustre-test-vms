@@ -220,6 +220,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> int:
             eth0_speed=args.eth0_speed,
             nic=list(args.nic or []),
             kernel_args=args.kernel_args,
+            disable_nesting=getattr(args, "disable_nesting", False),
             numa_nodes=args.numa_nodes,
             numa_dist=args.numa_dist,
             numa_dist_file=args.numa_dist_file,
