@@ -155,21 +155,23 @@ gcloud compute instances update <name> \
 
 #### Expose KVM in a VM created by ltvm
 
-On an Apple M3 or later with macOS 15 or later, use a native aarch64
-target, a Linux guest kernel with KVM enabled, and QEMU 11.1 or later.
-`./ltvm install` supplies a signed QEMU bundle for Apple Silicon. Use
-`--enable-nesting` at create time to expose Arm EL2 to the guest through HVF:
+ltvm exposes Arm EL2 to native aarch64 guests by default on compatible
+Apple Silicon (M3 or later) with macOS 15+ and QEMU 11.1+. A Linux guest
+kernel with KVM enabled then provides `/dev/kvm`. `./ltvm install`
+supplies a signed QEMU bundle for Apple Silicon.
 
 ```bash
-ltvm create nested-host --target rocky10 --arch aarch64 --enable-nesting \
+ltvm create nested-host --target rocky10 --arch aarch64 \
     --mem 6144 --vcpus 4 --root-size 16G --mdt-disks 0 --ost-disks 0
 ltvm vm exec nested-host -- ls -l /dev/kvm
 ltvm vm exec nested-host -- dmesg | grep -E 'started at EL2|kvm \['
 ```
 
-The setting persists across stop and start. Enabling it changes the
-guest CPU features. QEMU's HVF backend suppresses Arm SME when it
-exposes EL2.
+ltvm checks support at each cold boot, including for existing VMs.
+On an older host or QEMU, the VM boots with ordinary HVF. To opt out,
+pass `--disable-nesting` to `ltvm create` or `ltvm cluster create`.
+ltvm saves the opt-out for each VM. QEMU suppresses Arm SME when it
+exposes EL2 through HVF, so opt out for workloads that need SME.
 
 The example allocates space for inner VMs and their images.
 For an inner QEMU, use

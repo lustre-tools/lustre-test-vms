@@ -52,19 +52,8 @@ def die(msg: str, code: int = EXIT_ERROR) -> NoReturn:
     sys.exit(code)
 
 
-def check_hvf_nested(arch: str) -> None:
-    """Validate the host and the QEMU binary selected for this guest."""
-    if (
-        not is_macos()
-        or platform.machine() != "arm64"
-        or arch != "aarch64"
-        or os.environ.get("LTVM_FORCE_TCG") == "1"
-    ):
-        die("--enable-nesting requires a native aarch64 guest with macOS HVF")
-
-    if int(platform.mac_ver()[0].split(".")[0] or 0) < 15:
-        die("--enable-nesting requires macOS 15 or later")
-
+def _hvf_el2_supported() -> bool:
+    """Query the host's Arm EL2 capability on macOS 15 or later."""
     import ctypes
 
     try:
@@ -72,35 +61,26 @@ def check_hvf_nested(arch: str) -> None:
             "/System/Library/Frameworks/Hypervisor.framework/Hypervisor"
         )
         query = hvf.hv_vm_config_get_el2_supported
-    except (OSError, AttributeError) as exc:
-        die(
-            f"--enable-nesting could not query macOS Hypervisor.framework EL2: {exc}"
-        )
+    except (OSError, AttributeError):
+        return False
     query.argtypes = [ctypes.POINTER(ctypes.c_bool)]
     query.restype = ctypes.c_int
     supported = ctypes.c_bool()
-    status = query(ctypes.byref(supported))
-    if status != 0:
-        die(
-            f"--enable-nesting EL2 capability check failed (HVF status {status})"
-        )
-    if not supported.value:
-        die(
-            "--enable-nesting requires a Mac with HVF EL2 support (Apple M3 or later)"
-        )
+    return query(ctypes.byref(supported)) == 0 and supported.value
 
-    binary = qemu_binary_for_arch(arch)
+
+def _qemu_supports_hvf_vgic(binary: str) -> bool:
+    """QEMU 11.1 introduced both the HVF platform GIC and EL2 support."""
     try:
-        result = run([binary, "--version"], check=True)
-    except (OSError, subprocess.CalledProcessError) as exc:
-        die(f"--enable-nesting could not check QEMU at {binary}: {exc}")
+        result = run([binary, "--version"], check=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
     version = re.search(r"\bversion (\d+)\.(\d+)\.(\d+)\b", result.stdout)
-    if not version or tuple(map(int, version.groups())) < (11, 1, 0):
-        found = version.group(0) if version else "unknown version"
-        die(
-            f"--enable-nesting requires QEMU 11.1 or later; {binary} reports {found}. "
-            "Run `ltvm install` to install ltvm's macOS QEMU bundle."
-        )
+    return version is not None and tuple(map(int, version.groups())) >= (
+        11,
+        1,
+        0,
+    )
 
 
 def _read_meminfo_mb(key: str) -> int:
@@ -1013,9 +993,6 @@ def launch_qemu(vm: VMInfo, *, wait_seconds: int = 0) -> None:
         print(f"VM '{vm.name}' is already running", file=sys.stderr)
         return
 
-    if vm.nested:
-        check_hvf_nested(vm.arch)
-
     if not vm.overlay_path.exists():
         die(f"overlay missing for '{vm.name}'")
 
@@ -1353,11 +1330,19 @@ def _start_qemu(vm: VMInfo) -> None:
     qemu_bin = qemu_binary_for_arch(arch)
     machine = qemu_machine_for_arch(arch)
     accel_args = []
-    if vm.nested:
-        # The platform vGIC provides the timer and interrupt interface
-        # KVM needs when handling its own guests at EL2.
-        accel_args = ["-accel", "hvf,kernel-irqchip=on"]
-        machine = machine.replace(",accel=hvf", "") + ",virtualization=on"
+    if arch == "aarch64" and "accel=hvf" in machine:
+        macos_major = int(platform.mac_ver()[0].partition(".")[0] or 0)
+        if macos_major < 15:
+            if _qemu_supports_hvf_vgic(qemu_bin):
+                # Newer QEMU defaults to a GIC that needs macOS 15.
+                machine = machine.replace(",accel=hvf", "")
+                accel_args = ["-accel", "hvf,kernel-irqchip=off"]
+        elif (
+            not vm.disable_nesting
+            and _hvf_el2_supported()
+            and _qemu_supports_hvf_vgic(qemu_bin)
+        ):
+            machine += ",virtualization=on"
 
     # q35 (x86) and virt (aarch64) both have a PCI bus, so virtio
     # devices attach as virtio-*-pci.  Previously x86 used microvm and

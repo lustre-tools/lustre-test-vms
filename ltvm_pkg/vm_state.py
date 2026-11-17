@@ -618,7 +618,7 @@ class VMInfo:
     image_id: str = ""
     os_id: str = ""  # OS identifier (e.g. rocky9, ubuntu24)
     arch: str = "x86_64"  # CPU architecture (x86_64, aarch64)
-    nested: bool = False  # Expose EL2 to an Arm guest under macOS HVF.
+    disable_nesting: bool = False  # Keep EL2 off under macOS HVF.
     creator: str = (
         ""  # username that created the VM (SUDO_USER, or "" for legacy)
     )
@@ -803,7 +803,7 @@ class VMInfo:
             f"IMAGE_ID={self.image_id}\n"
             f"OS_ID={self.os_id}\n"
             f"ARCH={self.arch}\n"
-            f"NESTED={int(self.nested)}\n"
+            f"DISABLE_NESTING={int(self.disable_nesting)}\n"
             f"CREATOR={self.creator}\n"
             f"OWNER_ID={self.owner_id or ''}\n"
             f"VARIANT={self.variant}\n"
@@ -1009,7 +1009,7 @@ class VMInfo:
             image_id=vals.get("IMAGE_ID", ""),
             os_id=vals.get("OS_ID", ""),
             arch=vals.get("ARCH", "x86_64"),
-            nested=vals.get("NESTED") == "1",
+            disable_nesting=vals.get("DISABLE_NESTING") == "1",
             creator=vals.get("CREATOR", ""),
             owner_id=vals.get("OWNER_ID") or None,
             variant=vals.get("VARIANT", "base"),

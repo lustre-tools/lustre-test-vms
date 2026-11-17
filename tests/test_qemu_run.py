@@ -988,22 +988,49 @@ class TestLaunchQemuMacos:
         ):
             qemu_run.launch_qemu(vm)
 
-    def test_nested_uses_hvf_gic_and_el2(self, tmp_vmdir: Path) -> None:
+    @pytest.mark.parametrize(
+        ("macos", "el2", "qemu", "disabled", "want_el2", "want_userspace_gic"),
+        [
+            ("26.6", True, True, False, True, False),
+            ("26.6", True, True, True, False, False),
+            ("26.6", True, False, False, False, False),
+            ("15.7", False, True, False, False, False),
+            ("14.8", False, True, False, False, True),
+            ("14.8", False, False, False, False, False),
+        ],
+    )
+    def test_arm_hvf_nesting(
+        self,
+        tmp_vmdir: Path,
+        macos: str,
+        el2: bool,
+        qemu: bool,
+        disabled: bool,
+        want_el2: bool,
+        want_userspace_gic: bool,
+    ) -> None:
         vm = _make_vm(tmp_vmdir, arch="aarch64")
-        vm.nested = True
+        vm.disable_nesting = disabled
         h = _LaunchHarness()
         with (
             patch("platform.system", return_value="Darwin"),
             patch("platform.machine", return_value="arm64"),
-            patch("ltvm_pkg.qemu_run.check_hvf_nested") as check,
+            patch("platform.mac_ver", return_value=(macos, (), "arm64")),
+            patch("ltvm_pkg.qemu_run._hvf_el2_supported", return_value=el2),
+            patch(
+                "ltvm_pkg.qemu_run._qemu_supports_hvf_vgic", return_value=qemu
+            ),
         ):
             self._launch_macos(vm, h)
-        check.assert_called_once_with("aarch64")
         args = h.qemu_args or []
-        assert args[args.index("-accel") + 1] == "hvf,kernel-irqchip=on"
-        assert args[args.index("-machine") + 1] == (
-            "virt,gic-version=max,virtualization=on"
-        )
+        machine = args[args.index("-machine") + 1]
+        assert ("virtualization=on" in machine) is want_el2
+        if want_userspace_gic:
+            assert args[args.index("-accel") + 1] == "hvf,kernel-irqchip=off"
+            assert machine == "virt,gic-version=max"
+        else:
+            assert "-accel" not in args
+            assert "accel=hvf" in machine
         assert args[args.index("-cpu") + 1] == "host"
 
     def test_mgmt_nic_uses_stream_unix(self, tmp_vmdir: Path) -> None:

@@ -428,6 +428,12 @@ class TestClusterCreateArgs:
             self._captured_ns().kernel_args == "slub_debug=FZPU page_owner=on"
         )
 
+    def test_disable_nesting_parsed(self) -> None:
+        cmd_cluster(
+            _ns("create", "co1", "--disable-nesting", "mgs+mds:co1-mds:1")
+        )
+        assert self._captured_ns().disable_nesting
+
     def test_unknown_flag_errors(self) -> None:
         err = _expect_usage_error(
             "create", "co1", "mgs+mds:co1-mds:1", "--frobnicate"
@@ -2314,6 +2320,15 @@ class TestCmdClusterSshBehavior:
 
 class TestClusterNodeDiskArgs:
     """`cluster create` must state disk counts explicitly."""
+
+    def test_disable_nesting_reaches_each_node(self) -> None:
+        node = vm_cluster.parse_node_spec("oss:co9-oss:3")
+        with patch.object(vm_cluster, "_run_prefixed") as run:
+            run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            vm_cluster._create_one_node(
+                node, vcpus=2, mem=None, disable_nesting=True
+            )
+        assert "--disable-nesting" in run.call_args.args[0]
 
     def test_kernel_and_variant_reach_each_node(self) -> None:
         node = vm_cluster.parse_node_spec("oss:co9-oss:3")

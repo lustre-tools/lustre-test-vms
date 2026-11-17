@@ -1089,15 +1089,15 @@ occurrence wins (`crashkernel=`) takes the user's value.  `root=`,
 ltvm's values, and rc.local configures the guest from `fc_*`.  Fixed at
 create time like the disks; `cluster create` applies it to every node.
 
-**Nested KVM on Apple Silicon:** a Linux host on an Apple CPU (`CPU
-implementer : 0x61`) is a VM under Apple Virtualization -- UTM, M3 or
-later, nested virtualization on -- and `qemu_machine_for_arch` gives its
-KVM guests `its=off` (`vm_state._nested_kvm_on_apple`).  With the ITS,
-virtio-pci MSIs lose wakeups there and the guest idles in `cpu_do_idle`
-forever a few seconds after init; wired INTx works.  It changes nothing
-on any other host, macOS's HVF included.  KVM is 3-40x faster than TCG
-there; the benchmarks, against TCG and against ltvm on the Mac itself,
-are in [docs/NESTED_VIRTUALIZATION.md](docs/NESTED_VIRTUALIZATION.md).
+**Nested KVM on Apple Silicon:** on macOS, `qemu_run` checks the host's
+EL2 capability and the selected QEMU binary at boot. Native Arm HVF
+guests get EL2 on macOS 15+ with compatible hardware and QEMU 11.1+.
+`create --disable-nesting` saves `DISABLE_NESTING=1` in the VM's
+`.info` file. Inside an Apple-hosted Linux VM, `qemu_machine_for_arch`
+gives KVM guests `its=off` (`vm_state._nested_kvm_on_apple`). This
+uses wired INTx to avoid a virtio interrupt hang observed under
+UTM's Apple Virtualization backend. See the setup and benchmarks in
+[docs/NESTED_VIRTUALIZATION.md](docs/NESTED_VIRTUALIZATION.md).
 
 **Naming:** `<hh><N>-<role>`, where `<hh>` is the first two consonants
 of the host's short name (`bl` on buildhost, `ts` on testnode) and N is unused

@@ -606,6 +606,7 @@ def _create_one_node(
     disk_cache: str = "",
     disk_prealloc: str = "",
     eth0_speed: int | None = None,
+    disable_nesting: bool = False,
 ) -> tuple[str, int, str]:
     """Create a single cluster VM via ltvm subprocess.
 
@@ -679,6 +680,8 @@ def _create_one_node(
     if kernel_args:
         # One argv word, so a value starting with '-' is not an option.
         cmd += [f"--kernel-args={kernel_args}"]
+    if disable_nesting:
+        cmd.append("--disable-nesting")
     if numa_nodes:
         cmd += ["--numa-nodes", str(numa_nodes)]
     if numa_dist:
@@ -880,6 +883,7 @@ def _print_cluster_plan(
     disk_dir: str = "",
     disk_cache: str = "",
     disk_prealloc: str = "",
+    disable_nesting: bool = False,
 ) -> None:
     """Report what `cluster create` would do, for --dry-run.
 
@@ -930,6 +934,8 @@ def _print_cluster_plan(
         print(f"  nics:    eth0 (mgmt) + {', '.join(nics)}")
     if kernel_args:
         print(f"  cmdline: + {kernel_args}")
+    if disable_nesting:
+        print("  nesting: disabled for every node (macOS HVF)")
     print(f"  owner:   {owner_id}")
     print("Nothing was written.  Re-run without --dry-run to create it.")
 
@@ -1140,6 +1146,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
         die(network_issue)
     nics = [str(n) for n in nic_specs]
     kernel_args = _validate_kernel_args(getattr(args, "kernel_args", None))
+    disable_nesting = getattr(args, "disable_nesting", False)
     wait_seconds: int = getattr(args, "wait", 0)
     numa_nodes: int = getattr(args, "numa_nodes", 0) or 0
     problem = nic_numa_problem(nic_specs, numa_nodes)
@@ -1202,6 +1209,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
             nics=nics,
             kernel_args=kernel_args,
             owner_id=owner_id,
+            disable_nesting=disable_nesting,
             **disk_opts,
         )
         return
@@ -1256,6 +1264,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
                     variant="base" if node_targets[node.name] else variant,
                     share_disks=node.name in shared,
                     eth0_speed=getattr(args, "eth0_speed", None),
+                    disable_nesting=disable_nesting,
                     **disk_opts,
                 ): node
                 for node in wave

@@ -234,33 +234,12 @@ class TestCreateDiskAllocation:
             )
         assert VMInfo.load("co1-kargs").kernel_args == "slub_debug=FZPU"
 
-    def test_nested_persists_and_validates_resolved_arch(
-        self, tmp_vmdir: Path
-    ) -> None:
-        with (
-            _create_env(tmp_vmdir) as env,
-            patch("ltvm_pkg.vm_commands.check_hvf_nested") as check,
-        ):
-            env["arts"].arch = "aarch64"
-            vm_commands.cmd_create(_create_args(name="co1-el2", nested=True))
-        check.assert_called_once_with("aarch64")
-        assert VMInfo.load("co1-el2").nested
-
-    def test_host_without_nested_support_writes_no_vm(
-        self, tmp_vmdir: Path
-    ) -> None:
-        with (
-            _create_env(tmp_vmdir) as env,
-            patch(
-                "ltvm_pkg.vm_commands.check_hvf_nested",
-                side_effect=SystemExit(1),
-            ),
-            pytest.raises(SystemExit),
-        ):
-            vm_commands.cmd_create(_create_args(name="co1-noel2", nested=True))
-        env["alloc_ip"].assert_not_called()
-        env["launch"].assert_not_called()
-        assert not (tmp_vmdir / "sockets" / "co1-noel2.info").exists()
+    def test_disable_nesting_persists(self, tmp_vmdir: Path) -> None:
+        with _create_env(tmp_vmdir):
+            vm_commands.cmd_create(
+                _create_args(name="co1-noel2", disable_nesting=True)
+            )
+        assert VMInfo.load("co1-noel2").disable_nesting
 
     def test_refused_kernel_args_write_nothing(self, tmp_vmdir: Path) -> None:
         with _create_env(tmp_vmdir) as env, pytest.raises(SystemExit):
