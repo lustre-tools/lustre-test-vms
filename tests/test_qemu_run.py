@@ -988,6 +988,24 @@ class TestLaunchQemuMacos:
         ):
             qemu_run.launch_qemu(vm)
 
+    def test_nested_uses_hvf_gic_and_el2(self, tmp_vmdir: Path) -> None:
+        vm = _make_vm(tmp_vmdir, arch="aarch64")
+        vm.nested = True
+        h = _LaunchHarness()
+        with (
+            patch("platform.system", return_value="Darwin"),
+            patch("platform.machine", return_value="arm64"),
+            patch("ltvm_pkg.qemu_run.check_hvf_nested") as check,
+        ):
+            self._launch_macos(vm, h)
+        check.assert_called_once_with("aarch64")
+        args = h.qemu_args or []
+        assert args[args.index("-accel") + 1] == "hvf,kernel-irqchip=on"
+        assert args[args.index("-machine") + 1] == (
+            "virt,gic-version=max,virtualization=on"
+        )
+        assert args[args.index("-cpu") + 1] == "host"
+
     def test_mgmt_nic_uses_stream_unix(self, tmp_vmdir: Path) -> None:
         """-netdev stream,addr.type=unix,addr.path=<socket>,server=off."""
         vm = _make_vm(tmp_vmdir)

@@ -31,6 +31,7 @@ from .nic_spec import numa_problem as nic_numa_problem
 from .paths import load_meta_safe
 from .priv import SudoUnavailable, chmod_regular, sudo_prime, sudo_run
 from .qemu_run import (
+    check_hvf_nested,
     die,
     host_node_problem,
     is_running,
@@ -708,6 +709,7 @@ _RESOURCE_FLAGS = {
     "disk_size": "--disk-size",
     "root_size": "--root-size",
     "kernel_args": "--kernel-args",
+    "nested": "--nested",
     "numa_nodes": "--numa-nodes",
     "numa_dist": "--numa-dist",
     "disk_dir": "--disk-dir",
@@ -950,6 +952,7 @@ def _allocate_and_persist_vm(
             os_id=os_id,
             kver=kver,
             arch=os_arts.arch,
+            nested=getattr(args, "nested", False),
             # Track the invoking human.  SUDO_USER preserves the legacy
             # ``sudo ltvm create`` path; the unified privilege model runs
             # the command as the user and elevates only individual writes.
@@ -1057,6 +1060,7 @@ def _print_create_plan(
         "target": os_target,
         "variant": variant,
         "arch": getattr(args, "arch", None) or os_arch_of(image),
+        "nested": getattr(args, "nested", False),
         "kernel": kernel,
         "kernel_version": kver,
         "image": image,
@@ -1096,6 +1100,8 @@ def _print_create_plan(
     print(f"           {kernel}")
     print(f"  image:   {image}")
     print(f"  cpu/mem: {args.vcpus} vcpus, {args.mem} MB")
+    if plan["nested"]:
+        print("  nested:  Arm EL2 (HVF)")
     if getattr(args, "numa_nodes", 0):
         print(f"  numa:    {args.numa_nodes} nodes")
     if getattr(args, "numa_dist", ""):
@@ -1826,6 +1832,8 @@ def cmd_create(args: argparse.Namespace) -> None:
     os_arts, image, kernel, kver, os_target, variant = _resolve_os_and_kernel(
         args, extra_nic_types
     )
+    if getattr(args, "nested", False):
+        check_hvf_nested(os_arts.arch)
     base_name = Path(image).name
     os_id = os_target
 

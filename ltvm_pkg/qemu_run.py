@@ -7,6 +7,7 @@ import fcntl
 import functools
 import math
 import os
+import platform
 import pwd
 import re
 import secrets
@@ -49,6 +50,51 @@ def run(
 def die(msg: str, code: int = EXIT_ERROR) -> NoReturn:
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(code)
+
+
+def check_hvf_nested(arch: str) -> None:
+    """Validate the host and the QEMU binary selected for this guest."""
+    if (
+        not is_macos()
+        or platform.machine() != "arm64"
+        or arch != "aarch64"
+        or os.environ.get("LTVM_FORCE_TCG") == "1"
+    ):
+        die("--nested requires a native aarch64 guest with macOS HVF")
+
+    if int(platform.mac_ver()[0].split(".")[0] or 0) < 15:
+        die("--nested requires macOS 15 or later")
+
+    import ctypes
+
+    try:
+        hvf = ctypes.CDLL(
+            "/System/Library/Frameworks/Hypervisor.framework/Hypervisor"
+        )
+        query = hvf.hv_vm_config_get_el2_supported
+    except (OSError, AttributeError) as exc:
+        die(f"--nested could not query macOS Hypervisor.framework EL2: {exc}")
+    query.argtypes = [ctypes.POINTER(ctypes.c_bool)]
+    query.restype = ctypes.c_int
+    supported = ctypes.c_bool()
+    status = query(ctypes.byref(supported))
+    if status != 0:
+        die(f"--nested EL2 capability check failed (HVF status {status})")
+    if not supported.value:
+        die("--nested requires a Mac with HVF EL2 support (Apple M3 or later)")
+
+    binary = qemu_binary_for_arch(arch)
+    try:
+        result = run([binary, "--version"], check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        die(f"--nested could not check QEMU at {binary}: {exc}")
+    version = re.search(r"\bversion (\d+)\.(\d+)\.(\d+)\b", result.stdout)
+    if not version or tuple(map(int, version.groups())) < (11, 1, 0):
+        found = version.group(0) if version else "unknown version"
+        die(
+            f"--nested requires QEMU 11.1 or later; {binary} reports {found}. "
+            "Run `ltvm install` to install ltvm's macOS QEMU bundle."
+        )
 
 
 def _read_meminfo_mb(key: str) -> int:
@@ -961,6 +1007,9 @@ def launch_qemu(vm: VMInfo, *, wait_seconds: int = 0) -> None:
         print(f"VM '{vm.name}' is already running", file=sys.stderr)
         return
 
+    if vm.nested:
+        check_hvf_nested(vm.arch)
+
     if not vm.overlay_path.exists():
         die(f"overlay missing for '{vm.name}'")
 
@@ -1294,11 +1343,15 @@ def _start_qemu(vm: VMInfo) -> None:
                 f"{str(_nic)!r} on VM {vm.name!r}"
             )
 
-    import platform as _platform
-
     arch = vm.arch
     qemu_bin = qemu_binary_for_arch(arch)
     machine = qemu_machine_for_arch(arch)
+    accel_args = []
+    if vm.nested:
+        # The platform vGIC provides the timer and interrupt interface
+        # KVM needs when handling its own guests at EL2.
+        accel_args = ["-accel", "hvf,kernel-irqchip=on"]
+        machine = machine.replace(",accel=hvf", "") + ",virtualization=on"
 
     # q35 (x86) and virt (aarch64) both have a PCI bus, so virtio
     # devices attach as virtio-*-pci.  Previously x86 used microvm and
@@ -1317,7 +1370,7 @@ def _start_qemu(vm: VMInfo) -> None:
     # those, so /sbin/init aborts with "Fatal glibc error: CPU does not
     # support x86-64-v2" and the kernel panics.  Nehalem (Intel 2008) is
     # the baseline CPU model that satisfies v2 in full.
-    host_arch = _platform.machine()
+    host_arch = platform.machine()
     import os as _os
 
     _force_tcg = _os.environ.get("LTVM_FORCE_TCG") == "1"
@@ -1345,6 +1398,7 @@ def _start_qemu(vm: VMInfo) -> None:
         qemu_bin,
         "-name",
         vm.name,
+        *accel_args,
         "-machine",
         machine,
         "-cpu",
