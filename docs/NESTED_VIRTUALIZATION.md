@@ -157,8 +157,10 @@ gcloud compute instances update <name> \
 
 ltvm exposes Arm EL2 to native aarch64 guests by default on compatible
 Apple Silicon (M3 or later) with macOS 15+ and QEMU 11.1+. A Linux guest
-kernel with KVM enabled then provides `/dev/kvm`. `./ltvm install`
-supplies a signed QEMU bundle for Apple Silicon.
+kernel with KVM enabled then provides `/dev/kvm`. On a capable Mac,
+`ltvm doctor` flags an older QEMU. `ltvm doctor --fix` or
+`ltvm install --qemu` installs the signed Apple Silicon QEMU bundle
+from [ltvm's GitHub releases](https://github.com/lustre-tools/lustre-test-vms/releases).
 
 ```bash
 ltvm create nested-host --target rocky10 --arch aarch64 \

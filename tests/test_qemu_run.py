@@ -1016,9 +1016,9 @@ class TestLaunchQemuMacos:
             patch("platform.system", return_value="Darwin"),
             patch("platform.machine", return_value="arm64"),
             patch("platform.mac_ver", return_value=(macos, (), "arm64")),
-            patch("ltvm_pkg.qemu_run._hvf_el2_supported", return_value=el2),
+            patch("ltvm_pkg.qemu_run.hvf_el2_supported", return_value=el2),
             patch(
-                "ltvm_pkg.qemu_run._qemu_supports_hvf_vgic", return_value=qemu
+                "ltvm_pkg.qemu_run.qemu_supports_hvf_vgic", return_value=qemu
             ),
         ):
             self._launch_macos(vm, h)

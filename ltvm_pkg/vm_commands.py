@@ -33,10 +33,12 @@ from .priv import SudoUnavailable, chmod_regular, sudo_prime, sudo_run
 from .qemu_run import (
     die,
     host_node_problem,
+    hvf_el2_supported,
     is_running,
     kill_qemu,
     launch_qemu,
     numa_problem,
+    qemu_supports_hvf_vgic,
     run,
 )
 from .vm_net import (
@@ -85,6 +87,7 @@ from .vm_state import (
     drop_orphan_clusters,
     lustre_libdir,
     nic_ip6,
+    qemu_binary_for_arch,
     resolve_os_artifacts,
 )
 
@@ -4010,6 +4013,33 @@ def _unreadable_vm_taps(name: str) -> set[str]:
     return taps_for_vm(name, count)
 
 
+def _check_macos_nesting_qemu(fix: bool) -> tuple[int, int]:
+    if not hvf_el2_supported():
+        return 0, 0
+    binary = qemu_binary_for_arch("aarch64")
+    if qemu_supports_hvf_vgic(binary):
+        return 0, 0
+
+    print(
+        f"nested virtualization needs QEMU 11.1 or newer at {binary}; "
+        "run `ltvm install --qemu` to install ltvm's macOS bundle from GitHub"
+    )
+    if not fix:
+        return 1, 0
+
+    from .host_setup import install_qemu_macos_vhost
+
+    try:
+        install_qemu_macos_vhost()
+        if not qemu_supports_hvf_vgic(qemu_binary_for_arch("aarch64")):
+            raise RuntimeError("selected QEMU is still missing or too old")
+    except (RuntimeError, OSError, subprocess.CalledProcessError) as exc:
+        print(f"  FAILED to update macOS QEMU: {exc}")
+        return 1, 1
+    print("  fixed: installed QEMU with nesting support")
+    return 1, 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     issues = 0
     # Counts repairs that were attempted and did not work, so --fix
@@ -4298,6 +4328,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     if is_macos():
         print("note: `ltvm target export` needs a Linux host; not checked")
+        found, failed = _check_macos_nesting_qemu(args.fix)
+        issues += found
+        fix_failures += failed
     else:
         from ltvm_pkg import image_export
 

@@ -52,8 +52,11 @@ def die(msg: str, code: int = EXIT_ERROR) -> NoReturn:
     sys.exit(code)
 
 
-def _hvf_el2_supported() -> bool:
-    """Query the host's Arm EL2 capability on macOS 15 or later."""
+def hvf_el2_supported() -> bool:
+    """Return whether this Apple Silicon host can expose Arm EL2."""
+    if not is_macos() or platform.machine() != "arm64":
+        return False
+
     import ctypes
 
     try:
@@ -69,7 +72,7 @@ def _hvf_el2_supported() -> bool:
     return query(ctypes.byref(supported)) == 0 and supported.value
 
 
-def _qemu_supports_hvf_vgic(binary: str) -> bool:
+def qemu_supports_hvf_vgic(binary: str) -> bool:
     """QEMU 11.1 introduced both the HVF platform GIC and EL2 support."""
     try:
         result = run([binary, "--version"], check=True, timeout=5)
@@ -1333,14 +1336,14 @@ def _start_qemu(vm: VMInfo) -> None:
     if arch == "aarch64" and "accel=hvf" in machine:
         macos_major = int(platform.mac_ver()[0].partition(".")[0] or 0)
         if macos_major < 15:
-            if _qemu_supports_hvf_vgic(qemu_bin):
+            if qemu_supports_hvf_vgic(qemu_bin):
                 # Newer QEMU defaults to a GIC that needs macOS 15.
                 machine = machine.replace(",accel=hvf", "")
                 accel_args = ["-accel", "hvf,kernel-irqchip=off"]
         elif (
             not vm.disable_nesting
-            and _hvf_el2_supported()
-            and _qemu_supports_hvf_vgic(qemu_bin)
+            and hvf_el2_supported()
+            and qemu_supports_hvf_vgic(qemu_bin)
         ):
             machine += ",virtualization=on"
 

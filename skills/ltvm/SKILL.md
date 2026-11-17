@@ -32,6 +32,8 @@ Apple Silicon (M3 or later), macOS 15+, and QEMU 11.1+. A Linux guest
 with KVM enabled gets `/dev/kvm` and can run its own accelerated VMs.
 Older setups boot with ordinary HVF. Pass `--disable-nesting` to
 `ltvm create` or `ltvm cluster create` to save a per-VM opt-out.
+On a capable Mac, `ltvm doctor` flags an older QEMU. Run
+`ltvm doctor --fix` to install the current bundle from GitHub.
 Use `ltvm vm exec <vm> -- ls -l /dev/kvm` to check the guest.
 
 `install` also sets up tab completion for the human's shell (bash, zsh,
