@@ -60,10 +60,10 @@ def check_hvf_nested(arch: str) -> None:
         or arch != "aarch64"
         or os.environ.get("LTVM_FORCE_TCG") == "1"
     ):
-        die("--nested requires a native aarch64 guest with macOS HVF")
+        die("--enable-nesting requires a native aarch64 guest with macOS HVF")
 
     if int(platform.mac_ver()[0].split(".")[0] or 0) < 15:
-        die("--nested requires macOS 15 or later")
+        die("--enable-nesting requires macOS 15 or later")
 
     import ctypes
 
@@ -73,26 +73,32 @@ def check_hvf_nested(arch: str) -> None:
         )
         query = hvf.hv_vm_config_get_el2_supported
     except (OSError, AttributeError) as exc:
-        die(f"--nested could not query macOS Hypervisor.framework EL2: {exc}")
+        die(
+            f"--enable-nesting could not query macOS Hypervisor.framework EL2: {exc}"
+        )
     query.argtypes = [ctypes.POINTER(ctypes.c_bool)]
     query.restype = ctypes.c_int
     supported = ctypes.c_bool()
     status = query(ctypes.byref(supported))
     if status != 0:
-        die(f"--nested EL2 capability check failed (HVF status {status})")
+        die(
+            f"--enable-nesting EL2 capability check failed (HVF status {status})"
+        )
     if not supported.value:
-        die("--nested requires a Mac with HVF EL2 support (Apple M3 or later)")
+        die(
+            "--enable-nesting requires a Mac with HVF EL2 support (Apple M3 or later)"
+        )
 
     binary = qemu_binary_for_arch(arch)
     try:
         result = run([binary, "--version"], check=True)
     except (OSError, subprocess.CalledProcessError) as exc:
-        die(f"--nested could not check QEMU at {binary}: {exc}")
+        die(f"--enable-nesting could not check QEMU at {binary}: {exc}")
     version = re.search(r"\bversion (\d+)\.(\d+)\.(\d+)\b", result.stdout)
     if not version or tuple(map(int, version.groups())) < (11, 1, 0):
         found = version.group(0) if version else "unknown version"
         die(
-            f"--nested requires QEMU 11.1 or later; {binary} reports {found}. "
+            f"--enable-nesting requires QEMU 11.1 or later; {binary} reports {found}. "
             "Run `ltvm install` to install ltvm's macOS QEMU bundle."
         )
 

@@ -158,17 +158,20 @@ gcloud compute instances update <name> \
 On an Apple M3 or later with macOS 15 or later, use a native aarch64
 target, a Linux guest kernel with KVM enabled, and QEMU 11.1 or later.
 `./ltvm install` supplies a signed QEMU bundle for Apple Silicon. Use
-`--nested` at create time to expose Arm EL2 to the guest through HVF:
+`--enable-nesting` at create time to expose Arm EL2 to the guest through HVF:
 
 ```bash
-ltvm create nested-host --target rocky10 --arch aarch64 --nested \
+ltvm create nested-host --target rocky10 --arch aarch64 --enable-nesting \
     --mem 6144 --vcpus 4 --root-size 16G --mdt-disks 0 --ost-disks 0
 ltvm vm exec nested-host -- ls -l /dev/kvm
 ltvm vm exec nested-host -- dmesg | grep -E 'started at EL2|kvm \['
 ```
 
-The setting persists across stop and start. The memory and disk sizes
-above leave room to run VMs and keep their images inside the guest.
+The setting persists across stop and start. Enabling it changes the
+guest CPU features. QEMU's HVF backend suppresses Arm SME when it
+exposes EL2.
+
+The example allocates space for inner VMs and their images.
 For an inner QEMU, use
 `-accel kvm -cpu host -machine virt,gic-version=max,its=off`.
 

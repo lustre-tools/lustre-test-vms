@@ -709,7 +709,7 @@ _RESOURCE_FLAGS = {
     "disk_size": "--disk-size",
     "root_size": "--root-size",
     "kernel_args": "--kernel-args",
-    "nested": "--nested",
+    "nested": "--enable-nesting",
     "numa_nodes": "--numa-nodes",
     "numa_dist": "--numa-dist",
     "disk_dir": "--disk-dir",

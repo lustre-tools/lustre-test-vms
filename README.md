@@ -71,7 +71,7 @@ a podman-managed Linux VM + QEMU microvms. A few things differ from Linux:
   ends), and `export LTVM_PODMAN_AUTOSTOP=0` keeps it up for good.
   A machine that lists as running but does not answer -- a failed
   start leaves it so -- is restarted by the next build.
-- **To run KVM inside an ltvm guest**, create it with `--nested`. This
+- **To run KVM inside an ltvm guest**, create it with `--enable-nesting`. This
   requires Apple M3 or later, macOS 15+, and QEMU 11.1+ (included in
   `./ltvm install`). To confine an agent to a Linux VM, run ltvm inside
   that guest or inside a UTM Linux guest with nested virtualization

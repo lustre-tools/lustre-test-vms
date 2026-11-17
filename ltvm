@@ -1763,7 +1763,8 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _vm_create_args.add_argument(
-        "--nested",
+        "--enable-nesting",
+        dest="nested",
         action="store_true",
         help="Expose Arm EL2 to the guest for KVM (Apple Silicon macOS, "
         "QEMU 11.1 or later). Fixed at create time.",
