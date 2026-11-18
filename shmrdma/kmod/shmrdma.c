@@ -59,6 +59,7 @@ struct shmrdma_dev {
 	bool nb_registered;
 	/* the port state last reported, under rtnl */
 	bool port_up;
+	char ifname[IFNAMSIZ];	/* the netdev it is bound to */
 
 	struct mutex ctrl_mutex;
 	struct completion ctrl_done;
@@ -1266,6 +1267,10 @@ static int shmrdma_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 	if (udata)
 		return -EOPNOTSUPP;
 	mutex_lock(&qp->state_lock);
+	/* a failed completion moved it to error with no event */
+	if ((READ_ONCE(qp->rec->fatal) || READ_ONCE(qp->rec->err)) &&
+	    qp->attr.qp_state != IB_QPS_RESET)
+		qp->attr.qp_state = qp->attr.cur_qp_state = IB_QPS_ERR;
 	cur = (mask & IB_QP_CUR_STATE) ? attr->cur_qp_state :
 					qp->attr.qp_state;
 	next = (mask & IB_QP_STATE) ? attr->qp_state : cur;
@@ -1387,6 +1392,9 @@ static int shmrdma_query_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 	struct shmrdma_qp *qp = to_sqp(ibqp);
 
 	mutex_lock(&qp->state_lock);
+	if ((READ_ONCE(qp->rec->fatal) || READ_ONCE(qp->rec->err)) &&
+	    qp->attr.qp_state != IB_QPS_RESET)
+		qp->attr.qp_state = qp->attr.cur_qp_state = IB_QPS_ERR;
 	*attr = qp->attr;
 	memset(&attr->ah_attr, 0, sizeof(attr->ah_attr));
 	memset(&attr->alt_ah_attr, 0, sizeof(attr->alt_ah_attr));
@@ -1872,8 +1880,20 @@ static int shmrdma_netdev_event(struct notifier_block *nb,
 	struct shmrdma_dev *dev = container_of(nb, struct shmrdma_dev, nb);
 	struct net_device *ndev = netdev_notifier_info_to_dev(ptr);
 
+	/* its NIC rebound (rc.local's NUMA setup does that) */
+	if ((event == NETDEV_REGISTER || event == NETDEV_CHANGENAME) &&
+	    !rtnl_dereference(dev->ndev) && READ_ONCE(dev->registered) &&
+	    net_eq(dev_net(ndev), &init_net) &&
+	    !strcmp(ndev->name, dev->ifname) &&
+	    !ib_device_set_netdev(&dev->ibdev, ndev, 1)) {
+		dev_hold(ndev);
+		rcu_assign_pointer(dev->ndev, ndev);
+		return NOTIFY_DONE;
+	}
 	if (ndev != rtnl_dereference(dev->ndev))
 		return NOTIFY_DONE;
+#ifndef HAVE_IB_DISPATCH_PORT_STATE_EVENT
+	/* newer cores dispatch port events from the netdev themselves */
 	if (event == NETDEV_UP || event == NETDEV_DOWN ||
 	    event == NETDEV_CHANGE) {
 		/* the port follows its netdev's link, as a RoCE HCA's does */
@@ -1890,6 +1910,7 @@ static int shmrdma_netdev_event(struct notifier_block *nb,
 		}
 		return NOTIFY_DONE;
 	}
+#endif
 	if (event != NETDEV_UNREGISTER)
 		return NOTIFY_DONE;
 	ib_device_set_netdev(&dev->ibdev, NULL, 1);
@@ -1988,6 +2009,7 @@ static int shmrdma_probe(struct virtio_device *vdev)
 		return -ENOMEM;
 	}
 	dev->vdev = vdev;
+	strscpy(dev->ifname, ifname, sizeof(dev->ifname));
 	RCU_INIT_POINTER(dev->ndev, ndev);
 	vdev->priv = dev;
 	mutex_init(&dev->ctrl_mutex);

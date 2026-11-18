@@ -318,6 +318,8 @@ def deploy_to_vm(
 
     Raises RuntimeError on failure.
     """
+    if not userspace_only:
+        _check_btf_base(vm, staging)
     try:
         with vm_claim.deploy_lock(vm.name):
             _deploy_to_vm(
@@ -338,6 +340,33 @@ def deploy_to_vm(
         raise RuntimeError(
             f"deploy to {vm.name}: {e}; {timeout_hint()}"
         ) from None
+
+
+def _check_btf_base(vm: VMInfo, staging: Path) -> None:
+    """Refuse modules whose BTF is split against another build of the
+    kernel *vm* runs: a rebuild keeps the release and can keep every
+    symbol CRC, and the guest then rejects the modules at modprobe."""
+    from .lustre_build import read_staging_meta
+    from .vm_commands import _vm_kernel_build_id
+
+    want = (read_staging_meta(staging) or {}).get("kernel_vmlinux_id") or ""
+    # "" is no BTF; size:mtime is a vmlinux with no build ID
+    if not want or ":" in want:
+        return
+    have = _vm_kernel_build_id(vm) or _vm_kernel_build_id(vm)
+    if not have:
+        raise RuntimeError(
+            f"{vm.name}: could not read its kernel's build ID to check "
+            f"these modules' BTF against; Lustre was not changed"
+        )
+    if have != want:
+        raise RuntimeError(
+            f"{vm.name} runs another build of this kernel (build ID "
+            f"{have[:12]}, these modules' {want[:12]}): restart it "
+            f"(ltvm stop, ltvm start) to boot the current one, or, if it "
+            f"runs that already, rebuild the Lustre (a fetched snapshot "
+            f"may predate the kernel)"
+        )
 
 
 def _deploy_to_vm(

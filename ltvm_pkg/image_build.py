@@ -989,6 +989,18 @@ def build_image(
                 f"run: ltvm build lustre {target_config.name} "
                 f"--kernel {kernel_name} --lustre-tree {lustre_tree}"
             )
+        from .lustre_build import read_staging_meta, staging_fits_vmlinux
+
+        if not staging_fits_vmlinux(
+            read_staging_meta(lustre_staging) or {},
+            target_config.kernel_output_dir(kernel=kernel) / "build-tree",
+        ):
+            raise FileNotFoundError(
+                f"The Lustre staging at {lustre_staging} was built against "
+                f"another build of this kernel -- run: ltvm build lustre "
+                f"{target_config.name} --kernel {kernel_name} --lustre-tree "
+                f"{lustre_tree}"
+            )
         lustre_hash_input = _lustre_staging_hash_input(lustre_staging)
 
     combined_extra_hash = lustre_hash_input + mofed_kmods_hash_input
@@ -1290,6 +1302,8 @@ def build_image(
             else None
         ),
         shmrdma_kmod=shmrdma_kmod,
+        # its driver binds a device tagged shmrdma@IFNAME (--nic shmrdma)
+        shmrdma_nic_tags=shmrdma_kmod,
         shmrdma_kmod_images=_kmod_images(
             prev_meta, prev_image, image_path, shmrdma_kmod
         ),

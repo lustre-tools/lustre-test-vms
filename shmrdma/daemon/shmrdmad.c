@@ -320,8 +320,12 @@ struct vdev {
 	int kind;
 	struct netport *port;
 	/* its link fault rule, as of g_fault_gen fault_gen (fault.c) */
+	plat_spinlock_t fault_lock;
 	struct fault *fault;
 	uint64_t fault_gen;
+	/* its guest reads a QP's error from its record (SHMRDMA_MQ_TIMEOUT
+	 * says so): a failed send raises no QP_FATAL */
+	bool quiet_errs;
 	struct ep_tag sock_tag;
 	bool dead;
 	/* QEMU stopped it (GET_VRING_BASE): nothing touches its memory
@@ -1291,6 +1295,8 @@ static void qp_to_err_ev(struct qp *qp, bool event)
 			qp->fatal_sent = true;
 			REL(&qp->rec->fatal, 1);
 			dev_raise_eq(qp->dev, qp->qpn, SHMRDMA_EQE_QP_FATAL);
+		} else if (!event) {
+			REL(&qp->rec->err, 1);
 		}
 	}
 }
@@ -1815,7 +1821,7 @@ static uint32_t wc_opcode(uint32_t op)
 
 /* fault_gate() for w, a WQE that would go on the wire */
 static int qp_fault_gate(struct qp *qp, const struct shmrdma_sq_wqe *w,
-			 uint32_t prod)
+			 uint32_t prod, bool held)
 {
 	bool ud = qp->type != SHMRDMA_QPT_RC;
 	struct vdev *pd;
@@ -1846,8 +1852,11 @@ static int qp_fault_gate(struct qp *qp, const struct shmrdma_sq_wqe *w,
 	}
 	len = (w->flags & SHMRDMA_WQE_INLINE) ? w->send.inline_len :
 	      sg_total(w->sge, w->num_sge);
+	/* never sent: exec_ud_send() fails it */
+	if (ud && len > UD_MTU)
+		return FG_GO;
 	return fault_gate(qp, pd, ud, w->opcode == SHMRDMA_OP_RDMA_READ, len,
-			  prod);
+			  prod, held);
 }
 
 /* bytes one pass moves for a QP, after its first WQE */
@@ -1916,9 +1925,7 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 			   w->send.inline_len > qp->sq.esz - SHMRDMA_WQE_HDR) {
 			st = WC_LOC_LEN_ERR;
 		} else {
-			/* a WQE waiting for a receive passed the gate already */
-			int g = qp->stall_since ? FG_GO :
-				qp_fault_gate(qp, w, prod);
+			int g = qp_fault_gate(qp, w, prod, qp->stall_since);
 
 			if (g == FG_WAIT) {
 				qp->gated = true;
@@ -1955,15 +1962,16 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 		c.qpn = qp->qpn;
 		c.opcode = opc;
 		c.status = st;
+		/* in error before its completion shows */
+		if (st != WC_SUCCESS && st != WC_WR_FLUSH_ERR) {
+			GLOG(qp->dev, "dev%d qp%u: wqe op %u failed status %d",
+			    qp->dev->id, qp->qpn, w->opcode, st);
+			qp_to_err_ev(qp, !ACQ(&qp->dev->quiet_errs));
+		}
 		qp->tx_wr++;
 		qp->sq_cons++;
 		wr_retire(qp, true, qp->sq_cons, qp->scq, cqe ? &c : NULL,
 			  false);
-		if (st != WC_SUCCESS && st != WC_WR_FLUSH_ERR) {
-			GLOG(qp->dev, "dev%d qp%u: wqe op %u failed status %d",
-			    qp->dev->id, qp->qpn, w->opcode, st);
-			qp_to_err_ev(qp, false);
-		}
 		done++;
 		if (qp->tx_bytes - bytes0 >= QP_PASS_BYTES ||
 		    __atomic_load_n(&g_wwait, __ATOMIC_SEQ_CST))
@@ -2200,6 +2208,8 @@ static void dev_reset_state(struct vdev *d)
 	}
 	d->mr_pages = 0;
 	memset(d->gid_valid, 0, sizeof(d->gid_valid));
+	/* the next driver opts in again, or is an older one */
+	REL(&d->quiet_errs, false);
 	d->initialized = false;
 	d->shared = NULL;
 	d->eq = NULL;
@@ -2435,6 +2445,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		if (c->modify_qp.mask & SHMRDMA_MQ_ACCESS)
 			qp->access = c->modify_qp.access;
 		if (c->modify_qp.mask & SHMRDMA_MQ_TIMEOUT) {
+			REL(&d->quiet_errs, true);
 			qp->timeout = c->modify_qp.timeout;
 			qp->retry_cnt = c->modify_qp.retry_cnt;
 			qp->timeout_known = true;
@@ -2448,6 +2459,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 					    ACQ(&qp->rec->rq_prod));
 				qp->fatal_sent = false;
 				REL(&qp->rec->fatal, 0);
+				REL(&qp->rec->err, 0);
 				qp->err_req = 0;
 			}
 			qp->state = ns;
@@ -3226,6 +3238,7 @@ static void accept_conn(int lsock, int kind)
 	plat_spin_init(&d->evq_lock);
 	plat_spin_init(&d->mr_lock);
 	plat_spin_init(&d->log_lock);
+	plat_spin_init(&d->fault_lock);
 	d->log_t = now_ns();
 	d->log_tokens = GLOG_BURST;
 	wlock();
@@ -3364,11 +3377,16 @@ int main(int argc, char **argv)
 
 		if (snprintf(ctl, sizeof(ctl), "%s.ctl", g_sock_path) >=
 		    (int)sizeof(ctl)) {
-			LOG("%s.ctl is too long for a socket path: give -C",
+			LOG("%s.ctl is too long for a socket path: no link faults without -C",
 			    g_sock_path);
-			return 2;
+			ctl[0] = '\0';
 		}
 		g_ctl_path = ctl;
+	}
+	if (*g_ctl_path && (!strcmp(g_ctl_path, g_sock_path) ||
+			    !strcmp(g_ctl_path, g_net_sock_path))) {
+		LOG("%s is a data socket: no link faults", g_ctl_path);
+		g_ctl_path = "";
 	} else if (strlen(g_ctl_path) >=
 		   sizeof(((struct sockaddr_un *)0)->sun_path)) {
 		LOG("socket paths must be shorter than %zu bytes",

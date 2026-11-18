@@ -156,12 +156,31 @@ def cmd_vm_link(args: argparse.Namespace) -> int:
         )
     if changing and not is_running(vm):
         return _error(f"VM '{vm.name}' is not running", use_json)
+    if changing:
+        from ltvm_pkg import vm_claim
+
+        try:
+            vm_claim.check(vm.name, "change links on")
+        except vm_claim.ClaimError as e:
+            return _error(str(e), use_json)
     opts = {
         "delay_ms": args.delay or 0,
         "loss_pct": args.loss or 0,
         "rate_mbit": args.rate or 0,
         "retry_ms": args.retry or 0,
     }
+    if args.carrier_only and any(opts.values()):
+        return _error(
+            "--carrier-only changes only the carrier: --delay, --loss, "
+            "--rate and --retry need the daemon",
+            use_json,
+        )
+    if args.carrier_only and args.silent:
+        return _error(
+            "--carrier-only changes only the carrier, which --silent "
+            "leaves alone",
+            use_json,
+        )
     if action != "set" and any(opts.values()) and action != "down":
         return _error(
             "--delay, --loss, --rate and --retry go with set or down", use_json
@@ -177,7 +196,19 @@ def cmd_vm_link(args: argparse.Namespace) -> int:
                 shmlink.rules(vm) if any(lk.on_switch for lk in links) else {}
             )
             off = {lk.nic for lk in links if not lk.on_switch}
-            out = {lk.nic: have.get(lk.nic) for lk in links}
+            own = set()
+            for lk in links:
+                if lk.on_switch:
+                    try:
+                        shmlink.control_socket(vm, lk)
+                    except shmlink.LinkError:
+                        own.add(lk.nic)
+            out = {
+                lk.nic: {"own_daemon": "1"}
+                if lk.nic in own
+                else have.get(lk.nic)
+                for lk in links
+            }
             if use_json:
                 print(json.dumps(out))
             elif not out:
@@ -186,6 +217,9 @@ def cmd_vm_link(args: argparse.Namespace) -> int:
                 for nic, r in out.items():
                     if nic in off:
                         print(f"{vm.name} {nic}: not on shmrdmad")
+                        continue
+                    if nic in own:
+                        print(f"{vm.name} {nic}: on a shmrdmad of its own")
                         continue
                     if not r:
                         print(f"{vm.name} {nic}: ok")
@@ -209,10 +243,55 @@ def cmd_vm_link(args: argparse.Namespace) -> int:
                     )
             return EXIT_OK
         link = shmlink.link_of(vm, args.nic)
+        if (
+            action == "up"
+            and not link.netdev
+            and (args.carrier_only or not link.on_switch)
+        ):
+            return _error(
+                f"{vm.name} {link.nic} has nothing `up` can raise: "
+                + (
+                    "eth0's carrier never goes down"
+                    if link.nic == "eth0"
+                    else "a passthrough NIC has no carrier ltvm controls"
+                ),
+                use_json,
+            )
+        with shmlink.change_lock(vm):
+            return _link_change(vm, link, action, args, opts, use_json)
+    except shmlink.LinkError as e:
+        return _error(str(e), use_json)
+
+
+def _link_change(
+    vm: Any,
+    link: Any,
+    action: str,
+    args: argparse.Namespace,
+    opts: dict[str, float],
+    use_json: bool,
+) -> int:
+    """One change to *link*, under its VM's link lock."""
+    import json
+
+    from ltvm_pkg import shmlink
+
+    try:
         if action == "up":
-            had = shmlink.clear_fault(vm, link) if link.on_switch else False
+            had = (
+                shmlink.clear_fault(vm, link)
+                if link.on_switch and not args.carrier_only
+                else False
+            )
             if link.netdev and not args.silent:
-                shmlink.set_carrier(vm, link, True)
+                try:
+                    shmlink.set_carrier(vm, link, True)
+                except shmlink.LinkError as e:
+                    return _error(
+                        f"{e} (its faults were cleared; the carrier is "
+                        f"still down)",
+                        use_json,
+                    )
             if use_json:
                 print(json.dumps({"cleared": had}))
             else:
@@ -230,20 +309,33 @@ def cmd_vm_link(args: argparse.Namespace) -> int:
                 rule = shmlink.set_fault(
                     vm, link, down=action == "down" or args.down, **opts
                 )
-            elif not link.netdev or action != "down":
+            elif not link.netdev or action != "down" or not args.carrier_only:
                 return _error(
                     f"{vm.name} {link.nic} is not on shmrdmad's switch: "
-                    f"only `down --carrier-only` applies to it",
+                    + (
+                        "only `down --carrier-only` applies to it"
+                        if link.netdev
+                        else "nothing applies to it"
+                    ),
                     use_json,
                 )
-            if action == "down" and link.netdev and not args.silent:
-                shmlink.set_carrier(vm, link, False)
+            going_down = action == "down" or bool(args.down)
+            if link.netdev and not args.silent:
+                try:
+                    shmlink.set_carrier(vm, link, not going_down)
+                except shmlink.LinkError as e:
+                    return _error(
+                        f"{e} ("
+                        + ("the rule is in place; " if rule else "")
+                        + "`up` undoes it)",
+                        use_json,
+                    )
             if use_json:
                 print(json.dumps(rule))
             else:
                 carrier = (
                     ""
-                    if action != "down" or not link.netdev or args.silent
+                    if not going_down or not link.netdev or args.silent
                     else ", carrier off"
                 )
                 print(f"{vm.name} {link.nic}: {action}{carrier}")

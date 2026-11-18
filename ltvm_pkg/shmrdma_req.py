@@ -27,6 +27,7 @@ SMC = "smc"  # SMC sockets over the device (not a flag; never refuses)
 # ltvm's own shmrdmad, which it builds and runs: --shmrdma or a shmnet
 # NIC without a socket given by hand.  Not a flag of its own.
 OWN_DAEMON = "shmrdmad"
+SHMRDMA_NIC = "shmrdma-nic"  # --nic shmrdma
 
 # Host packages the features need, by the command that proves them.
 # `ltvm install` installs these with its other prerequisites.
@@ -555,6 +556,21 @@ def target_checks(t: Target) -> list[Req]:
                 recheck=lambda: _current_has_kmod(t),
             )
         )
+        # a VM's own record means it was created already: one that
+        # booted on such an image is warned about after it starts
+        if has_kmod and t.has_kmod is None:
+            reqs.append(
+                Req(
+                    f"{t.name} image binds --nic shmrdma devices",
+                    frozenset({SHMRDMA_NIC}),
+                    shmrdma.image_has_nic_tags(t.image) is not False,
+                    f"{t.image}: its guest module predates them",
+                    fix=lambda: _build_image(t, force=True),
+                    how=f"ltvm build image {t.name}{k} --lustre-tree "
+                    f"<tree> --force",
+                    recheck=lambda: _current_has_nic_tags(t),
+                )
+            )
     smc = _kernel_has_smc(t.kernel_dir)
     if _smc_excluded(t.name):
         reqs.append(
@@ -601,6 +617,8 @@ def features_of(shmrdma_flag: str, nics: list, host_node: int) -> set[str]:
     feats = set()
     if shmrdma_flag or any(n.type == "shmrdma" for n in nics):
         feats |= {SHMRDMA, SMC}
+    if any(n.type == "shmrdma" for n in nics):
+        feats.add(SHMRDMA_NIC)
     if any(n.on_switch for n in nics):
         feats.add(SHMNET)
     if shmrdma_flag == "auto" or any(
@@ -668,6 +686,15 @@ def _root_daemon_check() -> Req | None:
         f"not running for {d.user}, and ltvm will not start it as root: " + how,
         how=how,
     )
+
+
+def _current_has_nic_tags(t: Target) -> bool:
+    from .image_store import current_image
+
+    if t.image is None:
+        return False
+    cur = current_image(Path(t.image).parent)
+    return cur is not None and bool(shmrdma.image_has_nic_tags(cur))
 
 
 def _current_has_kmod(t: Target) -> bool:

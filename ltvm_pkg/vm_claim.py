@@ -316,6 +316,29 @@ def deploy_lock_path(vm: str) -> Path:
     return _path(vm).with_name(f".{vm}.deploy")
 
 
+@contextlib.contextmanager
+def link_lock(vm: str) -> Iterator[None]:
+    """Hold *vm*'s link lock (``ltvm vm link``), waiting for another
+    change to finish; beside its claim, as deploy_lock() is.  Without a
+    usable claims directory the change goes ahead unlocked."""
+    try:
+        fd = _open(_path(vm).with_name(f".{vm}.link"), True)
+    except (OSError, ClaimError):
+        yield
+        return
+    try:
+        with contextlib.suppress(OSError):
+            if os.fstat(fd).st_uid == os.geteuid():
+                os.fchmod(fd, 0o666)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 class DeployInProgress(ClaimError):
     """Another deploy into the VM is running."""
 

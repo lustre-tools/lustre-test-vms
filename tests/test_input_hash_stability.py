@@ -27,45 +27,45 @@ from ltvm_pkg.target_config import TargetConfig
 # (target, artifact, kernel, variant, expected)
 GOLDEN = [
     ("rocky8", "container", None, None, "dfa0fc93d2774ebf"),
-    ("rocky8", "kernel", None, None, "f9282b2d2a61b2ff"),
-    ("rocky8", "image", None, None, "3184a3510a2bea97"),
+    ("rocky8", "kernel", None, None, "e62e0946be2d3db1"),
+    ("rocky8", "image", None, None, "e7e73a49d792f257"),
     ("rocky9", "container", None, None, "4a58226592cb2cf5"),
-    ("rocky9", "kernel", None, None, "9917b5f43ad2a431"),
-    ("rocky9", "image", None, None, "d908b8e05ce9e1a7"),
+    ("rocky9", "kernel", None, None, "7e79d71c25ca6c06"),
+    ("rocky9", "image", None, None, "208bc3537e28335e"),
     ("rocky9-64k", "container", None, None, "9ebe6bff482840f1"),
-    ("rocky9-64k", "kernel", None, None, "5cfa9a6bfe6a0141"),
-    ("rocky9-64k", "image", None, None, "480cc6a568d2f5f4"),
+    ("rocky9-64k", "kernel", None, None, "c3a54e865fb41c3c"),
+    ("rocky9-64k", "image", None, None, "e49c2540657ada8a"),
     ("rocky10", "container", None, None, "9f9eabcec78fc131"),
-    ("rocky10", "kernel", None, None, "9ffe169f16cb7b21"),
-    ("rocky10", "image", None, None, "cdcb09573ebfa9bf"),
+    ("rocky10", "kernel", None, None, "80994616a7980a26"),
+    ("rocky10", "image", None, None, "bc615d743707b372"),
     ("rocky10-16k", "container", None, None, "ee00de82e663a154"),
-    ("rocky10-16k", "kernel", None, None, "1d40dec71e52ba4e"),
-    ("rocky10-16k", "image", None, None, "b2421f46c0a1aaf7"),
+    ("rocky10-16k", "kernel", None, None, "ce82ce77e1d5fff3"),
+    ("rocky10-16k", "image", None, None, "5c96c6e49237a1a0"),
     ("mainline", "container", None, None, "c25d828a438d5e1b"),
-    ("mainline", "kernel", None, None, "553a4dfdd38396f1"),
-    ("mainline", "image", None, None, "a897b57c69782cb5"),
+    ("mainline", "kernel", None, None, "145fc824ca1285b7"),
+    ("mainline", "image", None, None, "6ac746cec0dd6f2f"),
     ("ubuntu2404", "container", None, None, "a6dbffaea81d2907"),
-    ("ubuntu2404", "kernel", None, None, "e4cb01f684b1ba28"),
-    ("ubuntu2404", "image", None, None, "01fd938d83dc2fc8"),
+    ("ubuntu2404", "kernel", None, None, "09c8607b7f125a7e"),
+    ("ubuntu2404", "image", None, None, "7eea8ec3518a090b"),
     ("ubuntu2604", "container", None, None, "a12a95e67b1528aa"),
-    ("ubuntu2604", "kernel", None, None, "9e7932acc03c6d3d"),
-    ("ubuntu2604", "image", None, None, "2a84c14bc8bdb89c"),
+    ("ubuntu2604", "kernel", None, None, "62ffd841ecb0594a"),
+    ("ubuntu2604", "image", None, None, "e142bb0f8ffd2b2f"),
     ("ubuntu2604-server", "container", None, None, "9a6c381b934a8c9f"),
-    ("ubuntu2604-server", "kernel", None, None, "1d45a0ce8ced1133"),
-    ("ubuntu2604-server", "image", None, None, "b1118e6362632c76"),
+    ("ubuntu2604-server", "kernel", None, None, "e369856eaba8f00d"),
+    ("ubuntu2604-server", "image", None, None, "906840ff55359a6f"),
     ("debian13", "container", None, None, "8bc7587fe4a5bc3f"),
-    ("debian13", "kernel", None, None, "1b3bf62e8f4399b2"),
-    ("debian13", "image", None, None, "9957672a69ca3156"),
+    ("debian13", "kernel", None, None, "4b83d73a29d20d07"),
+    ("debian13", "image", None, None, "538095436ab01358"),
     ("opensuse156", "container", None, None, "d9f755295c83a19c"),
-    ("opensuse156", "kernel", None, None, "7264d6e86c697b5c"),
-    ("opensuse156", "image", None, None, "38796d469bcbaea9"),
+    ("opensuse156", "kernel", None, None, "930ab71dd34683ef"),
+    ("opensuse156", "image", None, None, "4fdb68c1290e3b76"),
     # A variant must not perturb the base hashes above, and must differ
     # from them.
     ("rocky9", "container", None, "mofed-24", "cc1a03c2d0fda310"),
     ("rocky9", "image", None, "mofed-24", "68425d760796f4dd"),
     # An explicitly named kernel.
-    ("rocky9", "kernel", "5.14-rhel9.5", None, "a0f7b639375312bb"),
-    ("rocky9", "image", "5.14-rhel9.5", None, "801544844df67165"),
+    ("rocky9", "kernel", "5.14-rhel9.5", None, "ace413737ea07990"),
+    ("rocky9", "image", "5.14-rhel9.5", None, "eef771a70e4fd22a"),
 ]
 
 
@@ -111,7 +111,7 @@ def test_extra_bytes_still_fold_in() -> None:
     vmlinuz -- the exact workflow ltvm exists for.
     """
     tc = TargetConfig("rocky9")
-    assert tc.input_hash("kernel", extra=b"patchbytes") == "de148f25f7c9c125"
+    assert tc.input_hash("kernel", extra=b"patchbytes") == "b1c5f843e43da0b0"
     assert tc.input_hash("kernel", extra=b"patchbytes") != tc.input_hash(
         "kernel"
     )

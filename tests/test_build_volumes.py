@@ -126,6 +126,18 @@ class TestKernelVolumeName:
         (bt / "Module.symvers").write_text("0x1\tsym\tvmlinux\tEXPORT_SYMBOL\n")
         assert build_volumes.kernel_volume_name(bt) != before
 
+    def test_a_changed_config_gets_another_volume(self, tmp_path: Path) -> None:
+        bt = _kernel_artifact(tmp_path)
+        before = build_volumes.kernel_volume_name(bt)
+        (bt / ".config").write_text("CONFIG_FS_VERITY=y\n")
+        assert build_volumes.kernel_volume_name(bt) != before
+
+    def test_the_vmlinux_link_gets_another_volume(self, tmp_path: Path) -> None:
+        bt = _kernel_artifact(tmp_path)
+        before = build_volumes.kernel_volume_name(bt)
+        (bt / "vmlinux").symlink_to("/vmlinux")
+        assert build_volumes.kernel_volume_name(bt) != before
+
     def test_only_valid_volume_characters(self, tmp_path: Path) -> None:
         bt = _kernel_artifact(tmp_path, kver="5.14+odd name")
         name = build_volumes.kernel_volume_name(bt)

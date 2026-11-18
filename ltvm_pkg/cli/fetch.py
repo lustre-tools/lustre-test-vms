@@ -1745,7 +1745,7 @@ def _publish_input_mismatches(
         if kmeta is not None and not lustre_fits_kernel(kdir, lustre):
             problems.append(
                 f"Lustre: built against another build of this kernel (its "
-                f"Module.symvers differs); rebuild with `ltvm build all "
+                f"Module.symvers or vmlinux differs); rebuild with `ltvm build all "
                 f"{tc.name} --kernel {kernel}{v_flag} --lustre-tree <tree>`"
             )
         zfs_version = _snapshot_zfs_version(lustre)

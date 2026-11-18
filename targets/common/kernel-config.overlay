@@ -41,8 +41,10 @@ CONFIG_STAGING=n
 # BTF, so bpftrace and drgn read kernel and module types without
 # headers.  The RHEL and SUSE kernels have it; the deb-built ones did
 # not, and bpftrace scripts that dereference kernel structs failed.
+# Ubuntu's arm64 defconfig reduces debug info, which BTF excludes.
 CONFIG_BPF_SYSCALL=y
 CONFIG_BPF_JIT=y
+CONFIG_DEBUG_INFO_REDUCED=n
 CONFIG_DEBUG_INFO_BTF=y
 CONFIG_DEBUG_INFO_BTF_MODULES=y
 
@@ -56,6 +58,7 @@ CONFIG_LRU_GEN_ENABLED=y
 # which start from defconfig, lacked: the function and syscall
 # tracers, hist triggers, the hung task and lockup reports, transparent
 # huge pages, and netem for network delay and loss.
+CONFIG_FTRACE=y
 CONFIG_FUNCTION_TRACER=y
 CONFIG_FUNCTION_GRAPH_TRACER=y
 CONFIG_DYNAMIC_FTRACE=y

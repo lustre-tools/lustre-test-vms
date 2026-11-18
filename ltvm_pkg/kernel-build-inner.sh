@@ -368,6 +368,8 @@ rsync -a \
 # excluded by the .o filter
 cp Module.symvers "$BUILD_TREE/"
 cp .config "$BUILD_TREE/"
+# The Lustre build mounts the vmlinux here, for its modules' BTF.
+ln -sfn /vmlinux "$BUILD_TREE/vmlinux"
 if [[ -d scripts ]]; then
 	rsync -a scripts/ "$BUILD_TREE/scripts/"
 fi

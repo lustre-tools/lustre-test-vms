@@ -132,7 +132,8 @@ struct shmrdma_qp_rec {
 	__u64 rq_limbo_wr_id;
 	__u32 sq_limbo_op;	/* SHMRDMA_WC_* */
 	__u32 rq_limbo_op;
-	__u32 pad1[2];
+	__u32 err;		/* 1: in error, with no QP_FATAL */
+	__u32 pad1;
 };
 
 #define SHMRDMA_LIMBO_NONE	0xffffffffu

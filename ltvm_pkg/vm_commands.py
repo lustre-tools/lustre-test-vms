@@ -161,6 +161,7 @@ def _with_vm_stopped(
                 check_layout(vm)
                 _seed_kdump_boot(vm)
                 _check_nic_numa(vm)
+                _check_shmrdma_nics(vm)
                 print(f"started {vm.name}")
             except SystemExit as e:
                 if get_error is not None:
@@ -281,6 +282,55 @@ def _wait_crash_kernel(vm: VMInfo) -> None:
             f"warning: '{vm.name}' has no crash kernel loaded after "
             f"{CRASH_KERNEL_WAIT}s; the crash will not leave a vmcore "
             f"(check `systemctl status kdump` in the guest)",
+            file=sys.stderr,
+        )
+
+
+# rc.local may still be binding the devices when ssh first answers
+SHMRDMA_NIC_PROBE = (
+    "for i in 1 2 3 4 5 6 7 8 9 10; do "
+    "out=$(rdma link show 2>/dev/null) || {{ echo no-rdma-tool; exit 0; }}; "
+    "ok=1; for n in {nics}; do "
+    'echo "$out" | grep -qw "netdev $n" || ok=0; done; '
+    '[ $ok = 1 ] && break; sleep 1; done; echo "$out"'
+)
+
+
+def _check_shmrdma_nics(vm: VMInfo) -> None:
+    """Warn when a --nic shmrdma NIC booted with no RDMA device on it.
+
+    An image whose shmrdma driver predates these NICs passes preflight
+    (it has the module) but binds nothing to them.  Best effort, like
+    _check_nic_numa.
+    """
+    nics = [
+        f"eth{idx}"
+        for idx, nic, _tap, _mac in vm.extra_nics()
+        if nic.type == "shmrdma"
+    ]
+    if not nics:
+        return
+    try:
+        r = run_ssh(
+            vm.ip,
+            SHMRDMA_NIC_PROBE.format(nics=" ".join(nics)),
+            timeout=KDUMP_PROBE_TIMEOUT + 15,
+        )
+    except Exception as e:  # noqa: BLE001 - best-effort check
+        print(
+            f"warning: could not check shmrdma NICs on '{vm.name}': {e}",
+            file=sys.stderr,
+        )
+        return
+    if "no-rdma-tool" in r.stdout:
+        return
+    bound = set(re.findall(r"\bnetdev (\S+)", r.stdout))
+    missing = [n for n in nics if n not in bound]
+    if missing:
+        print(
+            f"warning: {vm.name}: no RDMA device on {', '.join(missing)}.  "
+            f"An image built before --nic shmrdma has a driver that does "
+            f"not bind to these NICs; rebuild it with `ltvm build image`.",
             file=sys.stderr,
         )
 
@@ -850,6 +900,7 @@ def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
     check_layout(vm)
     _seed_kdump_boot(vm)
     _check_nic_numa(vm)
+    _check_shmrdma_nics(vm)
     if args.json:
         print(
             json.dumps(
@@ -1704,6 +1755,7 @@ def _launch_and_wait(
     check_layout(vm)
     _seed_kdump_boot(vm)
     _check_nic_numa(vm)
+    _check_shmrdma_nics(vm)
 
 
 def _rollback_launch_failure(vm: VMInfo) -> None:
@@ -1981,6 +2033,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         check_layout(vm)
         _seed_kdump_boot(vm)
         _check_nic_numa(vm)
+        _check_shmrdma_nics(vm)
         print(f"started {name}")
 
 

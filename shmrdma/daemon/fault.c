@@ -8,7 +8,9 @@
  * address as a GID), by MAC (the shmnet port sending from it, and the
  * RDMA device holding its link-local GID), or both.  A transfer from A
  * to B sees both ends' rules: down at either end, the delays and loss
- * added, A's send rate and B's receive rate.
+ * added, A's send rate and B's receive rate.  A flooded frame (broadcast,
+ * multicast, unknown unicast) sees only A's delay: each copy is dropped
+ * for B's down, loss or rate, but is not held for B's delay.
  *
  * Down is silent, as a dead switch port is: an RC send waits as on a
  * real HCA retrying, and fails with RETRY_EXC_ERR once the QP's retries
@@ -89,67 +91,82 @@ static struct fault *dev_fault(struct vdev *d)
 	if (!d || !RLX(&g_nfaults))
 		return NULL;
 	gen = ACQ(&g_fault_gen);
-	if (ACQ(&d->fault_gen) == gen)
-		return RLX(&d->fault);
+	plat_spin_lock(&d->fault_lock);
+	if (d->fault_gen == gen) {
+		f = d->fault;
+		plat_spin_unlock(&d->fault_lock);
+		return f;
+	}
+	plat_spin_unlock(&d->fault_lock);
 	for (int i = 0; i < FAULT_MAX && !f; i++)
 		if (g_faults[i].used && fault_matches(&g_faults[i], d))
 			f = &g_faults[i];
-	REL(&d->fault, f);
-	REL(&d->fault_gen, gen);
+	/* workers looking up a peer race: keep the newest */
+	plat_spin_lock(&d->fault_lock);
+	if (ACQ(&g_fault_gen) == gen) {
+		d->fault = f;
+		d->fault_gen = gen;
+	}
+	plat_spin_unlock(&d->fault_lock);
 	return f;
 }
 
-/* refill b, and say whether it has tokens left */
-static bool bucket_ok(struct bucket *b, uint64_t rate, uint64_t t)
+/* refill b; caller holds its lock */
+static void bucket_refill(struct bucket *b, uint64_t rate, uint64_t t)
 {
 	int64_t burst = rate / 1000 > 65536 ? rate / 1000 : 65536;
-	bool ok;
 
-	plat_spin_lock(&b->lock);
-	if (!b->last || t < b->last) {
+	if (!b->last) {
 		b->tokens = burst;
 		b->last = t;
-	} else {
+	} else if (t > b->last) {
 		unsigned __int128 add = (unsigned __int128)(t - b->last) * rate;
 
 		add /= 1000000000u;
-		if (add > (unsigned __int128)burst * 2) {
-			b->tokens += burst * 2;
+		if (add >= (unsigned __int128)(burst - b->tokens)) {
+			b->tokens = burst;
 			b->last = t;
 		} else if (add) {
 			/* keep the fraction of a byte for the next refill */
 			b->tokens += (int64_t)add;
 			b->last += (uint64_t)(add * 1000000000u / rate);
 		}
-		if (b->tokens > burst)
-			b->tokens = burst;
 	}
-	ok = b->tokens > 0;
-	plat_spin_unlock(&b->lock);
-	return ok;
 }
 
-static void bucket_take(struct bucket *b, uint64_t n)
+static void bucket_charge(struct bucket *b, uint64_t n)
 {
-	plat_spin_lock(&b->lock);
 	b->tokens -= (int64_t)(n > INT64_MAX / 2 ? INT64_MAX / 2 : n);
-	plat_spin_unlock(&b->lock);
 }
 
 /* n bytes from the end with rule s to the one with rule d, or false */
 static bool fault_rate_take(struct fault *s, struct fault *d, uint64_t n,
 			    uint64_t t)
 {
-	bool sok = !s || !s->rate || bucket_ok(&s->tx, s->rate, t);
-	bool dok = !d || !d->rate || bucket_ok(&d->rx, d->rate, t);
+	struct bucket *tx = s && s->rate ? &s->tx : NULL;
+	struct bucket *rx = d && d->rate ? &d->rx : NULL;
+	bool ok = true;
 
-	if (!sok || !dok)
-		return false;
-	if (s && s->rate)
-		bucket_take(&s->tx, n);
-	if (d && d->rate)
-		bucket_take(&d->rx, n);
-	return true;
+	/* checked and charged together; tx locks before rx locks */
+	if (tx) {
+		plat_spin_lock(&tx->lock);
+		bucket_refill(tx, s->rate, t);
+		ok = tx->tokens > 0;
+	}
+	if (rx && ok) {
+		plat_spin_lock(&rx->lock);
+		bucket_refill(rx, d->rate, t);
+		ok = rx->tokens > 0;
+		if (ok)
+			bucket_charge(rx, n);
+		plat_spin_unlock(&rx->lock);
+	}
+	if (tx) {
+		if (ok)
+			bucket_charge(tx, n);
+		plat_spin_unlock(&tx->lock);
+	}
+	return ok;
 }
 
 static uint32_t fault_loss(const struct fault *a, const struct fault *b)
@@ -227,10 +244,11 @@ static uint64_t qp_head_stamp(struct qp *qp, uint32_t prod, uint64_t t)
 
 /*
  * May the network operation at the head of qp's send queue go now?
- * len is the bytes it moves; pd the peer's device, if known.
+ * len is the bytes it moves; pd the peer's device, if known.  held: it
+ * passed the gate already and waits on its peer, so only down applies.
  */
 static int fault_gate(struct qp *qp, struct vdev *pd, bool ud, bool read,
-		      uint64_t len, uint32_t prod)
+		      uint64_t len, uint32_t prod, bool held)
 {
 	struct fault *fs = dev_fault(qp->dev), *fd = dev_fault(pd);
 	uint64_t t, delay;
@@ -256,15 +274,31 @@ static int fault_gate(struct qp *qp, struct vdev *pd, bool ud, bool read,
 		return FG_FAIL;
 	}
 	qp->blk_since = 0;
+	if (held)
+		return FG_GO;
+	loss = fault_loss(fs, fd);
+	/* as with no rule at all: a cleared loss leaves no retries */
+	if (!loss) {
+		qp->loss_until = 0;
+		qp->loss_tries = 0;
+	}
 	delay = fault_delay(fs, fd);
 	if (delay && t < qp_head_stamp(qp, prod, t) + delay)
 		return FG_WAIT;
 	if (qp->loss_until && t < qp->loss_until)
 		return FG_WAIT;
+	if (qp->loss_tries >
+	    (qp->timeout_known ? qp->retry_cnt : DEF_RETRY_CNT)) {
+		struct fault *f = fs && fs->loss_ppm ? fs : fd;
+
+		if (f)
+			STAT_ADD(f->fails, 1);
+		fault_qp_reset(qp);
+		return FG_FAIL;
+	}
 	if (!(read ? fault_rate_take(fd, fs, len, t) :
 		     fault_rate_take(fs, fd, len, t)))
 		return FG_WAIT;
-	loss = fault_loss(fs, fd);
 	if (loss && rng_ppm() < loss) {
 		struct fault *f = fs && fs->loss_ppm ? fs : fd;
 
@@ -273,13 +307,10 @@ static int fault_gate(struct qp *qp, struct vdev *pd, bool ud, bool read,
 			return FG_DROP;
 		}
 		STAT_ADD(f->lost, 1);
-		if (qp->loss_tries++ >=
-		    (qp->timeout_known ? qp->retry_cnt : DEF_RETRY_CNT)) {
-			STAT_ADD(f->fails, 1);
-			fault_qp_reset(qp);
-			return FG_FAIL;
-		}
-		qp->loss_until = t + qp_ack_ns(qp);
+		qp->loss_tries++;
+		/* from when it went, or the last timeout if a poll was late */
+		qp->loss_until = (qp->loss_until > t ? qp->loss_until : t) +
+				 qp_ack_ns(qp);
 		return FG_WAIT;
 	}
 	qp->loss_until = 0;
@@ -312,29 +343,39 @@ static uint64_t netq_head_stamp(struct netq *nq, struct vq *q, uint16_t ai,
 
 /*
  * May the frame at the head of nq go now, to dp (NULL when flooded)?
- * FG_DROP when a down link or a loss takes it.
+ * FG_DROP when a down link or a loss takes it.  held: as for fault_gate().
  */
 static int fault_net_gate(struct netq *nq, struct netport *dp, uint64_t flen,
-			  uint16_t ai)
+			  uint16_t ai, bool held)
 {
 	struct fault *fs, *fd;
 	struct vq *q = &nq->p->dev->vq[NET_TXQ(nq->qi)];
 	uint64_t t, delay;
 	uint32_t loss;
 
-	if (!RLX(&g_nfaults))
+	/* with no delay, stamping restarts at the head when one comes:
+	 * a cursor left behind could match again once the index wraps */
+	if (!RLX(&g_nfaults)) {
+		nq->stamp_to = q->last_avail;
 		return FG_GO;
+	}
 	fs = dev_fault(nq->p->dev);
 	fd = dp ? dev_fault(dp->dev) : NULL;
-	if (!fs && !fd)
+	if (!fs && !fd) {
+		nq->stamp_to = q->last_avail;
 		return FG_GO;
+	}
 	if (fault_down(fs, fd)) {
 		STAT_ADD((fs && fs->down ? fs : fd)->drops, 1);
 		return FG_DROP;
 	}
+	if (held)
+		return FG_GO;
 	t = now_ns();
 	delay = fault_delay(fs, fd);
-	if (delay && t < netq_head_stamp(nq, q, ai, t) + delay)
+	if (!delay)
+		nq->stamp_to = q->last_avail;
+	else if (t < netq_head_stamp(nq, q, ai, t) + delay)
 		return FG_WAIT;
 	if (!fault_rate_take(fs, fd, flen, t))
 		return FG_WAIT;
@@ -348,14 +389,18 @@ static int fault_net_gate(struct netq *nq, struct netport *dp, uint64_t flen,
 	return FG_GO;
 }
 
-/* a flooded copy for o that o's own link drops */
-static bool fault_net_drop_copy(struct netport *o)
+/*
+ * A flooded copy of flen bytes for o that o's own link drops.  The copy
+ * is not held for o's delay, and is dropped when o's rate has no room.
+ */
+static bool fault_net_drop_copy(struct netport *o, uint64_t flen)
 {
 	struct fault *f;
 
 	if (!RLX(&g_nfaults) || !(f = dev_fault(o->dev)))
 		return false;
-	if (f->down || (f->loss_ppm && rng_ppm() < f->loss_ppm)) {
+	if (f->down || (f->loss_ppm && rng_ppm() < f->loss_ppm) ||
+	    (f->rate && !fault_rate_take(NULL, f, flen, now_ns()))) {
 		STAT_ADD(f->drops, 1);
 		return true;
 	}
@@ -439,8 +484,12 @@ static void fault_describe(struct ctl_out *o, struct fault *f)
 	char ip[64] = "-";
 	uint8_t m[6];
 
-	if (f->has_ip)
-		gid_str(f->gid, ip, sizeof(ip));
+	static const uint8_t v4pfx[12] = { [10] = 0xff, [11] = 0xff };
+
+	if (f->has_ip && !memcmp(f->gid, v4pfx, 12))
+		inet_ntop(AF_INET, f->gid + 12, ip, sizeof(ip));
+	else if (f->has_ip)
+		inet_ntop(AF_INET6, f->gid, ip, sizeof(ip));
 	mac_bytes(f->mac, m);
 	ctl_printf(o, "link ip=%s mac=", ip);
 	if (f->has_mac)
@@ -465,6 +514,18 @@ static void fault_describe(struct ctl_out *o, struct fault *f)
 		any = true;
 	}
 	ctl_printf(o, "%s\n", any ? "" : "-");
+}
+
+/* whether f and n name the same link: an IP, a MAC or a device */
+static bool fault_same_link(const struct fault *f, const struct fault *n)
+{
+	if ((f->has_ip && n->has_ip && !memcmp(f->gid, n->gid, 16)) ||
+	    (f->has_mac && n->has_mac && f->mac == n->mac))
+		return true;
+	for (struct vdev *d = g_devs; d; d = d->next)
+		if (!d->dead && fault_matches(f, d) && fault_matches(n, d))
+			return true;
+	return false;
 }
 
 /*
@@ -544,10 +605,7 @@ static void ctl_request(char *line, struct ctl_out *o)
 	for (int i = 0; i < FAULT_MAX; i++) {
 		struct fault *f = &g_faults[i];
 
-		if (!f->used || (!all && (f->has_ip != n.has_ip ||
-					  f->has_mac != n.has_mac ||
-					  (n.has_ip && memcmp(f->gid, n.gid, 16)) ||
-					  (n.has_mac && f->mac != n.mac))))
+		if (!f->used || (!all && !fault_same_link(f, &n)))
 			continue;
 		f->used = false;
 		g_nfaults--;
@@ -568,9 +626,9 @@ static void ctl_request(char *line, struct ctl_out *o)
 		}
 		n.used = true;
 		n.since = now_ns();
-		plat_spin_init(&n.tx.lock);
-		plat_spin_init(&n.rx.lock);
 		*f = n;
+		plat_spin_init(&f->tx.lock);
+		plat_spin_init(&f->rx.lock);
 		g_nfaults++;
 		any = true;
 		fault_describe(o, f);
@@ -579,7 +637,7 @@ static void ctl_request(char *line, struct ctl_out *o)
 	wunlock();
 	/* stalled QPs and queues look again */
 	wake_workers();
-	if (*verb == 'c' && !any)
+	if (*verb == 'c' && !any && !all)
 		ctl_printf(o, "error: no such link\n");
 	else
 		ctl_printf(o, "ok\n");

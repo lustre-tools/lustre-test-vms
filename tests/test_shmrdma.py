@@ -2020,7 +2020,7 @@ class TestRequirements:
     def test_image_and_smc_checks(self, tmp_path: Path) -> None:
         from ltvm_pkg import shmrdma_req as sr
 
-        _image_dir(tmp_path, {"shmrdma_kmod": True})
+        _image_dir(tmp_path, {"shmrdma_kmod": True, "shmrdma_nic_tags": True})
         (tmp_path / "build-tree").mkdir()
         (tmp_path / "build-tree" / ".config").write_text("#\nCONFIG_SMC=m\n")
         t = sr.Target("rocky10", image=tmp_path / NEW_IMG, kernel_dir=tmp_path)
@@ -2030,6 +2030,22 @@ class TestRequirements:
         )
         smc = [r for r in sr.target_checks(t) if "SMC" in r.name][0]
         assert not smc.ok and not smc.hard
+
+    def test_nic_tags_refuse_only_new_vms(self, tmp_path: Path) -> None:
+        """An image from before --nic shmrdma refuses a VM with one; a
+        VM already made on it (its own record) is let start."""
+        from ltvm_pkg import shmrdma_req as sr
+
+        _image_dir(tmp_path, {"shmrdma_kmod": True})
+        (tmp_path / "build-tree").mkdir()
+        (tmp_path / "build-tree" / ".config").write_text("CONFIG_SMC=m\n")
+        t = sr.Target("rocky10", image=tmp_path / NEW_IMG, kernel_dir=tmp_path)
+        why = sr.refusal({sr.SHMRDMA, sr.SHMRDMA_NIC}, t, arch="x86_64")
+        assert why and "binds --nic shmrdma devices" in why
+        tags = [r for r in sr.target_checks(t) if "--nic shmrdma" in r.name]
+        assert tags and not tags[0].ok
+        t.has_kmod = True
+        assert not [r for r in sr.target_checks(t) if "--nic shmrdma" in r.name]
 
     def test_smc_excluded_target_offers_no_rebuild(
         self, tmp_path: Path
@@ -2883,6 +2899,213 @@ class TestLinks:
         with pytest.raises(shmlink.LinkError):
             shmlink.link_of(vm, "ib0")
 
+    def test_control_socket_per_nic(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+        tmp_path: Path,
+    ) -> None:
+        from ltvm_pkg import shmlink, shmrdma
+
+        vm = self._vm(tmp_vmdir)
+        own = tmp_path / "other" / "net.sock"
+        vm.nics[1] = NicSpec.parse(f"shmnet:socket={own}")
+        d = shmrdma.Daemon("me", os.getuid(), tmp_path / "run")
+        with patch.object(shmrdma, "daemon_for", return_value=d):
+            for nic in ("eth0", "eth1"):
+                link = shmlink.link_of(vm, nic)
+                assert shmlink.control_socket(vm, link) == d.ctl_socket
+            with pytest.raises(shmlink.LinkError, match="eth2 uses"):
+                shmlink.control_socket(vm, shmlink.link_of(vm, "eth2"))
+
+    def test_rules_match_either_selector(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+    ) -> None:
+        from ltvm_pkg import shmlink
+
+        vm = self._vm(tmp_vmdir)
+        macs = {i: m for i, _n, _t, m in vm.extra_nics()}
+        listed = [
+            "link ip=172.16.100.51 mac=- down=1",
+            f"link ip=- mac={macs[2].upper()} down=0 delay_ms=5",
+            "link ip=10.9.9.9 mac=- down=1",
+            "link ip=fd17::51 mac=- loss_pct=5",
+        ]
+        vm.nic_ip6s = ["fd17:0:0:0:0:0:0:51", "", ""]
+        with (
+            patch.object(shmlink, "control_socket", return_value=Path("/x")),
+            patch.object(shmlink, "request", return_value=listed),
+        ):
+            got = shmlink.rules(vm)
+        assert got["eth1"]["down"] == "1"
+        assert got["eth2"]["delay_ms"] == "5"
+        vm.nic_ip6s = ["fd17:0:0:0:0:0:0:51", "", ""]
+        listed.pop(0)
+        with (
+            patch.object(shmlink, "control_socket", return_value=Path("/x")),
+            patch.object(shmlink, "request", return_value=listed),
+        ):
+            assert shmlink.rules(vm)["eth1"]["loss_pct"] == "5"
+        assert set(got) == {"eth1", "eth2"}
+
+    def test_passthrough_has_no_carrier(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+    ) -> None:
+        from ltvm_pkg import shmlink
+
+        vm = self._vm(tmp_vmdir)
+        vm.nics[2] = NicSpec("passthrough", bdf="0000:01:00.0")
+        link = shmlink.link_of(vm, "eth3")
+        assert not link.netdev
+        with pytest.raises(shmlink.LinkError, match="passthrough"):
+            shmlink.set_carrier(vm, link, False)
+
+    @pytest.mark.parametrize(
+        "action,down,carrier",
+        [("down", False, False), ("set", True, False), ("set", False, True)],
+    )
+    def test_carrier_follows_down(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+        action: str,
+        down: bool,
+        carrier: bool,
+    ) -> None:
+        from ltvm_pkg import shmlink
+        from ltvm_pkg.cli import vm as cli_vm
+
+        vm = self._vm(tmp_vmdir)
+        vm.save()
+        args = self._link_args(
+            vm, action, delay=1 if action == "set" else None, down=down
+        )
+        with (
+            patch("ltvm_pkg.qemu_run.is_running", return_value=True),
+            patch.object(shmlink, "set_fault", return_value={}) as sf,
+            patch.object(shmlink, "set_carrier") as sc,
+        ):
+            assert cli_vm.cmd_vm_link(args) == 0
+        assert sf.call_args.kwargs["down"] is (action == "down" or down)
+        sc.assert_called_once()
+        assert sc.call_args.args[2] is carrier
+
+    def _link_args(self, vm: VMInfo, action: str, **kw: object):
+        import argparse
+
+        base = dict(
+            name=vm.name,
+            nic="eth1",
+            action=action,
+            json=True,
+            delay=None,
+            loss=None,
+            rate=None,
+            retry=None,
+            down=False,
+            silent=False,
+            carrier_only=False,
+        )
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def test_claimed_vm_refused(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+    ) -> None:
+        from ltvm_pkg import shmlink, vm_claim
+        from ltvm_pkg.cli import vm as cli_vm
+
+        vm = self._vm(tmp_vmdir)
+        vm.save()
+        with (
+            patch("ltvm_pkg.qemu_run.is_running", return_value=True),
+            patch.object(
+                vm_claim, "check", side_effect=vm_claim.ClaimHeld("claimed")
+            ),
+            patch.object(shmlink, "set_fault") as sf,
+            patch.object(shmlink, "set_carrier") as sc,
+        ):
+            assert cli_vm.cmd_vm_link(self._link_args(vm, "down")) != 0
+        sf.assert_not_called()
+        sc.assert_not_called()
+
+    def test_bridge_nic_down_needs_carrier_only(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+    ) -> None:
+        from ltvm_pkg import shmlink
+        from ltvm_pkg.cli import vm as cli_vm
+
+        vm = self._vm(tmp_vmdir)
+        vm.save()
+        with (
+            patch("ltvm_pkg.qemu_run.is_running", return_value=True),
+            patch.object(shmlink, "set_carrier") as sc,
+        ):
+            args = self._link_args(vm, "down", nic="eth3")
+            assert cli_vm.cmd_vm_link(args) != 0
+            sc.assert_not_called()
+            args = self._link_args(vm, "down", nic="eth3", carrier_only=True)
+            assert cli_vm.cmd_vm_link(args) == 0
+        assert sc.call_args.args[2] is False
+
+    def test_carrier_only_with_silent_refused(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+    ) -> None:
+        from ltvm_pkg.cli import vm as cli_vm
+
+        vm = self._vm(tmp_vmdir)
+        vm.save()
+        args = self._link_args(vm, "down", carrier_only=True, silent=True)
+        with patch("ltvm_pkg.qemu_run.is_running", return_value=True):
+            assert cli_vm.cmd_vm_link(args) != 0
+            args = self._link_args(vm, "down", carrier_only=True, retry=500)
+            assert cli_vm.cmd_vm_link(args) != 0
+
+    def test_show_names_a_nic_on_its_own_daemon(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+        tmp_path: Path,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from ltvm_pkg import shmrdma
+        from ltvm_pkg.cli import vm as cli_vm
+
+        vm = self._vm(tmp_vmdir)
+        vm.nics[1] = NicSpec.parse(f"shmnet:socket={tmp_path}/o/net.sock")
+        vm.save()
+        d = shmrdma.Daemon("me", os.getuid(), tmp_path / "run")
+        args = self._link_args(vm, "show", nic=None, json=False)
+        with (
+            patch.object(shmrdma, "daemon_for", return_value=d),
+            patch("ltvm_pkg.shmlink.request", return_value=[]),
+        ):
+            assert cli_vm.cmd_vm_link(args) == 0
+        out = capsys.readouterr().out
+        assert "eth2: on a shmrdmad of its own" in out
+        assert "eth1: ok" in out
+
+    def test_carrier_only_up_skips_the_daemon(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+    ) -> None:
+        from ltvm_pkg import shmlink
+        from ltvm_pkg.cli import vm as cli_vm
+
+        vm = self._vm(tmp_vmdir)
+        vm.save()
+        args = self._link_args(vm, "up", carrier_only=True)
+        with (
+            patch("ltvm_pkg.qemu_run.is_running", return_value=True),
+            patch.object(shmlink, "clear_fault") as cf,
+            patch.object(shmlink, "set_carrier") as sc,
+        ):
+            assert cli_vm.cmd_vm_link(args) == 0
+        cf.assert_not_called()
+        assert sc.call_args.args[2] is True
+
     def test_eth0_without_device_is_off_switch(
         self,
         tmp_vmdir: Path,  # noqa: F811
@@ -2956,6 +3179,16 @@ def test_daemon_link_rules(real_daemon: Path) -> None:
     assert len(rules) == 2
     assert rules[0]["down"] == "0" and rules[0]["delay_ms"] == "5"
     assert rules[1]["loss_pct"] == "2.5" and rules[1]["rate_mbit"] == "100"
+    # a rule naming the link by its IP alone is the same link's
+    shmlink.request(ctl, "set ip=172.16.100.104 down")
+    rules = [shmlink.parse_rule(x) for x in shmlink.request(ctl, "list")]
+    assert len(rules) == 2
+    assert {(r["ip"], r["mac"]) for r in rules} == {
+        ("172.16.100.104", "-"),
+        ("-", "52:54:00:00:00:01"),
+    }
+    shmlink.request(ctl, "clear ip=172.16.100.104 mac=52:54:00:aa:bb:cc")
+    assert len(shmlink.request(ctl, "list")) == 1
     shmlink.request(ctl, "clear mac=52:54:00:00:00:01")
     with pytest.raises(shmlink.LinkError, match="no such link"):
         shmlink.request(ctl, "clear mac=52:54:00:00:00:01")
@@ -2964,3 +3197,58 @@ def test_daemon_link_rules(real_daemon: Path) -> None:
             shmlink.request(ctl, bad)
     shmlink.request(ctl, "clear all")
     assert shmlink.request(ctl, "list") == []
+
+
+class TestCheckShmrdmaNics:
+    def _check(self, tmp_vmdir: Path, stdout: str) -> MagicMock:  # noqa: F811
+        from ltvm_pkg import vm_commands
+
+        vm = _make_vm(tmp_vmdir)
+        vm.nics = [NicSpec("shmrdma"), NicSpec("tcp"), NicSpec("shmrdma")]
+        r = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
+        with patch.object(vm_commands, "run_ssh", return_value=r) as ssh:
+            vm_commands._check_shmrdma_nics(vm)
+        return ssh
+
+    def test_bound_is_quiet(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        ssh = self._check(
+            tmp_vmdir,
+            "link shmrdma0/1 state ACTIVE physical_state LINK_UP netdev eth1\n"
+            "link shmrdma1/1 state ACTIVE physical_state LINK_UP netdev eth3\n",
+        )
+        assert "eth1 eth3" in ssh.call_args.args[1]
+        assert capsys.readouterr().err == ""
+
+    def test_old_image_warns(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._check(
+            tmp_vmdir,
+            "link shmrdma0/1 state ACTIVE physical_state LINK_UP netdev eth1\n",
+        )
+        err = capsys.readouterr().err
+        assert "no RDMA device on eth3" in err
+        assert "eth1" not in err.split("no RDMA device on")[1].split(".")[0]
+
+    def test_no_rdma_tool_is_quiet(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        self._check(tmp_vmdir, "no-rdma-tool\n")
+        assert capsys.readouterr().err == ""
+
+    def test_no_shmrdma_nic_no_ssh(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        from ltvm_pkg import vm_commands
+
+        vm = _make_vm(tmp_vmdir)
+        vm.nics = [NicSpec("tcp")]
+        with patch.object(vm_commands, "run_ssh") as ssh:
+            vm_commands._check_shmrdma_nics(vm)
+        ssh.assert_not_called()

@@ -84,17 +84,25 @@ def kernel_volume_name(build_tree: Path) -> str:
     ``ltvm-kernel-<target>-<arch>-<kver>-<where>-<what>``: *where* hashes
     the artifact's path, so two ltvm checkouts on one Mac keep a volume
     each; *what* hashes its meta.json (which a rebuild or a fetch
-    rewrites) and the kernel.release and Module.symvers that Lustre
-    builds against, so a changed kernel never reads an old copy.  Only
+    rewrites) and the kernel.release, .config, Module.symvers and
+    vmlinux link that Lustre builds against, so a changed kernel never
+    reads an old copy.  Only
     *what* may differ between a volume and the one that supersedes it.
     """
     build_tree = build_tree.resolve()
     kdir = build_tree.parent
     where = hashlib.sha256(str(build_tree).encode()).hexdigest()[:8]
     what = hashlib.sha256()
-    for f in (kdir / "meta.json", build_tree / "include/config/kernel.release"):
+    for f in (
+        kdir / "meta.json",
+        build_tree / "include/config/kernel.release",
+        build_tree / ".config",
+    ):
         with contextlib.suppress(OSError):
             what.update(f.read_bytes())
+    # the link lustre_build adds for module BTF
+    if (build_tree / "vmlinux").is_symlink():
+        what.update(b"vmlinux")
     with contextlib.suppress(OSError):
         st = (build_tree / "Module.symvers").stat()
         what.update(f"{st.st_size}:{st.st_mtime_ns}".encode())

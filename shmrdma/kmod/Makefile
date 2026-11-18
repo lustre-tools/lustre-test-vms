@@ -21,6 +21,11 @@ ifneq ($(shell grep -s "void virtio_reset_device" $(srctree)/include/linux/virti
 ccflags-y += -DHAVE_VIRTIO_RESET_DEVICE
 endif
 
+# ib_core sends port events from the netdev's state itself
+ifneq ($(shell grep -s "void ib_dispatch_port_state_event" $(srctree)/include/rdma/ib_verbs.h),)
+ccflags-y += -DHAVE_IB_DISPATCH_PORT_STATE_EVENT
+endif
+
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
 all:

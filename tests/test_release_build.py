@@ -798,7 +798,7 @@ class TestVerify:
         )
         symvers.write_text("0x2 sym vmlinux\n")
         assert self._verify(tc)[0].endswith(
-            "was built against another kernel ABI"
+            "was built against another build of its kernel (Module.symvers or vmlinux)"
         )
 
     def test_payload_changed_since_verified(self, tmp_path: Path) -> None:

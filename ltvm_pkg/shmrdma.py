@@ -294,6 +294,21 @@ def image_has_kmod(image: str | Path) -> bool:
     )
 
 
+def image_has_nic_tags(image: str | Path) -> bool | None:
+    """Whether the image at *image* binds --nic shmrdma devices; None
+    when its directory's meta.json describes a newer image."""
+    from .image_store import CURRENT, current_image
+
+    path = Path(image)
+    cur = current_image(path.parent)
+    if path.name == CURRENT:
+        path = cur or path
+    if cur is None or cur.name != path.name:
+        return None
+    meta = load_meta_safe(path.parent / "meta.json") or {}
+    return bool(meta.get("shmrdma_nic_tags"))
+
+
 def vm_has_kmod(vm: VMInfo) -> bool:
     """Whether *vm*'s image has shmrdma.ko, by the VM's own record.
 

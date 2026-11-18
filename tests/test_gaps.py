@@ -11,7 +11,9 @@ Covers behaviours that were absent from existing tests:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -367,3 +369,235 @@ class TestReadStagingMeta:
         (tmp_path / ".ltvm-staging-meta.json").write_text(json.dumps(data))
         result = read_staging_meta(tmp_path)
         assert result == data
+
+
+# ── lustre_build: what the container build records and mounts ──────────────
+
+
+def _container_build(tmp_path: Path, on_podman=None) -> tuple:
+    """Run _build_in_container with a podman that installs a staging."""
+    from types import SimpleNamespace
+
+    from ltvm_pkg import lustre_build as lb
+
+    lustre_tree = tmp_path / "lustre"
+    (lustre_tree / "lustre" / "kernel_patches").mkdir(parents=True)
+    (lustre_tree / "lnet").mkdir()
+    (lustre_tree / "configure.ac").write_text("")
+    build_tree = tmp_path / "kernel" / "build-tree"
+    (build_tree / "include" / "config").mkdir(parents=True)
+    (build_tree / "include" / "config" / "kernel.release").write_text("1.2.3")
+    (build_tree / "Module.symvers").write_text("")
+    (build_tree / ".config").write_text(
+        "CONFIG_INFINIBAND=m\nCONFIG_INFINIBAND_ADDR_TRANS=y\n"
+        "CONFIG_DEBUG_INFO_BTF_MODULES=y\n"
+    )
+    captured: dict = {}
+
+    def fake_podman(cmd, **kw):
+        captured["cmd"] = cmd
+        staging = Path(
+            next(a for a in cmd if a.endswith(":/staging")).rsplit(":", 1)[0]
+        )
+        ko = staging / "lib" / "modules" / "1.2.3" / "extra" / "lnet.ko"
+        ko.parent.mkdir(parents=True)
+        ko.write_text("")
+        (staging / "sbin").mkdir(parents=True)
+        (staging / "sbin" / "mount.lustre").write_text("")
+        if on_podman:
+            on_podman(build_tree)
+        return SimpleNamespace(returncode=0)
+
+    with (
+        patch.object(lb, "run_podman_with_cleanup", side_effect=fake_podman),
+        patch.object(lb, "_show_configure_log"),
+    ):
+        lb._build_in_container(
+            lustre_tree,
+            build_tree,
+            "ltvm-build-rocky9",
+            "1.2.3",
+            True,
+            None,
+            4,
+            False,
+            target="rocky9",
+        )
+    return lustre_tree, build_tree, captured["cmd"]
+
+
+class TestContainerBuildStamps:
+    def test_config_stamped(self, tmp_path: Path) -> None:
+        from ltvm_pkg.lustre_build import _hash_file
+
+        lustre_tree, build_tree, _ = _container_build(tmp_path)
+        stamp = lustre_tree / ".ltvm-kconfig-rocky9-x86_64"
+        assert stamp.read_text().strip() == _hash_file(build_tree / ".config")
+
+    def test_config_changed_during_build_not_stamped(
+        self, tmp_path: Path
+    ) -> None:
+        def rebuild_kernel(build_tree: Path) -> None:
+            (build_tree / ".config").write_text("CONFIG_INFINIBAND=n\n")
+
+        with pytest.raises(RuntimeError, match="rebuilt during this build"):
+            _container_build(tmp_path, rebuild_kernel)
+        assert not (
+            tmp_path / "lustre" / ".ltvm-kconfig-rocky9-x86_64"
+        ).exists()
+
+
+def fake_vmlinux(path: Path, build_id: bytes) -> None:
+    """A little-endian ELF64 file whose one section is a GNU build ID note."""
+    import struct
+
+    note = struct.pack("<III", 4, len(build_id), 3) + b"GNU\0" + build_id
+    note += b"\0" * (-len(note) % 4)
+    shoff = 64 + len(note)
+    hdr = bytearray(64)
+    hdr[:6] = b"\x7fELF\x02\x01"
+    hdr[40:48] = struct.pack("<Q", shoff)
+    hdr[58:62] = struct.pack("<HH", 64, 2)
+    null = bytes(64)
+    sh = bytearray(64)
+    sh[4:8] = struct.pack("<I", 7)
+    sh[24:40] = struct.pack("<QQ", 64, len(note))
+    path.write_bytes(bytes(hdr) + note + null + bytes(sh))
+
+
+class TestVmlinuxForBtf:
+    def test_vmlinux_mounted_and_linked(self, tmp_path: Path) -> None:
+        (tmp_path / "kernel").mkdir()
+        vmlinux = tmp_path / "kernel" / "vmlinux"
+        fake_vmlinux(vmlinux, b"\x01" * 20)
+        _, build_tree, cmd = _container_build(tmp_path)
+        assert f"{vmlinux}:/vmlinux:ro" in cmd
+        assert cmd.index(f"{vmlinux}:/vmlinux:ro") < len(cmd) - 3
+        assert os.readlink(build_tree / "vmlinux") == "/vmlinux"
+
+    def test_new_vmlinux_relinks_modules(self, tmp_path: Path) -> None:
+        (tmp_path / "kernel").mkdir()
+        fake_vmlinux(tmp_path / "kernel" / "vmlinux", b"\x01" * 20)
+        lustre_tree, build_tree, _ = _container_build(tmp_path)
+        stamp = lustre_tree / ".ltvm-vmlinux-rocky9-x86_64"
+        from ltvm_pkg.lustre_build import vmlinux_id
+
+        assert stamp.read_text().strip() == vmlinux_id(build_tree)
+        ko = lustre_tree / "lnet" / "lnet.ko"
+        ko.write_text("")
+        staged = lustre_tree / ".ltvm-staging" / "x" / "lnet.ko"
+        staged.parent.mkdir(parents=True)
+        staged.write_text("")
+        fake_vmlinux(tmp_path / "kernel" / "vmlinux", b"\x02" * 20)
+        from ltvm_pkg import lustre_build as lb
+
+        with (
+            patch.object(lb, "run_podman_with_cleanup") as podman,
+            patch.object(lb, "_show_configure_log"),
+        ):
+            podman.return_value = SimpleNamespace(returncode=1)
+            with pytest.raises(RuntimeError):
+                lb._build_in_container(
+                    lustre_tree,
+                    build_tree,
+                    "ltvm-build-rocky9",
+                    "1.2.3",
+                    True,
+                    None,
+                    4,
+                    False,
+                    target="rocky9",
+                )
+        assert not ko.exists()
+        assert staged.exists()
+
+    def test_unwritable_build_tree_no_mount(self, tmp_path: Path) -> None:
+        from ltvm_pkg import lustre_build as lb
+
+        kdir = tmp_path / "kernel"
+        (kdir / "build-tree").mkdir(parents=True)
+        (kdir / "build-tree" / ".config").write_text(
+            "CONFIG_DEBUG_INFO_BTF_MODULES=y\n"
+        )
+        fake_vmlinux(kdir / "vmlinux", b"\x01" * 20)
+        with patch.object(
+            Path, "symlink_to", side_effect=PermissionError
+        ) as link:
+            assert lb._vmlinux_for_btf(kdir / "build-tree") is None
+        link.assert_called_once()
+
+    def test_vmlinux_without_build_id_no_mount(self, tmp_path: Path) -> None:
+        (tmp_path / "kernel").mkdir()
+        (tmp_path / "kernel" / "vmlinux").write_text("no ELF notes")
+        _, build_tree, cmd = _container_build(tmp_path)
+        assert not any(a.endswith(":/vmlinux:ro") for a in cmd)
+
+    def test_no_vmlinux_no_mount(self, tmp_path: Path) -> None:
+        _, build_tree, cmd = _container_build(tmp_path)
+        assert not any(a.endswith(":/vmlinux:ro") for a in cmd)
+        assert not (build_tree / "vmlinux").is_symlink()
+
+
+class TestElfBuildId:
+    def test_matches_readelf(self) -> None:
+        import shutil
+        import subprocess
+
+        from ltvm_pkg.lustre_build import elf_build_id
+
+        exe = Path(shutil.which("ls") or "/bin/ls").resolve()
+        if not shutil.which("readelf"):
+            pytest.skip("no readelf to compare with")
+        out = subprocess.run(
+            ["readelf", "-n", str(exe)], capture_output=True, text=True
+        ).stdout
+        ids = [
+            x.split(":")[-1].strip()
+            for x in out.splitlines()
+            if "Build ID" in x
+        ]
+        if not ids:
+            pytest.skip(f"{exe} has no build ID")
+        assert elf_build_id(exe) == ids[0]
+
+    def test_not_elf(self, tmp_path: Path) -> None:
+        from ltvm_pkg.lustre_build import elf_build_id
+
+        (tmp_path / "x").write_text("not an ELF file")
+        assert elf_build_id(tmp_path / "x") == ""
+        (tmp_path / "t").write_bytes(b"\x7fELF")
+        assert elf_build_id(tmp_path / "t") == ""
+        fake_vmlinux(tmp_path / "v", b"\xab" * 20)
+        assert elf_build_id(tmp_path / "v") == "ab" * 20
+        assert elf_build_id(tmp_path / "missing") == ""
+
+
+class TestStagingFitsVmlinux:
+    def test_release_check_refuses_another_vmlinux(
+        self, tmp_path: Path
+    ) -> None:
+        import json
+
+        from ltvm_pkg.lustre_build import _hash_file, vmlinux_id
+        from ltvm_pkg.release_build import lustre_fits_kernel
+
+        kdir = tmp_path / "k"
+        (kdir / "build-tree").mkdir(parents=True)
+        (kdir / "build-tree" / "Module.symvers").write_text("syms\n")
+        (kdir / "vmlinux").write_text("v1")
+        staged = tmp_path / "staged"
+        staged.mkdir()
+        meta = {
+            "module_symvers_sha256": _hash_file(
+                kdir / "build-tree" / "Module.symvers"
+            ),
+            "kernel_vmlinux_id": vmlinux_id(kdir / "build-tree"),
+        }
+        (staged / ".ltvm-staging-meta.json").write_text(json.dumps(meta))
+        assert lustre_fits_kernel(kdir, staged)
+        meta["kernel_vmlinux_id"] = "1:2"
+        (staged / ".ltvm-staging-meta.json").write_text(json.dumps(meta))
+        assert not lustre_fits_kernel(kdir, staged)
+        meta["kernel_vmlinux_id"] = ""
+        (staged / ".ltvm-staging-meta.json").write_text(json.dumps(meta))
+        assert lustre_fits_kernel(kdir, staged)

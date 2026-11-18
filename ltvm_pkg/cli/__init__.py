@@ -72,8 +72,10 @@ from ltvm_pkg.lustre_build import (
     _hash_file,
     _stamp_suffix,
     build_lustre,
+    module_btf_possible,
     read_staging_meta,
     staging_path,
+    vmlinux_id,
 )
 from ltvm_pkg.lustre_compat import ValidationResult, validate_target
 from ltvm_pkg.paths import load_meta_safe
@@ -338,6 +340,8 @@ __all__ = [
     "_hash_file",
     "_stamp_suffix",
     "read_staging_meta",
+    "vmlinux_id",
+    "module_btf_possible",
     "shlex",
     "snapshot_lustre",
     "staging_path",

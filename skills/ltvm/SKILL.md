@@ -203,9 +203,11 @@ fail_page_alloc, fail_make_request, fail_function via debugfs),
 `kmemleak=on`, `debug_pagealloc=on`, the `jbd2_debug` parameter, and the
 dm-dust/dm-delay targets (`targets/common/kernel-config.overlay`). They
 also have BTF, so bpftrace scripts can dereference kernel and Lustre
-structs with no headers, and the multi-gen LRU, on at boot as in the
-distro kernels (`/sys/kernel/mm/lru_gen/enabled` switches it), plus
-the function tracers, hung task and lockup reports, and netem.
+structs with no headers; the multi-gen LRU, on at boot as in the
+distro kernels (`/sys/kernel/mm/lru_gen/enabled` switches it); the
+function tracers, hung task and lockup reports, and netem. Rocky 8's
+4.18 has no multi-gen LRU, and its modules (Lustre's included) carry
+no BTF.
 
 ltvm refuses `root=`, `console=` and `fc_*`, which it sets itself.
 `cluster create` takes the same flag for every node.

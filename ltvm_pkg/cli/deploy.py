@@ -451,6 +451,23 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 print("  Kernel ABI changed since staging was built")
             return False
 
+        recorded_kconfig = meta.get("kernel_config_sha256")
+        current_kconfig = _cli_attr("_hash_file")(build_tree / ".config")
+        if current_kconfig and recorded_kconfig != current_kconfig:
+            if not use_json:
+                print("  Kernel config changed since staging was built")
+            return False
+        # the modules' BTF is split against it; "" when built without,
+        # which a build now able to mount it (the link is there) fixes
+        recorded_vmlinux = meta.get("kernel_vmlinux_id")
+        current_vmlinux = _cli_attr("vmlinux_id")(build_tree)
+        if recorded_vmlinux != current_vmlinux and (
+            recorded_vmlinux or _cli_attr("module_btf_possible")(build_tree)
+        ):
+            if not use_json:
+                print("  Kernel vmlinux changed since staging was built")
+            return False
+
         # A staging tree built without ZFS carries the same
         # configure_sha256 as the tree's stamp (both are the non-ZFS
         # hash), so the checks below would call it fresh and --zfs

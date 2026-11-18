@@ -2164,7 +2164,7 @@ def build_parser() -> argparse.ArgumentParser:
         "frames are dropped.  The VM's own NIC loses carrier as well "
         "unless --silent (never eth0, which ssh uses).  up clears every "
         "fault on the link.  set replaces the link's faults with those "
-        "given.",
+        "given, its carrier following --down.",
     )
     vlinkp.add_argument("name", help="VM name")
     vlinkp.add_argument(
@@ -2210,8 +2210,8 @@ def build_parser() -> argparse.ArgumentParser:
     vlinkp.add_argument(
         "--carrier-only",
         action="store_true",
-        help="down: only drop the NIC's carrier (any extra NIC, bridge "
-        "ones included)",
+        help="down and up: only the NIC's carrier (any extra NIC, "
+        "bridge ones included)",
     )
     vlinkp.set_defaults(func=cmd_vm_link)
 

@@ -179,17 +179,26 @@ to its control socket (`rdma.sock.ctl`, beside its other sockets):
 | action | what it does |
 |---|---|
 | `down` | The link is gone.  RC sends over it wait as on a real HCA retrying and complete with `RETRY_EXC_ERR` once the QP's retries would have run out (4.096 us << `timeout`, `retry_cnt` + 1 times, the values the guest set on the QP; `--retry MS` overrides).  UD sends (the CM's MADs) and frames are dropped, so connects time out.  The VM's own NIC also loses carrier and its RDMA port goes down, as when its switch port is disabled, unless `--silent`: a fault further into the fabric leaves the carrier up. |
-| `set` | Replace the link's faults with `--delay MS` (one way, added to each message), `--loss PCT` (frames and UD sends dropped; an RC message is sent again after the QP's ack timeout, and fails like a dead link once its retries run out), `--rate MBIT` (each way) and `--down`. |
+| `set` | Replace the link's faults with `--delay MS` (one way, added to each message), `--loss PCT` (frames and UD sends dropped; an RC message is sent again after the QP's ack timeout, and fails like a dead link once its retries run out), `--rate MBIT` (each way) and `--down`.  The carrier follows `--down`, as with `down` and `up`, unless `--silent`. |
 | `up` | Clear every fault and raise the carrier. |
 | `show` (no action) | The faults on each of the VM's links, with counts of what they dropped, lost and failed. |
 
 A transfer sees the faults of both its ends: down at either, the
 delays and losses added, and the sender's and receiver's rates.  A
+flooded frame (broadcast, multicast, unknown unicast) is the
+exception: each copy is dropped for its receiver's down, loss or rate,
+but not held for the receiver's delay.  A shmnet frame held for its
+receiver's delay or rate holds the sender's frames behind it in that
+queue, to every receiver.  A shmnet port is known by its MAC once it
+has sent a frame, so a rule by MAC reaches frames for it only after
+that.  A rule names a link by IP,
+MAC or both, and replaces any rule naming the same IP or MAC.  A
 link is the VM's NIC: an `--nic shmrdma` or shmnet NIC by its MAC (the
 RDMA device by its link-local GID too), eth0's `--shmrdma` device by
 its address.  eth0's carrier never changes, since ssh runs over it.
 `--carrier-only` drops just the carrier of any extra NIC, bridge NICs
-included, where the daemon carries nothing.
+included, where the daemon carries nothing; passthrough NICs have no
+carrier QEMU controls.
 
 Rules live in the daemon: they survive a guest reboot and go when the
 daemon stops.  A daemon from before link faults has no control socket;
@@ -310,8 +319,11 @@ control commands (create QP, modify QP, ...), events (one interrupt per
 batch of completion events), and doorbells (kicks only). QEMU 8.2 and
 9.2 both have the generic `vhost-user-device-pci`, but refuse to create
 it from the command line, so the device is a `vhost-user-fs-pci` with
-the tag `shmrdma`. The guest driver claims only that tag, and loads
-before virtiofs so that it sees the device first.
+the tag `shmrdma` (eth0's `--shmrdma` device) or `shmrdma@IFNAME` (an
+`--nic shmrdma` device, bound to that NIC). The guest driver claims
+only those tags, and loads before virtiofs so that it sees the device
+first. A device whose NIC has not appeared yet defers its probe; if
+virtiofs takes it meanwhile, the boot hook gives it back.
 
 **Data path.** Send and receive queues and completion queues are rings
 in guest memory, as on a real HCA. The guest writes a work request and
@@ -468,7 +480,7 @@ a guest that is merely slow to refill.
   atomics or memory windows.  A move to SQD (send queue drain) is
   refused; `ib_drain_qp` and the ULPs ltvm runs go through ERR.
 - The module claims virtio-fs devices and gives back every one whose
-  tag is not `shmrdma` only after virtio has negotiated its features
+  tag is neither `shmrdma` nor `shmrdma@IFNAME` only after virtio has negotiated its features
   and marked the device failed, so virtiofs then starts on a failed
   device.  ltvm VMs have no real virtiofs share, so this does not
   arise in them.

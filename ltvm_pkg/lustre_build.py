@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -1003,6 +1004,106 @@ def o2ib_configure_flag(
     raise RuntimeError(_o2ib_refusal(build_tree, meta, why, target, arch))
 
 
+def elf_build_id(path: Path) -> str:
+    """The GNU build ID in the notes of the 64-bit ELF file *path*, or "".
+    Read here, as macOS hosts may have no readelf."""
+    import struct
+
+    try:
+        with path.open("rb") as f:
+            hdr = f.read(64)
+            if len(hdr) < 64 or hdr[:4] != b"\x7fELF" or hdr[4] != 2:
+                return ""
+            end = "<" if hdr[5] == 1 else ">"
+            (shoff,) = struct.unpack(end + "Q", hdr[40:48])
+            shentsize, shnum = struct.unpack(end + "HH", hdr[58:62])
+            for i in range(shnum):
+                f.seek(shoff + i * shentsize)
+                sh = f.read(64)
+                (stype,) = struct.unpack(end + "I", sh[4:8])
+                if stype != 7:  # SHT_NOTE
+                    continue
+                off, size = struct.unpack(end + "QQ", sh[24:40])
+                f.seek(off)
+                notes = f.read(min(size, 1 << 16))
+                pos = 0
+                while pos + 12 <= len(notes):
+                    namesz, descsz, ntype = struct.unpack(
+                        end + "III", notes[pos : pos + 12]
+                    )
+                    name = pos + 12
+                    desc = name + (namesz + 3) // 4 * 4
+                    if ntype == 3 and notes[name : name + namesz] == b"GNU\0":
+                        return notes[desc : desc + descsz].hex()
+                    pos = desc + (descsz + 3) // 4 * 4
+    except (OSError, struct.error):
+        return ""
+    return ""
+
+
+def vmlinux_id(build_tree: Path) -> str:
+    """Which vmlinux the kernel of *build_tree* has, or "" for none: its
+    GNU build ID, the one a guest running it shows, when it has one."""
+    vmlinux = build_tree.parent / "vmlinux"
+    try:
+        st = vmlinux.stat()
+    except OSError:
+        return ""
+    return elf_build_id(vmlinux) or f"{st.st_size}:{st.st_mtime_ns}"
+
+
+def staging_fits_vmlinux(meta: dict, build_tree: Path) -> bool:
+    """Whether a staging's modules, by its *meta*, have BTF split
+    against the vmlinux of *build_tree*, or none at all."""
+    recorded = meta.get("kernel_vmlinux_id")
+    return not recorded or recorded == vmlinux_id(build_tree)
+
+
+def _config_has(build_tree: Path, option: str) -> bool:
+    try:
+        return f"\n{option}=y\n" in "\n" + (build_tree / ".config").read_text()
+    except OSError:
+        return False
+
+
+def module_btf_possible(build_tree: Path) -> bool:
+    """Whether a build against *build_tree* gives its modules BTF."""
+    return (
+        (build_tree.parent / "vmlinux").is_file()
+        and (build_tree / "vmlinux").is_symlink()
+        and _config_has(build_tree, "CONFIG_DEBUG_INFO_BTF_MODULES")
+        and bool(elf_build_id(build_tree.parent / "vmlinux"))
+    )
+
+
+def _vmlinux_for_btf(build_tree: Path) -> Path | None:
+    """The kernel's vmlinux, for the modules' BTF, or None when they
+    get none.
+
+    Kbuild gives a module BTF only when the build tree has a vmlinux,
+    which the kernel artifacts leave out.  The build tree has a link
+    to /vmlinux, where the build container mounts the real one; without
+    the mount it dangles and Kbuild skips BTF as before.
+    """
+    vmlinux = build_tree.parent / "vmlinux"
+    # without a build ID a guest's kernel cannot be checked against it
+    if (
+        not vmlinux.is_file()
+        or not _config_has(build_tree, "CONFIG_DEBUG_INFO_BTF_MODULES")
+        or not elf_build_id(vmlinux)
+    ):
+        return None
+    link = build_tree / "vmlinux"
+    if not link.is_symlink() and not link.exists():
+        try:
+            link.symlink_to("/vmlinux")
+        except FileExistsError:
+            pass
+        except OSError:
+            return None
+    return vmlinux
+
+
 def _build_in_container(
     lustre_tree: Path,
     build_tree: Path,
@@ -1036,6 +1137,21 @@ def _build_in_container(
     else:
         src = "git" if version.source == "git" else "LUSTRE-VERSION-FILE"
         print(f"  Lustre version: {version.version} (from {src})")
+    kconfig_used = _hash_file(build_tree / ".config")
+    vmlinux = _vmlinux_for_btf(build_tree)
+    vmlinux_used = vmlinux_id(build_tree) if vmlinux else ""
+    stamp_vmlinux = lustre_tree / f".ltvm-vmlinux-{_stamp_suffix(target, arch)}"
+    # relink for a new vmlinux, or to drop BTF split against one gone
+    if (vmlinux_used or stamp_vmlinux.is_file()) and (
+        not stamp_vmlinux.is_file()
+        or stamp_vmlinux.read_text().strip() != vmlinux_used
+    ):
+        # their BTF is split against vmlinux: Kbuild relinks them
+        print("  Kernel vmlinux changed, relinking modules for their BTF")
+        stamp_vmlinux.unlink(missing_ok=True)
+        for ko in lustre_tree.rglob("*.ko"):
+            if ".ltvm-staging" not in ko.parts:
+                ko.unlink(missing_ok=True)
 
     # Check for cross-target kernel mismatch BEFORE asking
     # _needs_reconfigure.  _needs_reconfigure only inspects THIS
@@ -1571,6 +1687,8 @@ fi""")
         # Module.symvers out of it and must not write into a shared
         # artifact that other Lustre trees also build against.
         cmd[-3:-3] = ["-v", f"{zfs_src}:/zfs:ro"]
+    if vmlinux is not None:
+        cmd[-3:-3] = ["-v", f"{vmlinux}:/vmlinux:ro"]
 
     # Run podman as whoever ltvm itself runs as: do NOT drop privileges
     # to SUDO_USER here.
@@ -1601,8 +1719,12 @@ fi""")
         r = run_podman_with_cleanup(cmd)
         if r.returncode == 0:
             break
+        # installed by this attempt, not left from an earlier build
         has_ko = (
-            any((host_staging / "lib" / "modules").rglob("*.ko"))
+            any(
+                ko.stat().st_mtime >= attempt_start
+                for ko in (host_staging / "lib" / "modules").rglob("*.ko")
+            )
             if (host_staging / "lib" / "modules").is_dir()
             else False
         )
@@ -1696,9 +1818,28 @@ fi""")
     # forces a fresh autogen+configure pass.
     suffix = _stamp_suffix(target, arch)
     (lustre_tree / f".ltvm-kernel-{suffix}").write_text(kver + "\n")
-    kconfig = _hash_file(build_tree / ".config")
-    if kconfig:
-        (lustre_tree / f".ltvm-kconfig-{suffix}").write_text(kconfig + "\n")
+    stamp_kconfig = lustre_tree / f".ltvm-kconfig-{suffix}"
+    if kconfig_used != _hash_file(build_tree / ".config") or (
+        vmlinux_used and vmlinux_used != vmlinux_id(build_tree)
+    ):
+        stamp_kconfig.unlink(missing_ok=True)
+        stamp_vmlinux.unlink(missing_ok=True)
+        # it was installed over: nothing may ship or take it as fresh
+        (host_staging / ".ltvm-staging-meta.json").unlink(missing_ok=True)
+        (host_staging / ".ltvm-staging-stamp").unlink(missing_ok=True)
+        shutil.rmtree(host_staging / "lib" / "modules", ignore_errors=True)
+        raise RuntimeError(
+            f"The kernel at {build_tree} was rebuilt during this build; "
+            f"build again"
+        )
+    if kconfig_used:
+        stamp_kconfig.write_text(kconfig_used + "\n")
+    else:
+        stamp_kconfig.unlink(missing_ok=True)
+    if vmlinux_used:
+        stamp_vmlinux.write_text(vmlinux_used + "\n")
+    else:
+        stamp_vmlinux.unlink(missing_ok=True)
     (lustre_tree / f".ltvm-server-{suffix}").write_text(
         str(enable_server) + "\n"
     )
@@ -1726,6 +1867,10 @@ fi""")
             "target": target,
             "arch": arch,
             "module_symvers_sha256": symvers_hash,
+            # The kernel config configure probed, and the vmlinux the
+            # modules' BTF is split against.
+            "kernel_config_sha256": kconfig_used or "",
+            "kernel_vmlinux_id": vmlinux_used,
             "lustre_modules_sha256": lustre_hash,
             # What this staging was configured with.  cmd_deploy's
             # fast path compares these before deciding it can skip the

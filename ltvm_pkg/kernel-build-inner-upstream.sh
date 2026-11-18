@@ -201,6 +201,8 @@ rsync -a \
 
 cp Module.symvers "$BUILD_TREE/"
 cp .config "$BUILD_TREE/"
+# The Lustre build mounts the vmlinux here, for its modules' BTF.
+ln -sfn /vmlinux "$BUILD_TREE/vmlinux"
 [[ -d scripts ]] && rsync -a scripts/ "$BUILD_TREE/scripts/"
 [[ -d tools/objtool ]] && rsync -a tools/objtool/ "$BUILD_TREE/tools/objtool/"
 echo "$KVER" > "$BUILD_TREE/kernel-version"

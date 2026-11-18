@@ -3193,3 +3193,135 @@ class TestSingleLnet:
         assert deploy.uses_own_lnet(
             VMInfo(name="co1-b", ip="192.168.100.51", nics=[NicSpec("tcp")])
         )
+
+
+class TestCmdDeployKernelConfig:
+    def _deploy(
+        self,
+        tmp_path: Path,
+        recorded: str,
+        capsys,
+        vmlinux: str = "",
+        btf_config: bool = False,
+    ) -> str:
+        from ltvm_pkg import cli as cli_mod
+        from ltvm_pkg.lustre_build import _hash_file, staging_path
+
+        build_path = tmp_path / "lustre-release"
+        _setup_lustre_tree(build_path)
+        staging = staging_path(
+            build_path, "rocky9", arch="x86_64", kernel="5.14-rhel9.7"
+        )
+        staging.mkdir(parents=True)
+        (staging / "lustre.ko").write_text("")
+        tc = _stub_tc()
+        # its own kernel dir: the shared stub root must not keep a .config
+        tc.kernel_output_dir.side_effect = lambda kernel=None: (
+            tmp_path / "kernels" / (kernel or "5.14-rhel9.7")
+        )
+        _mark_staging_fresh(staging, build_path, tc)
+        kconfig = tc.kernel_output_dir() / "build-tree" / ".config"
+        kconfig.write_text(
+            "CONFIG_FS_VERITY=y\n"
+            + ("CONFIG_DEBUG_INFO_BTF_MODULES=y\n" if btf_config else "")
+        )
+        meta_file = staging / ".ltvm-staging-meta.json"
+        meta = json.loads(meta_file.read_text())
+        if recorded != "absent":
+            meta["kernel_config_sha256"] = recorded or _hash_file(kconfig)
+        if vmlinux:
+            from tests.test_gaps import fake_vmlinux
+
+            fake_vmlinux(kconfig.parent.parent / "vmlinux", b"\x01" * 20)
+            (kconfig.parent / "vmlinux").symlink_to("/vmlinux")
+            meta["kernel_vmlinux_id"] = "" if vmlinux == "none" else vmlinux
+        meta_file.write_text(json.dumps(meta))
+        (staging / ".ltvm-staging-stamp").touch()
+
+        vm = _make_vm(name="co1-kconfig", ip="10.0.0.17")
+        vm.os_id = "rocky9"
+        vm.save()
+        args = _deploy_args(vm="co1-kconfig", lustre_tree=str(build_path))
+        with (
+            patch.object(cli_mod, "TargetConfig", return_value=tc),
+            patch(
+                "ltvm_pkg.cli.deploy_to_vm",
+                side_effect=RuntimeError("stop here"),
+            ),
+            patch(
+                "subprocess.run",
+                return_value=MagicMock(returncode=0, stdout=""),
+            ),
+        ):
+            try:
+                cli_mod.cmd_deploy(args)
+            except BaseException:  # noqa: BLE001 - the rebuild is not stubbed
+                pass
+        return capsys.readouterr().out
+
+    def test_same_config_is_fresh(
+        self, tmp_sockets: Path, tmp_path: Path, capsys
+    ) -> None:
+        out = self._deploy(tmp_path, "", capsys)
+        assert "Kernel config changed" not in out
+        assert "Staging up to date" in out
+
+    def test_changed_config_rebuilds(
+        self, tmp_sockets: Path, tmp_path: Path, capsys
+    ) -> None:
+        out = self._deploy(tmp_path, "0" * 64, capsys)
+        assert "Kernel config changed since staging was built" in out
+
+    def test_unrecorded_config_rebuilds(
+        self, tmp_sockets: Path, tmp_path: Path, capsys
+    ) -> None:
+        out = self._deploy(tmp_path, "absent", capsys)
+        assert "Kernel config changed since staging was built" in out
+
+    def test_staging_without_btf_rebuilds_once_possible(
+        self, tmp_sockets: Path, tmp_path: Path, capsys
+    ) -> None:
+        out = self._deploy(tmp_path, "", capsys, "none", btf_config=True)
+        assert "Kernel vmlinux changed since staging was built" in out
+
+    def test_kernel_without_module_btf_stays_fresh(
+        self, tmp_sockets: Path, tmp_path: Path, capsys
+    ) -> None:
+        out = self._deploy(tmp_path, "", capsys, "none")
+        assert "Kernel vmlinux changed" not in out
+        assert "Staging up to date" in out
+
+    def test_changed_vmlinux_rebuilds(
+        self, tmp_sockets: Path, tmp_path: Path, capsys
+    ) -> None:
+        out = self._deploy(tmp_path, "", capsys, vmlinux="1:2")
+        assert "Kernel vmlinux changed since staging was built" in out
+
+
+class TestCheckBtfBase:
+    def _check(self, tmp_path: Path, want: str, have: str | None) -> None:
+        from ltvm_pkg import deploy, vm_commands
+
+        (tmp_path / ".ltvm-staging-meta.json").write_text(
+            json.dumps({"kernel_vmlinux_id": want})
+        )
+        vm = _make_vm(name="co1-btfbase", ip="10.0.0.18")
+        with patch.object(
+            vm_commands, "_vm_kernel_build_id", return_value=have
+        ):
+            deploy._check_btf_base(vm, tmp_path)
+
+    def test_same_build(self, tmp_path: Path) -> None:
+        self._check(tmp_path, "aa" * 20, "aa" * 20)
+
+    def test_other_build_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(RuntimeError, match="another build"):
+            self._check(tmp_path, "aa" * 20, "bb" * 20)
+
+    def test_unreadable_guest_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(RuntimeError, match="could not read"):
+            self._check(tmp_path, "aa" * 20, None)
+
+    def test_no_btf_or_no_build_id(self, tmp_path: Path) -> None:
+        self._check(tmp_path, "", "bb" * 20)
+        self._check(tmp_path, "12:34", "bb" * 20)

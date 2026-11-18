@@ -731,13 +731,15 @@ def lustre_fits_kernel(kdir: Path, staged: Path) -> bool:
     """Whether the Lustre staged (or snapshotted) in ``staged`` was built
     against the kernel in ``kdir``: its recorded Module.symvers digest
     is that kernel's."""
-    from .lustre_build import _hash_file
+    from .lustre_build import _hash_file, staging_fits_vmlinux
     from .paths import load_meta_safe
 
     staged_meta = load_meta_safe(staged / ".ltvm-staging-meta.json") or {}
     symvers = _hash_file(kdir / "build-tree" / "Module.symvers")
-    return symvers is not None and symvers == staged_meta.get(
-        "module_symvers_sha256"
+    return (
+        symvers is not None
+        and symvers == staged_meta.get("module_symvers_sha256")
+        and staging_fits_vmlinux(staged_meta, kdir / "build-tree")
     )
 
 
@@ -776,7 +778,8 @@ def verify(
         problems.append(f"Lustre snapshot in {kdir} has no modules")
     if got == head and not lustre_fits_kernel(kdir, snap_dir):
         problems.append(
-            f"Lustre snapshot in {kdir} was built against another kernel ABI"
+            f"Lustre snapshot in {kdir} was built against another build of "
+            f"its kernel (Module.symvers or vmlinux)"
         )
     try:
         extra = _lustre_staging_hash_input(snap_dir)

@@ -107,8 +107,8 @@ static struct vdev *netq_dev(struct netq *nq)
 }
 
 static int fault_net_gate(struct netq *nq, struct netport *dp, uint64_t flen,
-			  uint16_t ai);
-static bool fault_net_drop_copy(struct netport *o);
+			  uint16_t ai, bool held);
+static bool fault_net_drop_copy(struct netport *o, uint64_t flen);
 
 /* the MAC d's port sends from, or 0 */
 static uint64_t dev_port_mac(struct vdev *d)
@@ -1091,11 +1091,9 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 
 			dp = eth[0] & 1 ? NULL : port_by_mac(eth);
 
-			/* a frame held for RX buffers passed the gate already */
-			int g = nq->stall_since ? FG_GO :
-				fault_net_gate(nq, dp && dp != p &&
+			int g = fault_net_gate(nq, dp && dp != p &&
 						   dp->attached ? dp : NULL,
-					       flen, ai);
+					       flen, ai, nq->stall_since);
 
 			if (g == FG_WAIT) {
 				nq->gated = true;
@@ -1113,7 +1111,7 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 				/* broadcast, multicast, or no port has it */
 				for (struct netport *o = g_ports; o; o = o->next)
 					if (o != p && o->attached &&
-					    (fault_net_drop_copy(o) ||
+					    (fault_net_drop_copy(o, flen) ||
 					     net_send_to(o, fh, &h, &frame,
 							 flen) != DLV_OK))
 						STAT_ADD(o->rx_drops, 1);
@@ -1243,6 +1241,10 @@ static void net_attach(struct vdev *d)
 	for (int i = 0; i < NET_MAX_QP; i++) {
 		p->q[i].stall_since = 0;
 		p->q[i].rx_starved_until = 0;
+		/* its rings start over: first-seen stamps with them */
+		free(p->q[i].stamp);
+		p->q[i].stamp = NULL;
+		p->q[i].stamp_n = 0;
 		netq_serve(&p->q[i]);
 	}
 	LOG("dev%d: net port up, features 0x%" PRIx64, d->id, d->features);
