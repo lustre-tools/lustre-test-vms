@@ -1053,6 +1053,7 @@ def _shmrdma_preflight(vm: VMInfo) -> None:
     feats = shmrdma_req.features_of(vm.shmrdma, vm.nics, vm.host_node)
     if not feats:
         return
+    rdma = bool(vm.shmrdma) or any(n.type == "shmrdma" for n in vm.nics)
     if not vm.kernel:
         die(f"VM '{vm.name}' has no kernel path set — recreate with --target")
     target = shmrdma_req.Target(
@@ -1060,11 +1061,11 @@ def _shmrdma_preflight(vm: VMInfo) -> None:
         image=Path(vm.image) if vm.image else None,
         kernel_dir=Path(vm.kernel).parent,
         arch=vm.arch or None,
-        has_kmod=shmrdma.vm_has_kmod(vm) if vm.shmrdma else None,
+        has_kmod=shmrdma.vm_has_kmod(vm) if rdma else None,
     )
     why = shmrdma_req.refusal(
         feats,
-        target if vm.shmrdma and vm.image else None,
+        target if rdma and vm.image else None,
         arch=vm.arch or None,
     )
     if why:
@@ -1317,11 +1318,11 @@ def _start_qemu(vm: VMInfo) -> None:
                 check=True,
                 quiet=True,
             )
-        elif _base_type in ("passthrough", "shmnet"):
+        elif _base_type in ("passthrough", "shmnet", "shmrdma"):
             # No host TAP: the VF is attached directly to the guest
             # via vfio-pci (the host-side bind-to-vfio happened in
-            # cmd_create), and a shmnet NIC is a port on shmrdmad's
-            # switch.  launch_qemu only emits the QEMU flags below.
+            # cmd_create), and a shmnet or shmrdma NIC is a port on
+            # shmrdmad's switch.  launch_qemu only emits the QEMU flags below.
             pass
         else:
             die(
@@ -1459,6 +1460,8 @@ def _start_qemu(vm: VMInfo) -> None:
         # commit cost on the common case.
         qemu_args += ["-mem-prealloc"]
 
+    # vm_sockets() order: eth0's device, then each NIC's in NIC order
+    _shm_rdma0 = shm_socks.pop(0) if vm.shmrdma else ""
     for _idx, _nic, _tap, _mac in extra_nics:
         _base_type = _nic.type
         _netdev_id = f"net{_idx}"
@@ -1479,8 +1482,8 @@ def _start_qemu(vm: VMInfo) -> None:
                 f"{net_driver},netdev={_netdev_id},mac={_mac}"
                 + speed_device_opts(_nic.speed),
             ]
-        elif _base_type == "shmnet":
-            _sock = shm_socks.pop(1 if vm.shmrdma else 0)
+        elif _base_type in ("shmnet", "shmrdma"):
+            _sock = shm_socks.pop(0)
             # One queue pair unless queues=N: more spread many TCP
             # streams over the guest's vCPUs, but slowed socklnd with
             # conns_per_peer=4 on Sookie (2.0-2.4 GB/s against 2.7-3.3).
@@ -1502,6 +1505,17 @@ def _start_qemu(vm: VMInfo) -> None:
                 f"{net_driver},netdev={_netdev_id},mac={_mac},mrg_rxbuf=on"
                 f"{_dev_mq}{_tso}",
             ]
+            if _base_type == "shmrdma":
+                # The RDMA device bound to this NIC: the guest driver
+                # takes its GIDs from eth<idx>, named in the tag.
+                qemu_args += [
+                    "-chardev",
+                    f"socket,id=shmrdma{_idx},path={shm_socks.pop(0)}",
+                    "-device",
+                    f"vhost-user-fs-pci,chardev=shmrdma{_idx},"
+                    f"tag=shmrdma@eth{_idx},"
+                    "num-request-queues=2,queue-size=256",
+                ]
         elif _base_type == "passthrough":
             _bdf = _nic.bdf
             # pcie-root-port gives the vfio'd device a dedicated slot;
@@ -1522,7 +1536,7 @@ def _start_qemu(vm: VMInfo) -> None:
     if vm.shmrdma:
         qemu_args += [
             "-chardev",
-            f"socket,id=shmrdma0,path={shm_socks[0]}",
+            f"socket,id=shmrdma0,path={_shm_rdma0}",
             "-device",
             # QEMU will not create its generic vhost-user-device from
             # the command line, so shmrdma rides on vhost-user-fs: three

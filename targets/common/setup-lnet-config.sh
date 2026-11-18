@@ -57,8 +57,9 @@ explicit_networks() {
 		(( i == 0 )) || name=${names[$((i - 1))]:-}
 		if [[ -n $name ]]; then
 			# Only software NICs take net=; passthrough keeps its resolver.
-			[[ ${nics[$i]} == tcp || ${nics[$i]} == softroce ]] ||
-				{ config_error 'explicit network needs tcp or softroce'; return 1; }
+			[[ ${nics[$i]} == tcp || ${nics[$i]} == softroce ||
+			   ${nics[$i]} == shmrdma ]] ||
+				{ config_error 'explicit network needs tcp, softroce or shmrdma'; return 1; }
 			[[ $name =~ ^${transport}(0|[1-9][0-9]{0,4})$ ]] ||
 				{ config_error "invalid LNet network '$name'"; return 1; }
 			number=${name#"$transport"}

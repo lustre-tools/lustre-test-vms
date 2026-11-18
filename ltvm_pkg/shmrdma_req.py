@@ -599,12 +599,13 @@ def target_checks(t: Target) -> list[Req]:
 def features_of(shmrdma_flag: str, nics: list, host_node: int) -> set[str]:
     """The features a VM with these settings uses."""
     feats = set()
-    if shmrdma_flag:
+    if shmrdma_flag or any(n.type == "shmrdma" for n in nics):
         feats |= {SHMRDMA, SMC}
-    if any(n.type == "shmnet" for n in nics):
+    if any(n.on_switch for n in nics):
         feats.add(SHMNET)
     if shmrdma_flag == "auto" or any(
-        n.type == "shmnet" and not n.socket for n in nics
+        (n.type == "shmnet" and not n.socket) or n.type == "shmrdma"
+        for n in nics
     ):
         feats.add(OWN_DAEMON)
     if host_node >= 0:
@@ -632,7 +633,7 @@ def refusal(
     if not missing:
         return None
     flags = {
-        SHMRDMA: "--shmrdma",
+        SHMRDMA: "--shmrdma or --nic shmrdma",
         SHMNET: "--nic shmnet",
         HOST_NODE: "--host-node",
     }

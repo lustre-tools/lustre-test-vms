@@ -275,9 +275,11 @@ if [ -n "${FC_NICS}" ]; then
 fi
 
 # --- shmrdma -------------------------------------------------------
-# ltvm create --shmrdma: SMC sockets over the device.  The hook comes
-# with the shmrdma guest module, so older images have neither.
-if grep -qw fc_shmrdma=1 /proc/cmdline && \
+# ltvm create --shmrdma or --nic shmrdma: SMC sockets over the device.
+# The hook comes with the shmrdma guest module, so older images have
+# neither.
+if { grep -qw fc_shmrdma=1 /proc/cmdline || \
+     [[ ",${FC_NICS}," == *,shmrdma,* ]]; } && \
    [ -x /usr/local/sbin/shmrdma-boot.sh ]; then
     /usr/local/sbin/shmrdma-boot.sh || \
         echo "rc.local: warning: shmrdma-boot.sh exited non-zero" >&2

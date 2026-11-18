@@ -746,7 +746,7 @@ class VMInfo:
     @property
     def shared_ram(self) -> bool:
         """Guest RAM is a shared memfd: a shmrdma device or shmnet NIC."""
-        return bool(self.shmrdma) or any(n.type == "shmnet" for n in self.nics)
+        return bool(self.shmrdma) or any(n.on_switch for n in self.nics)
 
     def extra_nics(self) -> list[tuple[int, NicSpec, str, str]]:
         """Return ``(index, nic, tap_name, mac)`` tuples for extra NICs.

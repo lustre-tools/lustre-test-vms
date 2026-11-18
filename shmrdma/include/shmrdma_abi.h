@@ -349,6 +349,7 @@ struct shmrdma_cmd {
 			__u32 retry_cnt;
 			__u32 access;	/* SHMRDMA_ACC_REMOTE_*: what peers may do */
 			__u8 dgid[16];
+			__u32 timeout;	/* ack timeout: 4.096 us << timeout */
 		} modify_qp;
 		struct {
 			__u32 qpn;
@@ -366,6 +367,12 @@ enum {
 	SHMRDMA_MQ_QKEY = 1 << 2,
 	SHMRDMA_MQ_RETRY = 1 << 3,
 	SHMRDMA_MQ_ACCESS = 1 << 4,
+	/*
+	 * retry_cnt and timeout, which a backend that knows no faults
+	 * ignores; added without an ABI bump, since a backend before it
+	 * ignores the bit and a driver before it never sets it.
+	 */
+	SHMRDMA_MQ_TIMEOUT = 1 << 5,
 };
 
 struct shmrdma_resp {

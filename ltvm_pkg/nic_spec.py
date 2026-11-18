@@ -24,7 +24,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, fields
 
 # The extra-NIC types, in the order the CLI help lists them.
-NIC_TYPES = ("tcp", "softroce", "passthrough", "shmnet")
+NIC_TYPES = ("tcp", "softroce", "passthrough", "shmnet", "shmrdma")
+
+# NICs on shmrdmad's switch: a shmnet NIC, and a shmrdma one, which is a
+# shmnet NIC with an RDMA device bound to it.
+SWITCH_NIC_TYPES = ("shmnet", "shmrdma")
 
 
 class NicSpecError(ValueError):
@@ -142,6 +146,11 @@ class NicSpec:
         if self.type == "shmnet":
             return "tcp"
         return self.type
+
+    @property
+    def on_switch(self) -> bool:
+        """Whether the NIC is a port on shmrdmad's switch."""
+        return self.type in SWITCH_NIC_TYPES
 
 
 # Mbps a virtio-net NIC advertises when not told otherwise.  socklnd
@@ -334,10 +343,14 @@ _KEYS: dict[str, _Key] = {
     "bdf": _Key("bdf", ("passthrough",), _bdf),
     # Not passthrough: the guest sets the node of the NIC it finds as
     # ethN, and a passed-through device need not appear as ethN.
-    "node": _Key("node", ("tcp", "softroce", "shmnet"), _node),
-    "net": _Key("net", ("tcp", "softroce", "shmnet"), _net),
-    "subnet": _Key("subnet", ("tcp", "softroce", "shmnet"), _subnet4),
-    "subnet6": _Key("subnet6", ("tcp", "softroce", "shmnet"), _subnet6),
+    "node": _Key("node", ("tcp", "softroce", "shmnet", "shmrdma"), _node),
+    "net": _Key("net", ("tcp", "softroce", "shmnet", "shmrdma"), _net),
+    "subnet": _Key(
+        "subnet", ("tcp", "softroce", "shmnet", "shmrdma"), _subnet4
+    ),
+    "subnet6": _Key(
+        "subnet6", ("tcp", "softroce", "shmnet", "shmrdma"), _subnet6
+    ),
     "socket": _Key("socket", ("shmnet",), _socket),
     "queues": _Key("queues", ("shmnet",), _queues),
     "tso": _Key("tso", ("shmnet",), _on_off),

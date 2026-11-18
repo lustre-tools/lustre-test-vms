@@ -3,7 +3,7 @@ CFLAGS += -pthread -std=gnu11
 
 all: shmrdmad
 
-shmrdmad: shmrdmad.c shmnet.c plat.h plat_linux.h plat_macos.h ../include/shmrdma_abi.h
+shmrdmad: shmrdmad.c shmnet.c fault.c plat.h plat_linux.h plat_macos.h ../include/shmrdma_abi.h
 	$(CC) $(CFLAGS) -o $@ shmrdmad.c
 
 .PHONY: all clean

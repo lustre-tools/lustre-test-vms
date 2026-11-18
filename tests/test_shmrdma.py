@@ -2777,3 +2777,190 @@ def test_vm_set_checks_the_vms_kernel_dir(tmp_path: Path) -> None:
         vm_commands._check_shmrdma_image(vm, "auto")
     t = refusal.call_args.args[1]
     assert t.kernel_dir == tmp_path / "kernels" / "k1"
+
+
+class TestShmrdmaNicSpec:
+    def test_plain(self) -> None:
+        spec = NicSpec.parse("shmrdma")
+        assert str(spec) == "shmrdma"
+        assert spec.on_switch
+        # the guest puts it on o2ib, with no rxe to set up
+        assert spec.cmdline_entry() == "shmrdma"
+
+    def test_net_must_be_o2ib(self) -> None:
+        assert NicSpec.parse("shmrdma:net=o2ib2").net == "o2ib2"
+        with pytest.raises(NicSpecError):
+            NicSpec.parse("shmrdma:net=tcp1")
+
+    def test_no_socket_or_queues(self) -> None:
+        for raw in ("shmrdma:socket=/x.sock", "shmrdma:queues=2"):
+            with pytest.raises(NicSpecError):
+                NicSpec.parse(raw)
+
+
+def test_launch_shmrdma_nics(tmp_vmdir: Path, own_daemon) -> None:  # noqa: F811
+    d, _ = own_daemon
+    vm = _make_vm(tmp_vmdir)
+    vm.shmrdma = "auto"
+    vm.nics = [
+        NicSpec.parse("shmnet"),
+        NicSpec.parse("shmrdma"),
+        NicSpec.parse("shmrdma:net=o2ib0"),
+    ]
+    vm.nic_ips = ["172.16.100.50", "172.16.100.51", "172.16.100.52"]
+    h = _LaunchHarness()
+    vm.save()
+    with patch("ltvm_pkg.shmrdma.vm_has_kmod", return_value=True):
+        _run_launch(vm, h)
+    argv = h.qemu_argv or []
+    joined = " ".join(argv)
+    # eth0's device, and each shmrdma NIC on the switch with a device
+    # bound to it by name
+    assert f"socket,id=shmrdma0,path={d.rdma_socket}" in joined
+    assert "tag=shmrdma," in joined
+    for i in (1, 2, 3):
+        assert f"socket,id=charnet{i},path={d.net_socket}" in joined
+    assert "socket,id=shmrdma1,path" not in joined
+    for i in (2, 3):
+        assert f"socket,id=shmrdma{i},path={d.rdma_socket}" in joined
+        assert f"chardev=shmrdma{i},tag=shmrdma@eth{i}," in joined
+    append = argv[argv.index("-append") + 1]
+    assert "fc_nics=tcp,shmrdma,shmrdma" in append
+    back = VMInfo.load(vm.name)
+    assert back.shm_sockets == [
+        str(d.rdma_socket),
+        str(d.net_socket),
+        str(d.net_socket),
+        str(d.rdma_socket),
+        str(d.net_socket),
+        str(d.rdma_socket),
+    ]
+
+
+def test_shmrdma_nic_needs_own_daemon_and_module() -> None:
+    from ltvm_pkg import shmrdma_req
+
+    feats = shmrdma_req.features_of("", [NicSpec.parse("shmrdma")], -1)
+    assert {
+        shmrdma_req.SHMRDMA,
+        shmrdma_req.SHMNET,
+        shmrdma_req.OWN_DAEMON,
+    } <= feats
+
+
+class TestLinks:
+    def _vm(self, tmp_vmdir: Path) -> VMInfo:  # noqa: F811
+        vm = _make_vm(tmp_vmdir)
+        vm.shmrdma = "auto"
+        vm.nics = [
+            NicSpec.parse("shmrdma"),
+            NicSpec.parse("shmnet"),
+            NicSpec.parse("tcp"),
+        ]
+        vm.nic_ips = ["172.16.100.51", "172.16.100.52", "172.16.100.53"]
+        return vm
+
+    def test_selectors(self, tmp_vmdir: Path) -> None:  # noqa: F811
+        from ltvm_pkg import shmlink
+
+        vm = self._vm(tmp_vmdir)
+        macs = {i: m for i, _n, _t, m in vm.extra_nics()}
+        eth0 = shmlink.link_of(vm, "eth0")
+        assert eth0.selector() == f"ip={vm.ip}" and not eth0.netdev
+        eth1 = shmlink.link_of(vm, "eth1")
+        assert eth1.selector() == f"ip=172.16.100.51 mac={macs[1]}"
+        assert eth1.netdev == "net1"
+        # a shmnet NIC has no RDMA device: its MAC alone
+        assert shmlink.link_of(vm, "eth2").selector() == f"mac={macs[2]}"
+        assert not shmlink.link_of(vm, "eth3").on_switch
+        assert [lk.nic for lk in shmlink.links_of(vm)] == [
+            "eth0",
+            "eth1",
+            "eth2",
+        ]
+        with pytest.raises(shmlink.LinkError):
+            shmlink.link_of(vm, "eth9")
+        with pytest.raises(shmlink.LinkError):
+            shmlink.link_of(vm, "ib0")
+
+    def test_eth0_without_device_is_off_switch(
+        self,
+        tmp_vmdir: Path,  # noqa: F811
+    ) -> None:
+        from ltvm_pkg import shmlink
+
+        vm = self._vm(tmp_vmdir)
+        vm.shmrdma = ""
+        assert not shmlink.link_of(vm, "eth0").on_switch
+
+    def test_request_errors(self, tmp_path: Path) -> None:
+        from ltvm_pkg import shmlink
+
+        with pytest.raises(shmlink.LinkError, match="no control socket"):
+            shmlink.request(tmp_path / "none.ctl", "list")
+
+
+def _cc() -> str | None:
+    return shutil.which("cc") or shutil.which("gcc")
+
+
+@pytest.fixture
+def real_daemon(tmp_path: Path) -> Iterator[Path]:
+    """The real shmrdmad, built from the tree; its control socket."""
+    cc = _cc()
+    if cc is None:
+        pytest.skip("no C compiler")
+    src = shmrdma.SRC_DIR / "daemon"
+    exe = tmp_path / "shmrdmad"
+    subprocess.run(
+        [cc, *shmrdma.DAEMON_CFLAGS, "-o", str(exe), "shmrdmad.c"],
+        cwd=src,
+        check=True,
+    )
+    proc = subprocess.Popen(
+        [
+            str(exe),
+            "-s",
+            str(tmp_path / "r.sock"),
+            "-n",
+            str(tmp_path / "n.sock"),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    ctl = tmp_path / "r.sock.ctl"
+    for _ in range(100):
+        if ctl.exists():
+            break
+        time.sleep(0.05)
+    yield ctl
+    proc.terminate()
+    proc.wait(5)
+
+
+def test_daemon_link_rules(real_daemon: Path) -> None:
+    from ltvm_pkg import shmlink
+
+    ctl = real_daemon
+    assert shmlink.request(ctl, "list") == []
+    got = shmlink.request(
+        ctl, "set ip=172.16.100.104 mac=52:54:00:aa:bb:cc down retry=13000"
+    )
+    r = shmlink.parse_rule(got[0])
+    assert r["down"] == "1" and r["retry_ms"] == "13000"
+    assert r["mac"] == "52:54:00:aa:bb:cc" and r["ip"] == "172.16.100.104"
+    # set replaces the rule of the same link
+    shmlink.request(ctl, "set ip=172.16.100.104 mac=52:54:00:aa:bb:cc delay=5")
+    shmlink.request(ctl, "set mac=52:54:00:00:00:01 loss=2.5 rate=100")
+    rules = [shmlink.parse_rule(x) for x in shmlink.request(ctl, "list")]
+    assert len(rules) == 2
+    assert rules[0]["down"] == "0" and rules[0]["delay_ms"] == "5"
+    assert rules[1]["loss_pct"] == "2.5" and rules[1]["rate_mbit"] == "100"
+    shmlink.request(ctl, "clear mac=52:54:00:00:00:01")
+    with pytest.raises(shmlink.LinkError, match="no such link"):
+        shmlink.request(ctl, "clear mac=52:54:00:00:00:01")
+    for bad in ("set", "set ip=1.2.3.4 loss=101", "set ip=x", "frob"):
+        with pytest.raises(shmlink.LinkError):
+            shmlink.request(ctl, bad)
+    shmlink.request(ctl, "clear all")
+    assert shmlink.request(ctl, "list") == []

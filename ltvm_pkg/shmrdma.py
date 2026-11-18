@@ -67,6 +67,7 @@ _DAEMON_FILES = (
     "daemon/plat_linux.h",
     "daemon/plat_macos.h",
     "daemon/shmnet.c",
+    "daemon/fault.c",
     "include/shmrdma_abi.h",
 )
 KMOD_FILES = ("kmod/shmrdma.c", "kmod/Makefile", "include/shmrdma_abi.h")
@@ -456,6 +457,11 @@ class Daemon:
         return self.dir / "net.sock"
 
     @property
+    def ctl_socket(self) -> Path:
+        # the daemon's default: its RDMA socket's path and ".ctl"
+        return self.dir / "rdma.sock.ctl"
+
+    @property
     def pid_path(self) -> Path:
         return self.dir / "shmrdmad.pid"
 
@@ -701,6 +707,9 @@ def vm_sockets(vm: VMInfo, d: Daemon) -> list[str]:
     for nic in vm.nics:
         if nic.type == "shmnet":
             socks.append(nic.socket or str(d.net_socket))
+        elif nic.type == "shmrdma":
+            # its NIC, then the RDMA device bound to it
+            socks += [str(d.net_socket), str(d.rdma_socket)]
     return socks
 
 
@@ -952,7 +961,7 @@ def _remove_files(d: Daemon) -> None:
     try:
         if os.fstat(fd).st_uid != d.uid:
             return
-        for p in (d.pid_path, d.rdma_socket, d.net_socket):
+        for p in (d.pid_path, d.rdma_socket, d.net_socket, d.ctl_socket):
             try:
                 os.unlink(p.name, dir_fd=fd)
             except FileNotFoundError:
@@ -1076,6 +1085,7 @@ def status() -> dict[str, object]:
         "user": d.user,
         "rdma_socket": str(d.rdma_socket),
         "net_socket": str(d.net_socket),
+        "ctl_socket": str(d.ctl_socket),
         "log": str(d.log_path),
         "current": (d.binary_hash() == current) if pid else None,
         "vms": attached_vms(d) if pid else [],
@@ -1084,7 +1094,8 @@ def status() -> dict[str, object]:
 
 def _needs_own(vm: VMInfo) -> bool:
     return vm.shmrdma == "auto" or any(
-        n.type == "shmnet" and not n.socket for n in vm.nics
+        (n.type == "shmnet" and not n.socket) or n.type == "shmrdma"
+        for n in vm.nics
     )
 
 

@@ -545,6 +545,29 @@ ltvm cluster create co2 mgs+mds+oss:co2-srv:3 client:co2-c1 --shmrdma
 ltvm cluster deploy co2 --build <tree> --mount
 ```
 
+### Multi-rail o2ib and link failures: --nic shmrdma, vm link
+
+For multi-rail o2ib, or for breaking a link under Lustre (a switch
+port that dies, a congested or lossy rail), `--nic shmrdma` adds a
+NIC with its own RDMA device on the same daemon, one per rail, and
+`ltvm vm link` breaks it.  softroce cannot stand in for this: it fails
+its live connection under a backlog or packet loss.
+
+```bash
+ltvm cluster create co3 mgs+mds+oss:co3-srv:2 client:co3-c1 \
+    --nic shmrdma:net=o2ib0 --nic shmrdma:net=o2ib0
+ltvm vm link co3-srv eth2 down        # silent to peers; carrier off
+ltvm vm link co3-srv eth1 set --rate 2000 --delay 1
+ltvm vm link co3-srv                  # faults and their counts
+ltvm vm link co3-srv eth2 up
+```
+
+`down` behaves as a dead port does: an RDMA send over it waits until
+the QP's retries run out (`--retry MS` sets that time, 13000 for what
+a ConnectX HCA was seen to take), connects time out, and frames are dropped.
+`--silent` keeps the VM's own carrier up.  docs/SHMRDMA.md has the
+detail.
+
 ### Failover pairs
 
 To move a target between 2 servers (`fail mds1`, replay and recovery

@@ -27,6 +27,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <arpa/inet.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -51,6 +52,7 @@ static int g_verbose;
 #define REL(p, v)	__atomic_store_n((p), (v), __ATOMIC_RELEASE)
 #endif
 #define FENCE()		__atomic_thread_fence(__ATOMIC_SEQ_CST)
+#define STAT_ADD(x, v)	__atomic_add_fetch(&(x), (v), __ATOMIC_RELAXED)
 
 /* ib_wc_status values */
 enum {
@@ -185,7 +187,7 @@ struct vring_used {
 /* ---------------------------------------------------------------- */
 /* objects                                                          */
 
-enum { EP_LISTEN = 1, EP_SOCK, EP_KICK, EP_LISTEN_NET };
+enum { EP_LISTEN = 1, EP_SOCK, EP_KICK, EP_LISTEN_NET, EP_LISTEN_CTL };
 
 struct vdev;
 
@@ -280,6 +282,9 @@ struct qp {
 	uint32_t dqpn;
 	uint32_t qkey;
 	uint32_t rnr_retry;
+	/* what the driver set for RC retries: ack timeout 4.096 us << timeout */
+	bool timeout_known;
+	uint32_t timeout, retry_cnt;
 	uint32_t pdn;
 	uint32_t access;	/* SHMRDMA_ACC_REMOTE_* its peer may use */
 	struct qp *peer;
@@ -290,6 +295,15 @@ struct qp {
 	bool fatal_sent;
 	/* set by other workers; the owner moves the QP to error */
 	int err_req;
+	/* link faults (fault.c): waiting on one, since when the link went
+	 * down under the head WQE, a lost one's resend, and when each WQE
+	 * was first seen, for a delay */
+	bool gated;
+	uint64_t blk_since;
+	uint64_t loss_until;
+	uint32_t loss_tries;
+	uint64_t *stamp;
+	uint32_t stamp_to;
 	/* stats */
 	uint64_t tx_bytes, tx_wr;
 };
@@ -305,6 +319,9 @@ struct vdev {
 	int sock;
 	int kind;
 	struct netport *port;
+	/* its link fault rule, as of g_fault_gen fault_gen (fault.c) */
+	struct fault *fault;
+	uint64_t fault_gen;
 	struct ep_tag sock_tag;
 	bool dead;
 	/* QEMU stopped it (GET_VRING_BASE): nothing touches its memory
@@ -382,6 +399,11 @@ static uint64_t g_nt_min = 64 << 10;	/* non-temporal stores from here */
 static uint64_t g_net_nt_min = 16 << 10;	/* the same for shmnet frames */
 static uint64_t g_net_part_min = 30 << 10;	/* split frames into these */
 static int g_lsock;
+/* bumped when a fault rule, a GID or a port's MAC changes (fault.c) */
+static uint64_t g_fault_gen = 1;
+#define FAULT_GEN_BUMP() __atomic_add_fetch(&g_fault_gen, 1, __ATOMIC_SEQ_CST)
+/* a link fault's verdict on a send (fault.c) */
+enum { FG_GO, FG_WAIT, FG_FAIL, FG_DROP };
 
 static int g_wwait;	/* wlock() is waiting for the workers' mutexes */
 
@@ -1208,6 +1230,12 @@ static int sg_copy_par(struct sg_iter *dst, struct sg_iter *src, uint64_t len)
 /* ---------------------------------------------------------------- */
 /* QP execution                                                     */
 
+static bool dev_has_gid(const struct vdev *d, const uint8_t *gid);
+static void gid_str(const uint8_t *g, char *buf, size_t n);
+
+#include "shmnet.c"
+#include "fault.c"
+
 static struct vdev *dev_by_gid(const uint8_t *gid)
 {
 	for (struct vdev *d = g_devs; d; d = d->next) {
@@ -1250,17 +1278,26 @@ static struct qp *qp_peer(struct qp *qp)
 	return p;
 }
 
-/* only qp's own worker, or a wlock holder; others use qp_err_req() */
-static void qp_to_err(struct qp *qp)
+/*
+ * Only qp's own worker, or a wlock holder; others use qp_err_req().
+ * A send that failed in its completion moves the QP to error without
+ * an async event, as on a real HCA, so the ULP hears of it once.
+ */
+static void qp_to_err_ev(struct qp *qp, bool event)
 {
 	if (qp->state != QPS_ERR) {
 		REL(&qp->state, QPS_ERR);
-		if (!qp->fatal_sent) {
+		if (event && !qp->fatal_sent) {
 			qp->fatal_sent = true;
 			REL(&qp->rec->fatal, 1);
 			dev_raise_eq(qp->dev, qp->qpn, SHMRDMA_EQE_QP_FATAL);
 		}
 	}
+}
+
+static void qp_to_err(struct qp *qp)
+{
+	qp_to_err_ev(qp, true);
 }
 
 /* any worker: have qp's owner move it to error */
@@ -1759,6 +1796,60 @@ static int exec_wqe(struct qp *qp, struct shmrdma_sq_wqe *w,
 	return WC_LOC_QP_OP_ERR;
 }
 
+/* the completion opcode of a send queue WQE that does not run */
+static uint32_t wc_opcode(uint32_t op)
+{
+	switch (op) {
+	case SHMRDMA_OP_RDMA_WRITE:
+	case SHMRDMA_OP_RDMA_WRITE_IMM:
+		return SHMRDMA_WC_RDMA_WRITE;
+	case SHMRDMA_OP_RDMA_READ:
+		return SHMRDMA_WC_RDMA_READ;
+	case SHMRDMA_OP_REG_MR:
+		return SHMRDMA_WC_REG_MR;
+	case SHMRDMA_OP_LOCAL_INV:
+		return SHMRDMA_WC_LOCAL_INV;
+	}
+	return SHMRDMA_WC_SEND;
+}
+
+/* fault_gate() for w, a WQE that would go on the wire */
+static int qp_fault_gate(struct qp *qp, const struct shmrdma_sq_wqe *w,
+			 uint32_t prod)
+{
+	bool ud = qp->type != SHMRDMA_QPT_RC;
+	struct vdev *pd;
+	uint64_t len;
+
+	if (!RLX(&g_nfaults)) {
+		if (qp->gated || qp->blk_since || qp->loss_until)
+			fault_qp_reset(qp);
+		return FG_GO;
+	}
+	switch (w->opcode) {
+	case SHMRDMA_OP_SEND:
+	case SHMRDMA_OP_SEND_IMM:
+	case SHMRDMA_OP_SEND_INV:
+	case SHMRDMA_OP_RDMA_WRITE:
+	case SHMRDMA_OP_RDMA_WRITE_IMM:
+	case SHMRDMA_OP_RDMA_READ:
+		break;
+	default:
+		return FG_GO;
+	}
+	if (ud) {
+		pd = dev_by_gid(w->ud.dgid);
+	} else {
+		struct qp *peer = qp_peer(qp);
+
+		pd = peer ? peer->dev : dev_by_gid(qp->dgid);
+	}
+	len = (w->flags & SHMRDMA_WQE_INLINE) ? w->send.inline_len :
+	      sg_total(w->sge, w->num_sge);
+	return fault_gate(qp, pd, ud, w->opcode == SHMRDMA_OP_RDMA_READ, len,
+			  prod);
+}
+
 /* bytes one pass moves for a QP, after its first WQE */
 #define QP_PASS_BYTES	(8u << 20)
 
@@ -1815,17 +1906,7 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 		if (qp->state == QPS_ERR) {
 			qp->stall_since = 0;
 			st = WC_WR_FLUSH_ERR;
-			switch (w->opcode) {
-			case SHMRDMA_OP_RDMA_WRITE:
-			case SHMRDMA_OP_RDMA_WRITE_IMM:
-				opc = SHMRDMA_WC_RDMA_WRITE; break;
-			case SHMRDMA_OP_RDMA_READ:
-				opc = SHMRDMA_WC_RDMA_READ; break;
-			case SHMRDMA_OP_REG_MR:
-				opc = SHMRDMA_WC_REG_MR; break;
-			case SHMRDMA_OP_LOCAL_INV:
-				opc = SHMRDMA_WC_LOCAL_INV; break;
-			}
+			opc = wc_opcode(w->opcode);
 		} else if ((w->flags & SHMRDMA_WQE_INLINE) &&
 			   (qp->type != SHMRDMA_QPT_RC ||
 			    !op_takes_inline(w->opcode))) {
@@ -1835,7 +1916,24 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 			   w->send.inline_len > qp->sq.esz - SHMRDMA_WQE_HDR) {
 			st = WC_LOC_LEN_ERR;
 		} else {
-			st = exec_wqe(qp, w, w->sge, &opc);
+			/* a WQE waiting for a receive passed the gate already */
+			int g = qp->stall_since ? FG_GO :
+				qp_fault_gate(qp, w, prod);
+
+			if (g == FG_WAIT) {
+				qp->gated = true;
+				*stalled = true;
+				break;
+			}
+			qp->gated = false;
+			if (g == FG_FAIL) {
+				opc = wc_opcode(w->opcode);
+				st = WC_RETRY_EXC_ERR;
+			} else if (g == FG_DROP) {
+				st = WC_SUCCESS;
+			} else {
+				st = exec_wqe(qp, w, w->sge, &opc);
+			}
 			if (st < 0) {
 				uint64_t t = now_ns();
 
@@ -1864,7 +1962,7 @@ static int qp_process(struct qp *qp, int budget, bool *stalled)
 		if (st != WC_SUCCESS && st != WC_WR_FLUSH_ERR) {
 			GLOG(qp->dev, "dev%d qp%u: wqe op %u failed status %d",
 			    qp->dev->id, qp->qpn, w->opcode, st);
-			qp_to_err(qp);
+			qp_to_err_ev(qp, false);
 		}
 		done++;
 		if (qp->tx_bytes - bytes0 >= QP_PASS_BYTES ||
@@ -1884,12 +1982,10 @@ static bool qp_has_work(struct qp *qp)
 	if (qp->state == QPS_ERR && ACQ(&qp->rec->rq_prod) != qp->rq_cons)
 		return true;
 	if ((qp->state != QPS_RTS && qp->state != QPS_ERR) ||
-	    qp->stall_since)
+	    qp->stall_since || qp->gated)
 		return false;
 	return ACQ(&qp->rec->sq_prod) != qp->sq_cons;
 }
-
-#include "shmnet.c"
 
 static void *worker_main(void *arg)
 {
@@ -2067,6 +2163,7 @@ static void qp_free(struct qp *qp)
 	ring_free(qp->dev, &qp->sq);
 	ring_free(qp->dev, &qp->rq);
 	plat_spin_destroy(&qp->rq_lock);
+	free(qp->stamp);
 	free(qp);
 }
 
@@ -2187,6 +2284,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		memcpy(d->gids[c->gid.index], c->gid.gid, 16);
 		d->gid_valid[c->gid.index] = true;
 		__atomic_add_fetch(&g_gen, 1, __ATOMIC_SEQ_CST);
+		FAULT_GEN_BUMP();
 		wunlock();
 		gid_str(c->gid.gid, gs, sizeof(gs));
 		GLOG(d, "dev%d: gid[%u] = %s", d->id, c->gid.index, gs);
@@ -2197,6 +2295,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		wlock();
 		d->gid_valid[c->gid.index] = false;
 		__atomic_add_fetch(&g_gen, 1, __ATOMIC_SEQ_CST);
+		FAULT_GEN_BUMP();
 		wunlock();
 		return 0;
 	case SHMRDMA_CMD_CREATE_CQ: {
@@ -2335,6 +2434,11 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 			qp->rnr_retry = c->modify_qp.rnr_retry;
 		if (c->modify_qp.mask & SHMRDMA_MQ_ACCESS)
 			qp->access = c->modify_qp.access;
+		if (c->modify_qp.mask & SHMRDMA_MQ_TIMEOUT) {
+			qp->timeout = c->modify_qp.timeout;
+			qp->retry_cnt = c->modify_qp.retry_cnt;
+			qp->timeout_known = true;
+		}
 		if (c->modify_qp.mask & SHMRDMA_MQ_STATE) {
 			uint32_t ns = c->modify_qp.state;
 
@@ -2348,6 +2452,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 			}
 			qp->state = ns;
 			qp->stall_since = 0;
+			fault_qp_reset(qp);
 			if (ns == QPS_ERR)
 				qp_flush_rq(qp);
 			__atomic_add_fetch(&g_gen, 1, __ATOMIC_SEQ_CST);
@@ -3215,8 +3320,8 @@ static void dump_stats(void)
 static void usage(void)
 {
 	fprintf(stderr,
-		"usage: shmrdmad [-s rdma_socket] [-n net_socket] [-w workers] "
-		"[-c copiers] [-p spin_us] [-v]\n");
+		"usage: shmrdmad [-s rdma_socket] [-n net_socket] [-C ctl_socket] "
+		"[-w workers] [-c copiers] [-p spin_us] [-v]\n");
 	exit(2);
 }
 
@@ -3224,8 +3329,9 @@ int main(int argc, char **argv)
 {
 	int opt;
 
-	while ((opt = getopt(argc, argv, "s:n:w:p:c:v")) != -1) {
+	while ((opt = getopt(argc, argv, "s:n:C:w:p:c:v")) != -1) {
 		switch (opt) {
+		case 'C': g_ctl_path = optarg; break;
 		case 'n': g_net_sock_path = optarg; break;
 		case 'c': g_ncopiers = atoi(optarg); break;
 		case 's': g_sock_path = optarg; break;
@@ -3252,6 +3358,22 @@ int main(int argc, char **argv)
 			    sizeof(sa.sun_path));
 			return 2;
 		}
+	}
+	if (!g_ctl_path) {
+		static char ctl[sizeof(((struct sockaddr_un *)0)->sun_path)];
+
+		if (snprintf(ctl, sizeof(ctl), "%s.ctl", g_sock_path) >=
+		    (int)sizeof(ctl)) {
+			LOG("%s.ctl is too long for a socket path: give -C",
+			    g_sock_path);
+			return 2;
+		}
+		g_ctl_path = ctl;
+	} else if (strlen(g_ctl_path) >=
+		   sizeof(((struct sockaddr_un *)0)->sun_path)) {
+		LOG("socket paths must be shorter than %zu bytes",
+		    sizeof(((struct sockaddr_un *)0)->sun_path));
+		return 2;
 	}
 	raise_nofile();
 	g_spare_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
@@ -3302,7 +3424,7 @@ int main(int argc, char **argv)
 	}
 
 	struct sockaddr_un sa = { .sun_family = AF_UNIX };
-	static struct ep_tag listen_tag, listen_net_tag;
+	static struct ep_tag listen_tag, listen_net_tag, listen_ctl_tag;
 
 	/* The sockets hand out guest RAM: only this user (and root) may
 	 * connect, from the moment they exist.
@@ -3338,6 +3460,21 @@ int main(int argc, char **argv)
 		ep_add(g_lsock_net, &listen_net_tag, EP_LISTEN_NET, NULL, 0);
 		LOG("net switch on %s", g_net_sock_path);
 	}
+	if (*g_ctl_path) {
+		struct sockaddr_un ca = { .sun_family = AF_UNIX };
+
+		memcpy(ca.sun_path, g_ctl_path, strlen(g_ctl_path));
+		unlink(g_ctl_path);
+		g_lsock_ctl = plat_unix_socket();
+		if (bind(g_lsock_ctl, (struct sockaddr *)&ca, sizeof(ca)) ||
+		    listen(g_lsock_ctl, 16)) {
+			LOG("listen %s: %s", g_ctl_path, strerror(errno));
+			return 1;
+		}
+		chmod(g_ctl_path, 0600);
+		ep_add(g_lsock_ctl, &listen_ctl_tag, EP_LISTEN_CTL, NULL, 0);
+		LOG("link faults on %s", g_ctl_path);
+	}
 	LOG("listening on %s, %d workers, %d copiers, spin %" PRIu64 " us",
 	    g_sock_path, g_nworkers, g_ncopiers, g_spin_ns / 1000);
 
@@ -3369,6 +3506,9 @@ int main(int argc, char **argv)
 				break;
 			case EP_LISTEN_NET:
 				accept_conn(g_lsock_net, KIND_NET);
+				break;
+			case EP_LISTEN_CTL:
+				ctl_accept();
 				break;
 			case EP_SOCK:
 				if (evs[i].hup ||

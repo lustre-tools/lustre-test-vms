@@ -64,6 +64,12 @@ struct netq {
 	/* RX: a hold on this queue ran out; frames for it that find no
 	 * buffers drop without a hold until then (rx_lock) */
 	uint64_t rx_starved_until;
+	/* TX held by a link fault (fault.c), and when each avail entry
+	 * was first seen, for a delay */
+	bool gated;
+	uint64_t *stamp;
+	uint32_t stamp_n;
+	uint16_t stamp_to;
 };
 
 struct netport {
@@ -86,7 +92,6 @@ struct netport {
 	struct netport *next;
 };
 
-#define STAT_ADD(x, v)	__atomic_add_fetch(&(x), (v), __ATOMIC_RELAXED)
 
 static struct netport *g_ports;		/* changed under wlock */
 static plat_spinlock_t g_mac_lock;	/* claiming a source MAC */
@@ -99,6 +104,16 @@ static plat_spinlock_t g_mac_lock;	/* claiming a source MAC */
 static struct vdev *netq_dev(struct netq *nq)
 {
 	return nq->p->dev;
+}
+
+static int fault_net_gate(struct netq *nq, struct netport *dp, uint64_t flen,
+			  uint16_t ai);
+static bool fault_net_drop_copy(struct netport *o);
+
+/* the MAC d's port sends from, or 0 */
+static uint64_t dev_port_mac(struct vdev *d)
+{
+	return d->port ? RLX(&d->port->mac) : 0;
 }
 
 #define MAC_KNOWN	(1ull << 48)
@@ -967,6 +982,7 @@ static bool net_claim_mac(struct netport *p, const uint8_t *mac)
 	if (ok) {
 		REL(&p->mac_ns, t);
 		REL(&p->mac, k);
+		FAULT_GEN_BUMP();
 	}
 	plat_spin_unlock(&g_mac_lock);
 	return ok;
@@ -1074,7 +1090,22 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 			uint32_t fh = net_flow_hash(&frame, flen);
 
 			dp = eth[0] & 1 ? NULL : port_by_mac(eth);
-			if (dp && dp != p && dp->attached) {
+
+			/* a frame held for RX buffers passed the gate already */
+			int g = nq->stall_since ? FG_GO :
+				fault_net_gate(nq, dp && dp != p &&
+						   dp->attached ? dp : NULL,
+					       flen, ai);
+
+			if (g == FG_WAIT) {
+				nq->gated = true;
+				*stalled = true;
+				break;
+			}
+			nq->gated = false;
+			if (g == FG_DROP) {
+				rc = DLV_DROP;
+			} else if (dp && dp != p && dp->attached) {
 				rc = net_send_to(dp, fh, &h, &frame, flen);
 				if (rc == DLV_DROP)
 					STAT_ADD(dp->rx_drops, 1);
@@ -1082,8 +1113,9 @@ static int net_tx_process(struct netq *nq, int budget, bool *stalled)
 				/* broadcast, multicast, or no port has it */
 				for (struct netport *o = g_ports; o; o = o->next)
 					if (o != p && o->attached &&
-					    net_send_to(o, fh, &h, &frame,
-							flen) != DLV_OK)
+					    (fault_net_drop_copy(o) ||
+					     net_send_to(o, fh, &h, &frame,
+							 flen) != DLV_OK))
 						STAT_ADD(o->rx_drops, 1);
 				rc = DLV_OK;
 			}
@@ -1135,7 +1167,7 @@ static bool net_has_work(struct netq *nq)
 	struct vq *q = &nq->p->dev->vq[NET_TXQ(nq->qi)];
 
 	return !nq->p->dev->dead && vq_ready(q) && !q->broken &&
-	       q->last_avail != ACQ(&q->avail->idx);
+	       !nq->gated && q->last_avail != ACQ(&q->avail->idx);
 }
 
 static void net_set_notify(struct netq *nq, bool want_kicks)
@@ -1187,6 +1219,7 @@ static void netq_unserve(struct netq *nq)
 	struct worker *w = nq->w;
 
 	nq->stall_since = 0;
+	nq->gated = false;
 	if (!w)
 		return;
 	for (int i = 0; i < w->nnq; i++)
@@ -1226,6 +1259,7 @@ static void net_detach(struct vdev *d)
 		netq_unserve(&p->q[i]);
 	p->attached = false;
 	REL(&p->mac, 0);
+	FAULT_GEN_BUMP();
 }
 
 static int net_port_new(struct vdev *d)
@@ -1278,8 +1312,10 @@ static void net_port_free(struct vdev *d)
 			*pp = p->next;
 			break;
 		}
-	for (int i = 0; i < NET_MAX_QP; i++)
+	for (int i = 0; i < NET_MAX_QP; i++) {
 		plat_spin_destroy(&p->rx_lock[i]);
+		free(p->q[i].stamp);
+	}
 	free(p);
 	d->port = NULL;
 }

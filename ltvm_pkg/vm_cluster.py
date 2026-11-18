@@ -1154,9 +1154,7 @@ def cmd_cluster_create(args: argparse.Namespace) -> None:
         die(problem)
     shmrdma_flag = getattr(args, "shmrdma", "") or ""
     host_node = getattr(args, "host_node", -1)
-    shared_ram = bool(shmrdma_flag) or any(
-        n.type == "shmnet" for n in nic_specs
-    )
+    shared_ram = bool(shmrdma_flag) or any(n.on_switch for n in nic_specs)
     # What every node's create would refuse alike; the image checks stay
     # with the nodes, whose targets differ.
     problem = (

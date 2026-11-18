@@ -13,6 +13,9 @@ There are two ways in:
   o2iblnd, rdma_cm and the kernel verbs run on it unchanged, and LNet
   comes up on `o2ib` over it. An RDMA WRITE is one memcpy from the
   sender's pages straight into the receiver's registered pages.
+- **`--nic shmrdma`**, both at once: a NIC on the switch with an RDMA
+  device bound to it, so a VM can have several RDMA ports, each with
+  its own address, the way a multi-rail o2ib node does.
 - **`--nic shmnet`**, a virtio-net NIC on a switch inside the daemon
   instead of the bridge. socklnd, TCP and ssh run unchanged; the guest
   configures it as a `tcp` NIC. TSO and checksum offload pass through,
@@ -33,6 +36,11 @@ ltvm create co1-b --nic shmnet                      # a NIC on the switch
 ltvm vm set co1-a --shmrdma none                    # drop it (stopped VM)
 ltvm create co1-c --shmrdma --host-node 2           # on host NUMA node 2
 ltvm vm shmrdmad [status|start|stop]
+ltvm create co1-d --nic shmrdma:net=o2ib0 --nic shmrdma:net=o2ib0
+ltvm vm link co1-d eth2 down                        # its switch port dies
+ltvm vm link co1-d eth1 set --delay 2 --rate 10000  # 2 ms, 10 Gbit/s
+ltvm vm link co1-d                                  # what each link has
+ltvm vm link co1-d eth2 up
 ```
 
 - **The daemon.** ltvm builds `shmrdmad` with the host's C compiler
@@ -104,7 +112,9 @@ ltvm vm shmrdmad [status|start|stop]
   replaced since they started.
 - **A daemon of your own.** `--shmrdma SOCKET` and `--nic
   shmnet:SOCKET` connect to a daemon you run yourself
-  (`shmrdmad -s RDMA_SOCKET -n NET_SOCKET`); ltvm does not start it,
+  (`shmrdmad -s RDMA_SOCKET -n NET_SOCKET`, with its link fault
+  control socket at `RDMA_SOCKET.ctl` unless `-C` names another or
+  `-C ''` turns it off); ltvm does not start it,
   and a start refuses while nothing listens there.  A socket path must
   be shorter than 108 bytes (104 on macOS) and hold no `,`, `|`, `:`,
   `=` or blanks.
@@ -145,6 +155,52 @@ ltvm vm shmrdmad [status|start|stop]
   shmnet VM counts against the limit at overcommit times its size.
   Shared memfd memory also gets no transparent huge pages unless the
   host's `shmem_enabled` allows them.
+
+## Several RDMA ports, and breaking links
+
+### `--nic shmrdma`
+
+Each `--nic shmrdma` adds a shmnet NIC (ethN) and an RDMA device
+bound to it: the device is a vhost-user-fs with the tag
+`shmrdma@ethN`, and the guest driver takes its GIDs from ethN rather
+than eth0.  IP traffic to that address (ARP, ping, ssh) goes through
+the daemon's switch and RDMA through the device, so both share the
+link's faults below.  The guest puts each on o2ib; name one net for
+all of a node's NICs (`net=o2ib0`) to make them rails of one LNet
+network, as `--nic softroce` NICs are.  They can be mixed with
+`--shmrdma`, which keeps eth0's device.
+
+### `ltvm vm link`
+
+shmrdmad is the wire between its VMs, so it can do to a link what a
+switch port or a cable does.  `ltvm vm link VM NIC ACTION` sends a rule
+to its control socket (`rdma.sock.ctl`, beside its other sockets):
+
+| action | what it does |
+|---|---|
+| `down` | The link is gone.  RC sends over it wait as on a real HCA retrying and complete with `RETRY_EXC_ERR` once the QP's retries would have run out (4.096 us << `timeout`, `retry_cnt` + 1 times, the values the guest set on the QP; `--retry MS` overrides).  UD sends (the CM's MADs) and frames are dropped, so connects time out.  The VM's own NIC also loses carrier and its RDMA port goes down, as when its switch port is disabled, unless `--silent`: a fault further into the fabric leaves the carrier up. |
+| `set` | Replace the link's faults with `--delay MS` (one way, added to each message), `--loss PCT` (frames and UD sends dropped; an RC message is sent again after the QP's ack timeout, and fails like a dead link once its retries run out), `--rate MBIT` (each way) and `--down`. |
+| `up` | Clear every fault and raise the carrier. |
+| `show` (no action) | The faults on each of the VM's links, with counts of what they dropped, lost and failed. |
+
+A transfer sees the faults of both its ends: down at either, the
+delays and losses added, and the sender's and receiver's rates.  A
+link is the VM's NIC: an `--nic shmrdma` or shmnet NIC by its MAC (the
+RDMA device by its link-local GID too), eth0's `--shmrdma` device by
+its address.  eth0's carrier never changes, since ssh runs over it.
+`--carrier-only` drops just the carrier of any extra NIC, bridge NICs
+included, where the daemon carries nothing.
+
+Rules live in the daemon: they survive a guest reboot and go when the
+daemon stops.  A daemon from before link faults has no control socket;
+`ltvm vm shmrdmad status` says when it predates the sources.
+
+The driver tells the daemon a QP's `timeout` and `retry_cnt` (a mask
+bit older daemons ignore); with an older guest module the daemon
+assumes rdma_cm's RoCE default, timeout 17 (0.54 s) and 7 retries.
+Rate limits are token buckets refilled continuously, so a big message
+may overdraw one and the next waits; at rates near the copy speed the
+limit is loose.  Delay is per message, not per byte.
 
 ## Requirements
 

@@ -135,6 +135,123 @@ def cmd_vm_set(args: argparse.Namespace) -> int:
     return _vm_call(_set, args, use_json)
 
 
+def cmd_vm_link(args: argparse.Namespace) -> int:
+    """Show or change the faults on a VM's links (shmrdmad)."""
+    import json
+
+    from ltvm_pkg import shmlink
+    from ltvm_pkg.qemu_run import is_running
+    from ltvm_pkg.vm_state import VMInfo, VMNotFound
+
+    use_json = args.json
+    try:
+        vm = VMInfo.load(args.name)
+    except VMNotFound as e:
+        return _error(str(e), use_json)
+    action = args.action
+    changing = action in ("down", "up", "set")
+    if changing and not args.nic:
+        return _error(
+            f"vm link {action} needs a NIC (eth0, eth1, ...)", use_json
+        )
+    if changing and not is_running(vm):
+        return _error(f"VM '{vm.name}' is not running", use_json)
+    opts = {
+        "delay_ms": args.delay or 0,
+        "loss_pct": args.loss or 0,
+        "rate_mbit": args.rate or 0,
+        "retry_ms": args.retry or 0,
+    }
+    if action != "set" and any(opts.values()) and action != "down":
+        return _error(
+            "--delay, --loss, --rate and --retry go with set or down", use_json
+        )
+    try:
+        if action == "show":
+            links = (
+                [shmlink.link_of(vm, args.nic)]
+                if args.nic
+                else shmlink.links_of(vm)
+            )
+            have = (
+                shmlink.rules(vm) if any(lk.on_switch for lk in links) else {}
+            )
+            off = {lk.nic for lk in links if not lk.on_switch}
+            out = {lk.nic: have.get(lk.nic) for lk in links}
+            if use_json:
+                print(json.dumps(out))
+            elif not out:
+                print(f"{vm.name}: no links on shmrdmad")
+            else:
+                for nic, r in out.items():
+                    if nic in off:
+                        print(f"{vm.name} {nic}: not on shmrdmad")
+                        continue
+                    if not r:
+                        print(f"{vm.name} {nic}: ok")
+                        continue
+                    what = []
+                    if r.get("down") == "1":
+                        what.append("down")
+                    for k, unit in (
+                        ("delay_ms", "ms delay"),
+                        ("loss_pct", "% loss"),
+                        ("rate_mbit", " Mbit/s"),
+                        ("retry_ms", "ms retry"),
+                    ):
+                        if r.get(k, "0") != "0":
+                            what.append(f"{r[k]}{unit}")
+                    print(
+                        f"{vm.name} {nic}: {', '.join(what)} "
+                        f"(drops {r.get('drops')}, lost {r.get('lost')}, "
+                        f"failed sends {r.get('fails')}, "
+                        f"for {r.get('age_s')} s)"
+                    )
+            return EXIT_OK
+        link = shmlink.link_of(vm, args.nic)
+        if action == "up":
+            had = shmlink.clear_fault(vm, link) if link.on_switch else False
+            if link.netdev and not args.silent:
+                shmlink.set_carrier(vm, link, True)
+            if use_json:
+                print(json.dumps({"cleared": had}))
+            else:
+                print(
+                    f"{vm.name} {link.nic}: up"
+                    + (
+                        ""
+                        if had or not link.on_switch
+                        else " (it had no fault)"
+                    )
+                )
+        else:
+            rule = {}
+            if link.on_switch and not args.carrier_only:
+                rule = shmlink.set_fault(
+                    vm, link, down=action == "down" or args.down, **opts
+                )
+            elif not link.netdev or action != "down":
+                return _error(
+                    f"{vm.name} {link.nic} is not on shmrdmad's switch: "
+                    f"only `down --carrier-only` applies to it",
+                    use_json,
+                )
+            if action == "down" and link.netdev and not args.silent:
+                shmlink.set_carrier(vm, link, False)
+            if use_json:
+                print(json.dumps(rule))
+            else:
+                carrier = (
+                    ""
+                    if action != "down" or not link.netdev or args.silent
+                    else ", carrier off"
+                )
+                print(f"{vm.name} {link.nic}: {action}{carrier}")
+    except shmlink.LinkError as e:
+        return _error(str(e), use_json)
+    return EXIT_OK
+
+
 def cmd_vm_shmrdmad(args: argparse.Namespace) -> int:
     """Status, start or stop of this user's shmrdmad."""
     import json
@@ -162,6 +279,7 @@ def cmd_vm_shmrdmad(args: argparse.Namespace) -> int:
         print(f"shmrdmad: running, pid {st['pid']}, user {st['user']}")
         print(f"  rdma socket: {st['rdma_socket']}")
         print(f"  net socket:  {st['net_socket']}")
+        print(f"  link faults: {st['ctl_socket']} (ltvm vm link)")
         print(f"  log:         {st['log']}")
         if st["cpus"]:
             print(f"  cpus:        {st['cpus']}")

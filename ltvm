@@ -240,6 +240,7 @@ try:
         cmd_uninstall,
         cmd_update,
         cmd_validate,
+        cmd_vm_link,
         cmd_vm_set,
         cmd_vm_shmrdmad,
         cmd_vm_start,
@@ -1715,13 +1716,16 @@ def build_parser() -> argparse.ArgumentParser:
             "omit its 'bdf=' key.  node=N (tcp, softroce) puts the NIC "
             "on guest NUMA node N of --numa-nodes. net= groups NICs on "
             "one LNet network; subnet= and subnet6= choose their IPv4 "
-            "and IPv6 data networks (tcp, softroce, shmnet only).  "
+            "and IPv6 data networks (not passthrough).  "
             "'shmnet[:SOCKET]' is a virtio-net NIC on shmrdmad's "
             "host-memory switch instead of the bridge; the guest "
             "configures it as a tcp NIC (see --shmrdma), queues=N "
             "(1-8) gives it N queue pairs, and tso=off has the switch "
             "deliver MSS-sized TCP segments to it rather than 64 KB "
-            "frames.  speed=MBPS (tcp, softroce) is the link speed the "
+            "frames.  'shmrdma' is a shmnet NIC with a shmrdma RDMA "
+            "device bound to it (o2ib, one more rail per NIC; see "
+            "`ltvm vm link` for taking it down).  "
+            "speed=MBPS (tcp, softroce) is the link speed the "
             "NIC advertises, "
             f"default {DEFAULT_SPEED}; speed=0 or speed=none advertises "
             "none, as upstream CI's VMs do."
@@ -2148,6 +2152,68 @@ def build_parser() -> argparse.ArgumentParser:
         "stop working until they restart)",
     )
     vshp.set_defaults(func=cmd_vm_shmrdmad)
+
+    vlinkp = vm_sub.add_parser(
+        "link",
+        parents=[common],
+        help="Take a VM's link down or up, or delay, lose or rate-limit "
+        "it (links on shmrdmad: shmnet and shmrdma NICs, and eth0's "
+        "RDMA device under --shmrdma)",
+        description="down is silent to the far end, as a dead switch "
+        "port: RDMA sends to it wait until their retries run out, and "
+        "frames are dropped.  The VM's own NIC loses carrier as well "
+        "unless --silent (never eth0, which ssh uses).  up clears every "
+        "fault on the link.  set replaces the link's faults with those "
+        "given.",
+    )
+    vlinkp.add_argument("name", help="VM name")
+    vlinkp.add_argument(
+        "nic", nargs="?", help="eth0, eth1, ... (show: all, when omitted)"
+    )
+    vlinkp.add_argument(
+        "action",
+        nargs="?",
+        default="show",
+        choices=["show", "down", "up", "set"],
+    )
+    vlinkp.add_argument(
+        "--delay", type=float, metavar="MS", help="added one-way latency"
+    )
+    vlinkp.add_argument(
+        "--loss",
+        type=float,
+        metavar="PCT",
+        help="packets lost: frames and RDMA UD sends dropped, RC "
+        "messages sent again after the QP's ack timeout",
+    )
+    vlinkp.add_argument(
+        "--rate", type=float, metavar="MBIT", help="rate limit each way"
+    )
+    vlinkp.add_argument(
+        "--retry",
+        type=float,
+        metavar="MS",
+        help="while down, fail RDMA sends after this long instead of "
+        "the QP's own retry time (4.096 us << timeout, retry_cnt + 1 "
+        "times)",
+    )
+    vlinkp.add_argument(
+        "--down",
+        action="store_true",
+        help="with set: down as well as the other faults",
+    )
+    vlinkp.add_argument(
+        "--silent",
+        action="store_true",
+        help="leave the VM's own carrier as it is",
+    )
+    vlinkp.add_argument(
+        "--carrier-only",
+        action="store_true",
+        help="down: only drop the NIC's carrier (any extra NIC, bridge "
+        "ones included)",
+    )
+    vlinkp.set_defaults(func=cmd_vm_link)
 
     def _vm_no_action(args: argparse.Namespace) -> int:
         vm_parser.print_help()

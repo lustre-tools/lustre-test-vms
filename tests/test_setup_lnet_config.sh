@@ -146,6 +146,18 @@ check "cli: fc_shmrdma=1 with one named of two extras" \
 	'options lnet networks="o2ib0(eth0),tcp5(eth2)"' \
 	"$(run_cli 'fc_shmrdma=1 fc_nics=tcp,tcp fc_nic_nets=,tcp5')"
 
+check "cli: fc_nics=shmrdma,shmrdma -> o2ib" \
+	'options lnet networks="o2ib0(eth1),o2ib1(eth2)"' \
+	"$(run_cli 'fc_nics=shmrdma,shmrdma')"
+
+check "cli: shmrdma NICs named onto one net are its rails" \
+	'options lnet networks="o2ib0(eth1,eth2)"' \
+	"$(run_cli 'fc_nics=shmrdma,shmrdma fc_nic_nets=o2ib0,o2ib0')"
+
+check "cli: fc_shmrdma=1 keeps an unnamed shmrdma NIC" \
+	'options lnet networks="o2ib0(eth0),o2ib1(eth1)"' \
+	"$(run_cli 'fc_shmrdma=1 fc_nics=shmrdma')"
+
 check "cli: fc_nics=passthrough (mgmt SSH-only)" \
 	'options lnet networks="o2ib0(@ib-of-eth1))"' \
 	"$(run_cli 'fc_nics=passthrough')"

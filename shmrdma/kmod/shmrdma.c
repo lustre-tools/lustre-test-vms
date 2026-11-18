@@ -31,7 +31,7 @@
 
 static char *netdev = "eth0";
 module_param(netdev, charp, 0444);
-MODULE_PARM_DESC(netdev, "netdev whose IP addresses give the GIDs");
+MODULE_PARM_DESC(netdev, "netdev whose IP addresses give the GIDs, for a device tagged plain shmrdma (shmrdma@IFNAME names its own)");
 
 #define SHMRDMA_EQ_ENTRIES	16384
 #define SHMRDMA_EQ_BUDGET	1024	/* EQEs per pass with interrupts off */
@@ -57,6 +57,8 @@ struct shmrdma_dev {
 	struct net_device __rcu *ndev;
 	struct notifier_block nb;
 	bool nb_registered;
+	/* the port state last reported, under rtnl */
+	bool port_up;
 
 	struct mutex ctrl_mutex;
 	struct completion ctrl_done;
@@ -594,20 +596,28 @@ static int shmrdma_query_device(struct ib_device *ibdev,
 	return 0;
 }
 
-static int shmrdma_query_port(struct ib_device *ibdev, u32 port,
-			      struct ib_port_attr *attr)
+static bool shmrdma_port_up(struct shmrdma_dev *dev)
 {
-	struct shmrdma_dev *dev = to_sdev(ibdev);
 	struct net_device *ndev;
 	bool up;
 
-	if (port != 1)
-		return -EINVAL;
 	rcu_read_lock();
 	ndev = rcu_dereference(dev->ndev);
 	up = ndev && netif_running(ndev) && netif_carrier_ok(ndev) &&
 	     !READ_ONCE(dev->broken);
 	rcu_read_unlock();
+	return up;
+}
+
+static int shmrdma_query_port(struct ib_device *ibdev, u32 port,
+			      struct ib_port_attr *attr)
+{
+	struct shmrdma_dev *dev = to_sdev(ibdev);
+	bool up;
+
+	if (port != 1)
+		return -EINVAL;
+	up = shmrdma_port_up(dev);
 	attr->state = up ? IB_PORT_ACTIVE : IB_PORT_DOWN;
 	attr->phys_state = up ? IB_PORT_PHYS_STATE_LINK_UP :
 				IB_PORT_PHYS_STATE_DISABLED;
@@ -1295,6 +1305,13 @@ static int shmrdma_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 		cmd.modify_qp.mask |= SHMRDMA_MQ_ACCESS;
 		cmd.modify_qp.access = acc_bits(attr->qp_access_flags);
 	}
+	if (mask & (IB_QP_TIMEOUT | IB_QP_RETRY_CNT)) {
+		cmd.modify_qp.mask |= SHMRDMA_MQ_TIMEOUT;
+		cmd.modify_qp.timeout = mask & IB_QP_TIMEOUT ? attr->timeout :
+					qp->attr.timeout;
+		cmd.modify_qp.retry_cnt = mask & IB_QP_RETRY_CNT ?
+					  attr->retry_cnt : qp->attr.retry_cnt;
+	}
 
 	if (cmd.modify_qp.mask) {
 		rc = shmrdma_cmd(dev, &cmd, NULL);
@@ -1855,7 +1872,25 @@ static int shmrdma_netdev_event(struct notifier_block *nb,
 	struct shmrdma_dev *dev = container_of(nb, struct shmrdma_dev, nb);
 	struct net_device *ndev = netdev_notifier_info_to_dev(ptr);
 
-	if (event != NETDEV_UNREGISTER || ndev != rtnl_dereference(dev->ndev))
+	if (ndev != rtnl_dereference(dev->ndev))
+		return NOTIFY_DONE;
+	if (event == NETDEV_UP || event == NETDEV_DOWN ||
+	    event == NETDEV_CHANGE) {
+		/* the port follows its netdev's link, as a RoCE HCA's does */
+		bool up = shmrdma_port_up(dev);
+		struct ib_event ev = {
+			.device = &dev->ibdev,
+			.event = up ? IB_EVENT_PORT_ACTIVE : IB_EVENT_PORT_ERR,
+			.element.port_num = 1,
+		};
+
+		if (up != dev->port_up && READ_ONCE(dev->registered)) {
+			dev->port_up = up;
+			ib_dispatch_event(&ev);
+		}
+		return NOTIFY_DONE;
+	}
+	if (event != NETDEV_UNREGISTER)
 		return NOTIFY_DONE;
 	ib_device_set_netdev(&dev->ibdev, NULL, 1);
 	RCU_INIT_POINTER(dev->ndev, NULL);
@@ -1916,10 +1951,15 @@ static int shmrdma_probe(struct virtio_device *vdev)
 	int rc, i;
 
 	char tag[sizeof_field(struct virtio_fs_config, tag) + 1] = "";
+	const char *ifname = netdev;
 
 	virtio_cread_bytes(vdev, offsetof(struct virtio_fs_config, tag), tag,
 			   sizeof(tag) - 1);
-	if (strcmp(tag, SHMRDMA_TAG))
+	/* "shmrdma", or "shmrdma@IFNAME" for a device bound to IFNAME */
+	if (!strncmp(tag, SHMRDMA_TAG "@", sizeof(SHMRDMA_TAG)) &&
+	    tag[sizeof(SHMRDMA_TAG)])
+		ifname = tag + sizeof(SHMRDMA_TAG);
+	else if (strcmp(tag, SHMRDMA_TAG))
 		return -ENODEV;
 	rc = shmrdma_check_dma(vdev->dev.parent);
 	if (rc) {
@@ -1929,10 +1969,18 @@ static int shmrdma_probe(struct virtio_device *vdev)
 		return rc;
 	}
 
-	ndev = dev_get_by_name(&init_net, netdev);
+	/*
+	 * Its NIC may probe after it: try again when another device binds.
+	 * virtiofs, loading after this module, may take it meanwhile; the
+	 * boot hook (shmrdma-boot.sh) hands it back.  Reset it first, so a
+	 * later probe starts from a device with no queues set up.
+	 */
+	ndev = dev_get_by_name(&init_net, ifname);
 	if (!ndev) {
-		dev_err(&vdev->dev, "no netdev %s\n", netdev);
-		return -ENODEV;
+		dev_info(&vdev->dev, "no netdev %s yet\n", ifname);
+		virtio_reset_device(vdev);
+		virtio_add_status(vdev, VIRTIO_CONFIG_S_ACKNOWLEDGE);
+		return -EPROBE_DEFER;
 	}
 	dev = ib_alloc_device(shmrdma_dev, ibdev);
 	if (!dev) {
@@ -2019,6 +2067,7 @@ static int shmrdma_probe(struct virtio_device *vdev)
 	/* an unregister before the notifier was registered was not seen */
 	rc = ndev && ndev->reg_state == NETREG_REGISTERED ?
 	     ib_device_set_netdev(&dev->ibdev, ndev, 1) : -ENODEV;
+	dev->port_up = !rc && shmrdma_port_up(dev);
 	rtnl_unlock();
 	if (rc)
 		goto err_reset;
@@ -2034,7 +2083,7 @@ static int shmrdma_probe(struct virtio_device *vdev)
 		schedule_work(&dev->fatal_work);
 	mutex_unlock(&dev->ctrl_mutex);
 	dev_info(&vdev->dev, "%s on %s, backend dev%u, ABI %u\n",
-		 dev_name(&dev->ibdev.dev), netdev, (u32)resp.val,
+		 dev_name(&dev->ibdev.dev), ifname, (u32)resp.val,
 		 SHMRDMA_ABI_VERSION);
 	return 0;
 

@@ -12,12 +12,24 @@ EID=LTVM-SHMRDMA
 # shmrdma.ko can load, which the modprobe.d softdep cannot order: hand
 # it over.
 for tag in /sys/fs/virtiofs/*/tag; do
-	[[ -r $tag && $(< "$tag") == shmrdma ]] || continue
+	[[ -r $tag ]] || continue
+	t=$(< "$tag")
+	[[ $t == shmrdma || $t == shmrdma@* ]] || continue
 	dev=$(basename "$(readlink -f "${tag%/tag}/device")")
 	[[ -e /sys/bus/virtio/drivers/virtiofs/$dev ]] || continue
 	modprobe shmrdma || exit 1
 	echo "$dev" > /sys/bus/virtio/drivers/virtiofs/unbind || exit 1
 	echo "$dev" > /sys/bus/virtio/drivers/shmrdma/bind || exit 1
+done
+
+# A device bound to its own NIC (shmrdma@ethN) whose probe found no
+# ethN yet waits for another driver to bind; virtiofs takes it above
+# when it loads after, and here a device still unbound is offered to
+# shmrdma, which refuses one tagged for anything else.
+for d in /sys/bus/virtio/devices/*; do
+	[[ -e $d/driver || $(< "$d/device") != 0x001a ]] && continue
+	modprobe shmrdma || exit 1
+	echo "$(basename "$d")" > /sys/bus/virtio/drivers/shmrdma/bind 2> /dev/null
 done
 
 [[ -d /sys/module/smc ]] || modinfo smc &> /dev/null || exit 0
