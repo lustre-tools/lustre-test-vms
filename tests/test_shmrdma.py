@@ -590,12 +590,23 @@ def test_kmod_sources_feed_image_hash(tmp_path: Path) -> None:
         assert tc.input_hash("image") != before
 
 
+@pytest.fixture(scope="session")
+def daemon_cache(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """An XDG cache shared by the tests that run the daemon, so they
+    compile shmrdmad once between them; the build has its own tests."""
+    return tmp_path_factory.mktemp("shmrdmad-cache")
+
+
 @pytest.mark.skipif(
     not (shutil.which("cc") or shutil.which("gcc")),
     reason="needs a C compiler",
 )
-def test_daemon_unpinned_without_taskset(tmp_vmdir: Path, monkeypatch) -> None:  # noqa: F811
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_vmdir / "cache"))
+def test_daemon_unpinned_without_taskset(
+    tmp_vmdir: Path,  # noqa: F811
+    daemon_cache: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(daemon_cache))
     which = shutil.which
     with (
         patch("ltvm_pkg.qemu_run._guest_scope", return_value=[]),
@@ -616,8 +627,12 @@ def test_daemon_unpinned_without_taskset(tmp_vmdir: Path, monkeypatch) -> None: 
     not (shutil.which("cc") or shutil.which("gcc")),
     reason="needs a C compiler",
 )
-def test_daemon_start_status_stop(tmp_vmdir: Path, monkeypatch) -> None:  # noqa: F811
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_vmdir / "cache"))
+def test_daemon_start_status_stop(
+    tmp_vmdir: Path,  # noqa: F811
+    daemon_cache: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(daemon_cache))
     with (
         patch("ltvm_pkg.qemu_run._guest_scope", return_value=[]),
     ):
@@ -644,9 +659,13 @@ def test_daemon_start_status_stop(tmp_vmdir: Path, monkeypatch) -> None:  # noqa
     not (shutil.which("cc") or shutil.which("gcc")),
     reason="needs a C compiler",
 )
-def test_daemon_starts_when_scope_refused(tmp_vmdir: Path, monkeypatch) -> None:  # noqa: F811
+def test_daemon_starts_when_scope_refused(
+    tmp_vmdir: Path,  # noqa: F811
+    daemon_cache: Path,
+    monkeypatch,
+) -> None:
     """As QEMU's launch: a refused systemd-run scope is retried without."""
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_vmdir / "cache"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(daemon_cache))
     fake = tmp_vmdir / "systemd-run"
     fake.write_text(
         "#!/bin/sh\necho 'Failed to start transient scope unit: x' >&2\nexit 1\n"

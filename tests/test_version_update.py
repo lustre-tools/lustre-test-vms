@@ -615,39 +615,37 @@ class TestVersionRefreshAfterUpdate:
     def test_refresh_picks_up_rewritten_build_info(
         self, tmp_path: Path, monkeypatch: Any
     ) -> None:
-        import importlib
+        import importlib.util
         import sys as _sys
 
         import ltvm_pkg
 
-        pkg_dir = Path(ltvm_pkg.__file__).parent
-        build_info = pkg_dir / "_build_info.py"
-        original = build_info.read_text() if build_info.exists() else None
+        # A _build_info.py of the test's own: the checkout's is read by
+        # every test running beside this one, and by the developer.
+        monkeypatch.setattr(ltvm_pkg, "__file__", str(tmp_path / "x.py"))
+        build_info = tmp_path / "_build_info.py"
+        build_info.write_text('VERSION = "0.5.1+aaaaaaa"\n')
+        # Prime both caches the way package import does.
+        spec = importlib.util.spec_from_file_location(
+            "ltvm_pkg._build_info", build_info
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        monkeypatch.setitem(_sys.modules, "ltvm_pkg._build_info", module)
+        assert ltvm_pkg._compute_version(refresh=True).endswith("+aaaaaaa")
 
-        try:
-            build_info.write_text('VERSION = "0.5.1+aaaaaaa"\n')
-            # Prime both caches the way package import does.
-            _sys.modules.pop("ltvm_pkg._build_info", None)
-            importlib.import_module("ltvm_pkg._build_info")
-            assert ltvm_pkg._compute_version(refresh=True).endswith("+aaaaaaa")
+        # cmd_update rewrites the file with the post-pull hash.
+        # Same length as the previous content, written within the
+        # same second -- so a .pyc revalidated on (mtime, size) is
+        # still considered current, which is why re-importing is
+        # not enough and the refresh path reads the file.
+        build_info.write_text('VERSION = "0.5.2+bbbbbbb"\n')
 
-            # cmd_update rewrites the file with the post-pull hash.
-            # Same length as the previous content, written within the
-            # same second -- so a .pyc revalidated on (mtime, size) is
-            # still considered current, which is why re-importing is
-            # not enough and the refresh path reads the file.
-            build_info.write_text('VERSION = "0.5.2+bbbbbbb"\n')
-
-            # The already-imported module still holds the old hash...
-            assert ltvm_pkg._compute_version().endswith("+aaaaaaa")
-            # ...and refresh reports what is actually on disk.
-            assert ltvm_pkg._compute_version(refresh=True).endswith("+bbbbbbb")
-        finally:
-            if original is not None:
-                build_info.write_text(original)
-            elif build_info.exists():
-                build_info.unlink()
-            _sys.modules.pop("ltvm_pkg._build_info", None)
+        # The already-imported module still holds the old hash...
+        assert ltvm_pkg._compute_version().endswith("+aaaaaaa")
+        # ...and refresh reports what is actually on disk.
+        assert ltvm_pkg._compute_version(refresh=True).endswith("+bbbbbbb")
 
 
 class TestUpdateKeepsCheckoutOwnership:

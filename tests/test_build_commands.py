@@ -1681,6 +1681,11 @@ class TestWarnLowDisk:
 
         monkeypatch.setattr(cfg, "ARTIFACTS_DIR", tmp_path / "artifacts")
         monkeypatch.setattr(_build_mod.Path, "home", lambda: tmp_path)
+        # A store on the same filesystem as the artifacts.
+        monkeypatch.setattr(
+            "ltvm_pkg.release_build.podman_store",
+            lambda: tmp_path / "storage",
+        )
         with patch.object(
             _build_mod.shutil,
             "disk_usage",
@@ -1700,6 +1705,10 @@ class TestWarnLowDisk:
         import ltvm_pkg.target_config as cfg
 
         monkeypatch.setattr(cfg, "ARTIFACTS_DIR", tmp_path / "artifacts")
+        monkeypatch.setattr(
+            "ltvm_pkg.release_build.podman_store",
+            lambda: tmp_path / "storage",
+        )
         with patch.object(
             _build_mod.shutil,
             "disk_usage",

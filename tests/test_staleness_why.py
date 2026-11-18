@@ -47,16 +47,21 @@ class TestInputComponents:
     def test_a_changed_file_changes_only_its_component(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        import shutil
+
+        import ltvm_pkg.target_config as cfg
+
+        # A copy of the real targets: other tests hash the real ones,
+        # in parallel with this one.
+        targets = tmp_path / "targets"
+        shutil.copytree(cfg.TARGETS_DIR, targets)
+        monkeypatch.setattr(cfg, "TARGETS_DIR", targets)
+        monkeypatch.setattr(cfg, "TARGETS_YAML", targets / "targets.yaml")
         tc = TargetConfig("rocky9")
         before = tc.input_components("container")
-        # Rewrite one hashed file through the real path it is read from.
-        real = Path("targets/common/build-e2fsprogs.sh")
-        original = real.read_bytes()
-        try:
-            real.write_bytes(original + b"\n# tweak\n")
-            after = TargetConfig("rocky9").input_components("container")
-        finally:
-            real.write_bytes(original)
+        script = targets / "common" / "build-e2fsprogs.sh"
+        script.write_bytes(script.read_bytes() + b"\n# tweak\n")
+        after = TargetConfig("rocky9").input_components("container")
         changed = [k for k in after if before.get(k) != after[k]]
         assert changed == ["common/build-e2fsprogs.sh"]
 

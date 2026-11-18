@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import tempfile
 import textwrap
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 import yaml
@@ -98,9 +100,39 @@ def fake_ext4(blocks: int = 2) -> bytes:
     return bytes(data)
 
 
+def _returns(value: object = None) -> Callable[..., object]:
+    """A stand-in that returns *value*, for the autouse fixtures.
+
+    Making a MagicMock costs far more than the call it replaces, and
+    these fixtures replace about twenty functions for every test.
+    """
+
+    def stub(*_a: object, **_k: object) -> object:
+        return value
+
+    return stub
+
+
+@pytest.fixture(scope="session")
+def _scratch_base(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One directory for the autouse fixtures' per-test scratch dirs.
+
+    tmp_path_factory.mktemp() picks its number by scanning every entry
+    already in the base temp dir, so calling it several times per test
+    made fixture setup quadratic in the size of the suite: most of the
+    suite's run time.  mkdtemp() under this directory costs the same at
+    the last test as at the first.
+    """
+    return tmp_path_factory.mktemp("scratch", numbered=False)
+
+
+def _scratch(base: Path, name: str) -> Path:
+    return Path(tempfile.mkdtemp(prefix=f"{name}-", dir=base))
+
+
 @pytest.fixture(autouse=True)
 def _isolate_user_state(
-    tmp_path_factory: pytest.TempPathFactory,
+    _scratch_base: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> object:
     """Keep the suite out of the developer's real config and state.
@@ -121,7 +153,7 @@ def _isolate_user_state(
     ls-remote` once per test, so it is patched out.  Both have their
     own tests, which set up their own isolation.
     """
-    root = tmp_path_factory.mktemp("xdg")
+    root = _scratch(_scratch_base, "xdg")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(root / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(root / "state"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(root / "cache"))
@@ -193,13 +225,13 @@ def _isolate_user_state(
     # no patch: the env above disables it through its own front door,
     # so the tests exercise the real disabled path.
     with patch(
-        "ltvm_pkg.update_check.maybe_check_for_updates", return_value=None
+        "ltvm_pkg.update_check.maybe_check_for_updates", new=_returns(None)
     ):
         yield
 
 
 @pytest.fixture(autouse=True)
-def _isolate_vm_state(tmp_path_factory: pytest.TempPathFactory) -> object:
+def _isolate_vm_state(_scratch_base: Path) -> object:
     """Keep VM and cluster records out of the host's real sockets dir.
 
     Tests name their fixtures after real clusters (co2, co3), so a save
@@ -208,26 +240,26 @@ def _isolate_vm_state(tmp_path_factory: pytest.TempPathFactory) -> object:
     that needs its own directory patches SOCKETS again inside this one.
     """
     with (
-        patch("ltvm_pkg.vm_state.SOCKETS", tmp_path_factory.mktemp("sockets")),
+        patch("ltvm_pkg.vm_state.SOCKETS", _scratch(_scratch_base, "sockets")),
         # `ltvm clean` reads every overlay's backing file
         # (image_store.referenced_images); the host's VMs must not
         # decide what a test may prune.
         patch(
-            "ltvm_pkg.vm_state.OVERLAYS", tmp_path_factory.mktemp("overlays")
+            "ltvm_pkg.vm_state.OVERLAYS", _scratch(_scratch_base, "overlays")
         ),
     ):
         yield
 
 
 @pytest.fixture(autouse=True)
-def _isolate_cpufreq(tmp_path_factory: pytest.TempPathFactory) -> object:
+def _isolate_cpufreq(_scratch_base: Path) -> object:
     """Keep doctor and install off the host's real cpufreq sysfs.
 
     On a host running schedutil every doctor test would see an issue,
     and a --fix test would set the real governor and write the real
     /etc/tmpfiles.d line.
     """
-    tmp = tmp_path_factory.mktemp("cpufreq")
+    tmp = _scratch(_scratch_base, "cpufreq")
     with (
         patch("ltvm_pkg.host_cpufreq.SYSFS_CPU", tmp / "cpu"),
         patch("ltvm_pkg.host_cpufreq.TMPFILES", tmp / "ltvm-cpufreq.conf"),
@@ -246,16 +278,16 @@ def _neutralize_podman_preflight() -> object:
     with (
         patch(
             "ltvm_pkg.cli.build.check_podman_machine_macos",
-            return_value=None,
+            new=_returns(None),
         ),
-        patch("ltvm_pkg.release_package._ensure_podman", return_value=None),
+        patch("ltvm_pkg.release_package._ensure_podman", new=_returns(None)),
     ):
         yield
 
 
 @pytest.fixture(autouse=True)
 def _isolate_podman_usage_lock(
-    tmp_path_factory: pytest.TempPathFactory,
+    _scratch_base: Path,
 ) -> object:
     """Keep the podman usage lock off the real one in /tmp.
 
@@ -267,7 +299,7 @@ def _isolate_podman_usage_lock(
 
     import ltvm_pkg.host_setup as hs
 
-    lock = tmp_path_factory.mktemp("podman-lock") / "podman.lock"
+    lock = _scratch(_scratch_base, "podman-lock") / "podman.lock"
     hs._usage_fd = None
     # Nor may a test start the detached idle-stop waiter for real, nor
     # the last start's rescue (a real Popen of `podman machine start`):
@@ -275,14 +307,14 @@ def _isolate_podman_usage_lock(
     # is one more podman command the start tests would have to script.
     with (
         patch.object(hs, "_podman_lock_path", lambda: lock),
-        patch.object(hs, "schedule_idle_stop"),
-        patch("ltvm_pkg.cli.build.schedule_idle_stop"),
+        patch.object(hs, "schedule_idle_stop", new=_returns()),
+        patch("ltvm_pkg.cli.build.schedule_idle_stop", new=_returns()),
         patch.object(
             hs,
             "_start_rescuing",
             lambda: hs._podman_machine_cmd("start", timeout=180),
         ),
-        patch.object(hs, "_tune_machine_boot"),
+        patch.object(hs, "_tune_machine_boot", new_callable=Mock),
     ):
         yield
     if hs._usage_fd is not None:
@@ -299,7 +331,7 @@ def _neutralize_container_preflight() -> object:
     podman state, so treat the preflight as a pass unless a test opts
     out by re-patching ``_preflight_container``.
     """
-    with patch("ltvm_pkg.cli.build._preflight_container", return_value=None):
+    with patch("ltvm_pkg.cli.build._preflight_container", new=_returns(None)):
         yield
 
 
@@ -310,7 +342,7 @@ def _neutralize_ssh_config_check() -> object:
     tests/test_vm_doctor.py::TestDoctorSshClientConfig opts back in.
     """
     with patch(
-        "ltvm_pkg.vm_commands.ssh_client_config_error", return_value=None
+        "ltvm_pkg.vm_commands.ssh_client_config_error", new=_returns(None)
     ):
         yield
 
@@ -328,10 +360,10 @@ def _classic_privileges() -> object:
         patch.object(
             rootless,
             "readiness",
-            return_value=rootless.Readiness(problems=["disabled in tests"]),
+            new=_returns(rootless.Readiness(problems=["disabled in tests"])),
         ),
-        patch.object(rootless, "hosts_dir_writable", return_value=False),
-        patch.object(rootless, "hosts_entries", return_value=[]),
+        patch.object(rootless, "hosts_dir_writable", new=_returns(False)),
+        patch.object(rootless, "hosts_entries", new=_returns([])),
     ):
         yield
 
@@ -470,7 +502,7 @@ def _neutralize_deployed_fstype() -> object:
     it was deployed with; the tests' clusters have no real nodes.
     tests/test_cluster_logic.py::TestDeployedFstype covers the reader.
     """
-    with patch("ltvm_pkg.vm_cluster._deployed_fstype", return_value=None):
+    with patch("ltvm_pkg.vm_cluster._deployed_fstype", new=_returns(None)):
         yield
 
 
@@ -485,7 +517,7 @@ def _no_real_node_create() -> object:
     def refuse(cmd: object, *_a: object, **_k: object) -> None:
         raise AssertionError(f"test ran a real child command: {cmd}")
 
-    with patch("ltvm_pkg.vm_cluster._run_prefixed", side_effect=refuse):
+    with patch("ltvm_pkg.vm_cluster._run_prefixed", new=refuse):
         yield
 
 
@@ -495,7 +527,7 @@ def _neutralize_guest_memory_budget() -> object:
 
     Tests that check either patch it with a budget of their own.
     """
-    with patch("ltvm_pkg.qemu_run.guest_memory_budget", return_value=None):
+    with patch("ltvm_pkg.qemu_run.guest_memory_budget", new=_returns(None)):
         yield
 
 
@@ -507,7 +539,7 @@ def _neutralize_ensure_pdsh() -> object:
     """
     with patch(
         "ltvm_pkg.vm_cluster._ensure_pdsh",
-        side_effect=lambda name, *a, **k: (name, 0, ""),
+        new=lambda name, *a, **k: (name, 0, ""),
     ):
         yield
 
@@ -517,7 +549,7 @@ def _neutralize_guest_helpers() -> object:
     """Keep cluster deploy from writing the guest helpers over ssh."""
     with patch(
         "ltvm_pkg.vm_cluster._install_guest_helpers",
-        side_effect=lambda name, *a, **k: (name, 0, ""),
+        new=lambda name, *a, **k: (name, 0, ""),
     ):
         yield
 
@@ -528,7 +560,7 @@ def _neutralize_lustre_state() -> object:
 
     tests/test_cluster_lustre_state.py covers it.
     """
-    with patch("ltvm_pkg.cluster_lustre_state.lustre_state", return_value=[]):
+    with patch("ltvm_pkg.cluster_lustre_state.lustre_state", new=_returns([])):
         yield
 
 
@@ -540,7 +572,7 @@ def _neutralize_podman_gc() -> object:
     returning None the store looks empty.  tests/test_podman_gc.py
     patches it again for its own cases.
     """
-    with patch("ltvm_pkg.podman_gc._podman", return_value=None):
+    with patch("ltvm_pkg.podman_gc._podman", new=_returns(None)):
         yield
 
 
@@ -553,10 +585,10 @@ def _neutralize_host_clean_state() -> object:
     image files no overlay on the host uses.  Each has its own tests.
     """
     with (
-        patch("ltvm_pkg.cli.clean._idle_vms", return_value=[]),
-        patch("ltvm_pkg.cli.clean._vm_kernel_dirs", return_value=set()),
-        patch("ltvm_pkg.cli.build._warn_low_disk"),
-        patch("ltvm_pkg.image_build.prune_superseded", return_value=0),
+        patch("ltvm_pkg.cli.clean._idle_vms", new=_returns([])),
+        patch("ltvm_pkg.cli.clean._vm_kernel_dirs", new=_returns(set())),
+        patch("ltvm_pkg.cli.build._warn_low_disk", new=_returns()),
+        patch("ltvm_pkg.image_build.prune_superseded", new=_returns(0)),
     ):
         yield
 
@@ -570,15 +602,15 @@ def _neutralize_default_branch_check() -> object:
     inputs all committed.
     tests/test_keyed_releases.py covers each."""
     with (
-        patch("ltvm_pkg.release_tags.default_branch_head", return_value=None),
-        patch("ltvm_pkg.release_tags.checkout_problem", return_value=None),
+        patch("ltvm_pkg.release_tags.default_branch_head", new=_returns(None)),
+        patch("ltvm_pkg.release_tags.checkout_problem", new=_returns(None)),
         patch(
             "ltvm_pkg.release_tags.uncommitted_inputs",
-            side_effect=lambda ids: {tuple(i): [] for i in ids},
+            new=lambda ids: {tuple(i): [] for i in ids},
         ),
         patch(
             "ltvm_pkg.cli._gh_release_info",
-            return_value={"state": "absent", "body": "", "assets": []},
+            new=_returns({"state": "absent", "body": "", "assets": []}),
         ),
     ):
         yield

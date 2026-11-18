@@ -53,4 +53,4 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: pytest
-        run: uv run --locked pytest -q --no-cov -p no:cacheprovider
+        run: uv run --locked pytest -q --no-cov -p no:cacheprovider -n auto

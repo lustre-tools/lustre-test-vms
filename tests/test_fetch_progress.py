@@ -325,7 +325,7 @@ class TestDownloadDrivesTheBar:
             "with open(dest, 'wb', buffering=0) as f:\n"
             f"    for _ in range({chunks}):\n"
             "        f.write(b'x' * 1024)\n"
-            "        time.sleep(0.4)\n"
+            "        time.sleep(0.1)\n"
         )
         curl.chmod(0o755)
         return bindir
@@ -336,6 +336,7 @@ class TestDownloadDrivesTheBar:
         monkeypatch.setenv(
             "PATH", f"{self._fake_curl(tmp_path)}:{os.environ['PATH']}"
         )
+        monkeypatch.setattr(rp, "_PROGRESS_POLL_SECONDS", 0.02)
         seen: list[int] = []
 
         class Recorder:

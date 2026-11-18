@@ -499,20 +499,20 @@ class TestStreamTree:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Takes longer in total than the limit, but never stalls."""
-        monkeypatch.setenv("LTVM_DEPLOY_TIMEOUT", "2")
+        monkeypatch.setattr(deploy, "step_timeout", lambda: 0.6)
         monkeypatch.setattr(deploy, "_CHUNK", 64 * 1024)
         (staging / "big").write_bytes(os.urandom(1 << 20))
         root = tmp_path / "root"
         root.mkdir()
-        # Reads 64 KiB every 0.2s: about 3s for the 1 MiB.
+        # Reads 64 KiB every 0.05s: about 0.8s for the 1 MiB.
         slow = (
             "while dd bs=64k count=1 iflag=fullblock status=none "
-            "| grep -qc ''; do sleep 0.2; done"
+            "| grep -qc ''; do sleep 0.05; done"
         )
         start = time.monotonic()
         with self._remote(root, script=slow):
             deploy._stream_tree(_make_vm(ip="10.9.8.7"), staging)
-        assert time.monotonic() - start > 2
+        assert time.monotonic() - start > 0.6
 
     def test_stall_is_stopped_and_named(
         self,
@@ -520,14 +520,14 @@ class TestStreamTree:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setenv("LTVM_DEPLOY_TIMEOUT", "1")
+        monkeypatch.setattr(deploy, "step_timeout", lambda: 0.3)
         (staging / "big").write_bytes(os.urandom(4 << 20))
         with self._remote(tmp_path, script="sleep 60"):
             start = time.monotonic()
             with pytest.raises(RuntimeError) as exc:
                 deploy._stream_tree(_make_vm(ip="10.9.8.7"), staging)
         assert time.monotonic() - start < 30
-        assert "no progress for 1s" in str(exc.value)
+        assert "no progress for 0.3s" in str(exc.value)
         assert "LTVM_DEPLOY_TIMEOUT" in str(exc.value)
 
     def test_remote_failure_carries_its_output(

@@ -18,13 +18,18 @@ format:
 typecheck:
 	uv run mypy ltvm ltvm_pkg/
 
+# Tests run in parallel (pytest-xdist): one worker per core, at most
+# eight, past which this suite gets no faster.  A plain `uv run pytest`
+# stays serial, which suits running one file.
+PYTEST_PARALLEL = -n auto --maxprocesses=8
+
 # Run tests (with coverage summary in terminal)
 test:
-	uv run pytest
+	uv run pytest $(PYTEST_PARALLEL)
 
 # Run tests without coverage (faster iteration during development)
 test-fast:
-	uv run pytest --no-cov -q
+	uv run pytest $(PYTEST_PARALLEL) --no-cov -q
 
 # Run end-to-end tests (requires root, KVM, and a built rocky9 image).
 # These drive the real `ltvm` binary; they skip cleanly when the host
@@ -43,7 +48,7 @@ test-sh:
 
 # Run tests + open HTML coverage report
 coverage:
-	uv run pytest --cov-report=html
+	uv run pytest $(PYTEST_PARALLEL) --cov-report=html
 	@echo "Coverage report: htmlcov/index.html"
 
 # CI-friendly check (non-zero exit on any issue)

@@ -15,6 +15,7 @@ dev = [
     "mypy>=1.15",
     "pytest>=8.0",
     "pytest-cov>=6.0",
+    "pytest-xdist>=3.6",
     "ruff>=0.15",
     "types-pyyaml>=6.0",
 ]
@@ -53,6 +54,10 @@ markers = [
 
 [tool.coverage.run]
 source = ["ltvm_pkg"]
+# sys.monitoring (Python 3.12+) measures the same lines at about a
+# third of the old tracer's cost; older Pythons fall back to it.
+core = "sysmon"
+disable_warnings = ["no-sysmon"]
 omit = []
 
 [tool.coverage.report]

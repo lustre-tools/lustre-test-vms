@@ -2292,6 +2292,7 @@ def test_archives_saved_by_id_and_by_tag_load_under_the_tag(
     """Against real podman, with a throwaway image: an archive saved by
     id, as export now writes, and one saved by tag, as releases before
     it carry, both load as the same id under the name loaders use."""
+    import os
     import subprocess
 
     from ltvm_pkg import release_package as rp
@@ -2301,8 +2302,9 @@ def test_archives_saved_by_id_and_by_tag_load_under_the_tag(
             ["podman", *args], capture_output=True, text=True, timeout=120
         )
 
-    src = "localhost/ltvm-pytest-keyed-src:latest"
-    name = "ltvm-pytest-keyed"
+    # Per process: two suites running at once share one podman store.
+    name = f"ltvm-pytest-keyed-{os.getpid()}"
+    src = f"localhost/{name}-src:latest"
     (tmp_path / "f").write_text("x")
     subprocess.run(
         ["tar", "cf", str(tmp_path / "in.tar"), "-C", str(tmp_path), "f"],

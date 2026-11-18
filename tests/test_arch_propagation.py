@@ -337,6 +337,13 @@ class TestCcacheVolumeArch:
     arch builds, otherwise an aarch64 cross-build serves stale x86_64
     object files (and vice versa)."""
 
+    @pytest.fixture(autouse=True)
+    def _own_artifacts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # _ccache_volume makes the directory it names.
+        monkeypatch.setattr("ltvm_pkg.target_config.ARTIFACTS_DIR", tmp_path)
+
     def test_default_arch_volume_name(self) -> None:
         # Post-0e4c1c9: ccache is a host bind-mount path under
         # output_dir, not a named podman volume.  Native x86_64 has

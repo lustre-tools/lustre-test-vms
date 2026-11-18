@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -19,6 +21,36 @@ import pytest
 from ltvm_pkg import release_build as rb
 from ltvm_pkg.cli import release as release_mod
 from ltvm_pkg.cli.fetch import _is_base_stem
+
+
+@pytest.fixture(autouse=True)
+def _sigint_default() -> Iterator[None]:
+    """As cmd_build_release does: a suite run as a background job starts
+    with SIGINT ignored, and the builds these tests stop with it would
+    inherit that and run on."""
+    old = signal.signal(signal.SIGINT, signal.default_int_handler)
+    yield
+    signal.signal(signal.SIGINT, old)
+
+
+@pytest.fixture(autouse=True)
+def _private_locks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Take a run's locks under the test's own directory, not on this
+    checkout's artifacts and this user's cache, which a real release
+    build holds and tests running in parallel share."""
+    from ltvm_pkg.target_config import ARTIFACTS_DIR
+
+    real = rb.lock_paths
+
+    def lock_paths(
+        artifacts: Path, work: Path, home: Path | None = None
+    ) -> list[tuple[Path, str]]:
+        if artifacts == ARTIFACTS_DIR:
+            artifacts = tmp_path / "artifacts"
+        return real(artifacts, work, home or tmp_path / "home")
+
+    monkeypatch.setattr(rb, "lock_paths", lock_paths)
+
 
 DECLARED = {
     "rocky9": ["5.14-rhel9.8", "5.14-rhel9.7"],
@@ -942,6 +974,13 @@ class TestCommand:
         stack.enter_context(
             patch.object(rb, "available_cpus", return_value=None)
         )
+        # Keep the plan off this host's podman and its real artifacts.
+        stack.enter_context(
+            patch("ltvm_pkg.cli.release._new_targets", return_value=0)
+        )
+        stack.enter_context(
+            patch("ltvm_pkg.cli.release._kernel_ccache_room", return_value=[])
+        )
         stack.enter_context(
             patch.object(
                 rb,
@@ -1450,7 +1489,7 @@ def test_a_silent_build_is_stopped_as_stalled(tmp_path: Path) -> None:
 
 def test_a_build_that_keeps_writing_is_not_stalled(tmp_path: Path) -> None:
     script = tmp_path / "chatty.sh"
-    script.write_text("for i in 1 2 3 4 5 6 7 8; do echo $i; sleep 0.2; done\n")
+    script.write_text("for i in 1 2 3 4 5 6; do echo $i; sleep 0.15; done\n")
     runner = rb.Runner(
         ltvm=["bash", str(script)],
         arch="x86_64",

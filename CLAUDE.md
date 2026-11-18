@@ -1591,6 +1591,26 @@ of the developer's real state: XDG config and state, `LTVM_TELEMETRY=0`,
 and `LTVM_COMPLETION_ROOT`.  Add to it rather than patching per test
 whenever a new code path writes outside the repo.
 
+That isolation runs for every one of about 4700 tests, so keep it cheap.
+It replaces functions with plain stubs (`_returns`) rather than
+MagicMocks, which cost more to make than most tests take to run, and
+takes its scratch directories with `_scratch`, not
+`tmp_path_factory.mktemp`: mktemp scans every directory it has made
+before to pick a number, and five calls per test made setup quadratic:
+most of the suite's time.
+
+`make test` and `make test-fast` run the suite in parallel
+(pytest-xdist, up to eight workers: about 20 s, against a minute
+serially), and so does CI.  A plain `uv run pytest` stays serial.  Tests
+running side by side share the checkout, so a test must not write into
+it, not even to restore it afterwards: one that briefly edited a real
+file under `targets/` made other tests see another input hash.  Copy
+what it needs into `tmp_path` and patch the path (`TARGETS_DIR`,
+`ARTIFACTS_DIR`) instead.  Nor may a test hold a host-wide lock or name,
+such as a podman image name, without making it unique to its process.
+A test that waits on a real clock (a stall limit, a poll interval) gets
+the limit patched down or a fake clock, never a sleep of seconds.
+
 ### Interactive container shell
 
 ```bash

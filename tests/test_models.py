@@ -619,9 +619,13 @@ class TestWaitForSsh:
         fail_result = MagicMock()
         fail_result.returncode = 1
 
+        clock = _FakeClock()
         with (
             patch("ltvm_pkg.vm_net.run_ssh", return_value=fail_result),
-            patch("ltvm_pkg.vm_net.time.sleep"),
+            patch(
+                "ltvm_pkg.vm_net.time.monotonic", side_effect=clock.monotonic
+            ),
+            patch("ltvm_pkg.vm_net.time.sleep", side_effect=clock.sleep),
         ):
             with pytest.raises(SystemExit):
                 wait_for_ssh("192.168.100.99", max_wait=3)
