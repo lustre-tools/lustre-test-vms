@@ -1351,7 +1351,14 @@ def _shmrdma_lines(
             "will refuse it"
         )
         return []
-    from .shmrdma import GUEST_FILES, MODPROBE_CONF, SRC_DIR, build_kmod
+    from .shmrdma import (
+        GUEST_FILES,
+        MODPROBE_CONF,
+        PROVIDER_DIR,
+        PROVIDER_FILES,
+        SRC_DIR,
+        build_kmod,
+    )
 
     shm_ko = build_kmod(target_config, kernel, kver)
     if shm_ko is None:
@@ -1372,6 +1379,23 @@ def _shmrdma_lines(
         names.append(f"/usr/local/sbin/{name}")
         lines.append(f"COPY shmrdma/{name} /usr/local/sbin/{name}")
     lines.append(f"RUN chmod 0755 {' '.join(names)}")
+    # The verbs provider: without it (no network, an rdma-core it does
+    # not build against) the device still serves kernel users.  Its
+    # sources stay, for a rebuild after the guest updates rdma-core.
+    prov = shm_dest / "provider"
+    prov.mkdir(exist_ok=True)
+    for rel in PROVIDER_FILES:
+        shutil.copy2(SRC_DIR / rel, prov / Path(rel).name)
+    # Never from the layer cache: one that installed nothing (GitHub
+    # unreachable) would stay so.  It follows this kernel's module, so
+    # no other image shares the layer anyway.
+    lines += [
+        f"COPY shmrdma/provider {PROVIDER_DIR}",
+        f"RUN : build {time.time_ns()}; "
+        f"bash {PROVIDER_DIR}/build-provider.sh {PROVIDER_DIR} || "
+        "echo 'shmrdma provider: not installed; the device serves kernel "
+        "users only'",
+    ]
     return lines
 
 

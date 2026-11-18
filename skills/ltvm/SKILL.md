@@ -521,7 +521,8 @@ memory:
   RDMA device, and LNet comes up on o2ib over it: about 10 to 25 GB/s
   of LNet between two VMs, against about 1 GB/s on the default NIC.
   LNet then runs o2iblnd, not socklnd, so it is not the TCP path CI
-  mostly tests.
+  mostly tests.  Processes can use the device too (perftest, `rping`,
+  `ibv_rc_pingpong`) on images built since the provider was added.
 - `--nic shmnet` adds a TCP NIC on the daemon's switch, so LNet stays
   on socklnd.  It gains less: about 1.5 times the default NIC on slow
   cores, where the guests' own TCP is the limit, and close to o2ib on

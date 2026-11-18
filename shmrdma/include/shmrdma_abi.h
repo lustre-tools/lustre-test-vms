@@ -58,6 +58,7 @@ enum {
 #define SHMRDMA_MAX_CQ		8192	/* cqn < this; also EQ size */
 #define SHMRDMA_MAX_GID		32
 #define SHMRDMA_MAX_FRPL	4096	/* fast-reg page list length */
+#define SHMRDMA_MAX_MR_PAGES	(1u << 22)	/* pages in a REG_MR command */
 #define SHMRDMA_MAX_QP_WR	16384
 #define SHMRDMA_MAX_CQE		(1 << 20)
 #define SHMRDMA_MAX_SGE		16
@@ -154,7 +155,13 @@ struct shmrdma_cq_rec {
 	/* written by the backend */
 	__u32 prod;
 	__u32 err;		/* 1: CQ_ERR raised, read after eq_lost */
-	__u32 pad0[14];
+	/*
+	 * After a reset, by the driver: 1 when a process's CQ filled before
+	 * its QPs' work was all flushed.  The process asks for the rest
+	 * once it has polled (req_notify_cq).
+	 */
+	__u32 flush;
+	__u32 pad0[13];
 	/* written by the guest; arm is cleared by the backend */
 	__u32 cons;
 	__u32 arm;		/* SHMRDMA_CQ_ARM_* */
@@ -295,6 +302,25 @@ enum {
 	SHMRDMA_CMD_DESTROY_QP,
 	SHMRDMA_CMD_DEREG_MR,
 	SHMRDMA_CMD_RESET,
+	/*
+	 * Added without an ABI bump: a backend before them refuses them
+	 * with -EOPNOTSUPP, so a driver asks QUERY and uses the rest only
+	 * when its features say so.
+	 */
+	SHMRDMA_CMD_QUERY = 11,	/* resp.val: SHMRDMA_FEAT_* */
+	SHMRDMA_CMD_REG_MR = 12,
+};
+
+enum {
+	/*
+	 * REG_MR, and QPs created with SHMRDMA_QPF_USER: the backend
+	 * refuses the local DMA key and REG_MR WQEs on them.
+	 */
+	SHMRDMA_FEAT_USER = 1 << 0,
+};
+
+enum {
+	SHMRDMA_QPF_USER = 1 << 0,	/* its rings belong to a process */
 };
 
 enum {
@@ -338,7 +364,7 @@ struct shmrdma_cmd {
 			struct shmrdma_ring_desc sq;
 			struct shmrdma_ring_desc rq;
 			__u32 pdn;	/* protection domain */
-			__u32 pad;
+			__u32 flags;	/* SHMRDMA_QPF_* */
 		} create_qp;
 		struct {
 			__u32 qpn;
@@ -358,6 +384,22 @@ struct shmrdma_cmd {
 		struct {
 			__u32 key;
 		} dereg_mr;
+		/*
+		 * A registration of npages pages of 1 << page_shift bytes.
+		 * dir_gpa holds the GPAs of the 4 KB pages that hold the
+		 * page list, 512 entries each.
+		 */
+		struct {
+			__u32 key;
+			__u32 pdn;
+			__u32 access;	/* SHMRDMA_ACC_* */
+			__u32 page_shift;
+			__u64 iova;
+			__u64 length;
+			__u32 npages;
+			__u32 fpo;	/* offset of iova in the first page */
+			__u64 dir_gpa;
+		} reg_mr;
 		__u8 raw[120];
 	};
 };
@@ -382,6 +424,101 @@ struct shmrdma_resp {
 	__u64 val;		/* INIT: the backend's device number */
 };
 
+/* ---- userspace verbs: the guest driver and the provider library ---- */
+
+/*
+ * A process's CQ or QP lives in one buffer it allocates, page aligned:
+ * the record in the first 4 KB, then the rings, each starting on a
+ * 4 KB boundary.  The driver pins it and hands its pages to the
+ * backend.
+ */
+#define SHMRDMA_UABI_VERSION	1
+
+static inline __u32 shmrdma_pow2(__u32 x)
+{
+	__u32 p = 1;
+
+	while (p < x)
+		p <<= 1;
+	return p;
+}
+
+static inline __u64 shmrdma_ring_bytes(__u32 entries, __u32 esz)
+{
+	return ((__u64)entries * esz + SHMRDMA_RING_PAGE_SIZE - 1) &
+	       ~(__u64)(SHMRDMA_RING_PAGE_SIZE - 1);
+}
+
+struct shmrdma_qp_geom {
+	__u32 sq_entries, rq_entries;
+	__u32 sq_esz, rq_esz;
+	__u32 max_send_sge, max_recv_sge, max_inline;
+	__u32 sq_off, rq_off;	/* of the rings, in a user QP's buffer */
+	__u64 len;		/* of a user QP's buffer */
+};
+
+/* 0, or -1 when the device cannot give these capabilities */
+static inline int shmrdma_qp_geom(__u32 type, __u32 send_wr, __u32 recv_wr,
+				  __u32 send_sge, __u32 recv_sge,
+				  __u32 inline_data, struct shmrdma_qp_geom *g)
+{
+	__u32 s;
+
+	if (send_wr > SHMRDMA_MAX_QP_WR || recv_wr > SHMRDMA_MAX_QP_WR ||
+	    send_sge > SHMRDMA_MAX_SGE || recv_sge > SHMRDMA_MAX_SGE ||
+	    inline_data > 4096 - SHMRDMA_WQE_HDR)
+		return -1;
+	/* a UD WQE's address fields overlap the inline length */
+	if (type != SHMRDMA_QPT_RC && inline_data)
+		return -1;
+	g->sq_entries = shmrdma_pow2(send_wr ? send_wr : 1);
+	g->rq_entries = shmrdma_pow2(recv_wr ? recv_wr : 1);
+	s = 16 * (send_sge ? send_sge : 1);
+	g->sq_esz = shmrdma_pow2(SHMRDMA_WQE_HDR +
+				 (s > inline_data ? s : inline_data));
+	g->rq_esz = shmrdma_pow2(sizeof(struct shmrdma_rq_wqe) +
+				 16 * (recv_sge ? recv_sge : 1));
+	g->max_send_sge = (g->sq_esz - SHMRDMA_WQE_HDR) / 16;
+	if (g->max_send_sge > SHMRDMA_MAX_SGE)
+		g->max_send_sge = SHMRDMA_MAX_SGE;
+	g->max_recv_sge = (g->rq_esz - sizeof(struct shmrdma_rq_wqe)) / 16;
+	if (g->max_recv_sge > SHMRDMA_MAX_SGE)
+		g->max_recv_sge = SHMRDMA_MAX_SGE;
+	g->max_inline = type == SHMRDMA_QPT_RC ?
+			g->sq_esz - SHMRDMA_WQE_HDR : 0;
+	g->sq_off = SHMRDMA_RING_PAGE_SIZE;
+	g->rq_off = g->sq_off + shmrdma_ring_bytes(g->sq_entries, g->sq_esz);
+	g->len = g->rq_off + shmrdma_ring_bytes(g->rq_entries, g->rq_esz);
+	return 0;
+}
+
+/* a user CQ's buffer: the record, then the ring at 4 KB */
+static inline __u64 shmrdma_cq_len(__u32 entries)
+{
+	return SHMRDMA_RING_PAGE_SIZE +
+	       shmrdma_ring_bytes(entries, sizeof(struct shmrdma_cqe));
+}
+
+/* udata of the uverbs commands */
+struct shmrdma_uresp_ctx {
+	__u32 uabi;		/* SHMRDMA_UABI_VERSION */
+	__u32 pad;
+};
+
+struct shmrdma_ucmd_buf {	/* create CQ and create QP */
+	__u64 buf;
+	__u64 len;
+};
+
+struct shmrdma_uresp_cq {
+	__u32 cqn;
+	__u32 entries;
+};
+
+struct shmrdma_uresp_ah {
+	__u8 sgid[16];
+};
+
 #define SHMRDMA_ABI_SIZE(t, n) \
 	_Static_assert(sizeof(struct t) == (n), #t " size is ABI")
 
@@ -398,6 +535,10 @@ SHMRDMA_ABI_SIZE(shmrdma_rq_wqe, 16);
 SHMRDMA_ABI_SIZE(shmrdma_cqe, 32);
 SHMRDMA_ABI_SIZE(shmrdma_cmd, 128);
 SHMRDMA_ABI_SIZE(shmrdma_resp, 16);
+SHMRDMA_ABI_SIZE(shmrdma_uresp_ctx, 8);
+SHMRDMA_ABI_SIZE(shmrdma_ucmd_buf, 16);
+SHMRDMA_ABI_SIZE(shmrdma_uresp_cq, 8);
+SHMRDMA_ABI_SIZE(shmrdma_uresp_ah, 16);
 _Static_assert(offsetof(struct shmrdma_sq_wqe, sge) == SHMRDMA_WQE_HDR,
 	       "SGEs start after the 64-byte WQE header");
 

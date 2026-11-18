@@ -73,6 +73,16 @@ _DAEMON_FILES = (
 KMOD_FILES = ("kmod/shmrdma.c", "kmod/Makefile", "include/shmrdma_abi.h")
 # Baked into the image next to the module, into /usr/local/sbin.
 GUEST_FILES = ("guest/shmrdma-boot.sh", "tools/smc_ueid.py")
+# The libibverbs provider, built in the image against its rdma-core
+# (provider/build-provider.sh), so processes can use the device.
+PROVIDER_FILES = (
+    "provider/build-provider.sh",
+    "provider/CMakeLists.txt",
+    "provider/shmrdma.c",
+    "provider/shmrdma-abi.h",
+    "include/shmrdma_abi.h",
+)
+PROVIDER_DIR = "/usr/local/share/shmrdma-provider"
 
 # Guest modprobe config baked next to the module.  The device is a
 # vhost-user-fs to QEMU, so virtiofs matches it too; loading shmrdma
@@ -105,8 +115,9 @@ def _source_hash(files: tuple[str, ...]) -> str:
 
 
 def kmod_source_hash() -> bytes:
-    """The guest module's sources and boot files, as image inputs."""
-    return _source_hash(KMOD_FILES + GUEST_FILES).encode()
+    """The guest module's sources, boot files and provider, as image
+    inputs."""
+    return _source_hash(KMOD_FILES + GUEST_FILES + PROVIDER_FILES).encode()
 
 
 # --- the guest module -------------------------------------------------

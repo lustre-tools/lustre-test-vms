@@ -1919,12 +1919,14 @@ def test_guest_files_parse() -> None:
     for rel in shmrdma.GUEST_FILES:
         path = shmrdma.SRC_DIR / rel
         assert os.access(path, os.X_OK), rel
-    r = subprocess.run(
-        ["bash", "-n", str(shmrdma.SRC_DIR / "guest/shmrdma-boot.sh")],
-        capture_output=True,
-        text=True,
-    )
-    assert r.returncode == 0, r.stderr
+    for sh in ("guest/shmrdma-boot.sh", "provider/build-provider.sh"):
+        r = subprocess.run(
+            ["bash", "-n", str(shmrdma.SRC_DIR / sh)],
+            capture_output=True,
+            text=True,
+        )
+        assert r.returncode == 0, r.stderr
+    assert os.access(shmrdma.SRC_DIR / "provider/build-provider.sh", os.X_OK)
     compile(
         (shmrdma.SRC_DIR / "tools/smc_ueid.py").read_text(),
         "smc_ueid.py",
@@ -1932,14 +1934,19 @@ def test_guest_files_parse() -> None:
     )
 
 
-def test_guest_files_feed_image_hash(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "rel",
+    ["guest/shmrdma-boot.sh", "provider/shmrdma.c", "include/shmrdma_abi.h"],
+)
+def test_guest_files_feed_image_hash(tmp_path: Path, rel: str) -> None:
+    """The boot hook and the provider the image builds are its inputs."""
     from ltvm_pkg.target_config import TargetConfig
 
     tc = TargetConfig("rocky10")
     before = tc.input_hash("image")
     src = tmp_path / "shmrdma"
     shutil.copytree(shmrdma.SRC_DIR, src)
-    with (src / "guest" / "shmrdma-boot.sh").open("a") as f:
+    with (src / rel).open("a") as f:
         f.write("# changed\n")
     with patch("ltvm_pkg.shmrdma.SRC_DIR", src):
         assert tc.input_hash("image") != before
@@ -2527,6 +2534,23 @@ class TestImageLines:
         lines, _ = self._lines(tmp_path)
         assert "COPY shmrdma/shmrdma.ko /lib/modules/5.14.0/extra/" in lines
         assert (tmp_path / "inject" / "shmrdma" / "shmrdma.ko").is_file()
+
+    def test_provider_built_in_the_image(self, tmp_path: Path) -> None:
+        """Its sources are staged flat and kept, and a build that fails
+        leaves the image to build without it."""
+        lines, _ = self._lines(tmp_path)
+        prov = tmp_path / "inject" / "shmrdma" / "provider"
+        for rel in shmrdma.PROVIDER_FILES:
+            assert (prov / Path(rel).name).is_file(), rel
+        d = shmrdma.PROVIDER_DIR
+        assert f"COPY shmrdma/provider {d}" in lines
+        run = [x for x in lines if "build-provider.sh" in x]
+        assert len(run) == 1
+        assert f"bash {d}/build-provider.sh {d} || echo " in run[0]
+        # a forced rebuild retries it: never from the layer cache
+        (tmp_path / "again").mkdir()
+        again, _ = self._lines(tmp_path / "again")
+        assert [x for x in again if "build-provider.sh" in x] != run
 
     def test_left_out_over_mofed_kmods(self, tmp_path: Path) -> None:
         lines, build = self._lines(tmp_path, mofed=True)

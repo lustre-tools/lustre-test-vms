@@ -11,8 +11,10 @@ There are two ways in:
 
 - **`--shmrdma`**, an RDMA device that looks like a RoCEv2 HCA.
   o2iblnd, rdma_cm and the kernel verbs run on it unchanged, and LNet
-  comes up on `o2ib` over it. An RDMA WRITE is one memcpy from the
-  sender's pages straight into the receiver's registered pages.
+  comes up on `o2ib` over it. Processes use it through libibverbs too,
+  so perftest, `rping` and `ibv_rc_pingpong` run on it. An RDMA WRITE
+  is one memcpy from the sender's pages straight into the receiver's
+  registered pages.
 - **`--nic shmrdma`**, both at once: a NIC on the switch with an RDMA
   device bound to it, so a VM can have several RDMA ports, each with
   its own address, the way a multi-rail o2ib node does.
@@ -23,8 +25,9 @@ There are two ways in:
   NIC has `tso=off`, below), but the guest's own TCP
   receive copy remains, so it is two copies per byte against RDMA's one.
 
-Sources: `shmrdma/` (`daemon/`, `kmod/`, `include/`, `tools/`, and the
-benchmark scripts in `bench/`).
+Sources: `shmrdma/` (`daemon/`, `kmod/`, `include/`, the libibverbs
+provider in `provider/`, `tools/`, and the benchmark scripts in
+`bench/`).
 
 ## Using it
 
@@ -416,6 +419,10 @@ of a closed socket, so the guest finds out only at its next control
 command.  Traffic in flight just stops, and with o2iblnd that command
 usually comes when its transmit timeout (60 s) tears the connection
 down, so the device is reported dead about 90 s after the daemon went.
+While processes have QPs, which may only be polling, the driver sends
+a no-op command every 10 s, so a dead daemon is found within about
+40 s; the cost is that a daemon paused for longer than 30 s (in a
+debugger, say) then freezes the VM as above.
 Unload LNet before shmrdma, as `lustre_rmmod` does: o2iblnd cannot let
 a device go under it, and removing shmrdma first leaves both stuck in
 `cma_remove_one`.
@@ -441,6 +448,30 @@ not at all.  Other GSO frames for such a port are dropped and counted.
 When the destination has no RX buffers it holds the sender's TX queue
 for up to 2 ms before dropping, which keeps TCP from losing segments to
 a guest that is merely slow to refill.
+
+**Processes.** A process's CQs and QPs are rings in its own memory.
+The libibverbs provider (`provider/shmrdma.c`, `libshmrdma-rdmav*.so`)
+allocates each as one buffer: the doorbell record in the first 4 KB,
+then the rings. The driver pins the buffer and hands its pages to the
+daemon, as it does for its own rings, so posting and polling are plain
+memory accesses. The doorbell, needed only when the daemon has gone
+idle on the QP, is a `post_send` command with no work requests, as
+rxe's is. A process registers memory through the driver, which pins it
+and sends the daemon its page list (`SHMRDMA_CMD_REG_MR`). The daemon
+refuses the local DMA key and REG_MR work requests on a process's QPs,
+so a process reaches only memory it registered. A driver asks the
+daemon first (`SHMRDMA_CMD_QUERY`); against a daemon too old to
+enforce that, it offers no userspace verbs at all.
+
+The provider links against libibverbs' private ABI, which can change
+with any rdma-core release, so it is built inside each image, in an
+rdma-core source tree of the installed version fetched from the
+upstream release (`provider/build-provider.sh`). A guest that updates
+rdma-core rebuilds it with
+
+```bash
+bash /usr/local/share/shmrdma-provider/build-provider.sh /usr/local/share/shmrdma-provider
+```
 
 ### Why these choices
 
@@ -476,9 +507,17 @@ a guest that is merely slow to refill.
   change) waits for every worker.  A single multi-GB SEND or RDMA
   WRITE/READ therefore stalls the control plane for all VMs on the
   daemon for the length of its copy, 0.1 to 0.7 s at 2 GB.
-- Kernel verbs only (no userspace verbs, so no perftest); no SRQ,
-  atomics or memory windows.  A move to SQD (send queue drain) is
-  refused; `ib_drain_qp` and the ULPs ltvm runs go through ERR.
+- No SRQ, atomics or memory windows.  A move to SQD (send queue
+  drain) is refused; `ib_drain_qp` and the ULPs ltvm runs go through
+  ERR.
+- Processes get RC and UD QPs through the classic verbs
+  (`ibv_post_send`, `ibv_poll_cq`).  The extended ones are not there:
+  no `ibv_wr_*` send API and no `ibv_create_cq_ex`, and
+  `ibv_create_qp_ex` takes only what `ibv_create_qp` does.  A perftest
+  build that asks for the `ibv_wr` API (and so fails to create its
+  QP) runs with `--use_old_post_send`.  An image
+  built without network access to GitHub has no provider, and the
+  device then serves kernel users only.
 - The module claims virtio-fs devices and gives back every one whose
   tag is neither `shmrdma` nor `shmrdma@IFNAME` only after virtio has negotiated its features
   and marked the device failed, so virtiofs then starts on a failed
@@ -572,6 +611,26 @@ lnet.conf came up as `o2ib0(eth0)`, the client mounted
 `192.168.100.230@o2ib:/lustre`, and lnet_selftest wrote 15.7 GB/s (1 MB,
 8 in flight) between the two.  Two 2-vCPU shmnet VMs on `--host-node 0`
 with two queue pairs each ran iperf3 at 37.7 Gbit/s with two streams.
+
+### Userspace verbs (i7-14700KF, two Rocky 10 VMs)
+
+perftest and the libibverbs examples between two VMs on one host, with
+other work on it (load average about 3 on 28 threads):
+
+| Test | Result |
+|---|---|
+| `ib_send_lat`, 2 bytes | 1.2 us typical |
+| `ib_read_lat`, 2 bytes | 2.2 us typical |
+| `ibv_rc_pingpong`, 4 KB | 4.1 us per round trip |
+| `ib_write_bw`, 64 KB (also over rdma_cm, `-R`) | 27 GB/s |
+| `ib_write_bw`, 256 MB messages | 14 GB/s |
+| `ib_send_bw -c UD`, 4 KB | 3.4 M messages/s, 13 GB/s |
+
+`rping -V` verifies 1000 exchanges, and `ibv_ud_pingpong` and
+`ibv_rc_pingpong -e` (completion events) pass.  A send from the local
+DMA key fails with a local protection error.  Killing a process in the
+middle of `ib_write_bw` leaves nothing behind, and Lustre over o2ib on
+the same devices is unaffected.
 
 ### Correctness
 

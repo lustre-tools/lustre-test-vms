@@ -262,6 +262,7 @@ struct mr {
 	uint32_t npages;
 	uint32_t fpo;		/* offset of iova in the first page */
 	uint32_t pdn;		/* the PD of the QP that registered it */
+	bool user;		/* a process's: charged to umr_pages */
 	bool valid;
 	uint32_t cap;		/* entries pages[] has room for */
 	uint64_t *pages;	/* grows, never shrinks or moves once used */
@@ -287,6 +288,8 @@ struct qp {
 	uint32_t timeout, retry_cnt;
 	uint32_t pdn;
 	uint32_t access;	/* SHMRDMA_ACC_REMOTE_* its peer may use */
+	/* a process's: no local DMA key, no REG_MR */
+	bool user;
 	struct qp *peer;
 	uint64_t peer_gen;
 	plat_spinlock_t rq_lock;
@@ -356,6 +359,7 @@ struct vdev {
 	struct mr **mrs;		/* SHMRDMA_MAX_MR pointers */
 	uint32_t ring_pages;		/* in every ring of the device */
 	uint32_t mr_pages;		/* page list entries of its MRs, mr_lock */
+	uint32_t umr_pages;		/* of processes' MRs (REG_MR), apart */
 	/* Workers register, invalidate and translate MRs concurrently;
 	 * freeing one needs wlock. */
 	plat_spinlock_t mr_lock;
@@ -890,6 +894,10 @@ static int64_t sg_next(struct sg_iter *it, uint64_t max, uint8_t **out)
 	struct vdev *d = it->qp->dev;
 
 	if (s->lkey == SHMRDMA_LOCAL_DMA_LKEY && !it->remote) {
+		if (it->qp->user) {
+			it->err = WC_LOC_PROT_ERR;
+			return -1;
+		}
 		gpa = addr;
 		p = gpa_hva(d, gpa, &avail);
 		if (!p) {
@@ -1594,12 +1602,84 @@ static int deliver_recv(struct qp *qp, struct qp *peer,
 /* 32 MB of MR page lists per device */
 #define DEV_MR_PAGES	(1u << 22)
 
+/*
+ * Make key a valid MR over the npages page addresses at pl.  Returns 0,
+ * or WC_* for a REG_MR WQE.
+ */
+static int mr_install(struct vdev *d, uint32_t key, uint32_t pdn,
+		      uint32_t access, uint64_t iova, uint64_t length,
+		      uint32_t page_shift, uint32_t fpo, uint32_t npages,
+		      const uint64_t *pl, bool user, const char *who)
+{
+	uint32_t *used;
+	uint32_t idx = SHMRDMA_KEY_INDEX(key);
+	struct mr *mr;
+	bool fresh = false;
+
+	plat_spin_lock(&d->mr_lock);
+	mr = d->mrs[idx];
+	if (!mr) {
+		/* published once it holds its pages */
+		mr = calloc(1, sizeof(*mr));
+		if (!mr) {
+			plat_spin_unlock(&d->mr_lock);
+			return WC_GENERAL_ERR;
+		}
+		fresh = true;
+		mr->user = user;
+	}
+	used = mr->user ? &d->umr_pages : &d->mr_pages;
+	REL(&mr->valid, false);
+	if (npages > mr->cap) {
+		/* a FastReg MR's page list is sized once, at its first use */
+		uint32_t cap = npages < 64 ? 64 : npages;
+		uint64_t *np;
+
+		if (cap - mr->cap > DEV_MR_PAGES - *used) {
+			plat_spin_unlock(&d->mr_lock);
+			if (fresh)
+				free(mr);
+			GLOG(d, "dev%d %s: MR page lists past %u entries, refused",
+			    d->id, who, DEV_MR_PAGES);
+			return WC_LOC_QP_OP_ERR;
+		}
+		np = realloc(mr->pages, cap * sizeof(*np));
+		if (!np) {
+			plat_spin_unlock(&d->mr_lock);
+			if (fresh)
+				free(mr);
+			return WC_GENERAL_ERR;
+		}
+		*used += cap - mr->cap;
+		mr->pages = np;
+		mr->cap = cap;
+	}
+	mr->key = key;
+	mr->iova = iova;
+	mr->length = length;
+	mr->page_shift = page_shift;
+	mr->npages = npages;
+	mr->access = access;
+	mr->pdn = pdn;
+	mr->fpo = fpo & ((1u << page_shift) - 1);
+	if (npages)
+		memcpy(mr->pages, pl, npages * 8ull);
+	if (fresh)
+		d->mrs[idx] = mr;
+	REL(&mr->valid, true);
+	plat_spin_unlock(&d->mr_lock);
+	return WC_SUCCESS;
+}
+
 static int exec_reg_mr(struct qp *qp, struct shmrdma_sq_wqe *w)
 {
 	struct vdev *d = qp->dev;
 	uint32_t idx = SHMRDMA_KEY_INDEX(w->reg.key);
-	struct mr *mr;
+	char who[16];
 
+	/* a process names no guest physical pages */
+	if (qp->user)
+		return WC_LOC_QP_OP_ERR;
 	if (idx == 0 || idx >= SHMRDMA_MAX_MR || w->reg.npages > SHMRDMA_MAX_FRPL ||
 	    w->reg.page_shift < 12 || w->reg.page_shift > 30)
 		return WC_LOC_QP_OP_ERR;
@@ -1607,50 +1687,51 @@ static int exec_reg_mr(struct qp *qp, struct shmrdma_sq_wqe *w)
 
 	if (!pl)
 		return WC_LOC_PROT_ERR;
-	plat_spin_lock(&d->mr_lock);
-	mr = d->mrs[idx];
-	if (!mr) {
-		mr = calloc(1, sizeof(*mr));
-		if (!mr) {
-			plat_spin_unlock(&d->mr_lock);
-			return WC_GENERAL_ERR;
-		}
-		d->mrs[idx] = mr;
-	}
-	REL(&mr->valid, false);
-	if (w->reg.npages > mr->cap) {
-		/* a FastReg MR's page list is sized once, at its first use */
-		uint32_t cap = w->reg.npages < 64 ? 64 : w->reg.npages;
-		uint64_t *np;
+	snprintf(who, sizeof(who), "qp%u", qp->qpn);
+	return mr_install(d, w->reg.key, qp->pdn, w->reg.access, w->reg.iova,
+			  w->reg.length, w->reg.page_shift, w->ex,
+			  w->reg.npages, pl, false, who);
+}
 
-		if (cap - mr->cap > DEV_MR_PAGES - d->mr_pages) {
-			plat_spin_unlock(&d->mr_lock);
-			GLOG(d, "dev%d qp%u: MR page lists past %u entries, refused",
-			    d->id, qp->qpn, DEV_MR_PAGES);
-			return WC_LOC_QP_OP_ERR;
+/* SHMRDMA_CMD_REG_MR: a process's memory, pinned by the driver */
+static int cmd_reg_mr(struct vdev *d, const struct shmrdma_cmd *c)
+{
+	uint32_t idx = SHMRDMA_KEY_INDEX(c->reg_mr.key);
+	uint32_t n = c->reg_mr.npages, ndir = (n + 511) / 512;
+	uint64_t *dir, *pl;
+	int rc;
+
+	if (!d->initialized || idx == 0 || idx >= SHMRDMA_MAX_MR || !n ||
+	    n > SHMRDMA_MAX_MR_PAGES || c->reg_mr.page_shift < 12 ||
+	    c->reg_mr.page_shift > 30 || (c->reg_mr.dir_gpa & 7) ||
+	    c->reg_mr.fpo >> c->reg_mr.page_shift ||
+	    c->reg_mr.length + c->reg_mr.fpo >
+	    ((uint64_t)n << c->reg_mr.page_shift))
+		return -EINVAL;
+	dir = gpa_range(d, c->reg_mr.dir_gpa, ndir * 8ull);
+	if (!dir)
+		return -EFAULT;
+	pl = malloc(n * 8ull);
+	if (!pl)
+		return -ENOMEM;
+	for (uint32_t i = 0; i < ndir; i++) {
+		uint64_t gpa = RLX(&dir[i]);
+		uint32_t k = n - i * 512 < 512 ? n - i * 512 : 512;
+		uint64_t *leaf = (gpa & 4095) ? NULL : gpa_range(d, gpa, k * 8ull);
+
+		if (!leaf) {
+			free(pl);
+			return -EFAULT;
 		}
-		np = realloc(mr->pages, cap * sizeof(*np));
-		if (!np) {
-			plat_spin_unlock(&d->mr_lock);
-			return WC_GENERAL_ERR;
-		}
-		d->mr_pages += cap - mr->cap;
-		mr->pages = np;
-		mr->cap = cap;
+		memcpy(pl + i * 512ull, leaf, k * 8ull);
 	}
-	mr->key = w->reg.key;
-	mr->iova = w->reg.iova;
-	mr->length = w->reg.length;
-	mr->page_shift = w->reg.page_shift;
-	mr->npages = w->reg.npages;
-	mr->access = w->reg.access;
-	mr->pdn = qp->pdn;
-	mr->fpo = w->ex & ((1u << w->reg.page_shift) - 1);
-	if (w->reg.npages)
-		memcpy(mr->pages, pl, w->reg.npages * 8ull);
-	REL(&mr->valid, true);
-	plat_spin_unlock(&d->mr_lock);
-	return WC_SUCCESS;
+	rc = mr_install(d, c->reg_mr.key, c->reg_mr.pdn, c->reg_mr.access,
+			c->reg_mr.iova, c->reg_mr.length, c->reg_mr.page_shift,
+			c->reg_mr.fpo, n, pl, true, "reg_mr");
+	free(pl);
+	if (rc == WC_GENERAL_ERR)
+		return -ENOMEM;
+	return rc == WC_SUCCESS ? 0 : -ENOSPC;
 }
 
 static bool op_takes_inline(uint32_t op)
@@ -2207,6 +2288,7 @@ static void dev_reset_state(struct vdev *d)
 		}
 	}
 	d->mr_pages = 0;
+	d->umr_pages = 0;
 	memset(d->gid_valid, 0, sizeof(d->gid_valid));
 	/* the next driver opts in again, or is an older one */
 	REL(&d->quiet_errs, false);
@@ -2371,6 +2453,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		int rc;
 
 		if (!d->initialized || qpn >= SHMRDMA_MAX_QP || d->qps[qpn] ||
+		    (c->create_qp.flags & ~SHMRDMA_QPF_USER) ||
 		    sc >= SHMRDMA_MAX_CQ || rcn >= SHMRDMA_MAX_CQ ||
 		    !d->cqs[sc] || !d->cqs[rcn])
 			return -EINVAL;
@@ -2381,6 +2464,7 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		qp->qpn = qpn;
 		qp->type = c->create_qp.type;
 		qp->pdn = c->create_qp.pdn;
+		qp->user = c->create_qp.flags & SHMRDMA_QPF_USER;
 		qp->state = QPS_RESET;
 		qp->scq = d->cqs[sc];
 		qp->rcq = d->cqs[rcn];
@@ -2499,7 +2583,8 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 			return -EINVAL;
 		wlock();
 		if (d->mrs[idx]) {
-			d->mr_pages -= d->mrs[idx]->cap;
+			*(d->mrs[idx]->user ? &d->umr_pages : &d->mr_pages) -=
+				d->mrs[idx]->cap;
 			free(d->mrs[idx]->pages);
 		}
 		free(d->mrs[idx]);
@@ -2512,6 +2597,11 @@ static int do_cmd(struct vdev *d, const struct shmrdma_cmd *c,
 		dev_reset_state(d);
 		wunlock();
 		return 0;
+	case SHMRDMA_CMD_QUERY:
+		r->val = SHMRDMA_FEAT_USER;
+		return 0;
+	case SHMRDMA_CMD_REG_MR:
+		return cmd_reg_mr(d, c);
 	}
 	return -EOPNOTSUPP;
 }

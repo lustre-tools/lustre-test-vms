@@ -26,6 +26,13 @@ ifneq ($(shell grep -s "void ib_dispatch_port_state_event" $(srctree)/include/rd
 ccflags-y += -DHAVE_IB_DISPATCH_PORT_STATE_EVENT
 endif
 
+# ib_umem_get took the udata before 5.5 (EL8), and became ib_umem_get_va in 7.3
+ifneq ($(shell grep -s "ib_umem_get_va" $(srctree)/include/rdma/ib_umem.h),)
+ccflags-y += -DHAVE_IB_UMEM_GET_VA
+else ifneq ($(shell grep -s "ib_umem_get.struct ib_udata" $(srctree)/include/rdma/ib_umem.h),)
+ccflags-y += -DHAVE_IB_UMEM_GET_UDATA
+endif
+
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
 all:

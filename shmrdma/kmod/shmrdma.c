@@ -26,6 +26,10 @@
 #include <net/addrconf.h>
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_mad.h>
+#include <rdma/ib_umem.h>
+#ifdef HAVE_CREATE_CQ_ATTRS
+#include <rdma/uverbs_ioctl.h>
+#endif
 
 #include "../include/shmrdma_abi.h"
 
@@ -39,6 +43,9 @@ MODULE_PARM_DESC(netdev, "netdev whose IP addresses give the GIDs, for a device 
 #define SHMRDMA_CQE_SIZE	32
 #define SHMRDMA_QPN_NONE	U32_MAX	/* a cleaned CQE: no QP has it */
 #define SHMRDMA_MAX_PD		(1 << 20)
+/* how often a device with processes' QPs checks the backend is there */
+#define SHMRDMA_LIVE_PERIOD	(10 * HZ)
+#define SHMRDMA_FLUSH_BUDGET	4096	/* processes' flushes per pass */
 
 #ifndef HAVE_VIRTIO_RESET_DEVICE
 static inline void virtio_reset_device(struct virtio_device *vdev)
@@ -94,6 +101,27 @@ struct shmrdma_dev {
 
 	struct ib_device_attr attr;
 	bool registered;
+	/* the backend serves processes' QPs and MRs (SHMRDMA_FEAT_USER) */
+	bool user_ok;
+	/*
+	 * Nothing tells the guest the backend died, and a process polling
+	 * its CQ sends no command that would find out: while processes
+	 * have QPs, a command every SHMRDMA_LIVE_PERIOD does.
+	 */
+	atomic_t uqps;
+	struct delayed_work live_work;
+};
+
+struct shmrdma_ucontext {
+	struct ib_ucontext ibuc;
+};
+
+/* a process's CQ or QP buffer, pinned and mapped */
+struct shmrdma_ubuf {
+	struct ib_umem *umem;
+	void *map;
+	struct page **pages;
+	u32 npages;
 };
 
 struct shmrdma_pd {
@@ -127,6 +155,10 @@ struct shmrdma_cq {
 	struct work_struct ev_work;
 	/* QPs sending and receiving on this CQ, under lock */
 	struct list_head sq_qps, rq_qps;
+	struct shmrdma_ubuf ubuf;	/* a process's; its ring is in there */
+	/* a process's, after the reset: the backend's last producer */
+	bool final_set;
+	u32 final_prod;
 };
 
 struct shmrdma_qp {
@@ -145,10 +177,16 @@ struct shmrdma_qp {
 	struct mutex state_lock;
 	struct ib_qp_attr attr;
 	u8 dgid[16];
+	/* the rest of the address vector the backend took, for query_qp */
+	bool av_set;
+	u8 sgid_index, hop_limit, tclass, sl, static_rate;
+	u32 flow_label;
+	struct shmrdma_ubuf ubuf;	/* a process's; its rings are in there */
 };
 
 struct shmrdma_mr {
 	struct ib_mr ibmr;
+	struct ib_umem *umem;
 	u32 index;
 	u64 *pages;
 	u32 npages;
@@ -242,10 +280,31 @@ static void shmrdma_kick_cqs(struct shmrdma_dev *dev, bool all)
 	spin_unlock_irqrestore(&dev->eq_lock, flags);
 }
 
+static void shmrdma_flush_users(struct shmrdma_dev *dev);
+static int shmrdma_cmd(struct shmrdma_dev *dev, struct shmrdma_cmd *cmd,
+		       struct shmrdma_resp *resp);
+
+static void shmrdma_live_work(struct work_struct *work)
+{
+	struct shmrdma_dev *dev = container_of(to_delayed_work(work),
+					       struct shmrdma_dev, live_work);
+	struct shmrdma_cmd cmd = { .cmd = SHMRDMA_CMD_QUERY };
+
+	if (!atomic_read(&dev->uqps) || READ_ONCE(dev->broken))
+		return;
+	/* one that times out resets the device, which flushes their work */
+	shmrdma_cmd(dev, &cmd, NULL);
+	if (atomic_read(&dev->uqps) && !READ_ONCE(dev->broken))
+		schedule_delayed_work(&dev->live_work, SHMRDMA_LIVE_PERIOD);
+}
+
 static void shmrdma_flush_work(struct work_struct *work)
 {
-	shmrdma_kick_cqs(container_of(work, struct shmrdma_dev, flush_work),
-			 false);
+	struct shmrdma_dev *dev = container_of(work, struct shmrdma_dev,
+					       flush_work);
+
+	shmrdma_flush_users(dev);
+	shmrdma_kick_cqs(dev, false);
 }
 
 static void shmrdma_fatal_work(struct work_struct *work)
@@ -267,6 +326,7 @@ static void shmrdma_fatal_work(struct work_struct *work)
 	mutex_unlock(&dev->ctrl_mutex);
 	if (send)
 		ib_dispatch_event(&ev);
+	shmrdma_flush_users(dev);
 	shmrdma_kick_cqs(dev, true);
 }
 
@@ -390,6 +450,283 @@ static void ring_desc(struct shmrdma_ring *r, struct shmrdma_ring_desc *d)
 static inline void *ring_at(struct shmrdma_ring *r, u32 idx)
 {
 	return r->buf + (size_t)(idx & (r->entries - 1)) * r->esz;
+}
+
+static struct ib_umem *shmrdma_umem_get(struct shmrdma_dev *dev,
+					struct ib_udata *udata, u64 addr,
+					size_t len, int access)
+{
+#if defined(HAVE_IB_UMEM_GET_VA)
+	return ib_umem_get_va(&dev->ibdev, addr, len, access);
+#elif defined(HAVE_IB_UMEM_GET_UDATA)
+	return ib_umem_get(udata, addr, len, access);
+#else
+	return ib_umem_get(&dev->ibdev, addr, len, access);
+#endif
+}
+
+/* the pinned pages, in order: the first holds addr */
+static int shmrdma_umem_pages(struct ib_umem *umem, struct page ***out,
+			      u32 *n)
+{
+	struct sg_table *sgt = &umem->sgt_append.sgt;
+	struct sg_page_iter it;
+	struct page **pg;
+	u32 i = 0, max;
+
+	max = DIV_ROUND_UP((umem->address & ~PAGE_MASK) + umem->length,
+			   PAGE_SIZE);
+	pg = kvmalloc_array(max, sizeof(*pg), GFP_KERNEL);
+	if (!pg)
+		return -ENOMEM;
+	for_each_sg_page(sgt->sgl, &it, sgt->orig_nents, 0) {
+		if (i == max) {
+			kvfree(pg);
+			return -EFAULT;
+		}
+		pg[i++] = sg_page_iter_page(&it);
+	}
+	if (i != max) {
+		kvfree(pg);
+		return -EFAULT;
+	}
+	*out = pg;
+	*n = i;
+	return 0;
+}
+
+/*
+ * Pin and map a process's page aligned buffer of len bytes: the backend
+ * writes its records and rings, and the driver reads the records.
+ */
+static int shmrdma_ubuf_get(struct shmrdma_dev *dev, struct ib_udata *udata,
+			    u64 addr, u64 len, struct shmrdma_ubuf *b)
+{
+	int rc;
+
+	if (!len || (addr & ~PAGE_MASK) || len > SZ_1G)
+		return -EINVAL;
+	b->umem = shmrdma_umem_get(dev, udata, addr, len,
+				   IB_ACCESS_LOCAL_WRITE);
+	if (IS_ERR(b->umem)) {
+		rc = PTR_ERR(b->umem);
+		b->umem = NULL;
+		return rc;
+	}
+	rc = shmrdma_umem_pages(b->umem, &b->pages, &b->npages);
+	if (rc)
+		goto err_umem;
+	b->map = vmap(b->pages, b->npages, VM_MAP, PAGE_KERNEL);
+	if (!b->map) {
+		rc = -ENOMEM;
+		goto err_pages;
+	}
+	return 0;
+
+err_pages:
+	kvfree(b->pages);
+	b->pages = NULL;
+err_umem:
+	ib_umem_release(b->umem);
+	b->umem = NULL;
+	return rc;
+}
+
+static void shmrdma_ubuf_put(struct shmrdma_ubuf *b)
+{
+	if (!b->umem)
+		return;
+	vunmap(b->map);
+	kvfree(b->pages);
+	ib_umem_release(b->umem);
+	memset(b, 0, sizeof(*b));
+}
+
+/* a ring at off in a process's buffer */
+static int ring_user(struct shmrdma_ring *r, struct shmrdma_ubuf *b, u64 off,
+		     u32 entries, u32 esz)
+{
+	u32 i;
+
+	r->entries = entries;
+	r->esz = esz;
+	r->npages = DIV_ROUND_UP((size_t)entries * esz, SHMRDMA_RING_PAGE_SIZE);
+	if (off + ((u64)r->npages << SHMRDMA_RING_PAGE_SHIFT) >
+	    (u64)b->npages << PAGE_SHIFT)
+		return -EINVAL;
+	r->pages = kmalloc_array(r->npages, sizeof(u64), GFP_KERNEL);
+	if (!r->pages)
+		return -ENOMEM;
+	for (i = 0; i < r->npages; i++) {
+		u64 o = off + ((u64)i << SHMRDMA_RING_PAGE_SHIFT);
+
+		r->pages[i] = page_to_phys(b->pages[o >> PAGE_SHIFT]) +
+			      (o & ~PAGE_MASK);
+	}
+	r->buf = b->map + off;
+	return 0;
+}
+
+/* a record: kernel memory, or the start of a process's buffer */
+static u64 shmrdma_rec_gpa(void *rec, struct shmrdma_ubuf *b)
+{
+	return b->umem ? page_to_phys(b->pages[0]) : virt_to_phys(rec);
+}
+
+/* a process's ring: its memory goes with the buffer */
+static void ring_free_user(struct shmrdma_ring *r)
+{
+	kfree(r->pages);
+	r->buf = NULL;
+	r->pages = NULL;
+}
+
+static u32 sq_wc(u32 op)
+{
+	switch (op) {
+	case SHMRDMA_OP_RDMA_WRITE:
+	case SHMRDMA_OP_RDMA_WRITE_IMM:
+		return SHMRDMA_WC_RDMA_WRITE;
+	case SHMRDMA_OP_RDMA_READ:
+		return SHMRDMA_WC_RDMA_READ;
+	case SHMRDMA_OP_LOCAL_INV:
+		return SHMRDMA_WC_LOCAL_INV;
+	}
+	return SHMRDMA_WC_SEND;
+}
+
+/* room in a process's CQ for one more flush; if not, it asks for a refill */
+static bool shmrdma_ucq_room(struct shmrdma_cq *cq)
+{
+	if (READ_ONCE(cq->rec->prod) - READ_ONCE(cq->rec->cons) <
+	    cq->ring.entries)
+		return true;
+	WRITE_ONCE(cq->rec->flush, 1);
+	/* the process polls, then reads flush: one of us sees the other */
+	smp_mb();
+	return READ_ONCE(cq->rec->prod) - READ_ONCE(cq->rec->cons) <
+	       cq->ring.entries;
+}
+
+/* a flush completion in a process's CQ, which has room for it */
+static void shmrdma_ucq_put(struct shmrdma_cq *cq, u32 qpn, u64 wr_id, u32 op)
+{
+	u32 prod = READ_ONCE(cq->rec->prod);
+	struct shmrdma_cqe *e;
+
+	e = ring_at(&cq->ring, prod);
+	memset(e, 0, sizeof(*e));
+	e->wr_id = wr_id;
+	e->qpn = qpn;
+	e->opcode = op;
+	e->status = IB_WC_WR_FLUSH_ERR;
+	smp_store_release(&cq->rec->prod, prod + 1);
+}
+
+/*
+ * One work queue of a process's QP, once the device is reset: the
+ * backend completes nothing more, so the driver, now the only producer
+ * of its CQ, flushes what is posted.  Caller holds cq->lock.
+ */
+static void shmrdma_uwq_flush(struct shmrdma_qp *qp, bool sq, int *budget)
+{
+	struct shmrdma_qp_rec *r = qp->rec;
+	struct shmrdma_cq *cq = sq ? qp->scq : qp->rcq;
+	struct shmrdma_ring *ring = sq ? &qp->sq : &qp->rq;
+	u32 *consp = sq ? &r->sq_cons : &r->rq_cons;
+	u32 *donep = sq ? &r->sq_done : &r->rq_done;
+	u32 *opp = sq ? &r->sq_limbo_op : &r->rq_limbo_op;
+	u32 *posp = sq ? &r->sq_limbo_pos : &r->rq_limbo_pos;
+	u64 *idp = sq ? &r->sq_limbo_wr_id : &r->rq_limbo_wr_id;
+	u32 *prodp = sq ? &r->sq_prod : &r->rq_prod;
+	/* the process wrote the entries before it moved this */
+	u32 prod = smp_load_acquire(prodp);
+	u32 cons = READ_ONCE(*consp), op;
+	u64 wr_id;
+
+	if (READ_ONCE(*donep) != cons) {
+		op = READ_ONCE(*opp);
+		if (shmrdma_limbo_owed(READ_ONCE(*donep), cons, op,
+				       READ_ONCE(*posp), cq->final_prod)) {
+			if (!*budget || !shmrdma_ucq_room(cq))
+				return;
+			--*budget;
+			shmrdma_ucq_put(cq, qp->ibqp.qp_num, READ_ONCE(*idp),
+					op);
+		}
+		WRITE_ONCE(*donep, cons);
+	}
+	if (prod - cons > ring->entries)
+		cons = prod - ring->entries;
+	WRITE_ONCE(*consp, cons);
+	WRITE_ONCE(*donep, cons);
+	/* as the backend does: the slot is free before its CQE is seen */
+	for (; cons != prod && *budget && shmrdma_ucq_room(cq); cons++) {
+		--*budget;
+		if (sq) {
+			struct shmrdma_sq_wqe *w = ring_at(ring, cons);
+
+			op = sq_wc(READ_ONCE(w->opcode));
+			wr_id = READ_ONCE(w->wr_id);
+		} else {
+			struct shmrdma_rq_wqe *w = ring_at(ring, cons);
+
+			op = SHMRDMA_WC_RECV;
+			wr_id = READ_ONCE(w->wr_id);
+		}
+		/* after the slot's fields are read: the process reuses it */
+		smp_store_release(consp, cons + 1);
+		WRITE_ONCE(*donep, cons + 1);
+		shmrdma_ucq_put(cq, qp->ibqp.qp_num, wr_id, op);
+	}
+}
+
+/* after the reset: processes' QPs go to error and their work is flushed */
+static void shmrdma_flush_users(struct shmrdma_dev *dev)
+{
+	struct shmrdma_qp *qp;
+	struct shmrdma_cq *cq;
+	unsigned long flags, i;
+	int budget = SHMRDMA_FLUSH_BUDGET;
+
+	if (!smp_load_acquire(&dev->reset_done))
+		return;
+	spin_lock_irqsave(&dev->eq_lock, flags);
+	/* set again for each CQ that fills during this pass */
+	xa_for_each(&dev->cqs, i, cq) {
+		if (!cq->ubuf.umem)
+			continue;
+		spin_lock(&cq->lock);
+		/* before the driver's flushes move it */
+		if (!cq->final_set) {
+			cq->final_prod = READ_ONCE(cq->rec->prod);
+			cq->final_set = true;
+		}
+		WRITE_ONCE(cq->rec->flush, 0);
+		spin_unlock(&cq->lock);
+	}
+	xa_for_each(&dev->qps, i, qp) {
+		if (!qp->ubuf.umem)
+			continue;
+		WRITE_ONCE(qp->rec->fatal, 1);
+		/* a post after this sees fatal and rings; one before is seen */
+		smp_mb();
+		spin_lock(&qp->scq->lock);
+		shmrdma_uwq_flush(qp, true, &budget);
+		spin_unlock(&qp->scq->lock);
+		spin_lock(&qp->rcq->lock);
+		shmrdma_uwq_flush(qp, false, &budget);
+		spin_unlock(&qp->rcq->lock);
+	}
+	spin_unlock_irqrestore(&dev->eq_lock, flags);
+	/* interrupts were off for this pass: the rest in another */
+	if (!budget)
+		schedule_work(&dev->flush_work);
+}
+
+static int shmrdma_copy_resp(struct ib_udata *udata, void *resp, size_t len)
+{
+	return ib_copy_to_udata(udata, resp, min(len, udata->outlen));
 }
 
 /* ---------------------------------------------------------------- */
@@ -686,8 +1023,6 @@ static int shmrdma_alloc_pd(struct ib_pd *pd, struct ib_udata *udata)
 	struct shmrdma_dev *dev = to_sdev(pd->device);
 	int rc;
 
-	if (udata)
-		return -EOPNOTSUPP;
 	rc = ida_alloc_range(&dev->pdn_ida, 1, SHMRDMA_MAX_PD - 1, GFP_KERNEL);
 	if (rc < 0)
 		return rc;
@@ -717,6 +1052,12 @@ static int shmrdma_create_ah(struct ib_ah *ibah,
 	memcpy(ah->dgid, grh->dgid.raw, 16);
 	if (grh->sgid_attr)
 		memcpy(ah->sgid, grh->sgid_attr->gid.raw, 16);
+	if (udata) {
+		struct shmrdma_uresp_ah uresp;
+
+		memcpy(uresp.sgid, ah->sgid, 16);
+		return shmrdma_copy_resp(udata, &uresp, sizeof(uresp));
+	}
 	return 0;
 }
 
@@ -757,9 +1098,14 @@ static int shmrdma_create_cq(struct ib_cq *ibcq,
 			     struct ib_udata *udata)
 #endif
 {
+#ifdef HAVE_CREATE_CQ_ATTRS
+	struct ib_udata *udata = attrs ? &attrs->driver_udata : NULL;
+#endif
 	struct shmrdma_dev *dev = to_sdev(ibcq->device);
 	struct shmrdma_cq *cq = to_scq(ibcq);
 	struct shmrdma_cmd cmd = { .cmd = SHMRDMA_CMD_CREATE_CQ };
+	struct shmrdma_ucmd_buf ucmd = { 0 };
+	struct shmrdma_uresp_cq uresp = { 0 };
 	unsigned long flags;
 	u32 entries;
 	int rc;
@@ -767,6 +1113,16 @@ static int shmrdma_create_cq(struct ib_cq *ibcq,
 	if (attr->flags || attr->cqe < 1 || attr->cqe >= SHMRDMA_MAX_CQE)
 		return -EINVAL;
 	entries = roundup_pow_of_two(attr->cqe + 1);
+	if (udata) {
+		if (!dev->user_ok)
+			return -EOPNOTSUPP;
+		rc = ib_copy_from_udata(&ucmd, udata,
+					min(sizeof(ucmd), udata->inlen));
+		if (rc)
+			return rc;
+		if (ucmd.len < shmrdma_cq_len(entries))
+			return -EINVAL;
+	}
 	rc = ida_alloc_rr(&dev->cqn_ida, &dev->next_cqn, 0, SHMRDMA_MAX_CQ - 1);
 	if (rc < 0)
 		return rc;
@@ -775,16 +1131,28 @@ static int shmrdma_create_cq(struct ib_cq *ibcq,
 	INIT_LIST_HEAD(&cq->sq_qps);
 	INIT_LIST_HEAD(&cq->rq_qps);
 	INIT_WORK(&cq->ev_work, shmrdma_cq_ev_work);
-	cq->rec = kzalloc(sizeof(*cq->rec), GFP_KERNEL);
-	if (!cq->rec) {
-		rc = -ENOMEM;
-		goto err_ida;
+	if (udata) {
+		rc = shmrdma_ubuf_get(dev, udata, ucmd.buf,
+				      shmrdma_cq_len(entries), &cq->ubuf);
+		if (rc)
+			goto err_ida;
+		cq->rec = cq->ubuf.map;
+		rc = ring_user(&cq->ring, &cq->ubuf, SHMRDMA_RING_PAGE_SIZE,
+			       entries, SHMRDMA_CQE_SIZE);
+		if (rc)
+			goto err_rec;
+	} else {
+		cq->rec = kzalloc(sizeof(*cq->rec), GFP_KERNEL);
+		if (!cq->rec) {
+			rc = -ENOMEM;
+			goto err_ida;
+		}
+		rc = ring_alloc(&cq->ring, entries, SHMRDMA_CQE_SIZE);
+		if (rc)
+			goto err_rec;
 	}
-	rc = ring_alloc(&cq->ring, entries, SHMRDMA_CQE_SIZE);
-	if (rc)
-		goto err_rec;
 	cmd.create_cq.cqn = cq->cqn;
-	cmd.create_cq.rec_gpa = virt_to_phys(cq->rec);
+	cmd.create_cq.rec_gpa = shmrdma_rec_gpa(cq->rec, &cq->ubuf);
 	ring_desc(&cq->ring, &cmd.create_cq.ring);
 	rc = xa_err(xa_store_irq(&dev->cqs, cq->cqn, cq, GFP_KERNEL));
 	if (rc)
@@ -793,6 +1161,19 @@ static int shmrdma_create_cq(struct ib_cq *ibcq,
 	if (rc)
 		goto err_xa;
 	ibcq->cqe = entries - 1;
+	if (udata) {
+		uresp.cqn = cq->cqn;
+		uresp.entries = entries;
+		rc = shmrdma_copy_resp(udata, &uresp, sizeof(uresp));
+		if (rc) {
+			cmd.cmd = SHMRDMA_CMD_DESTROY_CQ;
+			cmd.destroy_cq.cqn = cq->cqn;
+			if (shmrdma_cmd(dev, &cmd, NULL))
+				shmrdma_destroy_failed(dev, "destroy cq",
+						       cq->cqn, -EIO);
+			goto err_xa;
+		}
+	}
 	return 0;
 
 err_xa:
@@ -801,12 +1182,29 @@ err_xa:
 	spin_unlock_irqrestore(&dev->eq_lock, flags);
 	cancel_work_sync(&cq->ev_work);
 err_ring:
-	ring_free(&cq->ring);
+	if (cq->ubuf.umem)
+		ring_free_user(&cq->ring);
+	else
+		ring_free(&cq->ring);
 err_rec:
-	kfree(cq->rec);
+	if (cq->ubuf.umem)
+		shmrdma_ubuf_put(&cq->ubuf);
+	else
+		kfree(cq->rec);
 err_ida:
 	ida_free(&dev->cqn_ida, cq->cqn);
 	return rc;
+}
+
+static void shmrdma_cq_free(struct shmrdma_cq *cq)
+{
+	if (cq->ubuf.umem) {
+		ring_free_user(&cq->ring);
+		shmrdma_ubuf_put(&cq->ubuf);
+	} else {
+		ring_free(&cq->ring);
+		kfree(cq->rec);
+	}
 }
 
 static int shmrdma_destroy_cq(struct ib_cq *ibcq, struct ib_udata *udata)
@@ -826,8 +1224,7 @@ static int shmrdma_destroy_cq(struct ib_cq *ibcq, struct ib_udata *udata)
 	xa_erase(&dev->cqs, cq->cqn);
 	spin_unlock_irqrestore(&dev->eq_lock, flags);
 	cancel_work_sync(&cq->ev_work);
-	ring_free(&cq->ring);
-	kfree(cq->rec);
+	shmrdma_cq_free(cq);
 	ida_free(&dev->cqn_ida, cq->cqn);
 	return 0;
 }
@@ -991,9 +1388,16 @@ static bool shmrdma_cq_pending(struct shmrdma_dev *dev, struct shmrdma_cq *cq)
 
 	spin_lock_irqsave(&cq->lock, flags);
 	reset = smp_load_acquire(&dev->reset_done);
-	pending = (!list_empty(&cq->sq_qps) || !list_empty(&cq->rq_qps)) &&
-		  (cq->cons != shmrdma_cq_prod(dev, cq) ||
-		   (reset && shmrdma_flush_cq(dev, cq, 1, NULL)));
+	/* a process polls its CQ itself, and is told of a reset by event */
+	if (cq->ubuf.umem)
+		pending = (!list_empty(&cq->sq_qps) ||
+			   !list_empty(&cq->rq_qps)) &&
+			  READ_ONCE(cq->rec->cons) != READ_ONCE(cq->rec->prod);
+	else
+		pending = (!list_empty(&cq->sq_qps) ||
+			   !list_empty(&cq->rq_qps)) &&
+			  (cq->cons != shmrdma_cq_prod(dev, cq) ||
+			   (reset && shmrdma_flush_cq(dev, cq, 1, NULL)));
 	spin_unlock_irqrestore(&cq->lock, flags);
 	return pending;
 }
@@ -1007,6 +1411,8 @@ static int shmrdma_poll_cq(struct ib_cq *ibcq, int num, struct ib_wc *wc)
 	int n = 0;
 	u32 prod;
 
+	if (cq->ubuf.umem)
+		return -EOPNOTSUPP;
 	spin_lock_irqsave(&cq->lock, flags);
 	/* before the producer: after the reset it moves no more */
 	reset = smp_load_acquire(&dev->reset_done);
@@ -1068,6 +1474,12 @@ static int shmrdma_req_notify_cq(struct ib_cq *ibcq,
 	u32 arm = (flags & IB_CQ_SOLICITED_MASK) == IB_CQ_SOLICITED ?
 		  SHMRDMA_CQ_ARM_SOLICITED : SHMRDMA_CQ_ARM_NEXT;
 
+	/* a process's: only to go on flushing after a reset */
+	if (cq->ubuf.umem) {
+		if (smp_load_acquire(&dev->reset_done))
+			schedule_work(&dev->flush_work);
+		return 0;
+	}
 	if (arm == SHMRDMA_CQ_ARM_SOLICITED &&
 	    READ_ONCE(cq->rec->arm) == SHMRDMA_CQ_ARM_NEXT)
 		arm = SHMRDMA_CQ_ARM_NEXT;
@@ -1118,11 +1530,15 @@ static int shmrdma_create_qp(struct ib_qp *ibqp,
 	struct shmrdma_dev *dev = to_sdev(ibqp->device);
 	struct shmrdma_qp *qp = to_sqp(ibqp);
 	struct shmrdma_cmd cmd = { .cmd = SHMRDMA_CMD_CREATE_QP };
+	struct shmrdma_ucmd_buf ucmd = { 0 };
 	struct ib_qp_cap *cap = &init->cap;
-	u32 sq_entries, rq_entries, sq_esz, rq_esz, qpn;
+	struct shmrdma_qp_geom g;
+	u32 qpn;
 	int rc;
 
-	if (udata || init->srq || init->create_flags)
+	if (init->srq || init->create_flags)
+		return -EOPNOTSUPP;
+	if (udata && !dev->user_ok)
 		return -EOPNOTSUPP;
 	if (!init->send_cq || !init->recv_cq)
 		return -EINVAL;
@@ -1139,23 +1555,20 @@ static int shmrdma_create_qp(struct ib_qp *ibqp,
 	default:
 		return -EOPNOTSUPP;
 	}
-	if (cap->max_send_wr > SHMRDMA_MAX_QP_WR ||
-	    cap->max_recv_wr > SHMRDMA_MAX_QP_WR ||
-	    cap->max_send_sge > SHMRDMA_MAX_SGE ||
-	    cap->max_recv_sge > SHMRDMA_MAX_SGE ||
-	    cap->max_inline_data > 4096 - SHMRDMA_WQE_HDR)
+	if (shmrdma_qp_geom(qp->type, cap->max_send_wr, cap->max_recv_wr,
+			    cap->max_send_sge, cap->max_recv_sge,
+			    cap->max_inline_data, &g))
 		return -EINVAL;
-	/* a UD WQE's address fields overlap the inline length */
-	if (qp->type != SHMRDMA_QPT_RC && cap->max_inline_data)
-		return -EINVAL;
-
-	sq_entries = roundup_pow_of_two(max(cap->max_send_wr, 1u));
-	rq_entries = roundup_pow_of_two(max(cap->max_recv_wr, 1u));
-	sq_esz = roundup_pow_of_two(SHMRDMA_WQE_HDR +
-				    max(16 * max(cap->max_send_sge, 1u),
-					cap->max_inline_data));
-	rq_esz = roundup_pow_of_two(sizeof(struct shmrdma_rq_wqe) +
-				    16 * max(cap->max_recv_sge, 1u));
+	if (udata) {
+		if (qp->type == SHMRDMA_QPT_GSI)
+			return -EOPNOTSUPP;
+		rc = ib_copy_from_udata(&ucmd, udata,
+					min(sizeof(ucmd), udata->inlen));
+		if (rc)
+			return rc;
+		if (ucmd.len < g.len)
+			return -EINVAL;
+	}
 
 	if (qp->type == SHMRDMA_QPT_GSI) {
 		qpn = 1;
@@ -1172,34 +1585,49 @@ static int shmrdma_create_qp(struct ib_qp *ibqp,
 	mutex_init(&qp->state_lock);
 	INIT_WORK(&qp->ev_work, shmrdma_qp_ev_work);
 	qp->sig_all = init->sq_sig_type == IB_SIGNAL_ALL_WR;
-	qp->max_send_sge = (sq_esz - SHMRDMA_WQE_HDR) / 16;
-	if (qp->max_send_sge > SHMRDMA_MAX_SGE)
-		qp->max_send_sge = SHMRDMA_MAX_SGE;
-	qp->max_recv_sge = (rq_esz - sizeof(struct shmrdma_rq_wqe)) / 16;
-	if (qp->max_recv_sge > SHMRDMA_MAX_SGE)
-		qp->max_recv_sge = SHMRDMA_MAX_SGE;
-	qp->max_inline = qp->type == SHMRDMA_QPT_RC ? sq_esz - SHMRDMA_WQE_HDR : 0;
+	qp->max_send_sge = g.max_send_sge;
+	qp->max_recv_sge = g.max_recv_sge;
+	qp->max_inline = g.max_inline;
 	qp->attr.qp_state = IB_QPS_RESET;
 	qp->scq = to_scq(init->send_cq);
 	qp->rcq = to_scq(init->recv_cq);
 
-	qp->rec = kzalloc(sizeof(*qp->rec), GFP_KERNEL);
-	if (!qp->rec) {
-		rc = -ENOMEM;
-		goto err_qpn;
+	if (udata) {
+		rc = shmrdma_ubuf_get(dev, udata, ucmd.buf, g.len, &qp->ubuf);
+		if (rc)
+			goto err_qpn;
+		qp->rec = qp->ubuf.map;
+		rc = ring_user(&qp->sq, &qp->ubuf, g.sq_off, g.sq_entries,
+			       g.sq_esz);
+		if (rc)
+			goto err_rec;
+		rc = ring_user(&qp->rq, &qp->ubuf, g.rq_off, g.rq_entries,
+			       g.rq_esz);
+		if (rc)
+			goto err_sq;
+		cmd.create_qp.flags = SHMRDMA_QPF_USER;
+		if (atomic_inc_return(&dev->uqps) == 1)
+			schedule_delayed_work(&dev->live_work,
+					      SHMRDMA_LIVE_PERIOD);
+	} else {
+		qp->rec = kzalloc(sizeof(*qp->rec), GFP_KERNEL);
+		if (!qp->rec) {
+			rc = -ENOMEM;
+			goto err_qpn;
+		}
+		rc = ring_alloc(&qp->sq, g.sq_entries, g.sq_esz);
+		if (rc)
+			goto err_rec;
+		rc = ring_alloc(&qp->rq, g.rq_entries, g.rq_esz);
+		if (rc)
+			goto err_sq;
 	}
-	rc = ring_alloc(&qp->sq, sq_entries, sq_esz);
-	if (rc)
-		goto err_rec;
-	rc = ring_alloc(&qp->rq, rq_entries, rq_esz);
-	if (rc)
-		goto err_sq;
 
 	cmd.create_qp.qpn = qpn;
 	cmd.create_qp.type = qp->type;
 	cmd.create_qp.send_cqn = qp->scq->cqn;
 	cmd.create_qp.recv_cqn = qp->rcq->cqn;
-	cmd.create_qp.rec_gpa = virt_to_phys(qp->rec);
+	cmd.create_qp.rec_gpa = shmrdma_rec_gpa(qp->rec, &qp->ubuf);
 	cmd.create_qp.pdn = to_spd(ibqp->pd)->pdn;
 	ring_desc(&qp->sq, &cmd.create_qp.sq);
 	ring_desc(&qp->rq, &cmd.create_qp.rq);
@@ -1212,8 +1640,8 @@ static int shmrdma_create_qp(struct ib_qp *ibqp,
 	if (rc)
 		goto err_xa;
 
-	cap->max_send_wr = sq_entries;
-	cap->max_recv_wr = rq_entries;
+	cap->max_send_wr = g.sq_entries;
+	cap->max_recv_wr = g.rq_entries;
 	cap->max_send_sge = qp->max_send_sge;
 	cap->max_recv_sge = qp->max_recv_sge;
 	cap->max_inline_data = qp->max_inline;
@@ -1223,11 +1651,23 @@ static int shmrdma_create_qp(struct ib_qp *ibqp,
 err_xa:
 	shmrdma_qp_erase(dev, qp);
 err_rq:
-	ring_free(&qp->rq);
+	if (qp->ubuf.umem)
+		ring_free_user(&qp->rq);
+	else
+		ring_free(&qp->rq);
 err_sq:
-	ring_free(&qp->sq);
+	if (qp->ubuf.umem)
+		ring_free_user(&qp->sq);
+	else
+		ring_free(&qp->sq);
 err_rec:
-	kfree(qp->rec);
+	if (qp->ubuf.umem) {
+		if (cmd.create_qp.flags)
+			atomic_dec(&dev->uqps);
+		shmrdma_ubuf_put(&qp->ubuf);
+	} else {
+		kfree(qp->rec);
+	}
 err_qpn:
 	if (qpn != 1)
 		ida_free(&dev->qpn_ida, qpn);
@@ -1244,6 +1684,23 @@ static int shmrdma_qp_drop(struct shmrdma_qp *qp, enum ib_qp_state next)
 
 	if (next != IB_QPS_RESET)
 		return 0;
+	/* what is posted is gone: no later flush pass completes it */
+	if (qp->ubuf.umem) {
+		struct shmrdma_qp_rec *r = qp->rec;
+		u32 p;
+
+		spin_lock_irqsave(&qp->scq->lock, flags);
+		p = smp_load_acquire(&r->sq_prod);
+		WRITE_ONCE(r->sq_cons, p);
+		WRITE_ONCE(r->sq_done, p);
+		spin_unlock_irqrestore(&qp->scq->lock, flags);
+		spin_lock_irqsave(&qp->rcq->lock, flags);
+		p = smp_load_acquire(&r->rq_prod);
+		WRITE_ONCE(r->rq_cons, p);
+		WRITE_ONCE(r->rq_done, p);
+		spin_unlock_irqrestore(&qp->rcq->lock, flags);
+		return 0;
+	}
 	spin_lock_irqsave(&qp->sq_lock, flags);
 	WRITE_ONCE(qp->rec->sq_cons, qp->sq_prod);
 	WRITE_ONCE(qp->rec->sq_done, qp->sq_prod);
@@ -1264,8 +1721,6 @@ static int shmrdma_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 	enum ib_qp_state cur, next;
 	int rc;
 
-	if (udata)
-		return -EOPNOTSUPP;
 	mutex_lock(&qp->state_lock);
 	/* a failed completion moved it to error with no event */
 	if ((READ_ONCE(qp->rec->fatal) || READ_ONCE(qp->rec->err)) &&
@@ -1330,9 +1785,19 @@ static int shmrdma_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 	}
 
 	/* only what the backend took: query_qp and later modifies read it */
-	if (mask & IB_QP_AV)
-		memcpy(qp->dgid, rdma_ah_read_grh(&attr->ah_attr)->dgid.raw,
-		       16);
+	if (mask & IB_QP_AV) {
+		const struct ib_global_route *grh =
+			rdma_ah_read_grh(&attr->ah_attr);
+
+		memcpy(qp->dgid, grh->dgid.raw, 16);
+		qp->sgid_index = grh->sgid_index;
+		qp->hop_limit = grh->hop_limit;
+		qp->tclass = grh->traffic_class;
+		qp->flow_label = grh->flow_label;
+		qp->sl = rdma_ah_get_sl(&attr->ah_attr);
+		qp->static_rate = rdma_ah_get_static_rate(&attr->ah_attr);
+		qp->av_set = true;
+	}
 	if (mask & IB_QP_DEST_QPN)
 		qp->attr.dest_qp_num = attr->dest_qp_num;
 	if (mask & IB_QP_QKEY)
@@ -1397,6 +1862,17 @@ static int shmrdma_query_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 		qp->attr.qp_state = qp->attr.cur_qp_state = IB_QPS_ERR;
 	*attr = qp->attr;
 	memset(&attr->ah_attr, 0, sizeof(attr->ah_attr));
+	if (qp->av_set) {
+		union ib_gid dgid;
+
+		memcpy(dgid.raw, qp->dgid, 16);
+		attr->ah_attr.type = RDMA_AH_ATTR_TYPE_ROCE;
+		rdma_ah_set_port_num(&attr->ah_attr, 1);
+		rdma_ah_set_sl(&attr->ah_attr, qp->sl);
+		rdma_ah_set_static_rate(&attr->ah_attr, qp->static_rate);
+		rdma_ah_set_grh(&attr->ah_attr, &dgid, qp->flow_label,
+				qp->sgid_index, qp->hop_limit, qp->tclass);
+	}
 	memset(&attr->alt_ah_attr, 0, sizeof(attr->alt_ah_attr));
 	mutex_unlock(&qp->state_lock);
 	memset(init, 0, sizeof(*init));
@@ -1418,21 +1894,22 @@ static void shmrdma_cq_clean(struct shmrdma_cq *cq, struct shmrdma_qp *qp,
 {
 	u32 qpn = qp->ibqp.qp_num;
 	unsigned long flags;
-	u32 i, prod;
+	u32 i, prod, cons;
 
 	spin_lock_irqsave(&cq->lock, flags);
 	if (unlink && qp->scq == cq)
 		list_del_init(&qp->scq_node);
 	if (unlink && qp->rcq == cq)
 		list_del_init(&qp->rcq_node);
+	cons = cq->ubuf.umem ? READ_ONCE(cq->rec->cons) : cq->cons;
 	prod = smp_load_acquire(&cq->rec->prod);
-	if (prod - cq->cons > cq->ring.entries)
-		prod = cq->cons + cq->ring.entries;
-	for (i = cq->cons; i != prod; i++) {
+	if (prod - cons > cq->ring.entries)
+		prod = cons + cq->ring.entries;
+	/* a process polls without cq->lock: its slot may be reused meanwhile */
+	for (i = cons; i != prod; i++) {
 		struct shmrdma_cqe *e = ring_at(&cq->ring, i);
 
-		if (READ_ONCE(e->qpn) == qpn)
-			WRITE_ONCE(e->qpn, SHMRDMA_QPN_NONE);
+		cmpxchg(&e->qpn, qpn, SHMRDMA_QPN_NONE);
 	}
 	spin_unlock_irqrestore(&cq->lock, flags);
 }
@@ -1466,9 +1943,16 @@ static int shmrdma_destroy_qp(struct ib_qp *ibqp, struct ib_udata *udata)
 	if (rc)
 		shmrdma_destroy_failed(dev, "destroy qp", ibqp->qp_num, rc);
 	shmrdma_qp_erase(dev, qp);
-	ring_free(&qp->sq);
-	ring_free(&qp->rq);
-	kfree(qp->rec);
+	if (qp->ubuf.umem) {
+		ring_free_user(&qp->sq);
+		ring_free_user(&qp->rq);
+		shmrdma_ubuf_put(&qp->ubuf);
+		atomic_dec(&dev->uqps);
+	} else {
+		ring_free(&qp->sq);
+		ring_free(&qp->rq);
+		kfree(qp->rec);
+	}
 	if (ibqp->qp_num != 1)
 		ida_free(&dev->qpn_ida, ibqp->qp_num);
 	return 0;
@@ -1610,6 +2094,18 @@ static int shmrdma_post_send(struct ib_qp *ibqp, const struct ib_send_wr *wr,
 	unsigned long flags;
 	int rc = 0;
 
+	/* a process's doorbell: it posted to its rings itself */
+	if (qp->ubuf.umem) {
+		if (wr) {
+			*bad = wr;
+			return -EINVAL;
+		}
+		if (smp_load_acquire(&dev->reset_done))
+			schedule_work(&dev->flush_work);
+		else
+			shmrdma_doorbell(dev, qp->rec);
+		return 0;
+	}
 	if (st != IB_QPS_RTS && st != IB_QPS_ERR) {
 		*bad = wr;
 		return -EINVAL;
@@ -1646,7 +2142,7 @@ static int shmrdma_post_recv(struct ib_qp *ibqp, const struct ib_recv_wr *wr,
 	int rc = 0;
 	int i;
 
-	if (READ_ONCE(qp->attr.qp_state) == IB_QPS_RESET) {
+	if (qp->ubuf.umem || READ_ONCE(qp->attr.qp_state) == IB_QPS_RESET) {
 		*bad = wr;
 		return -EINVAL;
 	}
@@ -1710,7 +2206,85 @@ static struct ib_mr *shmrdma_reg_user_mr(struct ib_pd *pd, u64 start, u64 len,
 #endif
 					 struct ib_udata *udata)
 {
-	return ERR_PTR(-EOPNOTSUPP);
+	struct shmrdma_dev *dev = to_sdev(pd->device);
+	struct shmrdma_cmd cmd = { .cmd = SHMRDMA_CMD_REG_MR };
+	struct page **pg = NULL;
+	struct shmrdma_mr *mr;
+	u64 *list = NULL, *dir = NULL;
+	u32 n, ndir, i;
+	int rc;
+
+	if (!dev->user_ok)
+		return ERR_PTR(-EOPNOTSUPP);
+	if (!len || (access & (IB_ACCESS_ON_DEMAND | IB_ZERO_BASED)))
+		return ERR_PTR(-EOPNOTSUPP);
+	if (DIV_ROUND_UP(offset_in_page(start) + len, PAGE_SIZE) >
+	    SHMRDMA_MAX_MR_PAGES)
+		return ERR_PTR(-EINVAL);
+	mr = kzalloc(sizeof(*mr), GFP_KERNEL);
+	if (!mr)
+		return ERR_PTR(-ENOMEM);
+	mr->umem = shmrdma_umem_get(dev, udata, start, len, access);
+	if (IS_ERR(mr->umem)) {
+		rc = PTR_ERR(mr->umem);
+		goto err_mr;
+	}
+	rc = shmrdma_umem_pages(mr->umem, &pg, &n);
+	if (rc)
+		goto err_umem;
+	if (n > SHMRDMA_MAX_MR_PAGES) {
+		rc = -EINVAL;
+		goto err_pages;
+	}
+	/* the page list, and the 4 KB pieces of it the backend reads */
+	ndir = DIV_ROUND_UP(n, SHMRDMA_RING_PAGE_SIZE / sizeof(u64));
+	rc = -ENOMEM;
+	list = vmalloc(array_size(ndir, SHMRDMA_RING_PAGE_SIZE));
+	dir = kmalloc_array(ndir, sizeof(u64), GFP_KERNEL);
+	if (!list || !dir)
+		goto err_pages;
+	for (i = 0; i < n; i++)
+		list[i] = page_to_phys(pg[i]);
+	for (i = 0; i < ndir; i++) {
+		void *p = (void *)list + (size_t)i * SHMRDMA_RING_PAGE_SIZE;
+
+		dir[i] = page_to_phys(vmalloc_to_page(p)) +
+			 offset_in_page(p);
+	}
+	rc = ida_alloc_rr(&dev->mr_ida, &dev->next_mrn, 1, SHMRDMA_MAX_MR - 1);
+	if (rc < 0)
+		goto err_pages;
+	mr->index = rc;
+	mr->ibmr.lkey = mr->index << 8 | (u8)atomic_inc_return(&dev->mr_variant);
+	mr->ibmr.rkey = mr->ibmr.lkey;
+	cmd.reg_mr.key = mr->ibmr.lkey;
+	cmd.reg_mr.pdn = to_spd(pd)->pdn;
+	cmd.reg_mr.access = acc_bits(access);
+	cmd.reg_mr.page_shift = PAGE_SHIFT;
+	cmd.reg_mr.iova = virt;
+	cmd.reg_mr.length = len;
+	cmd.reg_mr.npages = n;
+	cmd.reg_mr.fpo = offset_in_page(start);
+	cmd.reg_mr.dir_gpa = virt_to_phys(dir);
+	rc = shmrdma_cmd(dev, &cmd, NULL);
+	if (rc)
+		goto err_ida;
+	kfree(dir);
+	vfree(list);
+	kvfree(pg);
+	return &mr->ibmr;
+
+err_ida:
+	ida_free(&dev->mr_ida, mr->index);
+err_pages:
+	kfree(dir);
+	vfree(list);
+	kvfree(pg);
+err_umem:
+	ib_umem_release(mr->umem);
+err_mr:
+	kfree(mr);
+	return ERR_PTR(rc);
 }
 
 static struct ib_mr *shmrdma_alloc_mr(struct ib_pd *pd, enum ib_mr_type type,
@@ -1781,10 +2355,44 @@ static int shmrdma_dereg_mr(struct ib_mr *ibmr, struct ib_udata *udata)
 			shmrdma_destroy_failed(dev, "dereg mr", mr->index, rc);
 		ida_free(&dev->mr_ida, mr->index);
 	}
+	if (mr->umem)
+		ib_umem_release(mr->umem);
 	kfree(mr->pages);
 	kfree(mr);
 	return 0;
 }
+
+static int shmrdma_alloc_ucontext(struct ib_ucontext *uctx,
+				  struct ib_udata *udata)
+{
+	struct shmrdma_uresp_ctx uresp = { .uabi = SHMRDMA_UABI_VERSION };
+
+	if (!to_sdev(uctx->device)->user_ok)
+		return -EOPNOTSUPP;
+	return shmrdma_copy_resp(udata, &uresp, sizeof(uresp));
+}
+
+static void shmrdma_dealloc_ucontext(struct ib_ucontext *uctx)
+{
+}
+
+/*
+ * With this, removal destroys an open context's objects instead of
+ * waiting for the process to close it; there are no mappings to zap.
+ */
+static void shmrdma_disassociate_ucontext(struct ib_ucontext *uctx)
+{
+}
+
+/* only with a backend that serves processes */
+static const struct ib_device_ops shmrdma_user_ops = {
+	.alloc_ucontext = shmrdma_alloc_ucontext,
+	.create_user_ah = shmrdma_create_ah,
+	.dealloc_ucontext = shmrdma_dealloc_ucontext,
+	.disassociate_ucontext = shmrdma_disassociate_ucontext,
+
+	INIT_RDMA_OBJ_SIZE(ib_ucontext, shmrdma_ucontext, ibuc),
+};
 
 static const struct ib_device_ops shmrdma_dev_ops = {
 	.owner = THIS_MODULE,
@@ -1832,7 +2440,7 @@ static void shmrdma_init_attr(struct shmrdma_dev *dev)
 	struct ib_device_attr *a = &dev->attr;
 
 	memset(a, 0, sizeof(*a));
-	a->max_mr_size = 1ull << 40;
+	a->max_mr_size = (u64)SHMRDMA_MAX_MR_PAGES << PAGE_SHIFT;
 	a->page_size_cap = 0x7ffff000;	/* the backend takes 4 KB to 1 GB */
 	a->vendor_id = 0x1af4;
 	a->vendor_part_id = SHMRDMA_VIRTIO_ID;
@@ -1965,7 +2573,7 @@ static int shmrdma_probe(struct virtio_device *vdev)
 #endif
 	struct virtqueue *vqs[SHMRDMA_NUM_VQS];
 	struct shmrdma_cmd cmd = { .cmd = SHMRDMA_CMD_INIT };
-	struct shmrdma_resp resp = { 0 };
+	struct shmrdma_resp resp = { 0 }, qresp = { 0 };
 	struct shmrdma_dev *dev;
 	struct net_device *ndev;
 	struct scatterlist sg;
@@ -2016,6 +2624,7 @@ static int shmrdma_probe(struct virtio_device *vdev)
 	INIT_WORK(&dev->fatal_work, shmrdma_fatal_work);
 	INIT_WORK(&dev->flush_work, shmrdma_flush_work);
 	INIT_WORK(&dev->eq_work, shmrdma_eq_work);
+	INIT_DELAYED_WORK(&dev->live_work, shmrdma_live_work);
 	init_completion(&dev->ctrl_done);
 	spin_lock_init(&dev->eq_lock);
 	xa_init_flags(&dev->qps, XA_FLAGS_LOCK_IRQ);
@@ -2079,6 +2688,23 @@ static int shmrdma_probe(struct virtio_device *vdev)
 			    ndev->dev_addr);
 	shmrdma_init_attr(dev);
 	ib_set_device_ops(&dev->ibdev, &shmrdma_dev_ops);
+	cmd = (struct shmrdma_cmd){ .cmd = SHMRDMA_CMD_QUERY };
+	rc = shmrdma_cmd(dev, &cmd, &qresp);
+	/* an older backend refuses it; one that never answered is gone */
+	if (rc && dev->broken)
+		goto err_reset;
+	dev->user_ok = IS_ENABLED(CONFIG_INFINIBAND_USER_MEM) && !rc &&
+		       (qresp.val & SHMRDMA_FEAT_USER);
+	if (dev->user_ok) {
+		ib_set_device_ops(&dev->ibdev, &shmrdma_user_ops);
+		/*
+		 * A process's doorbell is a post_send with no work; after a
+		 * reset, it and req_notify_cq drive the flush of its work.
+		 */
+		dev->ibdev.uverbs_cmd_mask |=
+			BIT_ULL(IB_USER_VERBS_CMD_POST_SEND) |
+			BIT_ULL(IB_USER_VERBS_CMD_REQ_NOTIFY_CQ);
+	}
 	dev->nb.notifier_call = shmrdma_netdev_event;
 	rc = register_netdevice_notifier(&dev->nb);
 	if (rc)
@@ -2115,6 +2741,8 @@ err_reset:
 	mutex_lock(&dev->ctrl_mutex);
 	shmrdma_reset_locked(dev);
 	mutex_unlock(&dev->ctrl_mutex);
+	/* a failed ib_register_device() may have let a process in */
+	cancel_delayed_work_sync(&dev->live_work);
 	cancel_work_sync(&dev->fatal_work);
 	cancel_work_sync(&dev->flush_work);
 	vdev->config->del_vqs(vdev);
@@ -2152,6 +2780,8 @@ static void shmrdma_remove(struct virtio_device *vdev)
 	flush_work(&dev->fatal_work);
 	if (registered)
 		ib_unregister_device(&dev->ibdev);
+	/* no process's QP is left to start it again */
+	cancel_delayed_work_sync(&dev->live_work);
 	shmrdma_cmd(dev, &cmd, NULL);
 	mutex_lock(&dev->ctrl_mutex);
 	shmrdma_reset_locked(dev);
