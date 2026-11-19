@@ -25,10 +25,11 @@ log = logging.getLogger("ltvm")
 def usable_cpus() -> int:
     """CPUs this process may run on: taskset or a cpuset narrows them,
     and os.cpu_count() does not see that."""
-    try:
-        return len(os.sched_getaffinity(0)) or 1
-    except AttributeError:
+    # getattr: mypy on macOS, which has none, would reject the name.
+    affinity = getattr(os, "sched_getaffinity", None)
+    if affinity is None:
         return os.cpu_count() or 4
+    return len(affinity(0)) or 1
 
 
 def ext4_whole(path: Path) -> bool:
