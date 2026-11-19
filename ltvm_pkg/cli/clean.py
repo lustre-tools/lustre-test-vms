@@ -47,7 +47,7 @@ from ltvm_pkg.target_config import kernel_dir_version_key
 class _Candidate:
     target: str
     arch: str
-    kind: str  # "kernel" | "image"
+    kind: str  # "kernel" | "kernel-file" | "image" | ...
     path: Path
     bytes: int
     reason: str
@@ -157,14 +157,17 @@ def _scan_target(
     force: bool,
     referenced: tuple[set[str], list[str]] | None = None,
     vm_kernels: set[str] | None = None,
+    kernel_refs: tuple[set[str], set[str]] | None = None,
 ) -> _TargetReport | None:
     """Walk artifacts/<target>/<arch>/{kernels,images} and produce a
     report.  Returns None when the target/arch dir doesn't exist.
 
     ``referenced`` is image_store.referenced_images(), computed here
     when not given.  While any overlay's backing file is unknown, no
-    image is offered for removal.
+    image is offered for removal.  ``kernel_refs`` is
+    kernel_store.referenced_kernels(), likewise.
     """
+    from ltvm_pkg import kernel_store
     from ltvm_pkg.image_store import (
         current_image,
         image_files,
@@ -303,6 +306,32 @@ def _scan_target(
                 )
             )
             pruned_kernel_names.add(d.name)
+
+    # ---- Kernel files: versioned vmlinuz a rebuild superseded ----
+    # Within the kernel dirs that stay; only those no VM records, by
+    # path or by identity (kernel_store).
+    if kernel_refs is None:
+        kernel_refs = kernel_store.referenced_kernels()
+    for d in on_disk_kernel_dirs:
+        if d.name in pruned_kernel_names:
+            continue
+        for f in kernel_store.superseded(d, kernel_refs):
+            age = _file_age_days(f)
+            if older_than_days is not None and (
+                age is None or age < older_than_days
+            ):
+                continue
+            report.candidates.append(
+                _Candidate(
+                    target=target,
+                    arch=arch,
+                    kind="kernel-file",
+                    path=f,
+                    bytes=f.stat().st_size,
+                    reason="superseded kernel; no VM boots it",
+                    age_days=age,
+                )
+            )
 
     # ---- Images: cascade with kernel removals + flag orphans ----
     images_dir = arch_dir / "images"
@@ -702,6 +731,11 @@ def cmd_prune(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     vm_kernels = _vm_kernel_dirs() if targets else set()
+    from ltvm_pkg.kernel_store import referenced_kernels
+
+    kernel_refs: tuple[set[str], set[str]] = (
+        referenced_kernels() if targets else (set(), set())
+    )
     for t in targets:
         for a in _arches_for_target(t, arch_flag):
             r = _scan_target(
@@ -712,6 +746,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
                 force=force,
                 referenced=referenced,
                 vm_kernels=vm_kernels,
+                kernel_refs=kernel_refs,
             )
             if r is not None:
                 reports.append(r)

@@ -46,6 +46,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
+from . import kernel_store
 from .meta_schema import require_kernel_meta
 from .paths import load_meta_safe
 
@@ -1070,6 +1071,11 @@ def package_target(
             # locally on demand rather than published.
             "--exclude",
             f"{kernel_rel}/zfs",
+            # The versioned links to this and earlier kernels
+            # (kernel_store): the asset carries the current one as
+            # vmlinuz, as it always has, and fetch versions it.
+            "--exclude",
+            f"{kernel_rel}/vmlinuz-*",
             "-cf",
             str(kern_asset),
             "-C",
@@ -1706,6 +1712,17 @@ def fetch_target(
                         _install_fetched_images(staging, output_base)
                     finally:
                         shutil.rmtree(staging, ignore_errors=True)
+                elif asset["kind"] == "kernel":
+                    # tar would write through to the vmlinuz inode VMs
+                    # boot; the fetched one gets a versioned name of its
+                    # own (kernel_store).
+                    kdir = _variant_paths(
+                        output_base / target_name / arch,
+                        manifest["kernel"],
+                        variant,
+                    )["kernel_dir"]
+                    with kernel_store.replacing(kdir):
+                        _untar_zstd(tarball, output_base)
                 else:
                     _untar_zstd(tarball, output_base)
                 tarball.unlink()  # free disk eagerly on a multi-GB fetch
