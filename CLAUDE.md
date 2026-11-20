@@ -1648,6 +1648,27 @@ SoftRoCE LNet setup with no LND.  An o2ib setting in configure_args or
 wins.  Every Lustre build goes through it: `build lustre`/`all`,
 deploy-lustre, cluster deploy and make-install.
 
+`--lnds kfi,efa` (on `build lustre` and `deploy-lustre`; `all` for
+both) builds the two hardware LNDs whose code lives outside the kernel,
+for compile-checking: `ltvm_pkg/lnd_deps.py`.  `kfi` builds only the
+core `kfabric.ko` of HPE's shs-kfabric (pinned `KFABRIC_COMMIT`,
+fetched by commit id) in the build container, cached per kernel under
+`kernels/<k>/lnds/kfabric-<commit12>/` (or `~/.cache/ltvm/lnds/...`
+for a user who does not own the kernel, by ZFS's rules), mounted at
+`/kfi` for `--with-kfi=/kfi`; kfabric's own `kfi_cxi_ext.h` satisfies
+configure's kfi_cxi probes, so the CXI provider and cxi-ss1 are not
+built.  `efa` fetches `efa_verbs.h` from amzn-drivers (pinned
+`EFA_COMMIT` and sha256) into `~/.cache/ltvm/lnds/efa-<commit12>/`,
+mounted at `/efa` for `--enable-efa=/efa`.  The pins go into the
+configure stamp (`configure_stamp_hash`'s `lnd_id`; a build without
+`--lnds` hashes as before), and `kfabric.ko` is installed into the
+staging under `extra/kfabric/` so kkfilnd can load.  Opt-in, not
+default: neither LND can run in a VM.  kfilnd accepts only the CXI
+provider (it takes the NIC from a `struct kcxi_addr` and opens the CXI
+fabric and domain ops), which needs cxi-ss1 and a Cassini NIC or HPE's
+netsim, which is not public; efalnd needs an EFA device, and nothing
+emulates one.  Cross-arch builds refuse `kfi`.
+
 The container runs under `podman run --timeout`, as the ZFS and
 MOFED-kmod builds do ([ltvm_pkg/build_timeout.py](ltvm_pkg/build_timeout.py)):
 3600s for Lustre, 1800s for the other two.  `LTVM_BUILD_TIMEOUT`,

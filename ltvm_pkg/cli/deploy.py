@@ -556,7 +556,12 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         # configure, not with the flags asked for now; only the build
         # can tell whether --configure changes anything.
         configure = getattr(args, "configure", None)
-        staging_fresh = not configure and _staging_is_fresh(staging, build_path)
+        lnds = getattr(args, "lnds", None)
+        staging_fresh = (
+            not configure
+            and not lnds
+            and _staging_is_fresh(staging, build_path)
+        )
 
         if staging_fresh:
             if not use_json:
@@ -615,6 +620,8 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 build_cmd += ["--force-compat"]
             if configure:
                 build_cmd += [f"--configure={configure}"]
+            if lnds:
+                build_cmd += ["--lnds", lnds]
             if want_zfs:
                 build_cmd += ["--zfs"]
                 if zfs_source:

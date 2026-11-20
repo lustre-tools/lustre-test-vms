@@ -395,7 +395,9 @@ def configure_builds_modules(cfg: str) -> bool:
     return builds
 
 
-def configure_stamp_hash(cfg: str, zfs_version: str | None = None) -> str:
+def configure_stamp_hash(
+    cfg: str, zfs_version: str | None = None, lnd_id: str | None = None
+) -> str:
     """Identity of a configure run, for the reconfigure stamp.
 
     The kernel/server stamps don't capture configure flags, so a changed
@@ -411,14 +413,20 @@ def configure_stamp_hash(cfg: str, zfs_version: str | None = None) -> str:
     against 2.3.4 headers using the config.h probed against 2.4.0,
     which fails on the dmu_flags_t argument 2.4.0 added ("too many
     arguments to function 'dmu_write_by_dnode'").
+
+    The LND dependencies (``lnd_id``, from lnd_deps.identity) are
+    hashed for the same reason: /kfi and /efa are mount points too.
     """
-    if not zfs_version:
+    if not zfs_version and not lnd_id:
         # Hash the bare command line, exactly as this did before ZFS
         # existed, so adding the parameter does not invalidate the
         # stamp in every Lustre tree already on disk and cost everyone
         # one full reconfigure + rebuild per target for nothing.
         return hashlib.sha256(cfg.encode()).hexdigest()
-    return hashlib.sha256(f"{cfg}\0zfs={zfs_version}".encode()).hexdigest()
+    key = f"{cfg}\0zfs={zfs_version}" if zfs_version else cfg
+    if lnd_id:
+        key += f"\0lnds={lnd_id}"
+    return hashlib.sha256(key.encode()).hexdigest()
 
 
 # Lustre's configure costs every fresh tree 20-60s, most of it kernel
@@ -650,6 +658,7 @@ def build_lustre(
     variant: str = "base",
     zfs_src: str | Path | None = None,
     zfs_version: str | None = None,
+    lnd_dirs: dict[str, Path] | None = None,
 ) -> BuildResult:
     """Build a Lustre source tree.
 
@@ -670,6 +679,9 @@ def build_lustre(
                     produces osd-zfs alongside osd-ldiskfs.
     zfs_version:    str or None -- recorded in the staging meta so
                     deploy knows which ZFS artifact to ship with it
+    lnd_dirs:       {"kfi": dir, "efa": dir} or None -- the
+                    lnd_deps.ensure() result for the hardware LNDs to
+                    build (kfilnd, efalnd), mounted at /kfi and /efa
 
     Raises RuntimeError on build failure.
     """
@@ -744,6 +756,7 @@ def build_lustre(
             variant=variant,
             zfs_src=zfs_src,
             zfs_version=zfs_version,
+            lnd_dirs=lnd_dirs,
         )
 
 
@@ -1119,6 +1132,7 @@ def _build_in_container(
     variant: str = "base",
     zfs_src: Path | None = None,
     zfs_version: str | None = None,
+    lnd_dirs: dict[str, Path] | None = None,
 ) -> BuildResult:
     """Build Lustre inside the build container.
 
@@ -1126,7 +1140,13 @@ def _build_in_container(
       /lustre  -- Lustre source (read-write, build here)
       /kernel  -- kernel build-tree (read-only)
       /zfs     -- built ZFS source tree (read-only, only with --zfs)
+      /kfi     -- built kfabric tree (read-only, only with --lnds kfi)
+      /efa     -- efa_verbs.h (read-only, only with --lnds efa)
     """
+    from . import lnd_deps
+
+    lnd_dirs = lnd_dirs or {}
+    lnds = tuple(sorted(lnd_dirs))
     print(f"  Container: {container_tag}")
     print(f"  Lustre:    {lustre_tree}")
     print(f"  Kernel:    {build_tree}")
@@ -1404,6 +1424,8 @@ def _build_in_container(
     # second OSD rather than replacing the first.
     if zfs_src is not None:
         cfg += " --with-zfs=/zfs"
+    for a in lnd_deps.configure_args(lnds):
+        cfg += f" {a}"
     if cross_compiling:
         # The container's mpicc builds for the host.
         cfg += " --disable-mpitests"
@@ -1432,7 +1454,7 @@ def _build_in_container(
             args = [a for a in args if not a.startswith("--enable-mpitests")]
         cfg += " " + " ".join(shlex.quote(a) for a in args)
 
-    cfg_hash = configure_stamp_hash(cfg, zfs_version)
+    cfg_hash = configure_stamp_hash(cfg, zfs_version, lnd_deps.identity(lnds))
     cfg_stamp = lustre_tree / f".ltvm-configure-{_stamp_suffix(target, arch)}"
     if not need_reconf:
         if not cfg_stamp.exists():
@@ -1579,6 +1601,13 @@ fi""")
         f"make{make_cross} install DESTDIR=/staging -j{jobs}"
         f"{libtool_silent}{noise_filter}"
     )
+    if "kfi" in lnds:
+        # kkfilnd needs kfabric.ko to load; ship it where its own
+        # `make install` puts it (INSTALL_MOD_DIR=kfabric).
+        script_parts.append(
+            f"install -D -m 644 {lnd_deps.KFI_MOUNT}/kfabric.ko "
+            f"/staging/lib/modules/{kver}/extra/kfabric/kfabric.ko"
+        )
     script = "\n".join(script_parts)
 
     # Ensure the staging directory exists on the host before mounting.
@@ -1689,6 +1718,10 @@ fi""")
         cmd[-3:-3] = ["-v", f"{zfs_src}:/zfs:ro"]
     if vmlinux is not None:
         cmd[-3:-3] = ["-v", f"{vmlinux}:/vmlinux:ro"]
+    if "kfi" in lnd_dirs:
+        cmd[-3:-3] = ["-v", f"{lnd_dirs['kfi']}:{lnd_deps.KFI_MOUNT}:ro"]
+    if "efa" in lnd_dirs:
+        cmd[-3:-3] = ["-v", f"{lnd_dirs['efa']}:{lnd_deps.EFA_MOUNT}:ro"]
 
     # Run podman as whoever ltvm itself runs as: do NOT drop privileges
     # to SUDO_USER here.
@@ -1887,6 +1920,8 @@ fi""")
             # The ZFS artifact it was linked against: the shared one or,
             # for a user who cannot write that, their own copy.
             "zfs_dir": str(Path(zfs_src).parent) if zfs_src else None,
+            # The hardware LNDs built (--lnds), and their pinned deps.
+            **({"lnds": lnd_deps.identity(lnds)} if lnds else {}),
         },
         indent=2,
     )

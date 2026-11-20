@@ -1072,6 +1072,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--configure --with-o2ib=no.  The = form works too.",
     )
     blp.add_argument(
+        "--lnds",
+        default=None,
+        metavar="LIST",
+        help="Also build these hardware LNDs, comma-separated: kfi "
+        "(kfilnd, against HPE's kfabric, built here for the kernel), "
+        "efa (efalnd, against Amazon's efa_verbs.h), or all.  "
+        "The modules ship and load, but no VM can bring up either "
+        "network: both need hardware.",
+    )
+    blp.add_argument(
         "--jobs", type=int, default=None, help="Parallel jobs (default: nproc)"
     )
     blp.set_defaults(func=cmd_build_lustre)
@@ -2433,6 +2443,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Extra configure arguments for the build, as for `build "
         "lustre` (e.g. --configure=--enable-crypto).  The build always "
         "runs when this is given; it is incremental.",
+    )
+    sp.add_argument(
+        "--lnds",
+        default=None,
+        metavar="LIST",
+        help="Build the hardware LNDs too, as for `build lustre` "
+        "(kfi, efa, or all), and ship kfabric.ko with kkfilnd.  The "
+        "build always runs when this is given.",
     )
     sp.add_argument(
         "--fstype",

@@ -259,6 +259,24 @@ uses the target's defaults, so a tree built with `build lustre
 --configure=...` loses those flags at its next deploy: pass the same
 `--configure` to `deploy-lustre` or `cluster deploy`.
 
+kfilnd and efalnd need code outside the kernel, so a default build
+skips them. `--lnds kfi,efa` (or `all`) on `build lustre` or
+`deploy-lustre` builds them too, for compile-checking a change to
+`lnet/klnds/kfilnd` or `lnet/klnds/efalnd`:
+
+```bash
+ltvm build lustre rocky9 --lustre-tree <tree> --lnds kfi,efa
+```
+
+`kfi` builds HPE's kfabric core (`kfabric.ko`, pinned shs-kfabric
+commit) once per kernel and configures `--with-kfi`; `efa` fetches
+Amazon's `efa_verbs.h` (pinned, sha256-checked) for `--enable-efa`. The
+staging gets `kkfilnd.ko`, `kefalnd.ko` and `kfabric.ko`, so after a
+deploy `modprobe kkfilnd kefalnd` works, but `lnetctl net add` fails
+(-ENODATA for kfi, -ENODEV for efa) and nothing more can run them: kfilnd needs a CXI NIC (its
+only provider; HPE's Cassini simulator is not public) and efalnd an EFA
+device, and no software stand-in exists for either.
+
 ltvm's build path detects two staleness traps that a host build still
 walks into, and both look like something else:
 

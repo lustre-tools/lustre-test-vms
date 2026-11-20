@@ -255,7 +255,8 @@ ltvm build all <target>         Container + kernel + Lustre + image
 ltvm build container <target>   Rebuild the build container
 ltvm build kernel <target>      Kernel (+ --kernel, --lustre-tree)
 ltvm build image <target>       Per-kernel VM image (+ --kernel)
-ltvm build lustre <target>      Lustre against target kernel (+ --lustre-tree, --kernel)
+ltvm build lustre <target>      Lustre against target kernel (+ --lustre-tree, --kernel,
+                                --lnds kfi,efa to compile kfilnd/efalnd too)
 ltvm build mofed-kmods <t>      Per-kernel MOFED kernel modules
 ltvm build zfs <target>         ZFS against the target kernel (see --zfs)
 ltvm build shell <target>       Interactive shell in build container

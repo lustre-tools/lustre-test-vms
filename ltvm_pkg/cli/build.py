@@ -757,6 +757,35 @@ def _resolve_zfs(
     return src, version, None
 
 
+def _resolve_lnds(
+    tc: TargetConfig,
+    args: argparse.Namespace,
+    kernel: str | None,
+    use_json: bool,
+) -> tuple[dict[str, Path] | None, str | None]:
+    """Prepare the dependencies of the LNDs --lnds asks for.
+
+    Returns ``(lnd_dirs, error_message)``; ``(None, None)`` when --lnds
+    was not given, which is the default.
+    """
+    from ltvm_pkg import lnd_deps
+
+    try:
+        lnds = lnd_deps.parse_lnds(getattr(args, "lnds", None))
+    except ValueError as e:
+        return None, str(e)
+    if not lnds:
+        return None, None
+    try:
+        dirs = lnd_deps.ensure(tc, kernel, lnds)
+    except (lnd_deps.LndDepError, OSError) as e:
+        return None, f"LND dependencies failed: {e}"
+    if not use_json:
+        for name, d in sorted(dirs.items()):
+            print(f"  lnd:   {lnd_deps.LNDS[name]} ({d})")
+    return dirs, None
+
+
 def cmd_build_zfs(args: argparse.Namespace) -> int:
     use_json = args.json
     tc, err = _load_target_args(args, use_json)
@@ -1251,6 +1280,10 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
                 hint="Drop --disable-server, or drop --zfs",
             )
 
+        lnd_dirs, lnd_err = _resolve_lnds(tc, args, resolved_kernel, use_json)
+        if lnd_err is not None:
+            return _error(lnd_err, use_json)
+
         container_tag = tc.container_tag
 
         try:
@@ -1268,6 +1301,7 @@ def cmd_build_lustre(args: argparse.Namespace) -> int:
                 variant=tc.variant_name,
                 zfs_src=zfs_src,
                 zfs_version=zfs_version,
+                lnd_dirs=lnd_dirs,
             )
         except Exception as e:
             return _error(f"Lustre build failed: {e}", use_json)
