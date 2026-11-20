@@ -294,7 +294,17 @@ class TestGenerateLocalSh:
         assert "DIR=${DIR:-$MOUNT}" in text
         assert "DIR1=${DIR1:-$MOUNT1}" in text
         assert "DIR2=${DIR2:-$MOUNT2}" in text
-        assert "LOAD_MODULES_REMOTE=true" in text
+        # Defaults to true, but a LOAD_MODULES_REMOTE in the environment wins.
+        assert "LOAD_MODULES_REMOTE=${LOAD_MODULES_REMOTE:-true}" in text
+
+    def test_load_modules_remote_env_overridable(self) -> None:
+        """LOAD_MODULES_REMOTE is a default assignment, so the environment
+        can override it (e.g. a single-node run wanting it off)."""
+        c = _cluster(("n", ["mgs", "mds"], 1, 0, "10.0.0.1"))
+        text = vm_cluster.generate_local_sh(c)
+        # Not a hard assignment that the environment cannot change.
+        assert "LOAD_MODULES_REMOTE=true" not in text
+        assert "LOAD_MODULES_REMOTE=${LOAD_MODULES_REMOTE:-true}" in text
 
 
 # ── _validate_lustre_source ──────────────────────────────

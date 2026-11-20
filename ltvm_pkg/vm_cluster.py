@@ -564,7 +564,7 @@ def generate_local_sh(
     lines.append("")
 
     lines.append('PDSH="pdsh -S -Rssh -w"')
-    lines.append("LOAD_MODULES_REMOTE=true")
+    lines.append("LOAD_MODULES_REMOTE=${LOAD_MODULES_REMOTE:-true}")
     lines.append("MOUNT=/mnt/lustre")
     lines.append("MOUNT1=${MOUNT1:-$MOUNT}")
     lines.append("MOUNT2=/mnt/lustre2")
