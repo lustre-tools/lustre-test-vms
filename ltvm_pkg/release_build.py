@@ -393,9 +393,19 @@ def default_jobs(available: list[int] | None) -> int:
 
 
 def available_cpus() -> list[int] | None:
-    if sys.platform != "linux" or shutil.which("taskset") is None:
+    # getattr: macOS has none, and mypy there rejects the name.
+    affinity = getattr(os, "sched_getaffinity", None)
+    if _platform() != "linux" or affinity is None:
         return None
-    return sorted(os.sched_getaffinity(0))
+    if shutil.which("taskset") is None:
+        return None
+    return sorted(affinity(0))
+
+
+def _platform() -> str:
+    """sys.platform, through a call: mypy evaluates sys.platform tests,
+    and on one platform the other's branch reads as unreachable."""
+    return sys.platform
 
 
 # ------------------------------------------------------------------
@@ -408,7 +418,7 @@ def podman_store() -> Path | None:
     CONTAINERS_STORAGE_CONF can move it off the home filesystem.  None
     when it is not on this host's filesystems: on macOS, inside the
     podman machine, and with a remote podman service."""
-    if sys.platform == "darwin":
+    if _platform() == "darwin":
         return None
     try:
         r = subprocess.run(

@@ -1016,7 +1016,7 @@ def _pidfd_open(pid: int) -> int | None:
     """A pidfd for *pid*, or None where there are none."""
     if hasattr(os, "pidfd_open"):
         return int(os.pidfd_open(pid))
-    if not sys.platform.startswith("linux"):
+    if not _LINUX:
         return None
     import ctypes
 

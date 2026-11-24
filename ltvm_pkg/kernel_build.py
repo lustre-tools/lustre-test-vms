@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
+from . import kernel_store
 from .cross_compile import host_podman_platform
 from .lustre_tree import kp_configs, kp_patches, kp_series, kp_targets
 from .paths import load_meta_safe
@@ -1291,7 +1292,10 @@ def _build_kernel_upstream(
             jobs,
             rel.version,
         )
-        _run_kernel_podman(container_cmd, kernel_out)
+        # The inner script's cp would write through to the vmlinuz
+        # inode VMs boot; it gets a new file instead (kernel_store).
+        with kernel_store.replacing(kernel_out):
+            _run_kernel_podman(container_cmd, kernel_out)
 
     return _finalize_kernel_build(
         target_config,
@@ -1385,7 +1389,10 @@ def _build_kernel_deb(
             jobs,
             deb_source,
         )
-        _run_kernel_podman(container_cmd, kernel_out)
+        # The inner script's cp would write through to the vmlinuz
+        # inode VMs boot; it gets a new file instead (kernel_store).
+        with kernel_store.replacing(kernel_out):
+            _run_kernel_podman(container_cmd, kernel_out)
 
     abi = deb_abi(deb_source)
     if abi is not None:
@@ -1638,7 +1645,10 @@ def _build_kernel_suse(
         ]
 
         log.info("Starting SUSE kernel build in container (j%d)...", jobs)
-        _run_kernel_podman(container_cmd, kernel_out)
+        # The inner script's cp would write through to the vmlinuz
+        # inode VMs boot; it gets a new file instead (kernel_store).
+        with kernel_store.replacing(kernel_out):
+            _run_kernel_podman(container_cmd, kernel_out)
 
     if (
         archived_build_id
@@ -1825,7 +1835,10 @@ def _build_kernel_srpm(
         ]
 
         log.info("Starting kernel build in container (j%d)...", jobs)
-        _run_kernel_podman(container_cmd, kernel_out)
+        # The inner script's cp would write through to the vmlinuz
+        # inode VMs boot; it gets a new file instead (kernel_store).
+        with kernel_store.replacing(kernel_out):
+            _run_kernel_podman(container_cmd, kernel_out)
 
     # A rebuild that reproduced the same binary makes the archive a
     # duplicate of the new vmlinux; drop it rather than keep a few

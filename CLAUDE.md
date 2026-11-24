@@ -491,6 +491,55 @@ over a different filesystem: "No working init found".  So
   included.  One overlay whose backing file it cannot read
   keeps every image.
 
+### Kernel files are never overwritten
+
+A kernel dir is keyed on kernel.release, so a rebuild whose
+inputs moved without moving the release (the 2026-11-16
+config overlay change) lands in the same dir, and the inner
+script's `cp ... /output/vmlinuz` wrote through the old
+inode.  Every VM created earlier then booted the new kernel
+over the modules its image carries: "disagrees about version
+of symbol module_layout", `modprobe lnet`: Exec format error.
+31 VMs broke at once, and start and doctor said nothing
+([ltvm_pkg/kernel_store.py](ltvm_pkg/kernel_store.py)):
+
+- Each build's and each fetch's vmlinuz is also hard-linked
+  as `vmlinuz-<UTC stamp>-<hex>` (a copy with the same
+  size:mtime where links fail).  `vmlinuz` stays a real
+  file naming the current one, so image builds, export,
+  kdump seeding and an older ltvm read it unchanged.
+- `kernel_store.replacing(kdir)` wraps every kernel build's
+  podman run and the kernel asset's untar.  It takes the
+  name `vmlinuz` off the inode first (a legacy `vmlinuz`
+  with no versioned link is renamed to one), so the write
+  makes a new file; afterwards it links the new one and
+  prunes versioned files no VM uses, and a failed run puts
+  the previous one back.  The inner scripts are untouched:
+  their bytes are in every kernel's hash.
+- `current_kernel(dir)` is how create finds "the kernel"
+  (`resolve_os_artifacts`): the versioned file, so `KERNEL`
+  names one no rebuild moves, with its `size:mtime_ns` as
+  `KERNEL_ID`.
+- `launch_qemu` refuses a VM whose kernel is gone or whose
+  identity moved (`check_kernel`), naming the fixes:
+  recreate, or `ltvm vm set <vm> --current-kernel` and copy
+  the new modules in.  When a versioned file with the
+  recorded identity is still there -- a VM that adopted the
+  record on a legacy `vmlinuz` -- it is repointed there
+  instead.  No `KERNEL_ID`: warned when the kernel changed
+  after `CREATED`, otherwise adopted, with the versioned
+  name.  `ltvm doctor` reports the same VMs
+  (`kernel_problem`, read-only).
+- Publish excludes `vmlinuz-*` from the kernel asset, which
+  carries the current kernel as `vmlinuz` as it always has:
+  no schema change.
+- `ltvm clean` offers superseded versioned files in the
+  kernel dirs it keeps (`kernel-file`), never one a VM's
+  `KERNEL` names or whose identity a `KERNEL_ID` records;
+  an `.info` this ltvm cannot load is read raw for those two
+  keys.  `fetch --replace` still removes the whole dir, as
+  it does the image dir.
+
 ## Exporting Images
 
 `ltvm target export` repackages a built image + its

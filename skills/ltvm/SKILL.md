@@ -63,6 +63,13 @@ and creating against a kernel with no matching image fails rather than
 booting the wrong modules. A Lustre build lands in the tree's
 `.ltvm-staging/<target>/<arch>/<kernel>/`.
 
+A VM keeps booting the kernel it was created with after a rebuild or
+refetch of that kernel. One whose kernel file is gone or was replaced
+in place (built by an older ltvm) is refused at `start`, and listed by
+`ltvm doctor`: recreate it, or `ltvm vm set <vm> --current-kernel`,
+start it, and copy the kernel dir's `modules/lib/modules/<kver>` into
+the guest's `/lib/modules/` (then `depmod -a` and redeploy Lustre).
+
 ## A single VM, from nothing to a mounted filesystem
 
 ```bash

@@ -340,12 +340,11 @@ def resolve_os_artifacts(
 
     # Pick the actual kernel binary file if the caller didn't pass a path.
     if kern is None:
+        from .kernel_store import current_kernel
+
         kdir = kernels_root / kernel_dirname
-        for nm in ("vmlinuz", "vmlinux"):
-            c = kdir / nm
-            if c.exists():
-                kern = c
-                break
+        # The versioned file, which no rebuild overwrites (kernel_store).
+        kern = current_kernel(kdir)
         if kern is None:
             raise FileNotFoundError(
                 f"Kernel directory exists but has no vmlinuz/vmlinux: "
@@ -616,6 +615,9 @@ class VMInfo:
     # Size and mtime of the image file at create time (image_store); a
     # start refuses an overlay whose base image no longer matches.
     image_id: str = ""
+    # Size and mtime of the kernel file at create time (kernel_store); a
+    # start refuses a VM whose kernel no longer matches its modules.
+    kernel_id: str = ""
     os_id: str = ""  # OS identifier (e.g. rocky9, ubuntu24)
     arch: str = "x86_64"  # CPU architecture (x86_64, aarch64)
     disable_nesting: bool = False  # Keep EL2 off under macOS HVF.
@@ -801,6 +803,7 @@ class VMInfo:
             f"KVER={self.kver}\n"
             f"BASE_IMAGE={self.base_image}\n"
             f"IMAGE_ID={self.image_id}\n"
+            f"KERNEL_ID={self.kernel_id}\n"
             f"OS_ID={self.os_id}\n"
             f"ARCH={self.arch}\n"
             f"DISABLE_NESTING={int(self.disable_nesting)}\n"
@@ -1007,6 +1010,7 @@ class VMInfo:
             kver=vals.get("KVER", ""),
             base_image=vals.get("BASE_IMAGE", ""),
             image_id=vals.get("IMAGE_ID", ""),
+            kernel_id=vals.get("KERNEL_ID", ""),
             os_id=vals.get("OS_ID", ""),
             arch=vals.get("ARCH", "x86_64"),
             disable_nesting=vals.get("DISABLE_NESTING") == "1",

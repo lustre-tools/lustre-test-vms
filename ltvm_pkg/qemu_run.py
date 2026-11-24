@@ -1000,8 +1000,9 @@ def launch_qemu(vm: VMInfo, *, wait_seconds: int = 0) -> None:
         die(f"overlay missing for '{vm.name}'")
 
     from .image_store import check_backing
+    from .kernel_store import check_kernel
 
-    refusal = check_backing(vm)
+    refusal = check_backing(vm) or check_kernel(vm)
     if refusal:
         die(refusal)
 

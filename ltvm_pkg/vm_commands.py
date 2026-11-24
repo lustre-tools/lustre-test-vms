@@ -17,7 +17,14 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from . import numa_dist, rootless, shmrdma, shmrdma_req, vm_claim
+from . import (
+    kernel_store,
+    numa_dist,
+    rootless,
+    shmrdma,
+    shmrdma_req,
+    vm_claim,
+)
 from .deploy import (
     configure_single_lnet,
     configure_test_disks,
@@ -464,8 +471,12 @@ def _seed_kdump_boot(vm: VMInfo) -> None:
     # Fall back to seeding from the host's kernel dir: scp vmlinuz
     # to /boot/, then regenerate initramfs inside the VM so it has
     # matching module dependencies for the kernel actually running.
+    # The VM's own kernel file, not the kernel dir's current one, which a
+    # rebuild may have replaced since the VM was created (kernel_store).
     kernel_dir = Path(vm.kernel).parent if vm.kernel else None
     vmlinuz = kernel_dir / "vmlinuz" if kernel_dir else None
+    if vm.kernel and kernel_store.is_versioned_name(Path(vm.kernel).name):
+        vmlinuz = Path(vm.kernel)
     if not vmlinuz or not vmlinuz.exists():
         die(
             f"no vmlinuz next to {vm.kernel!r} to seed to VM; "
@@ -918,6 +929,7 @@ def _handle_existing_vm(name: str, args: argparse.Namespace) -> bool:
 
 
 def _image_id(image: str) -> str:
+    """Size and mtime of an image or kernel file, or "" if unreadable."""
     from .image_store import image_identity
 
     try:
@@ -1001,6 +1013,7 @@ def _allocate_and_persist_vm(
             created=int(time.time()),
             base_image=base_name,
             image_id=_image_id(image),
+            kernel_id=_image_id(kernel),
             shmrdma_kmod=shmrdma.image_has_kmod(image),
             os_id=os_id,
             kver=kver,
@@ -3490,8 +3503,10 @@ def cmd_set(args: argparse.Namespace) -> None:
             die(problem)
         host_node = max(host_node, -1)
     speed_arg = getattr(args, "eth0_speed", None)
+    set_kernel = bool(getattr(args, "current_kernel", None))
     if (
-        args.vcpus is None
+        not set_kernel
+        and args.vcpus is None
         and args.mem is None
         and numa is None
         and dist_inline is None
@@ -3503,8 +3518,8 @@ def cmd_set(args: argparse.Namespace) -> None:
     ):
         die(
             "nothing to set: give --vcpus, --mem, --numa-nodes, "
-            "--numa-dist[-file], --disk-cache, --host-node, --shmrdma "
-            "and/or --eth0-speed"
+            "--numa-dist[-file], --disk-cache, --host-node, --shmrdma, "
+            "--eth0-speed and/or --current-kernel"
         )
     if shm == "none":
         shm = ""
@@ -3590,6 +3605,19 @@ def cmd_set(args: argparse.Namespace) -> None:
             f"eth0 speed {_speed_label(vm.eth0_speed)} -> {_speed_label(speed)}"
         )
         vm.eth0_speed = speed
+    if set_kernel:
+        if not vm.kernel:
+            die(f"{vm.name} records no kernel; recreate it")
+        cur = kernel_store.current_kernel(Path(vm.kernel).parent)
+        if cur is None:
+            die(f"no kernel in {Path(vm.kernel).parent}")
+        ident = _image_id(str(cur))
+        if str(cur) != vm.kernel or ident != vm.kernel_id:
+            # The guest's modules are still the old kernel's: the user
+            # copies the new ones in after the next start.
+            changes.append(f"kernel {vm.kernel} -> {cur}")
+            vm.kernel = str(cur)
+            vm.kernel_id = ident
     problem = numa_problem(
         vm.vcpus, vm.mem, vm.numa_nodes, vm.shared_ram, vm.arch
     ) or (nic_numa_problem(vm.nics, vm.numa_nodes))
@@ -3957,6 +3985,32 @@ def _check_disk_dirs(fix: bool) -> tuple[int, int]:
     return issues, failures
 
 
+def _check_vm_kernels(fix: bool) -> tuple[int, int]:
+    """VMs whose recorded kernel is gone or was replaced (kernel_store):
+    they boot a kernel their root image has no modules for, or not at
+    all.  Never fixed: which way to go is the user's choice.
+    Returns (issues, failures).
+    """
+    issues = failures = 0
+    for name in sorted(VMInfo.all_names()):
+        try:
+            vm = VMInfo.load(name)
+        except (VMNotFound, ValueError):
+            continue
+        problem = kernel_store.kernel_problem(vm)
+        if problem is None:
+            continue
+        print(f"stale VM kernel: {name}: {problem}")
+        issues += 1
+        if fix:
+            print(
+                f"  NOT fixed: recreate {name}, or `ltvm vm set {name} "
+                f"--current-kernel` and copy the new modules into it"
+            )
+            failures += 1
+    return issues, failures
+
+
 def _check_claims(fix: bool) -> tuple[int, int]:
     """The claims directory, and claims whose session has gone.
 
@@ -4209,6 +4263,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 fix_failures += 1
 
     found, failed = _check_disk_dirs(args.fix)
+    issues += found
+    fix_failures += failed
+
+    found, failed = _check_vm_kernels(args.fix)
     issues += found
     fix_failures += failed
 

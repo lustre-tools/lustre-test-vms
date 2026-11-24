@@ -2091,8 +2091,8 @@ def build_parser() -> argparse.ArgumentParser:
     vsetp = vm_sub.add_parser(
         "set",
         parents=[common],
-        help="Change the vCPUs, memory, NUMA layout or data disk cache of "
-        "a stopped VM (next start)",
+        help="Change the vCPUs, memory, NUMA layout, data disk cache or "
+        "kernel of a stopped VM (next start)",
     )
     _vsetp_name = vsetp.add_argument("name", help="VM name")
     _vsetp_name.completer = complete_vms  # type: ignore[attr-defined]
@@ -2140,6 +2140,15 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="MBPS",
         help="New link speed for eth0 in Mbps; 0 or 'none' advertises "
         f"none, 'default' is ltvm's ({DEFAULT_SPEED})",
+    )
+    vsetp.add_argument(
+        "--current-kernel",
+        dest="current_kernel",
+        action="store_true",
+        default=None,
+        help="Boot its kernel dir's current kernel, after a rebuild "
+        "replaced the one the VM was created with (its modules must "
+        "then be copied into the guest)",
     )
     vsetp.set_defaults(func=cmd_vm_set)
 
