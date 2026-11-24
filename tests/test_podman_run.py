@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import resource
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -320,6 +321,100 @@ class TestReclaimOwnership:
             podman_run.reclaim_ownership(tmp_path)
         walk.assert_not_called()
         run.assert_not_called()
+
+
+def _other_group() -> int:
+    others = [g for g in os.getgroups() if g != os.getegid()]
+    if not others:
+        pytest.skip("needs a supplementary group")
+    return others[0]
+
+
+class TestMappedGroup:
+    """A setgid tree shared with an unmapped group, around a container."""
+
+    def _tree(self, tmp_path: Path, shared: int) -> Path:
+        root = tmp_path / "kernel"
+        (root / "build-tree").mkdir(parents=True)
+        (root / "build-tree" / "Makefile").write_text("x")
+        (root / "keep").write_text("x")
+        for p in (root, root / "build-tree", root / "build-tree" / "Makefile",
+                  root / "keep"):  # fmt: skip
+            os.chown(p, -1, shared)
+        for d in (root, root / "build-tree"):
+            os.chmod(d, 0o2775)
+        return root
+
+    def test_user_group_during_run_shared_group_after(
+        self, tmp_path: Path
+    ) -> None:
+        shared = _other_group()
+        mine = os.getegid()
+        root = self._tree(tmp_path, shared)
+        with patch.object(podman_run.sys, "platform", "linux"):
+            with podman_run.mapped_group(root):
+                for p in (root, root / "build-tree", root / "keep"):
+                    assert os.lstat(p).st_gid == mine
+                for d in (root, root / "build-tree"):
+                    assert not os.lstat(d).st_mode & stat.S_ISGID
+                # What the container makes, and a file it replaces.
+                (root / "build-tree" / "include").mkdir()
+                (root / "build-tree" / "include" / "a.h").write_text("x")
+                (root / "build-tree" / "Makefile").unlink()
+                (root / "build-tree" / "Makefile").write_text("y")
+        for p in (
+            root,
+            root / "keep",
+            root / "build-tree",
+            root / "build-tree" / "Makefile",
+            root / "build-tree" / "include",
+            root / "build-tree" / "include" / "a.h",
+        ):
+            assert os.lstat(p).st_gid == shared, p
+        for d in (root, root / "build-tree", root / "build-tree" / "include"):
+            assert os.lstat(d).st_mode & stat.S_ISGID, d
+        assert not os.lstat(root / "keep").st_mode & stat.S_ISGID
+
+    def test_restores_when_the_run_fails(self, tmp_path: Path) -> None:
+        shared = _other_group()
+        root = self._tree(tmp_path, shared)
+        with patch.object(podman_run.sys, "platform", "linux"):
+            with pytest.raises(RuntimeError):
+                with podman_run.mapped_group(root):
+                    raise RuntimeError("build failed")
+        assert os.lstat(root).st_gid == shared
+        assert os.lstat(root).st_mode & stat.S_ISGID
+
+    def test_own_group_tree_is_left_alone(self, tmp_path: Path) -> None:
+        root = tmp_path / "kernel"
+        root.mkdir()
+        os.chown(root, -1, os.getegid())
+        os.chmod(root, 0o755)
+        (root / "f").write_text("x")
+        with (
+            patch.object(podman_run.sys, "platform", "linux"),
+            patch.object(podman_run.os, "lchown") as lchown,
+            patch.object(podman_run.os, "chmod") as chmod,
+        ):
+            with podman_run.mapped_group(root):
+                (root / "g").write_text("x")
+        lchown.assert_not_called()
+        chmod.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("platform", "euid"), [("darwin", 501), ("linux", 0)]
+    )
+    def test_skipped_off_linux_and_as_root(
+        self, tmp_path: Path, platform: str, euid: int
+    ) -> None:
+        with (
+            patch.object(podman_run.sys, "platform", platform),
+            patch.object(podman_run.os, "geteuid", return_value=euid),
+            patch.object(podman_run.os, "walk") as walk,
+        ):
+            with podman_run.mapped_group(tmp_path):
+                pass
+        walk.assert_not_called()
 
 
 class TestRmtree:
