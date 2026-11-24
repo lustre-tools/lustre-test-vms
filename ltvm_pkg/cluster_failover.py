@@ -463,4 +463,28 @@ def cmd_cluster_failback(args: argparse.Namespace) -> None:
         use_json,
     )
     if rc != 0:
+        _failback_hint(cluster, pair)
         raise SystemExit(1)
+
+
+def _failback_hint(cluster: ClusterInfo, pair: _Pair) -> None:
+    """After a failed failback, say what holds the targets now, and the
+    way on.  A failed mount leaves the record on the primary with the
+    target mounted nowhere: the gate on llmount then passes, and a
+    second failback retries the mount.  Callers saw only "mount of
+    mds1 failed", and took the cluster for stuck."""
+    after = pair.active()
+    nowhere = [
+        f
+        for f in pair.facets
+        if after.get(f) == (pair.primary.name, "unmounted")
+    ]
+    if not nowhere:
+        return
+    print(
+        f"{', '.join(nowhere)} mounted nowhere now; the record names "
+        f"{pair.primary.name}.  Retry the mount: ltvm cluster failback "
+        f"{cluster.name} {pair.primary.name}; or remount the file system: "
+        f"ltvm cluster llmount {cluster.name}",
+        file=sys.stderr,
+    )

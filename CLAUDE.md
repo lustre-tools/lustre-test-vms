@@ -1447,6 +1447,10 @@ does the rest: `--failnode` (MMP on) and the move on `fail <facet>`.
   Their `init_test_env` deletes `$TMP/*active`, and they then act on
   the primaries.  A record that names a partner with nothing mounted
   passes, because a deploy unloads Lustre on every node.
+- A failed failback mount leaves the record on the primary, mounted
+  nowhere; `_failback_hint` then names the retry (failback again) and
+  `cluster llmount`.  An odd number of `fail`s in a suite leaves the
+  targets on the partner (fb-46a5ae8c6b1c).
 - `split-brain` must fail to take over.  Its exit status is 0 only
   when MMP refused every mount.
 - `freeze` refuses macOS.  There, SIGSTOP stalls socket_vmnet for every

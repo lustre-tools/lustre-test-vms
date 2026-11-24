@@ -448,7 +448,11 @@ takeover. Both nodes then kept the targets, on ldiskfs and on ZFS.
 
 `cluster failback` starts, resumes or reconnects the primary as
 failover left it. It then moves the targets back from the partner, and
-it mounts a target that a failed move left mounted nowhere.
+it mounts a target that a failed move left mounted nowhere. When its
+own mount fails, it names the targets mounted nowhere: a second
+failback retries the mount, and `cluster llmount` now passes its gate.
+A suite with an odd number of `fail`s (`ONLY_REPEAT=5`, HARD or not)
+leaves the targets on the partner: fail back after it.
 
 A suite, `llmount.sh` and `llmountcleanup.sh` delete the framework's
 record of the active node when they start. They then act on each

@@ -222,3 +222,54 @@ class TestMovedFacets:
         ):
             cluster_failover.require_no_moved_facets(self._c(), "start a suite")
         assert "ltvm cluster failback g g-oss1" in capsys.readouterr().err
+
+
+class TestFailbackFailure:
+    """A failback whose mount fails names the way on (fb-46a5ae8c6b1c)."""
+
+    def _run(self, after: dict[str, tuple[str, str]], capsys: Any) -> str:
+        import argparse
+
+        pair = object.__new__(cluster_failover._Pair)
+        pair.primary = cluster_failover.VMInfo(name="g-mds1", ip="10.0.0.10")
+        pair.partner = cluster_failover.VMInfo(name="g-mds2", ip="10.0.0.13")
+        pair.client = cluster_failover.VMInfo(name="g-c", ip="10.0.0.12")
+        pair.facets = ["mds1", "mds2"]
+        before = {f: ("g-mds2", "mounted") for f in pair.facets}
+        ok = cluster_failover.subprocess.CompletedProcess("", 0, "", "")
+        failed = cluster_failover.subprocess.CompletedProcess(
+            "", 1, "mount of mds1 failed; it is mounted nowhere\n", ""
+        )
+
+        def facets_cmd(action: str, facets: list[str], timeout: int) -> Any:
+            return failed if action == "move" else ok
+
+        args = argparse.Namespace(name="g", node="g-mds1", timeout=60)
+        with (
+            patch.object(cluster_failover.ClusterInfo, "load"),
+            patch.object(cluster_failover, "_require"),
+            patch.object(cluster_failover, "_Pair", return_value=pair),
+            patch.object(cluster_failover, "is_running", return_value=True),
+            patch.object(cluster_failover, "_unfault"),
+            patch.object(pair, "active", side_effect=[before, after]),
+            patch.object(pair, "facets_cmd", side_effect=facets_cmd),
+            pytest.raises(SystemExit),
+        ):
+            cluster_failover.cmd_cluster_failback(args)
+        err: str = capsys.readouterr().err
+        return err
+
+    def test_mounted_nowhere_names_the_retry_and_llmount(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        after = {f: ("g-mds1", "unmounted") for f in ("mds1", "mds2")}
+        err = self._run(after, capsys)
+        assert "mds1, mds2 mounted nowhere" in err
+        assert "ltvm cluster failback" in err
+        assert "ltvm cluster llmount" in err
+
+    def test_targets_left_on_the_partner_get_no_hint(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        after = {f: ("g-mds2", "mounted") for f in ("mds1", "mds2")}
+        assert "mounted nowhere" not in self._run(after, capsys)

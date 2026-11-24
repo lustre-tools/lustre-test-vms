@@ -642,7 +642,12 @@ on its partner, and name the failback to run.
 For suites with hard failures, add `--env FAILURE_MODE=HARD`.  The
 framework then crashes a node through `ltvm-power`, and the node
 reboots after 30 seconds.  `ltvm-power` logs this, so `suite status`
-reports only other reboots as crashes.  A cluster last deployed before
+reports only other reboots as crashes.  Each `fail` moves the targets:
+an odd number of them (`ONLY_REPEAT=5` of a test that fails once)
+leaves the targets on the partner, so run `cluster failback` after,
+or use an even repeat count.  When the failback's mount fails, the
+targets are mounted nowhere and it says so: run the failback again,
+or `ltvm cluster llmount`.  A cluster last deployed before
 that log existed still reports these reboots: `cluster deploy` installs
 the new helper.
 
