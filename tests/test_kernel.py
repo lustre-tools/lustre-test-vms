@@ -1071,6 +1071,36 @@ class TestRunKernelPodman:
                 _run_kernel_podman(["podman", "run", "foo"], tmp_path)
         reclaim.assert_called_once_with(tmp_path)
 
+    def test_group_restored_after_ownership_reclaimed(
+        self, tmp_path: Path
+    ) -> None:
+        import contextlib
+
+        order: list[str] = []
+
+        @contextlib.contextmanager
+        def fake_mapped(root: Path):
+            order.append(f"map {root}")
+            try:
+                yield
+            finally:
+                order.append("restore")
+
+        fake = MagicMock(returncode=0, cleanup_eof=False)
+        with (
+            patch(
+                "ltvm_pkg.kernel_build.run_podman_with_cleanup",
+                side_effect=lambda *a, **k: order.append("run") or fake,
+            ),
+            patch(
+                "ltvm_pkg.kernel_build.reclaim_ownership",
+                side_effect=lambda r: order.append("reclaim"),
+            ),
+            patch("ltvm_pkg.kernel_build.mapped_group", fake_mapped),
+        ):
+            _run_kernel_podman(["podman", "run", "foo"], tmp_path)
+        assert order == [f"map {tmp_path}", "run", "reclaim", "restore"]
+
 
 class TestArchiveOutgoingVmlinux:
     """A rebuild must not destroy the vmlinux a running VM needs."""

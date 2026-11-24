@@ -25,17 +25,20 @@ cleanly.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 from collections import deque
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -410,6 +413,111 @@ def reclaim_ownership(root: Path) -> None:
     if r.returncode != 0:
         log.warning(
             "Could not reclaim ownership under %s: %s", root, r.stderr.strip()
+        )
+
+
+def _walk_all(root: Path) -> Iterator[tuple[str, str]]:
+    """(parent, path) for *root* and everything under it, top down."""
+    top = os.path.abspath(root)
+    yield os.path.dirname(top), top
+    for dirpath, dirnames, filenames in os.walk(top):
+        for name in dirnames + filenames:
+            yield dirpath, os.path.join(dirpath, name)
+
+
+@contextlib.contextmanager
+def mapped_group(root: Path) -> Iterator[None]:
+    """Give *root* the user's own group for a rootless container's run.
+
+    Rootless podman maps only the user's primary gid (to 0) and the
+    subgids, so in a setgid tree shared with another group (sookie's
+    ltvm, gid 1002) every file a container creates takes a gid the
+    container sees as 65534.  The kernel refuses chown of an inode whose
+    gid is unmapped, so ``rsync -a`` keeping a tarball's owners failed
+    with EPERM on each of ~89000 files.  The shared group cannot be
+    mapped in: newgidmap allows only the subgid ranges and the user's
+    own gid.
+
+    So for the run, every entry under *root* gets the user's gid and
+    the directories lose setgid; afterwards each entry still the same
+    inode gets back its group and setgid bit, and one created meanwhile
+    gets what a setgid parent would have given it.  Call
+    ``reclaim_ownership`` inside, so that the restore owns what it
+    changes.  Nothing is done unless something under *root* needs it.
+    """
+    host = sys.platform
+    if host != "linux" or os.geteuid() == 0:
+        yield
+        return
+    gid = os.getegid()
+    saved: dict[str, tuple[int, int, bool]] = {}
+    needed = False
+    for _, path in _walk_all(root):
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        setgid = stat.S_ISDIR(st.st_mode) and bool(st.st_mode & stat.S_ISGID)
+        saved[path] = (st.st_ino, st.st_gid, setgid)
+        needed = needed or setgid or st.st_gid != gid
+    if not needed:
+        yield
+        return
+    log.info("Giving %s group %d for the container's run", root, gid)
+    failed = 0
+    for path, (_, old_gid, setgid) in saved.items():
+        try:
+            if old_gid != gid:
+                os.lchown(path, -1, gid)
+            if setgid:
+                os.chmod(path, os.lstat(path).st_mode & ~stat.S_ISGID & 0o7777)
+        except OSError:
+            failed += 1
+    if failed:
+        log.warning(
+            "Could not change the group of %d entries under %s; a chown "
+            "in the container may fail on them",
+            failed,
+            root,
+        )
+    try:
+        yield
+    finally:
+        _restore_group(root, saved)
+
+
+def _restore_group(root: Path, saved: dict[str, tuple[int, int, bool]]) -> None:
+    """Undo ``mapped_group``, as a setgid tree would have it."""
+    # Directory -> (gid, setgid) as restored, for its new children.
+    state: dict[str, tuple[int, bool]] = {}
+    failed = 0
+    for parent, path in _walk_all(root):
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        rec = saved.get(path)
+        if rec is not None and rec[0] == st.st_ino:
+            want_gid, setgid = rec[1], rec[2]
+        elif parent in state and state[parent][1]:
+            want_gid = state[parent][0]
+            setgid = stat.S_ISDIR(st.st_mode)
+        else:
+            want_gid, setgid = st.st_gid, False
+        if stat.S_ISDIR(st.st_mode):
+            state[path] = (want_gid, setgid)
+        try:
+            if st.st_gid != want_gid:
+                os.lchown(path, -1, want_gid)
+            if setgid:
+                os.chmod(path, (os.lstat(path).st_mode | stat.S_ISGID) & 0o7777)
+        except OSError:
+            failed += 1
+    if failed:
+        log.warning(
+            "Could not give back the shared group of %d entries under %s",
+            failed,
+            root,
         )
 
 
