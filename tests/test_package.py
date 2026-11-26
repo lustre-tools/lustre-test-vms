@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch
@@ -129,6 +130,38 @@ class TestAssetNames:
             _manifest_name("rocky9", "x86_64", kv, "mofed")
             == f"manifest-rocky9-x86_64-{kv}-mofed.json"
         )
+
+
+class TestTarCreate:
+    """A release asset must not carry macOS metadata to Linux fetchers."""
+
+    def test_linux_is_plain_tar(self) -> None:
+        with patch("ltvm_pkg.host_setup.is_macos", return_value=False):
+            assert release_package._tar_create() == (["tar"], None)
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS bsdtar")
+    @needs_host_tools
+    def test_no_xattr_headers(self, tmp_path: Path) -> None:
+        """bsdtar left alone wrote a LIBARCHIVE.xattr pax header for
+        every file, which GNU tar warns on at fetch."""
+        tree = tmp_path / "kernels"
+        tree.mkdir()
+        f = tree / "vmlinuz"
+        f.write_bytes(b"kernel")
+        subprocess.run(
+            ["xattr", "-w", "com.ltvm.test", "1", str(f)], check=True
+        )
+        out = tmp_path / "k.tar.zst"
+        with patch.object(release_package, "_check_zstd", lambda: None):
+            release_package._tar_zstd(tmp_path, ["kernels"], out)
+        raw = subprocess.run(
+            ["zstd", "-dc", "--long=31", str(out)],
+            capture_output=True,
+            check=True,
+        ).stdout
+        assert b"kernels/vmlinuz" in raw
+        assert b"LIBARCHIVE.xattr" not in raw
+        assert b"._vmlinuz" not in raw
 
 
 class TestSha256:

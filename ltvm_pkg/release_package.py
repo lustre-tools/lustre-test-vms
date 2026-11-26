@@ -252,6 +252,26 @@ def _check_zstd() -> None:
         )
 
 
+def _tar_create() -> tuple[list[str], dict[str, str] | None]:
+    """The tar that writes a release asset, and the environment to run it in.
+
+    macOS's bsdtar records every file's xattrs -- and APFS gives every
+    file com.apple.provenance -- as AppleDouble ``._name`` entries and
+    ``LIBARCHIVE.xattr`` pax headers.  GNU tar on a Linux fetcher warns
+    on each of those headers, thousands per asset.  The flags are
+    bsdtar's own, so it is called by path, as deploy's tar is.
+    """
+    from .build_volumes import BSDTAR
+    from .host_setup import is_macos
+
+    if not is_macos():
+        return ["tar"], None
+    return (
+        [BSDTAR, "--no-mac-metadata", "--no-xattrs"],
+        {**os.environ, "COPYFILE_DISABLE": "1"},
+    )
+
+
 def _tar_zstd(
     base_dir: Path,
     entries: list[str],
@@ -269,7 +289,8 @@ def _tar_zstd(
     """
     _check_zstd()
     compress_prog = f"zstd -{ZSTD_LEVEL} -T{ZSTD_THREADS} --long={ZSTD_LONG}"
-    cmd = ["tar", f"--use-compress-program={compress_prog}"]
+    tar, env = _tar_create()
+    cmd = [*tar, f"--use-compress-program={compress_prog}"]
     if dereference:
         cmd.append("-h")
     for pat in exclude or []:
@@ -281,7 +302,7 @@ def _tar_zstd(
         str(base_dir),
         *entries,
     ]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, env=env)
 
 
 def _declared_variant_names(target_name: str, arch: str) -> list[str]:
@@ -1049,9 +1070,10 @@ def package_target(
     # content being added (``kernels/<kver>/lustre-artifacts``).
     print(f"  [kernel]    {kern_asset.name}")
     _check_zstd()
+    tar, env = _tar_create()
     subprocess.run(
         [
-            "tar",
+            *tar,
             f"--use-compress-program=zstd -{ZSTD_LEVEL} -T{ZSTD_THREADS} --long={ZSTD_LONG}",
             "--exclude",
             f"{kernel_rel}/lustre-artifacts",
@@ -1083,6 +1105,7 @@ def package_target(
             str(kernel_rel),
         ],
         check=True,
+        env=env,
     )
     assets["kernel"] = kern_asset
 
