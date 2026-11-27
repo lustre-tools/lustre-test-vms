@@ -215,6 +215,20 @@ class TestOsReleaseFallback:
         p = self._osr(tmp_path, 'ID=rocky\nVERSION_ID="9.7"\n')
         assert detect_targets_from_os_release(p) == ["rocky9"]
 
+    def test_base_target_beats_a_derived_one(self, tmp_path: Path) -> None:
+        """A derived target, rocky9 with a debug kernel, shares OS and arch.
+
+        An unstamped Rocky 9 node predates it, so it came from rocky9.
+        """
+        from ltvm_pkg.local_install import detect_targets_from_os_release
+
+        p = self._osr(tmp_path, 'ID=rocky\nVERSION_ID="9.7"\n')
+        with patch(
+            "ltvm_pkg.target_config.list_targets",
+            return_value=["rocky9-kasan", "rocky9"],
+        ):
+            assert detect_targets_from_os_release(p) == ["rocky9"]
+
     def test_experimental_targets_are_not_candidates(
         self, tmp_path: Path
     ) -> None:

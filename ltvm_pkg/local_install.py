@@ -244,6 +244,12 @@ def detect_targets_from_os_release(
             # shares its userspace.  --target still names one directly.
             continue
         matches.append(name)
+    # A derived target (rocky10-kasan: rocky10 with another kernel config)
+    # shares its base's OS and arch, and is newer than the stamp, as an
+    # experimental one is.  The base is the answer when it is a candidate.
+    base = f"{os_id}{major}"
+    if len(matches) > 1 and base in matches:
+        return [base]
     return matches
 
 
