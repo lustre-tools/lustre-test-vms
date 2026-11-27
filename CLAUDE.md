@@ -1552,6 +1552,35 @@ Per-target keys:
 | kernels.arch_config | {aarch64: {CONFIG_NFP: n}} | Overrides for one arch's kernel, on top of kernels.config; moves only that arch's kernel hash |
 | variants | {mofed-24: {...}} | Optional add-on variants |
 
+### Local targets
+
+A target that only some hosts or users need lives outside the checkout,
+so it is not an uncommitted edit that `git pull` and `ltvm update` stop
+on (`target_config.local_target_dirs`).  Two layers, each a directory
+holding a `targets.yaml` with a `targets:` mapping and a `<name>/`
+directory per target, laid out as in `targets/`:
+
+- the host's: `[targets] local = /etc/ltvm/targets.d` in
+  `/etc/ltvm.conf`, for every user;
+- the user's: `LTVM_LOCAL_TARGETS`, else `$XDG_CONFIG_HOME/ltvm/targets.d`
+  (`~/.config`) when it exists.  It wins a name both define, and an
+  empty `LTVM_LOCAL_TARGETS` turns it off.
+
+`_load_registry` merges them in and records each one's directory under
+`LOCAL_DIRS_KEY`, which is all `TargetConfig.target_dir` reads, so every
+command sees them.  A local entry may only add a target: one that names
+a checkout target is ignored with a warning.  The build context is still
+`targets/`, so a local target's Dockerfiles COPY from `common/` and the
+checkout's target directories (as rocky10-16k's reads rocky10's package
+lists), not from their own directory.  Its input hashes do not depend on
+where it lives, so moving a target out of the checkout leaves what it
+built current.  Artifacts are keyed by name only: a user's override of
+a host target builds into the same shared `artifacts/<name>/`, and the
+two definitions rebuild over each other, so give an override its own
+name unless it replaces the host's for everyone using that tree.  On
+macOS the directories must be ones the podman machine mounts (under
+`/Users`).
+
 ### Package Lists
 
 Shared in `targets/common/`:

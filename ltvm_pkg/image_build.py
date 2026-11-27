@@ -809,7 +809,11 @@ def _build_base_layers(
         needed = {"common", target_config.name}
         needed |= _dockerfile_referenced_target_dirs(effective_dockerfile)
         for name in sorted(needed):
-            src = TARGETS_DIR / name
+            src = (
+                target_config.target_dir
+                if name == target_config.name
+                else TARGETS_DIR / name
+            )
             if not src.is_dir():
                 continue
             dest = build_context / name
