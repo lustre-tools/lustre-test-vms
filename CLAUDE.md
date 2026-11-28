@@ -1321,7 +1321,9 @@ order:
 Target resolution prefers the stamp, then `--target`, then
 an `/etc/os-release` guess -- and an ambiguous guess
 (rocky9 vs rocky9-64k) is an error asking for `--target`,
-not a coin flip.  Without a stamp the kernel is matched to
+not a coin flip.  A derived target on the same OS and arch
+(rocky10-kasan) loses to its base, which is what an unstamped
+machine came from.  Without a stamp the kernel is matched to
 whatever is **running** rather than the target's default,
 since modules built for the wrong release won't load.
 

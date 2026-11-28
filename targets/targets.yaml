@@ -170,6 +170,47 @@ targets:
     status: working
     zfs:
       version: 2.4.0
+  rocky10-kasan:
+    # rocky10 with a memory-debugging kernel: KASAN, UBSAN and SLUB
+    # debugging report use-after-free, out-of-bounds and slab poison or
+    # redzone damage as it happens, where a stock kernel shows a later
+    # oops, LBUG or LASSERT, if anything.  For fuzzing and for chasing
+    # memory corruption.  KASAN's shadow takes an eighth of guest RAM
+    # and slows the kernel down a few times, hence the larger default.
+    # Same as rocky10 otherwise; its Dockerfiles are copies of
+    # rocky10's, and read rocky10's package lists, as rocky10-16k's do.
+    configure_args:
+    - --enable-gss=yes
+    - --enable-crypto=yes
+    container_image: quay.io/rockylinux/rockylinux:10.1
+    default_mem: 6144
+    kernels:
+      available:
+      - 6.12-rhel10.2
+      - 6.12-rhel10.1
+      config:
+        CONFIG_XEN_PVH: y
+        CONFIG_RDMA_RXE: m
+        CONFIG_KASAN: y
+        CONFIG_KASAN_GENERIC: y
+        CONFIG_KASAN_OUTLINE: y
+        CONFIG_KASAN_VMALLOC: y
+        CONFIG_UBSAN: y
+        CONFIG_UBSAN_BOUNDS: y
+        CONFIG_UBSAN_SHIFT: y
+        CONFIG_SLUB_DEBUG: y
+        CONFIG_DEBUG_KERNEL: y
+        CONFIG_DEBUG_LIST: y
+        CONFIG_STACKTRACE: y
+      default: 6.12-rhel10.2
+    lustre:
+      mode: server_ldiskfs
+    os_name: rocky
+    os_version: '10.1'
+    srpm_url: https://dl.rockylinux.org/pub/rocky/10/BaseOS/source/tree/Packages/k
+    status: working
+    zfs:
+      version: 2.4.0
   # 16 KiB-page aarch64, the largest page size Apple Silicon HVF can
   # run natively (it has only the 4K and 16K translation granules, so
   # rocky9-64k needs LTVM_FORCE_TCG there).  For finding Lustre
