@@ -159,6 +159,7 @@ def _isolate_user_state(
     monkeypatch.setenv("XDG_CACHE_HOME", str(root / "cache"))
     monkeypatch.setenv("LTVM_TELEMETRY", "0")
     monkeypatch.setenv("LTVM_SITE_CONFIG", str(root / "no-such-ltvm.conf"))
+    monkeypatch.delenv("LTVM_LOCAL_TARGETS", raising=False)
     # Whether the host has /dev/vhost-net must not change QEMU's args;
     # tests/test_vhost_net.py turns it on where it is the subject.
     monkeypatch.setenv("LTVM_VHOST_NET", "off")

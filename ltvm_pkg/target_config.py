@@ -6,11 +6,13 @@ Dockerfiles and package lists live in targets/<name>/.
 
 from __future__ import annotations
 
+import configparser
 import hashlib
 import json
 import logging
 import os
 import re
+import sys
 import tempfile
 from enum import Enum
 from pathlib import Path
@@ -528,13 +530,120 @@ def _dockerfile_referenced_files(dockerfile: Path) -> list[Path]:
 _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
+LOCAL_TARGETS_ENV = "LTVM_LOCAL_TARGETS"
+_warned: set[str] = set()
+
+
+def _warn_once(problem: str) -> None:
+    if problem not in _warned:
+        _warned.add(problem)
+        print(f"warning: {problem}", file=sys.stderr)
+
+
+def _user_targets_default() -> Path:
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return Path(xdg) / "ltvm" / "targets.d"
+
+
+def local_target_dirs() -> list[Path]:
+    """The directories of targets kept outside the checkout, in order.
+
+    Each holds a ``targets.yaml`` with a ``targets:`` mapping and a
+    ``<name>/`` directory per target with its Dockerfiles and package
+    lists, laid out as in targets/.  Their targets join the checkout's,
+    so a target that only some hosts or users need is not an uncommitted
+    edit that blocks every pull.  Two layers, the later winning a name
+    both define:
+
+    - the host's, ``[targets] local`` in /etc/ltvm.conf, for every user;
+    - the user's, ``LTVM_LOCAL_TARGETS``, else ``ltvm/targets.d`` under
+      ``$XDG_CONFIG_HOME`` (``~/.config``) when it exists; an empty
+      ``LTVM_LOCAL_TARGETS`` turns this layer off.
+
+    A setting that names no usable directory warns once and is ignored.
+    """
+    from . import site_config
+
+    layers: list[tuple[str, str]] = []
+    site = site_config.path()
+    parser = configparser.ConfigParser()
+    try:
+        parser.read(site)
+        layers.append(
+            (
+                parser.get("targets", "local", fallback="").strip(),
+                f"[targets] local in {site}",
+            )
+        )
+    except configparser.Error as e:
+        _warn_once(f"ignoring [targets] in {site}: {e}")
+    if LOCAL_TARGETS_ENV in os.environ:
+        layers.append(
+            (os.environ[LOCAL_TARGETS_ENV].strip(), LOCAL_TARGETS_ENV)
+        )
+    elif (_user_targets_default() / "targets.yaml").is_file():
+        layers.append((str(_user_targets_default()), "the user's targets"))
+    dirs: list[Path] = []
+    for raw, where in layers:
+        if not raw:
+            continue
+        d = Path(raw)
+        if not d.is_absolute():
+            _warn_once(f"ignoring {where}: {raw!r} is not an absolute path")
+        elif not (d / "targets.yaml").is_file():
+            _warn_once(f"ignoring {where}: no {d / 'targets.yaml'}")
+        elif d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
+def _local_targets(builtin: dict[str, Any]) -> dict[str, tuple[Path, Any]]:
+    """{name: (directory, entry)} from local_target_dirs(), less any name
+    the checkout already has: a local entry may add a target, not change
+    one every other host builds the same way."""
+    found: dict[str, tuple[Path, Any]] = {}
+    for d in local_target_dirs():
+        path = d / "targets.yaml"
+        try:
+            with path.open() as f:
+                data = yaml.load(f, Loader=_YAML_LOADER) or {}
+        except (OSError, yaml.YAMLError) as e:
+            _warn_once(f"ignoring {path}: {e}")
+            continue
+        targets = data.get("targets") if isinstance(data, dict) else None
+        if not isinstance(targets, dict):
+            _warn_once(f"ignoring {path}: it has no 'targets:' mapping")
+            continue
+        for name, entry in targets.items():
+            if name in builtin:
+                _warn_once(
+                    f"ignoring local target {name!r} in {path}: targets/targets.yaml already has it"
+                )
+            else:
+                found[name] = (d, entry)
+    return found
+
+
+# The registry's key for where its local targets came from: {name: dir}.
+LOCAL_DIRS_KEY = "_local_target_dirs"
+
+
 def _load_registry() -> dict[str, Any]:
-    """Load and return the full targets.yaml registry."""
+    """Load the targets.yaml registry, with the local targets merged in
+    and each one's directory recorded under LOCAL_DIRS_KEY."""
     if not TARGETS_YAML.exists():
         raise FileNotFoundError(f"Target registry not found: {TARGETS_YAML}")
     with TARGETS_YAML.open() as f:
         data: dict[str, Any] = yaml.load(f, Loader=_YAML_LOADER)
-        return data
+    builtin = data.setdefault("targets", {})
+    local = _local_targets(builtin)
+    for name, (_, entry) in local.items():
+        builtin[name] = entry
+    if local:
+        data[LOCAL_DIRS_KEY] = {
+            name: str(d / name) for name, (d, _) in local.items()
+        }
+    return data
 
 
 class TargetConfig:
@@ -557,14 +666,22 @@ class TargetConfig:
     ) -> None:
         self.name = name
         self.variant_name = variant
-        self.target_dir = TARGETS_DIR / name
-
         registry = _load_registry()
         targets = registry.get("targets", {})
         if name not in targets:
-            raise ValueError(
-                f"Unknown target: {name!r} (not in {TARGETS_YAML})"
-            )
+            files = [
+                str(TARGETS_YAML),
+                *(str(d / "targets.yaml") for d in local_target_dirs()),
+            ]
+            where = " or ".join(files)
+            raise ValueError(f"Unknown target: {name!r} (not in {where})")
+        # A local target's files live beside its entry; the build context
+        # is still targets/, so its Dockerfiles COPY from common/ and the
+        # checkout's own target dirs, as an in-tree one does.
+        local_dirs = registry.get(LOCAL_DIRS_KEY, {})
+        self.target_dir = (
+            Path(local_dirs[name]) if name in local_dirs else TARGETS_DIR / name
+        )
 
         defaults = {**_DEFAULTS, **registry.get("defaults", {})}
         raw = targets[name]
